@@ -1,65 +1,65 @@
 meta:
   ordering: strict
   status_values: [pending, done]
-  update_rule: "Paste fresh acceptance output before changing an item to done. No implementation item may be skipped."
-  verify_all: "just check && uv run pytest tests/test_e2e_smoke.py -v && uv run mkdocs build --strict"
+  update_rule: "Run the item's exact acceptance scenarios and paste fresh output before changing status. Test counts and prose are not evidence."
+  verify_all: "just verify"
 items:
   - id: P1-0
     task: "Create the feature branch and preserve reviewed docs without touching user-owned untracked paths."
     acceptance: "`git branch --show-current` prints feat/p1-p2-implementation; reviewed docs are committed or clean; `.agents/` and `.codex/` are not tracked."
-    status: pending
+    status: done
   - id: P1-1
     task: "Bootstrap names in place; update app metadata/dependencies/CLI and retain useful build/smoke checks."
-    acceptance: "`rg 'my-package|my_package|your-username|Your Name|you@example' --glob '!docs/goal-prompts/**'` has no unintended placeholder matches; `just check` and `just smoke` exit 0."
-    status: pending
+    acceptance: "`rg 'my-package|my_package|your-username|Your Name|you@example' --glob '!docs/goal-prompts/**'` has no unintended placeholder matches; `just verify` exits 0."
+    status: done
   - id: P1-2
     task: "Implement typed config, feature-gated secrets, strategy config validation, domain models, and composition root."
-    acceptance: "`uv run pytest tests/test_config.py tests/test_models.py -v` exits 0, including no-secret offline load and invalid-config errors."
-    status: pending
+    acceptance: "`uv run pytest tests/test_config.py tests/test_models.py -v` exits 0 for no-secret load and rejection of unknown fields/keys, empty required signals, candidate limits 0/11, and non-deterministic ranking before external I/O."
+    status: done
   - id: P1-3
     task: "Implement point-in-time universe membership, snapshot fallback, and manual include/exclude."
-    acceptance: "`uv run pytest tests/test_universe.py -v` exits 0 for parse, symbol normalization, sector/name retention, fallback, override, and history."
-    status: pending
+    acceptance: "`uv run pytest tests/test_universe.py tests/storage/test_state_store.py -v` exits 0 for normalization/fallback/override plus before/equal/after snapshot cutoff and same-date replacement deletion."
+    status: done
   - id: P1-4
     task: "Implement DataProvider contract and yfinance adapter with explicit adjusted OHLC normalization and partial-failure results."
     acceptance: "`uv run pytest tests/data/test_provider_contract.py tests/data/test_yfinance_provider.py -v` exits 0, including MultiIndex, split fixture, exclusive end date, empty and partial failure cases."
-    status: pending
+    status: done
   - id: P1-5
     task: "Implement Database, atomic Parquet upsert, MarketStore, StateStore, schemas, runs and run_steps."
-    acceptance: "`uv run pytest tests/storage -v` exits 0 for empty first run, correction upsert, duplicate prevention, rollback, and failed-run recovery."
-    status: pending
+    acceptance: "`uv run pytest tests/storage -v` exits 0 for correction upsert, an injected Nth-write full rollback, snapshot replacement deletion, temp/replace failure preserving the old file, cleanup, and successful rerun."
+    status: done
   - id: P1-6
     task: "Implement edgartools adapter and point-in-time fundamentals."
-    acceptance: "`uv run pytest tests/data/test_edgar.py -v` exits 0 for identity, throttling, retries, accession upsert, normalization, and filed_at/as_of exclusion."
-    status: pending
+    acceptance: "`uv run pytest tests/data/test_edgar.py -v` exits 0 for identity, before/equal/after as_of, throttle on every attempt, transient success, exact three-attempt ceiling/backoff, terminal error propagation, accession correction, and normalization."
+    status: done
   - id: P1-7
     task: "Implement shared pandas indicators, filters, signals, deterministic Candidate aggregation/ranking."
     acceptance: "`uv run pytest tests/screening -v` exits 0 for known indicator values, boundaries, AND semantics, aggregation, stable order, max 10, and as_of."
-    status: pending
+    status: done
   - id: P1-8
     task: "Implement risk sizing, sector concentration, correlation, and explicit not_calculable/data-quality results."
-    acceptance: "`uv run pytest tests/risk -v` exits 0 for integer sizing, invalid stop, missing equity, sector limits, correlation boundary, and insufficient history."
-    status: pending
+    acceptance: "`uv run pytest tests/risk -v` exits 0 for sizing/sector limits and correlation aligned by date, mismatched calendars, duplicates, insufficient common returns, and constant/NaN data-quality results."
+    status: done
   - id: P1-9
     task: "Implement deterministic multi-symbol backtest using production screening logic."
-    acceptance: "`uv run pytest tests/backtest -v` exits 0 for no look-ahead, next-open fill, gap stop, trailing update timing, 60-day exit, costs, cash/rank constraints, SPY, and reproducibility."
-    status: pending
+    acceptance: "`uv run pytest tests/backtest -v` exits 0 for no look-ahead and hand-calculated entry/every-exit slippage+commission, stop precedence, final liquidation equity, SPY residual cash, rank/cash constraints, and reproducibility."
+    status: done
   - id: P1-10
     task: "Wire daily steps 1-4 with explicit as_of/run_id and fatal-error semantics."
     acceptance: "`uv run pytest tests/pipeline/test_daily_core.py -v` exits 0; two identical dry runs have distinct run_ids and no duplicate business rows."
-    status: pending
+    status: done
   - id: P2-1
     task: "Implement Finnhub, EDGAR filing text, and FRED ports/adapters with source IDs and bounded input."
-    acceptance: "`uv run pytest tests/text -v` exits 0 for normalization, source identity, rate/retry limits, truncation, empty and partial failures."
-    status: pending
+    acceptance: "`uv run pytest tests/text -v` exits 0 under the autouse socket blocker for normalization, stable source identity, as_of boundaries, timeout/rate/retry ceilings, truncation, empty and partial failures."
+    status: done
   - id: P2-2
     task: "Implement Claude gateway, structured schemas, provenance, bounded retries/cache, pricing and budget gate."
-    acceptance: "`uv run pytest tests/llm -v` exits 0 for schema/source validation, refusal/error, retry ceiling, cache key, unknown pricing, budget skip, and audit redaction."
-    status: pending
+    acceptance: "`uv run pytest tests/llm -v` exits 0 for non-empty/known source IDs on fresh/cache responses, full system+user prompt hash, refusal/error, retry ceiling, CON-03 on every display field, unknown pricing, budget no-call, and prompt/response/exception redaction."
+    status: done
   - id: P2-3
     task: "Implement news and filing analysis prompts with prompt-injection resistance and deterministic chunk handling."
-    acceptance: "`uv run pytest tests/llm/test_analysis.py -v` exits 0 for sourced facts, untrusted instructions, forbidden advice, chunk cap, truncation disclosure, and merge behavior."
-    status: pending
+    acceptance: "`uv run pytest tests/llm/test_analysis.py -v` exits 0 for API-level system/user separation, delimiter escaping, inert injected instructions, sourced facts, forbidden advice in every field, chunk cap, truncation disclosure, and merge behavior."
+    status: done
   - id: P2-4
     task: "Implement chart data, offline HTML/assets, Discord adapter, atomic dated/latest reports and safe rendering."
     acceptance: "`uv run pytest tests/report -v` exits 0 for zero/ten candidates, LLM present/degraded, XSS payloads, offline assets, v5 chart calls, attribution, disclaimer, and atomic latest."
@@ -74,5 +74,5 @@ items:
     status: pending
   - id: FINAL
     task: "Update public API/docs/changelog, run complete verification, commit all implementation work, and optionally run live canary."
-    acceptance: "`just check`, `uv run pytest tests/test_e2e_smoke.py -v`, `uv run mkdocs build --strict`, and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."
+    acceptance: "On the committed tree, `just verify` and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."
     status: pending

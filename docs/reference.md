@@ -1,3 +1,3 @@
 # API Reference
 
-::: my_package
+::: swing_copilot

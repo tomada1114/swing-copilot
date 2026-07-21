@@ -4,7 +4,7 @@
 """Stop hook: lightweight quality gate before Claude ends its turn.
 
 Runs the same ruff lint + format checks and mypy as `just lint` (no tests —
-those stay in `just check` and CI) whenever the working tree contains
+those stay in `just test`/`just verify` and CI) whenever the working tree contains
 modified Python files or pyproject.toml. Exit code 2 blocks the stop and
 feeds the failures back to Claude so it fixes them before declaring the
 turn done.

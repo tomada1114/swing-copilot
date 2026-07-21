@@ -10,7 +10,9 @@ description: >
 
 # Smart Commit Workflow
 
-All commit messages must be written in English.
+Commit summaries may be written in Japanese or English. Conventional Commit
+type/scope tokens remain English; keep the summary language consistent with the
+work and surrounding history.
 
 ## Dynamic Context
 
@@ -52,8 +54,8 @@ Never commit files that could contain secrets:
 - Files matching `*password*`, `*secret*`, `*key*.pem`
 
 If any are detected among the candidates, **exclude them** and warn the user.
-Everything else — config files, source code, docs, test files — should be
-committed. Prefer committing work-in-progress over leaving it uncommitted.
+Do not automatically include unrelated or incomplete work merely because it is
+not sensitive; preserve user-owned changes and report anything left out.
 
 ## Step 3: Group Changes
 
@@ -87,14 +89,26 @@ happened through the commit history.
 **Special cases:**
 - `uv.lock` changes must be in the same commit as the `pyproject.toml`
   dependency change that caused them
-- A source file and its corresponding test file can go in the same commit
-  when they represent a single logical change (use `feat:` or `fix:` prefix)
+- A behavioral source change, its regression test, and any required canonical
+  requirement/design update belong in the same logical commit by default
 
 If all changes are closely related, a single commit is fine. Don't split
 artificially — three related one-line changes are better as one commit than
 three separate commits.
 
-## Step 4: Create Commits
+## Step 4: Verify Each Group
+
+Before staging a behavioral group, run the narrowest relevant test target and
+the applicable changed-path invariant review from `AGENTS.md`. Call counts may
+be verified when retry, rate, budget, or no-call behavior is the contract.
+
+If this commit completes the requested work, run `just verify`. For an
+intermediate atomic commit, targeted tests plus the existing pre-commit hooks
+are sufficient; report that full verification remains pending.
+
+Do not commit a group whose relevant test fails.
+
+## Step 5: Create Commits
 
 For each group, stage the relevant files and commit:
 
@@ -126,7 +140,7 @@ chore: configure .claude/rules for path-scoped linting
 Stage specific files by name — avoid `git add .` or `git add -A` which can
 accidentally include sensitive files or unrelated changes.
 
-## Step 5: Push (if requested)
+## Step 6: Push (if requested)
 
 Only push if the user explicitly asked to push (e.g., "commit and push",
 "ship it"). If the user only said "commit", skip this step — they may want
@@ -139,7 +153,7 @@ git push
 git push -u origin <current-branch>
 ```
 
-## Step 6: Verify
+## Step 7: Verify
 
 Show the final state to confirm everything is clean:
 

@@ -1,0 +1,65 @@
+universe:
+  index: "sp500"
+  refresh_interval_days: 7
+  snapshot_path: "config/universe_snapshot.csv"
+  manual_include: [] # ticker symbols to force-include
+  manual_exclude: [] # ticker symbols to force-exclude
+
+risk:
+  account_equity_usd: null # unset -> position sizing returns not_calculable
+  max_position_pct: 0.10 # 1 symbol <= 10% of equity
+  max_trade_risk_pct: 0.01 # 1 trade risk <= 1% of equity (stop-distance based)
+  max_sector_pct: 0.30 # same-sector exposure cap
+  max_correlation: 0.7 # warn (do not block) above this Pearson correlation
+  correlation_lookback_days: 60
+
+fundamental_filters:
+  min_profitable_quarters: 4 # net_income > 0 for the last N quarters
+  require_positive_fcf: true
+  min_equity_ratio: 0.30
+
+technical_signals:
+  trend:
+    sma_short: 50
+    sma_long: 200
+  pullback:
+    rsi_period: 14
+    rsi_threshold: 45
+    sma_band_pct: 0.03
+  volume:
+    avg_volume_days: 20
+    min_avg_volume: 1000000
+
+backtest:
+  initial_cash_usd: 100000
+  entry: "next_open"
+  exit_atr_multiple: 2.5
+  exit_atr_period: 14
+  max_hold_days: 60
+  commission_pct: 0.001
+  slippage_pct: 0.001
+  benchmark: "SPY"
+
+llm:
+  models:
+    news_summary: "claude-haiku-4-5-20251001"
+    filing_analysis: "claude-haiku-4-5-20251001"
+  max_tokens: 2048
+  schema_version: 1
+  max_news_items_per_symbol: 20
+  max_news_chars_per_item: 4000
+  filing_chunk_chars: 30000
+  max_filing_chunks: 4
+
+budget:
+  monthly_cap_usd_prototype: 5
+  monthly_cap_usd_production: 25
+
+schedule:
+  timeout_minutes: 35
+
+notification:
+  enabled: false # Discord notification is opt-in; set DISCORD_WEBHOOK_URL to use it
+
+report:
+  auto_open: true # open the generated report in the default browser after a live run

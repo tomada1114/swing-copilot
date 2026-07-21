@@ -39,8 +39,11 @@ just test
 # Build and verify the wheel in an isolated temp environment
 just smoke
 
-# Run everything (format → lint → test)
+# Mutating development check (format → lint → test)
 just check
+
+# Non-mutating PR/release gate (lint + test + strict docs + wheel smoke)
+just verify
 ```
 
 **Without Just**, run the equivalent commands:
@@ -49,8 +52,10 @@ just check
 uv run ruff check --fix .
 uv run ruff format .
 uv run ruff check .
+uv run ruff format --check .
 uv run mypy src scripts tests
-uv run pytest --cov=my_package --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=80
+uv run pytest --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
+uv run mkdocs build --strict
 uv build && uv run python scripts/smoke_test.py
 ```
 
@@ -58,7 +63,7 @@ uv build && uv run python scripts/smoke_test.py
 
 1. Fork the repository and create a branch from `main`
 2. Make your changes
-3. Ensure `just check` passes
+3. Apply formatting with `just fmt`, commit the result, then ensure `just verify` passes
 4. Write or update tests for your changes
 5. Open a pull request using the PR template
 
@@ -67,7 +72,7 @@ uv build && uv run python scripts/smoke_test.py
 - All public functions and methods must have type annotations
 - mypy strict mode must pass
 - Ruff must pass with no warnings
-- Maintain or improve test coverage (minimum 80%)
+- Maintain or improve test coverage (minimum 95%)
 
 ### Commit Messages
 
@@ -85,6 +90,11 @@ Examples:
 
 Recommended types: `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, `chore`,
 `perf`, `build`.
+
+Code identifiers and public API names use English. Prose may use Japanese or
+English in documentation, comments/docstrings, commit summaries, PR titles,
+and PR bodies. Keep Conventional Commit type/scope tokens in English and keep
+one prose language consistent within a document or PR.
 
 ### Changelog Policy
 

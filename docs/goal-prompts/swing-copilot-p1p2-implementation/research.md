@@ -1,6 +1,10 @@
 # Verified baseline and external facts
 
-Verified on 2026-07-21 in `/Users/masuyama/ghq/github.com/tomada1114/swing-copilot`.
+> Historical authoring snapshot only. Current thresholds, architecture,
+> status, and verification commands come from `AGENTS.md`, `justfile`,
+> `pyproject.toml`, Git, and fresh test output.
+
+Verified on 2026-07-21 in the repository root.
 
 ## Repository baseline
 
@@ -16,7 +20,8 @@ git status --short -> ?? .agents/ and ?? .codex/
 
 ```text
 just lint -> PASS (ruff check, ruff format --check, mypy)
-just test -> PASS (8 passed, 100% coverage; threshold currently 80%)
+just test -> PASS at authoring time (8 passed, 100% coverage; the historical
+template threshold was 80%, while the current project threshold is 95%)
 uv run mkdocs build --strict -> could not start because the docs dependency group was not installed in the active environment
 ```
 

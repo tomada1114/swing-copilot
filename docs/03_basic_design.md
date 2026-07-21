@@ -14,6 +14,8 @@
 
 本書は要件定義書（`docs/01_requirements.md`）で定義された要件ID（FR-01〜FR-12、NFR-01〜NFR-07、CON-01〜CON-04）を前提とし、それらを満たすシステム構成・データフロー・データストア・外部インターフェース・エラー処理方針・運用設計・セキュリティ設計を定める。要件そのものの再定義は行わない。
 
+文書の役割は、要件・制約=`docs/01_requirements.md`、アーキテクチャ=`docs/03_basic_design.md`、実装契約=`docs/04_detailed_design.md`、現在のデータ/API形状=`models.py`/`storage/schema.py`/公開シグネチャ、実行状況=Git・テスト・CIとする。`docs/goal-prompts/**`は特定の無人実行を支援する履歴資料であり、恒久設計の正本ではない。正本同士が矛盾した場合は暗黙に一方を選ばず、互換性を保ちながら差異を記録し、古い側を同じ変更で更新する。
+
 ---
 
 ## 2. システム全体構成
@@ -240,9 +242,9 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 - **フェイルソフトの原則（FR-12・NFR-04）**: 日次バッチはステップ(5)テキスト収集・(6)LLM分析が失敗しても、ステップ(7)レポート生成・(8)Discord通知は「スクリーニング＋リスクチェック結果のみの縮退版」として必ず完走する。これにより、外部テキストAPIやLLM APIの障害時でも、その日のスクリーニング結果を確実に人間へ届ける。
 - **各ステップの結果記録**: `runs`に実行全体、`run_steps`に9ステップそれぞれの成否・詳細・所要時間を記録する（NFR-05）。ステップ失敗時は後続ステップの実行可否を判断して処理を継続する。ただし(1)〜(4)の失敗はスクリーニング自体が成立しないため致命的終了とし、`runs.status=failed`を残す。
-- **冪等性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとしてupsertする。成功済みという理由だけでステップ全体を無条件スキップせず、外部データの訂正を取り込めるようにする。LLMのみ`(model,prompt_hash,schema_version)`一致時に成功レスポンスを再利用して課金重複を避ける。
-- **欠損検知・リトライ（NFR-04）**: DataProvider・LLMClient等、外部I/Oを伴うコンポーネントはリトライ機構を持つ。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し（例: yfinance実装）、後続処理は成功分のみで進める。
-- **断定的売買指示の禁止（CON-03）**: LLM出力スキーマは事実（`facts`）と推測（`interpretation`）をフィールドレベルで分離することを強制し、レポート・プロンプト双方でエラーとは独立にこの制約を担保する（詳細は`docs/04_detailed_design.md`のLLMプロンプト設計）。
+- **冪等性と原子性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。LLMのみ完全なsystem+user promptから算出した`(model,prompt_hash,schema_version)`一致時に成功レスポンスを再利用する。
+- **欠損検知・リトライ（NFR-04）**: DataProvider・LLMClient等、外部I/Oを伴うコンポーネントはtimeout、retry対象例外、総試行上限、backoffを明示する。レート制御は各試行へ適用し、設定/検証/プログラミングエラーはretryしない。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し、後続処理は成功分のみで進める。
+- **断定的売買指示の禁止（CON-03）**: LLM出力スキーマは事実（`facts`）と推測（`interpretation`）をフィールドレベルで分離する。プロンプト指示だけに依存せず、gatewayで全ユーザー表示テキストを一元検査し、違反応答をcache/表示しない。cache hitもsource_idとCON-03を再検証する。
 
 ---
 

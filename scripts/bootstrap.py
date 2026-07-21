@@ -11,11 +11,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-OLD_DISTRIBUTION_NAME = "my-package"
-OLD_MODULE_NAME = "my_package"
-OLD_GITHUB_USER = "your-username"
-OLD_AUTHOR_NAME = "Your Name"
-OLD_AUTHOR_EMAIL = "you@example.com"
+OLD_DISTRIBUTION_NAME = "swing-copilot"
+OLD_MODULE_NAME = "swing_copilot"
+OLD_GITHUB_USER = "tomada1114"
+OLD_AUTHOR_NAME = "tomada"
+OLD_AUTHOR_EMAIL = "tmasuyama1114@gmail.com"
 
 EXCLUDED_FILE_NAMES = {"uv.lock"}
 # Only used for the non-git fallback walk (e.g. after ``.git`` was removed):
@@ -129,7 +129,7 @@ def _replace_placeholders_in_file(path: Path, replacements: dict[str, str]) -> b
 
 
 def _rename_source_directory(repo_root: Path, new_module_name: str) -> None:
-    """Rename src/my_package to src/<new_module_name> in place."""
+    """Rename src/swing_copilot to src/<new_module_name> in place."""
     old_dir = repo_root / "src" / OLD_MODULE_NAME
     new_dir = repo_root / "src" / new_module_name
     if old_dir == new_dir:

@@ -26,7 +26,7 @@ lint:
 
 # Run tests with coverage
 test:
-    uv run pytest --cov=my_package --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=80
+    uv run pytest --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 # Run all checks: format, lint, test
 check: fmt lint test
@@ -35,6 +35,10 @@ check: fmt lint test
 docs:
     uv run mkdocs serve
 
+# Build documentation and fail on warnings
+docs-check:
+    uv run mkdocs build --strict
+
 # Build distribution packages
 build:
     uv build
@@ -42,6 +46,9 @@ build:
 # Build and smoke-test the wheel in a temporary virtual environment
 smoke: build
     uv run python scripts/smoke_test.py
+
+# Non-mutating local release/PR gate
+verify: lint test docs-check smoke
 
 # Remove build artifacts
 clean:

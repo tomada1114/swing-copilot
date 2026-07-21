@@ -1,2 +1,5 @@
 [files]
 extend-exclude = ["uv.lock"]
+
+[default.extend-words]
+yoy = "yoy" # finance term (year-over-year), not a typo of "you"

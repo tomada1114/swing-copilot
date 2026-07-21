@@ -26,6 +26,11 @@ paths:
 - **Collection boundaries**: single element, duplicate elements, max expected size
 - **Concurrent scenarios**: if the code is async, test cancellation and timeout behavior
 - **State transitions**: initial state, after one operation, after repeated operations, after error recovery
+- **Point-in-time boundaries**: immediately before, exactly at, and immediately after `as_of`
+- **Batch atomicity**: inject failure after an earlier row succeeds and assert full rollback/recovery
+- **Aligned series**: mismatched dates, duplicates, insufficient overlap, and constant values
+- **Exact accounting**: hand-calculate entry/exit costs and final liquidation equity
+- **Cache safety**: revalidate cached provenance and policy constraints, not only fresh responses
 
 ## Error and Exception Testing
 
@@ -56,7 +61,9 @@ paths:
 - Never mock the unit under test
 - Prefer fakes (in-memory implementations) over mocks for repositories/stores
 - Use `unittest.mock.AsyncMock` for async callables
-- Assert on behavior and outputs, not on how many times a mock was called
+- Assert on behavior and outputs. Call count/order is appropriate when it is the
+  contract: retry/rate ceilings, fail-soft isolation, budget skips, or proving
+  that an external call did not happen
 - If you need to mock more than 2 things in one test, the code under test may have too many dependencies
 
 ## Test Independence and Reliability
@@ -69,7 +76,7 @@ paths:
 
 ## Coverage Philosophy
 
-- Coverage is a *floor*, not a *ceiling* -- 80% minimum, but aim for meaningful coverage not percentage
+- Coverage is a *floor*, not a *ceiling* -- 95% line+branch minimum, but aim for meaningful coverage not percentage
 - Branch coverage matters more than line coverage; always test both sides of conditionals
 - Missing coverage should prompt "is this code reachable?" -- if not, delete it
 - Don't write trivial tests just to hit numbers; cover edge cases and error paths instead
@@ -81,3 +88,17 @@ paths:
 - Don't share mutable test data between tests (use fresh fixtures)
 - Don't test that a dependency's library works (e.g., testing that `json.loads` parses JSON)
 - Don't mock everything -- integration tests with real dependencies catch real bugs
+
+## Offline and Cross-cutting Contracts
+
+- Keep the autouse socket blocker in `tests/conftest.py`; ordinary tests must
+  fail fast on uninjected network access. Live tests are separate and explicit
+- Storage tests cover correction upsert, replacement deletion, Nth-write
+  rollback, previous-file preservation, and rerun after failure
+- External adapter tests cover retryable and non-retryable failures, exact total
+  attempts/backoff, timeout, and throttling on every attempt using fake time
+- LLM tests cover non-empty/known source IDs, cache revalidation, every
+  user-visible free-text field for CON-03, system/user prompt separation,
+  delimiter escaping, full-prompt cache hashing, and audit/exception redaction
+- Backtest tests use exact arithmetic for adverse slippage and commission on
+  entry and every exit path, including forced liquidation

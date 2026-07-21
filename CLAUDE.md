@@ -13,9 +13,15 @@ above). This repo additionally ships Claude Code configuration:
   `secrets/**` (via Edit/Write or shell commands), `git commit --no-verify`,
   and plain force-pushes (PreToolUse)
 - `.claude/hooks/stop_check.py` — runs ruff (lint + format check) and mypy
-  before a turn ends when Python files changed (Stop)
+  before a turn ends when Python files changed (Stop). This is intentionally a
+  lightweight feedback loop, not completion evidence; use `just verify` before
+  a PR or final completion claim
 - `.claude/skills/` — `create-pr`, `smart-commit`, and `merge-dependabot`
   workflow skills
 - `.claude/settings.json` — shared permission allowlist for local build,
   lint, and test commands; personal preferences (model, output style, extra
   permissions) belong in `.claude/settings.local.json`, never here
+
+`AGENTS.md` is the canonical cross-tool contract for domain invariants,
+source-of-truth precedence, test expectations, and the Japanese/English
+language policy. Do not duplicate or weaken those rules here.

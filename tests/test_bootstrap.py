@@ -15,11 +15,11 @@ if TYPE_CHECKING:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDERS = (
-    "my-package",
-    "my_package",
-    "your-username",
-    "Your Name",
-    "you@example.com",
+    "swing-copilot",
+    "swing_copilot",
+    "tomada1114",
+    "tomada",
+    "tmasuyama1114@gmail.com",
 )
 
 
@@ -64,7 +64,7 @@ def test_bootstrap_replaces_all_placeholders(tmp_path):
 
     assert module_name == "acme_widgets"
     assert (tmp_path / "src" / "acme_widgets").is_dir()
-    assert not (tmp_path / "src" / "my_package").exists()
+    assert not (tmp_path / "src" / "swing_copilot").exists()
 
     for path in tmp_path.rglob("*"):
         if not path.is_file() or path.name == "uv.lock":

@@ -23,7 +23,7 @@ body:
       description: Minimal code or steps to reproduce the behavior.
       placeholder: |
         ```python
-        from my_package import ...
+        from swing_copilot import ...
         ```
     validations:
       required: true
@@ -48,7 +48,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `python -c "import my_package; print(my_package.__version__)"`.
+      description: Output of `python -c "import swing_copilot; print(swing_copilot.__version__)"`.
       placeholder: "0.1.0"
     validations:
       required: true

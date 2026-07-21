@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from swing_copilot.models import Position, RunStatus, StepStatus
-from swing_copilot.storage import audit_records
+from swing_copilot.storage import audit_records, llm_records
 from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, SignalHit
     from swing_copilot.storage.database import Database
+    from swing_copilot.storage.llm_records import LLMCallRecord
 
 _UNIVERSE_SOURCE = "wikipedia"
 
@@ -313,3 +314,39 @@ class StateStore:
             run_id: The run these assessments belong to.
         """
         audit_records.record_risk_assessments(self._database, assessments, run_id)
+
+    def record_llm_call(self, call: LLMCallRecord) -> None:
+        """Append one LLM call's audit record.
+
+        Args:
+            call: The call to record.
+        """
+        llm_records.record_llm_call(self._database, call)
+
+    def get_cached_llm_response(
+        self, model: str, prompt_hash: str, schema_version: int
+    ) -> str | None:
+        """Return the most recent successful response for this natural key.
+
+        Args:
+            model: Model ID the original call used.
+            prompt_hash: Hash of the original prompt text.
+            schema_version: Schema version the original call used.
+
+        Returns:
+            The cached `response_json`, or `None` if no successful call matches.
+        """
+        return llm_records.get_cached_response(
+            self._database, model, prompt_hash, schema_version
+        )
+
+    def get_monthly_llm_cost(self, as_of: date) -> float:
+        """Return realized LLM cost for `as_of`'s calendar month.
+
+        Args:
+            as_of: Any date within the month to total.
+
+        Returns:
+            Total realized cost in USD for that calendar month.
+        """
+        return llm_records.get_monthly_cost(self._database, as_of)

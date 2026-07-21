@@ -8,6 +8,8 @@ from uuid import uuid4
 import pytest
 
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
+from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
+from swing_copilot.screening.base import Candidate, SignalHit
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
@@ -180,3 +182,91 @@ class TestUniverseMembership:
             date(2026, 7, 20),
             tuple(second),
         )
+
+
+class TestRecordSignals:
+    def test_duplicate_natural_key_is_skipped_not_overwritten(self, state_store):
+        run_date = date(2026, 7, 20)
+        hit = SignalHit(
+            symbol="AAPL",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": 100.0},
+        )
+        updated_hit = SignalHit(
+            symbol="AAPL",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": 999.0},
+        )
+
+        state_store.record_signals([hit], run_date, "default")
+        state_store.record_signals([updated_hit], run_date, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT metrics_json FROM signals WHERE symbol = 'AAPL'"
+            ).fetchall()
+        assert len(rows) == 1
+        assert "100.0" in rows[0][0]
+
+
+class TestRecordCandidates:
+    def test_records_one_row_per_candidate(self, state_store):
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=("trend_sma",),
+                metrics={"rsi14": 40.0},
+                rank=1,
+            )
+        ]
+
+        state_store.record_candidates(candidates, run_id, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, rank FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchall()
+        assert rows == [("AAPL", 1)]
+
+    def test_different_run_ids_do_not_collide(self, state_store):
+        candidate = Candidate(
+            symbol="AAPL", as_of=date(2026, 7, 20), signal_names=(), metrics={}, rank=1
+        )
+        run_a, run_b = uuid4(), uuid4()
+
+        state_store.record_candidates([candidate], run_a, "default")
+        state_store.record_candidates([candidate], run_b, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM candidates").fetchone()
+        assert count == (2,)
+
+
+class TestRecordRiskAssessments:
+    def test_records_status_and_warnings(self, state_store):
+        run_id = uuid4()
+        assessment = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+            warnings=(CorrelationWarning("MSFT", 0.8, "high_correlation"),),
+        )
+
+        state_store.record_risk_assessments([assessment], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT status, warnings_json FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchall()
+        assert rows[0][0] == "approved"
+        assert "MSFT" in rows[0][1]

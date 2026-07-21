@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from swing_copilot.models import Position, RunStatus, StepStatus
+from swing_copilot.storage import audit_records
+from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
@@ -24,144 +26,9 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.models import RunMode
+    from swing_copilot.risk.checks import RiskAssessment
+    from swing_copilot.screening.base import Candidate, SignalHit
     from swing_copilot.storage.database import Database
-
-_INIT_SCHEMA_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS universe_membership (
-        snapshot_date  DATE NOT NULL,
-        symbol         VARCHAR NOT NULL,
-        source_symbol  VARCHAR NOT NULL,
-        company_name   VARCHAR NOT NULL,
-        gics_sector    VARCHAR NOT NULL,
-        source         VARCHAR NOT NULL,
-        PRIMARY KEY (snapshot_date, symbol)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS runs (
-        run_id          UUID PRIMARY KEY,
-        run_date        DATE NOT NULL,
-        mode            VARCHAR NOT NULL CHECK (mode IN ('live', 'dry_run')),
-        config_hash     VARCHAR NOT NULL,
-        status          VARCHAR NOT NULL
-            CHECK (status IN ('running','success','degraded','failed')),
-        started_at      TIMESTAMPTZ NOT NULL,
-        completed_at    TIMESTAMPTZ,
-        report_path     VARCHAR,
-        error_summary   VARCHAR
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS run_steps (
-        run_id       UUID NOT NULL,
-        step         VARCHAR NOT NULL,
-        status       VARCHAR NOT NULL CHECK (status IN ('success','failed','skipped')),
-        detail       VARCHAR,
-        duration_s   DOUBLE NOT NULL,
-        PRIMARY KEY (run_id, step)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS signals (
-        run_date      DATE NOT NULL,
-        symbol        VARCHAR NOT NULL,
-        strategy_key  VARCHAR NOT NULL,
-        signal_name   VARCHAR NOT NULL,
-        strength      DOUBLE NOT NULL,
-        metrics_json  JSON NOT NULL,
-        PRIMARY KEY (run_date, symbol, strategy_key, signal_name)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS candidates (
-        run_id         UUID NOT NULL,
-        symbol         VARCHAR NOT NULL,
-        strategy_key   VARCHAR NOT NULL,
-        rank           INTEGER NOT NULL,
-        signal_names   VARCHAR[] NOT NULL,
-        metrics_json   JSON NOT NULL,
-        PRIMARY KEY (run_id, symbol, strategy_key),
-        UNIQUE (run_id, strategy_key, rank)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS risk_assessments (
-        run_id          UUID NOT NULL,
-        symbol          VARCHAR NOT NULL,
-        status          VARCHAR NOT NULL
-            CHECK (status IN ('approved','rejected','not_calculable')),
-        max_shares      BIGINT,
-        entry_price     DOUBLE,
-        stop_price      DOUBLE,
-        reasons_json    JSON NOT NULL,
-        warnings_json   JSON NOT NULL,
-        PRIMARY KEY (run_id, symbol)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS positions (
-        position_id   UUID PRIMARY KEY,
-        symbol        VARCHAR NOT NULL,
-        is_paper      BOOLEAN NOT NULL DEFAULT 1,
-        entry_date    DATE NOT NULL,
-        entry_price   DOUBLE NOT NULL,
-        shares        BIGINT NOT NULL,
-        stop_price    DOUBLE,
-        status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
-        close_date    DATE,
-        close_price   DOUBLE,
-        created_at    TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS trades_journal (
-        journal_id          UUID PRIMARY KEY,
-        run_id              UUID NOT NULL,
-        symbol              VARCHAR NOT NULL,
-        strategy_key        VARCHAR NOT NULL,
-        position_id         UUID,
-        decision            VARCHAR NOT NULL CHECK(decision IN ('followed','ignored','modified')),
-        reason_memo         VARCHAR,
-        virtual_fill_price  DOUBLE,
-        created_at          TIMESTAMPTZ NOT NULL,
-        UNIQUE (run_id, symbol, strategy_key)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS text_items (
-        source_id      VARCHAR PRIMARY KEY,
-        symbol         VARCHAR,
-        source_type    VARCHAR NOT NULL,
-        published_at   TIMESTAMPTZ NOT NULL,
-        title          VARCHAR,
-        source_url     VARCHAR NOT NULL,
-        content_text   VARCHAR NOT NULL,
-        fetched_at     TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS llm_calls (
-        call_id         UUID PRIMARY KEY,
-        run_id          UUID NOT NULL,
-        model           VARCHAR NOT NULL,
-        schema_name     VARCHAR NOT NULL,
-        schema_version  INTEGER NOT NULL,
-        prompt_text     VARCHAR NOT NULL,
-        prompt_hash     VARCHAR NOT NULL,
-        source_ids      VARCHAR[] NOT NULL,
-        status          VARCHAR NOT NULL CHECK(status IN ('success','failed','budget_skipped')),
-        input_tokens    INTEGER NOT NULL,
-        output_tokens   INTEGER NOT NULL,
-        input_price_per_mtok   DOUBLE NOT NULL,
-        output_price_per_mtok  DOUBLE NOT NULL,
-        cost_usd        DOUBLE NOT NULL,
-        response_json   JSON,
-        error_detail    VARCHAR,
-        created_at      TIMESTAMPTZ NOT NULL
-    )
-    """,
-)
 
 _UNIVERSE_SOURCE = "wikipedia"
 
@@ -180,7 +47,7 @@ class StateStore:
     def init_schema(self) -> None:
         """Create every table this store owns (idempotent, additive only)."""
         with self._database.connect() as conn:
-            for statement in _INIT_SCHEMA_STATEMENTS:
+            for statement in INIT_SCHEMA_STATEMENTS:
                 conn.execute(statement)
 
     def start_run(self, run_date: date, mode: RunMode, config_hash: str) -> UUID:
@@ -409,3 +276,40 @@ class StateStore:
             for row in rows
         )
         return (snapshot_date, members)
+
+    def record_signals(
+        self, signals: Sequence[SignalHit], run_date: date, strategy_key: str
+    ) -> None:
+        """Record signal hits; duplicates for the same natural key are skipped.
+
+        Args:
+            signals: Signal hits to record.
+            run_date: Evaluation market date the signals were computed for.
+            strategy_key: Which `strategies.yaml` entry produced them.
+        """
+        audit_records.record_signals(self._database, signals, run_date, strategy_key)
+
+    def record_candidates(
+        self, candidates: Sequence[Candidate], run_id: UUID, strategy_key: str
+    ) -> None:
+        """Record one run's ranked candidates, keyed by `(run_id, symbol, strategy_key)`.
+
+        Args:
+            candidates: Ranked candidates to record.
+            run_id: The run these candidates belong to.
+            strategy_key: Which `strategies.yaml` entry produced them.
+        """
+        audit_records.record_candidates(
+            self._database, candidates, run_id, strategy_key
+        )
+
+    def record_risk_assessments(
+        self, assessments: Sequence[RiskAssessment], run_id: UUID
+    ) -> None:
+        """Record one run's risk assessments, keyed by `(run_id, symbol)`.
+
+        Args:
+            assessments: Risk assessments to record.
+            run_id: The run these assessments belong to.
+        """
+        audit_records.record_risk_assessments(self._database, assessments, run_id)

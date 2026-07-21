@@ -1,0 +1,13 @@
+strategies:
+  default:
+    filters_all:
+      - profitable_positive_fcf_equity
+      - volume_min
+    signals_all:
+      - trend_sma
+      - pullback_rsi
+    candidate_limit: 10
+    ranking:
+      - rsi14_asc
+      - avg_volume_desc
+      - symbol_asc

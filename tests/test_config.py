@@ -1,0 +1,122 @@
+"""Tests for settings/secrets loading and feature-gated secret validation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from swing_copilot.config import (
+    Secrets,
+    Settings,
+    load_secrets,
+    load_settings,
+    require_secrets,
+)
+from swing_copilot.exceptions import ConfigError
+
+
+class TestLoadSettings:
+    def test_loads_default_settings_yaml(self):
+        settings = load_settings("config/settings.yaml")
+        assert isinstance(settings, Settings)
+        assert settings.universe.index == "sp500"
+        assert settings.risk.max_position_pct == pytest.approx(0.10)
+        assert settings.llm.models.news_summary == "claude-haiku-4-5-20251001"
+        assert settings.llm.models.filing_analysis == "claude-haiku-4-5-20251001"
+        assert settings.notification.enabled is False
+        assert settings.report.auto_open is True
+
+    def test_missing_file_raises_config_error(self, tmp_path):
+        with pytest.raises(ConfigError, match="not found"):
+            load_settings(str(tmp_path / "does-not-exist.yaml"))
+
+    def test_invalid_schema_raises_config_error(self, tmp_path):
+        bad = tmp_path / "settings.yaml"
+        bad.write_text('universe:\n  refresh_interval_days: "not-a-number"\n')
+        with pytest.raises(ConfigError):
+            load_settings(str(bad))
+
+    def test_malformed_yaml_raises_config_error(self, tmp_path):
+        bad = tmp_path / "settings.yaml"
+        bad.write_text("universe: [unterminated\n")
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            load_settings(str(bad))
+
+    def test_unknown_top_level_field_is_rejected(self, tmp_path):
+        valid_yaml = Path("config/settings.yaml").read_text(encoding="utf-8")
+        bad = tmp_path / "settings.yaml"
+        bad.write_text(valid_yaml + "\nbogus_top_level_field: 1\n")
+        with pytest.raises(ConfigError):
+            load_settings(str(bad))
+
+
+class TestLoadSecrets:
+    def test_loads_without_dotenv_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        for key in (
+            "ANTHROPIC_API_KEY",
+            "FINNHUB_API_KEY",
+            "FRED_API_KEY",
+            "DISCORD_WEBHOOK_URL",
+            "EDGAR_IDENTITY",
+            "EODHD_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        secrets = load_secrets()
+
+        assert isinstance(secrets, Secrets)
+        assert secrets.anthropic_api_key is None
+        assert secrets.finnhub_api_key is None
+
+    def test_reads_environment_variables(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+        secrets = load_secrets()
+        assert secrets.anthropic_api_key == "sk-test-123"
+
+
+class TestRequireSecrets:
+    def test_no_features_never_raises(self):
+        require_secrets(Secrets(), features=set())
+
+    def test_missing_feature_secret_raises_config_error(self):
+        with pytest.raises(ConfigError, match="anthropic_api_key"):
+            require_secrets(Secrets(), features={"llm"})
+
+    def test_present_feature_secret_passes(self):
+        secrets = Secrets(anthropic_api_key="sk-test")
+        require_secrets(secrets, features={"llm"})
+
+    def test_multiple_missing_secrets_all_reported(self):
+        with pytest.raises(ConfigError) as exc_info:
+            require_secrets(Secrets(), features={"llm", "finnhub", "fred"})
+        message = str(exc_info.value)
+        assert "anthropic_api_key" in message
+        assert "finnhub_api_key" in message
+        assert "fred_api_key" in message
+
+    def test_unknown_feature_raises_config_error(self):
+        with pytest.raises(ConfigError, match="unknown feature"):
+            require_secrets(Secrets(), features={"not_a_real_feature"})
+
+
+class TestSecretsModel:
+    def test_extra_env_vars_are_ignored(self, monkeypatch):
+        monkeypatch.setenv("SOME_UNRELATED_ENV_VAR", "value")
+        Secrets()
+
+    def test_all_fields_default_to_none(self):
+        secrets = Secrets()
+        assert secrets.anthropic_api_key is None
+        assert secrets.finnhub_api_key is None
+        assert secrets.fred_api_key is None
+        assert secrets.discord_webhook_url is None
+        assert secrets.edgar_identity is None
+        assert secrets.eodhd_api_key is None
+
+
+def test_settings_rejects_wrong_type_for_nested_field():
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"technical_signals": {"trend": {"sma_short": "fast"}}})

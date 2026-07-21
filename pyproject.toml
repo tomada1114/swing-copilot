@@ -21,6 +21,11 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"
@@ -30,7 +35,14 @@ Issues = "https://github.com/tomada1114/swing-copilot/issues"
 Changelog = "https://github.com/tomada1114/swing-copilot/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["mypy>=2.1.0", "pre-commit>=4.6.0", "pytest>=8.0", "pytest-cov>=7.1.0", "ruff>=0.11"]
+dev = [
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "pytest>=8.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.11",
+    "types-pyyaml>=6.0",
+]
 docs = ["mkdocs-material>=9.7.6", "mkdocstrings[python]>=1.0.4"]
 
 # --------------------------------------------------------------------------- #

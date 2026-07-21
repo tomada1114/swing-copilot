@@ -1,4 +1,4 @@
-"""Tests for the public swing_copilot API."""
+"""Tests for the public swing_copilot package metadata."""
 
 from __future__ import annotations
 
@@ -7,23 +7,21 @@ import importlib.metadata as importlib_metadata
 from importlib.metadata import PackageNotFoundError, version
 
 import swing_copilot
-from swing_copilot import __all__, __version__, add
-
-
-class TestAdd:
-    def test_positive_numbers(self):
-        assert add(1, 2) == 3
-
-    def test_negative_numbers(self):
-        assert add(-1, -2) == -3
-
-    def test_zero(self):
-        assert add(0, 0) == 0
+from swing_copilot import __all__, __version__
 
 
 class TestPackageMetadata:
     def test_public_exports(self):
-        assert set(__all__) == {"__version__", "add"}
+        assert set(__all__) == {
+            "ConfigError",
+            "Secrets",
+            "Settings",
+            "SwingCopilotError",
+            "__version__",
+            "load_secrets",
+            "load_settings",
+            "require_secrets",
+        }
 
     def test_version_matches_installed_metadata(self):
         assert __version__ == version("swing-copilot")

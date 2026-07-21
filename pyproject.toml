@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pandas>=2.2",
     "lxml>=5.3",
+    "yfinance>=0.2.48",
 ]
 
 [project.urls]
@@ -171,6 +172,10 @@ enable_error_code = ["ignore-without-code", "redundant-cast", "truthy-bool"]
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+module = "yfinance.*"
+ignore_missing_imports = true
 
 # --------------------------------------------------------------------------- #
 #  pytest

@@ -24,25 +24,34 @@ if TYPE_CHECKING:
 def record_signals(
     database: Database, signals: Sequence[SignalHit], run_date: date, strategy_key: str
 ) -> None:
-    """Record signal hits; duplicates for the same natural key are skipped."""
+    """Upsert signal hits so same-date reruns can incorporate corrected input."""
     with database.connect() as conn:
-        for hit in signals:
-            conn.execute(
-                """
-                INSERT INTO signals (
-                    run_date, symbol, strategy_key, signal_name, strength, metrics_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_date, symbol, strategy_key, signal_name) DO NOTHING
-                """,
-                [
-                    run_date,
-                    hit.symbol,
-                    strategy_key,
-                    hit.signal_name,
-                    hit.strength,
-                    json.dumps(dict(hit.metrics)),
-                ],
-            )
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            for hit in signals:
+                conn.execute(
+                    """
+                    INSERT INTO signals (
+                        run_date, symbol, strategy_key, signal_name, strength, metrics_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (run_date, symbol, strategy_key, signal_name) DO UPDATE SET
+                        strength = EXCLUDED.strength,
+                        metrics_json = EXCLUDED.metrics_json
+                    """,
+                    [
+                        run_date,
+                        hit.symbol,
+                        strategy_key,
+                        hit.signal_name,
+                        hit.strength,
+                        json.dumps(dict(hit.metrics)),
+                    ],
+                )
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
 
 
 def record_candidates(

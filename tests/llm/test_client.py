@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -19,6 +19,7 @@ from swing_copilot.llm.client import (
     SchemaValidationError,
 )
 from swing_copilot.llm.pricing import ModelPricing
+from swing_copilot.llm.safety import ForbiddenLanguageError
 from swing_copilot.llm.schemas import NewsSummary, SourcedFact
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
@@ -71,6 +72,9 @@ class FakeClock:
     def today(self) -> date:
         return self._today
 
+    def now(self) -> datetime:
+        return datetime.combine(self._today, datetime.min.time(), tzinfo=UTC)
+
 
 def _news_summary(symbol: str = "AAPL", source_id: str = "news:1") -> NewsSummary:
     return NewsSummary(
@@ -91,6 +95,7 @@ def _request(
 ) -> AnalyzeRequest:
     return AnalyzeRequest(
         run_id=uuid4(),
+        system_prompt="System safety instructions.",
         prompt=prompt,
         source_ids=source_ids,
         schema=NewsSummary,
@@ -110,13 +115,14 @@ def state_store(tmp_path):
 class TestSuccessfulAnalyze:
     def test_returns_parsed_schema_and_records_success(self, state_store):
         response = FakeResponse(_news_summary())
+        fake_anthropic = FakeAnthropicClient(response)
         client = LLMClient(
             "test-key",
             state_store,
             ModelPricing(),
             monthly_budget_cap_usd=5.0,
             test_seams=LLMClientTestSeams(
-                anthropic_client=FakeAnthropicClient(response),
+                anthropic_client=fake_anthropic,
                 clock=FakeClock(date(2027, 1, 1)),
             ),
         )
@@ -132,6 +138,35 @@ class TestSuccessfulAnalyze:
         assert row[1] == 100
         assert row[2] == 50
         assert row[3] == pytest.approx((100 * 1.0 + 50 * 5.0) / 1_000_000)
+
+        call = fake_anthropic.messages.calls[0]
+        assert call["system"] == "System safety instructions."
+        assert call["messages"] == [{"role": "user", "content": "Summarize this news."}]
+
+    def test_redacts_api_key_from_persisted_prompt_and_response(self, state_store):
+        summary = _news_summary().model_copy(
+            update={"interpretation": ["The literal token test-key appeared."]}
+        )
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(summary)),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+        client.analyze(_request(prompt="Article accidentally contains test-key"))
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            prompt_text, response_json = conn.execute(
+                "SELECT prompt_text, response_json FROM llm_calls"
+            ).fetchone()
+        assert "test-key" not in prompt_text
+        assert "test-key" not in response_json
+        assert "[REDACTED]" in prompt_text
 
 
 class TestCaching:
@@ -172,6 +207,24 @@ class TestCaching:
         client.analyze(_request(prompt="prompt B"))
 
         assert len(fake_client.messages.calls) == 2
+
+    def test_cached_response_is_revalidated_against_current_source_ids(
+        self, state_store
+    ):
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+        client.analyze(_request(source_ids=("news:1",)))
+
+        with pytest.raises(SchemaValidationError):
+            client.analyze(_request(source_ids=("news:2",)))
 
 
 class TestRefusalAndErrors:
@@ -234,6 +287,28 @@ class TestRefusalAndErrors:
 
         with pytest.raises(SchemaValidationError):
             client.analyze(_request(source_ids=("news:1",)))
+
+    def test_forbidden_language_is_failed_before_it_can_be_cached(self, state_store):
+        unsafe = _news_summary().model_copy(
+            update={"interpretation": ["You should buy now."]}
+        )
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(unsafe)),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+        with pytest.raises(ForbiddenLanguageError):
+            client.analyze(_request())
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT status, response_json FROM llm_calls").fetchone()
+        assert row == ("failed", None)
 
 
 class TestBudgetGate:

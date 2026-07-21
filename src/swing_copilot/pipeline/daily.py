@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.clock import Clock
     from swing_copilot.config import Settings
-    from swing_copilot.data.base import DataProvider
+    from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.models import DailyRunOptions
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
@@ -87,23 +87,33 @@ def _select_symbols(
     return sorted({*limited, *held_symbols})
 
 
-def _stamp_bars(bars: pd.DataFrame, provider_name: str) -> pd.DataFrame:
+def _stamp_bars(
+    bars: pd.DataFrame, provider_name: str, fetched_at: datetime
+) -> pd.DataFrame:
     stamped = bars.copy()
     stamped["provider"] = provider_name
-    stamped["fetched_at"] = datetime.now(UTC)
+    stamped["fetched_at"] = fetched_at
     return stamped
 
 
 def _run_step_prices(
-    deps: DailyDependencies, symbols: list[str], as_of: date
+    deps: DailyDependencies,
+    symbols: list[str],
+    as_of: date,
+    prefetched: BarFetchResult | None = None,
 ) -> _StepOutcome:
-    start = as_of - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
-    result = deps.data_provider.get_daily_bars(
-        symbols, start, as_of + timedelta(days=1)
-    )
+    if prefetched is None:
+        start = as_of - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
+        result = deps.data_provider.get_daily_bars(
+            symbols, start, as_of + timedelta(days=1)
+        )
+    else:
+        result = prefetched
     if result.bars.empty:
         return _StepOutcome(False, "no price data returned for any symbol")
-    deps.market_store.write_bars(_stamp_bars(result.bars, deps.provider_name))
+    deps.market_store.write_bars(
+        _stamp_bars(result.bars, deps.provider_name, deps.clock.now())
+    )
     detail = (
         f"failed symbols: {[f.symbol for f in result.failures]}"
         if result.failures
@@ -140,11 +150,7 @@ def _run_step_fundamentals(
 def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
 ) -> tuple[_StepOutcome, list[Candidate]]:
-    as_of_cutoff = datetime.combine(as_of, datetime.max.time(), tzinfo=UTC)
-    with deps.market_store.get_connection() as conn:
-        fundamentals = conn.execute(
-            "SELECT * FROM fundamentals WHERE filed_at <= ?", [as_of_cutoff]
-        ).df()
+    fundamentals = deps.market_store.read_fundamentals(as_of)
     start = as_of - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
 
@@ -194,11 +200,26 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         The run outcome. `exit_code` is 0 only if all four steps succeeded.
     """
     mode = RunMode.DRY_RUN if options.is_dry_run else RunMode.LIVE
-    run_date = options.as_of or deps.clock.today()
+    fetch_cutoff = options.as_of or deps.clock.today()
     held_symbols = {
         position.symbol for position in deps.state_store.get_open_positions()
     }
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
+
+    prefetched_prices: BarFetchResult | None = None
+    prefetch_error: str | None = None
+    run_date = fetch_cutoff
+    if options.as_of is None:
+        try:
+            start = fetch_cutoff - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
+            prefetched_prices = deps.data_provider.get_daily_bars(
+                symbols, start, fetch_cutoff + timedelta(days=1)
+            )
+            if not prefetched_prices.bars.empty:
+                latest = max(prefetched_prices.bars["date"])
+                run_date = latest.date() if isinstance(latest, datetime) else latest
+        except Exception as exc:
+            prefetch_error = f"unexpected error: {exc}"
 
     run_id = deps.state_store.start_run(run_date, mode, _config_hash(deps.settings))
 
@@ -209,8 +230,13 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         outcome, candidates = _run_step_screening(deps, symbols, run_date, run_id)
         return outcome
 
+    def _step_prices() -> _StepOutcome:
+        if prefetch_error is not None:
+            return _StepOutcome(False, prefetch_error)
+        return _run_step_prices(deps, symbols, run_date, prefetched_prices)
+
     steps: list[tuple[str, Callable[[], _StepOutcome]]] = [
-        ("1_prices", lambda: _run_step_prices(deps, symbols, run_date)),
+        ("1_prices", _step_prices),
         ("2_fundamentals", lambda: _run_step_fundamentals(deps, symbols, run_date)),
         ("3_screening", _step_screening),
         ("4_risk", lambda: _run_step_risk(deps, candidates, run_id)),

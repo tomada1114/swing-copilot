@@ -245,7 +245,9 @@ class TestFetchRecentFilings:
             sleep_fn=lambda _s: None,
         )
 
-        refs = client.fetch_recent_filings("AAPL", ["8-K"])
+        refs = client.fetch_recent_filings(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )
 
         assert refs == [
             FilingRef(
@@ -293,6 +295,55 @@ class TestRateLimiting:
         assert sleeps == []
 
 
+class TestRetries:
+    def test_retries_transient_filing_list_failure(self):
+        calls = 0
+
+        def failing_then_succeeding(_symbol: str) -> FakeCompany:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                msg = "temporary EDGAR failure"
+                raise ConnectionError(msg)
+            return FakeCompany([])
+
+        sleeps: list[float] = []
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=failing_then_succeeding,
+            clock=FakeClock([0.0, 1.0]),
+            sleep_fn=sleeps.append,
+        )
+
+        assert (
+            client.fetch_fundamentals("AAPL", datetime(2026, 7, 20, tzinfo=UTC)) == []
+        )
+        assert calls == 2
+        assert sleeps == [1.0]
+
+    def test_stops_after_three_attempts(self):
+        calls = 0
+
+        def always_failing(_symbol: str) -> FakeCompany:
+            nonlocal calls
+            calls += 1
+            msg = "persistent EDGAR failure"
+            raise ConnectionError(msg)
+
+        sleeps: list[float] = []
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=always_failing,
+            clock=FakeClock([0.0, 1.0, 3.0]),
+            sleep_fn=sleeps.append,
+        )
+
+        with pytest.raises(ConnectionError, match="persistent"):
+            client.fetch_fundamentals("AAPL", datetime(2026, 7, 20, tzinfo=UTC))
+        assert calls == 3
+        assert sleeps == [1.0, 2.0]
+
+
 class TestFetchFilingTexts:
     def test_returns_one_text_item_per_filing(self):
         financials = FakeFinancials()
@@ -306,7 +357,9 @@ class TestFetchFilingTexts:
             sleep_fn=lambda _s: None,
         )
 
-        items = client.fetch_filing_texts("AAPL", ["8-K"])
+        items = client.fetch_filing_texts(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )
 
         assert len(items) == 1
         item = items[0]
@@ -316,3 +369,23 @@ class TestFetchFilingTexts:
         assert item.content_text == "Full filing text content."
         assert item.source_url == FakeFiling.DEFAULT_URL
         assert company.get_filings_calls == [["8-K"]]
+
+    def test_excludes_filing_text_published_after_as_of(self):
+        financials = FakeFinancials()
+        filings = [
+            FakeFiling("old", "8-K", date(2026, 7, 18), date(2026, 7, 18), financials),
+            FakeFiling(
+                "future", "8-K", date(2026, 7, 25), date(2026, 7, 25), financials
+            ),
+        ]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany(filings)),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )
+
+        assert [item.source_id for item in items] == ["edgar:old"]

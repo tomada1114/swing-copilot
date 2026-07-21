@@ -11,16 +11,18 @@ prompt instructions and a post-output banned-word check (`llm/summarize.py`,
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
+
+SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class SourcedFact(BaseModel):
     """One factual statement, tied to the input source(s) it came from."""
 
     statement: str
-    source_ids: list[str]
+    source_ids: Annotated[list[SourceId], Field(min_length=1)]
 
 
 class NewsSummary(BaseModel):

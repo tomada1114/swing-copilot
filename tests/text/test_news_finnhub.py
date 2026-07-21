@@ -22,6 +22,9 @@ class FakeDateClock:
     def today(self):
         return self._today
 
+    def now(self):
+        return datetime.combine(self._today, datetime.min.time(), tzinfo=UTC)
+
 
 def _fake_response(*_args, **_kwargs):
     return [
@@ -43,7 +46,9 @@ class TestFetchCompanyNews:
             date_clock=FakeDateClock(date(2027, 1, 10)),
         )
 
-        items = client.fetch_company_news("AAPL", date(2027, 1, 1))
+        items = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )
 
         assert len(items) == 1
         item = items[0]
@@ -67,11 +72,11 @@ class TestFetchCompanyNews:
             http_get=capturing_get,
             date_clock=FakeDateClock(date(2027, 1, 10)),
         )
-        client.fetch_company_news("AAPL", date(2027, 1, 1))
+        client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 8))
 
         assert captured["params"]["symbol"] == "AAPL"
         assert captured["params"]["from"] == "2027-01-01"
-        assert captured["params"]["to"] == "2027-01-10"
+        assert captured["params"]["to"] == "2027-01-08"
         assert captured["params"]["token"] == "test-key"  # noqa: S105 - test fixture, not a real credential
 
     def test_empty_response_returns_empty_list(self):
@@ -80,7 +85,10 @@ class TestFetchCompanyNews:
             http_get=lambda *_a, **_k: [],
             date_clock=FakeDateClock(date(2027, 1, 10)),
         )
-        assert client.fetch_company_news("AAPL", date(2027, 1, 1)) == []
+        assert (
+            client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
+            == []
+        )
 
 
 class TestRateLimiting:
@@ -94,8 +102,8 @@ class TestRateLimiting:
             sleep_fn=sleeps.append,
         )
 
-        client.fetch_company_news("AAPL", date(2027, 1, 1))
-        client.fetch_company_news("MSFT", date(2027, 1, 1))
+        client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
+        client.fetch_company_news("MSFT", date(2027, 1, 1), as_of=date(2027, 1, 10))
 
         assert sleeps == [0.7]
 
@@ -109,8 +117,8 @@ class TestRateLimiting:
             sleep_fn=sleeps.append,
         )
 
-        client.fetch_company_news("AAPL", date(2027, 1, 1))
-        client.fetch_company_news("MSFT", date(2027, 1, 1))
+        client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
+        client.fetch_company_news("MSFT", date(2027, 1, 1), as_of=date(2027, 1, 10))
 
         assert sleeps == []
 

@@ -44,9 +44,10 @@ class FakeUniverseStateStore:
         self.history.append((snapshot_date, tuple(members)))
 
     def get_latest_universe_membership(
-        self,
+        self, as_of: date | None = None
     ) -> tuple[date, tuple[UniverseMember, ...]] | None:
-        return self.history[-1] if self.history else None
+        eligible = [item for item in self.history if as_of is None or item[0] <= as_of]
+        return eligible[-1] if eligible else None
 
 
 class TestGetSp500Universe:

@@ -8,5 +8,6 @@ from swing_copilot.clock import SystemClock
 
 
 def test_system_clock_returns_a_date():
-    result = SystemClock().today()
-    assert isinstance(result, date)
+    clock = SystemClock()
+    assert isinstance(clock.today(), date)
+    assert clock.now().tzinfo is not None

@@ -17,6 +17,7 @@ import anthropic
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.llm.safety import ForbiddenLanguageError, check_structured_output
 from swing_copilot.storage.llm_records import LLMCallRecord
 
 if TYPE_CHECKING:
@@ -49,6 +50,10 @@ def _prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode()).hexdigest()
 
 
+def _full_prompt(request: AnalyzeRequest) -> str:
+    return f"SYSTEM:\n{request.system_prompt}\n\nUSER:\n{request.prompt}"
+
+
 def _validate_source_ids(parsed: BaseModel, source_ids: tuple[str, ...]) -> None:
     facts = getattr(parsed, "facts", None)
     if not facts:
@@ -66,6 +71,7 @@ class AnalyzeRequest:
     """Grouped `analyze()` parameters (keeps the method under 5 arguments)."""
 
     run_id: UUID
+    system_prompt: str
     prompt: str
     source_ids: tuple[str, ...]
     schema: type[BaseModel]
@@ -123,6 +129,7 @@ class LLMClient:
         self._pricing = pricing
         self._monthly_budget_cap_usd = monthly_budget_cap_usd
         self._clock = seams.clock or SystemClock()
+        self._sensitive_values = tuple(value for value in (api_key,) if value)
         self._client = seams.anthropic_client or anthropic.Anthropic(
             api_key=api_key,
             max_retries=_SDK_MAX_RETRIES,
@@ -144,16 +151,19 @@ class LLMClient:
                 model refused to produce structured output.
             SchemaValidationError: A fact cited a source ID not provided.
         """
-        prompt_hash = _prompt_hash(request.prompt)
+        full_prompt = _full_prompt(request)
+        prompt_hash = _prompt_hash(full_prompt)
+        pricing = self._pricing.get(request.model)
         cached = self._state_store.get_cached_llm_response(
             request.model, prompt_hash, request.schema_version
         )
         if cached is not None:
             cached_result: BaseModel = request.schema.model_validate_json(cached)
+            _validate_source_ids(cached_result, request.source_ids)
+            check_structured_output(cached_result)
             return cached_result
 
-        pricing = self._pricing.get(request.model)
-        estimated_cost = self._estimate_cost(request, pricing)
+        estimated_cost = self._estimate_cost(full_prompt, request.max_tokens, pricing)
         current_cost = self._state_store.get_monthly_llm_cost(self._clock.today())
         if current_cost + estimated_cost > self._monthly_budget_cap_usd:
             self._record(request, prompt_hash, pricing, _CallOutcome("budget_skipped"))
@@ -164,13 +174,15 @@ class LLMClient:
             response = self._client.messages.parse(  # type: ignore[attr-defined]
                 model=request.model,
                 max_tokens=request.max_tokens,
+                system=request.system_prompt,
                 messages=[{"role": "user", "content": request.prompt}],
                 output_format=request.schema,
             )
         except anthropic.AnthropicError as exc:
-            outcome = _CallOutcome("failed", error_detail=str(exc))
+            detail = self._redact(str(exc))
+            outcome = _CallOutcome("failed", error_detail=detail)
             self._record(request, prompt_hash, pricing, outcome)
-            msg = f"Claude API call failed: {exc}"
+            msg = f"Claude API call failed: {detail}"
             raise LLMError(msg) from exc
 
         raw_parsed = response.parsed_output
@@ -188,7 +200,8 @@ class LLMClient:
 
         try:
             _validate_source_ids(parsed, request.source_ids)
-        except SchemaValidationError as exc:
+            check_structured_output(parsed)
+        except (SchemaValidationError, ForbiddenLanguageError) as exc:
             outcome = _CallOutcome("failed", error_detail=str(exc))
             self._record(request, prompt_hash, pricing, outcome)
             raise
@@ -207,13 +220,21 @@ class LLMClient:
         return parsed
 
     def _estimate_cost(
-        self, request: AnalyzeRequest, pricing: tuple[float, float]
+        self, prompt: str, max_tokens: int, pricing: tuple[float, float]
     ) -> float:
         input_price, output_price = pricing
-        estimated_input_tokens = len(request.prompt) / _CHARS_PER_TOKEN_ESTIMATE
+        estimated_input_tokens = len(prompt) / _CHARS_PER_TOKEN_ESTIMATE
         return (
-            estimated_input_tokens * input_price + request.max_tokens * output_price
+            estimated_input_tokens * input_price + max_tokens * output_price
         ) / 1_000_000
+
+    def _redact(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        redacted = value
+        for secret in sorted(self._sensitive_values, key=len, reverse=True):
+            redacted = redacted.replace(secret, "[REDACTED]")
+        return redacted
 
     def _record(
         self,
@@ -230,7 +251,7 @@ class LLMClient:
                 model=request.model,
                 schema_name=request.schema.__name__,
                 schema_version=request.schema_version,
-                prompt_text=request.prompt,
+                prompt_text=self._redact(_full_prompt(request)) or "",
                 prompt_hash=prompt_hash,
                 source_ids=request.source_ids,
                 status=outcome.status,
@@ -239,7 +260,7 @@ class LLMClient:
                 input_price_per_mtok=input_price,
                 output_price_per_mtok=output_price,
                 cost_usd=outcome.cost_usd,
-                response_json=outcome.response_json,
-                error_detail=outcome.error_detail,
+                response_json=self._redact(outcome.response_json),
+                error_detail=self._redact(outcome.error_detail),
             )
         )

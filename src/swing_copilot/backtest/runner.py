@@ -15,8 +15,6 @@ from swing_copilot.screening.pipeline import ScreeningPipeline
 if TYPE_CHECKING:
     from datetime import date
 
-    import pandas as pd
-
     from swing_copilot.config import Settings
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
@@ -46,9 +44,9 @@ class BacktestRequest:
 class BacktestCostOverrides:
     """Cost/benchmark overrides, defaulting to `settings.yaml`'s own values."""
 
-    commission_pct: float = 0.001
-    slippage_pct: float = 0.001
-    benchmark_symbol: str = "SPY"
+    commission_pct: float | None = None
+    slippage_pct: float | None = None
+    benchmark_symbol: str | None = None
 
 
 def _trading_days(
@@ -56,13 +54,6 @@ def _trading_days(
 ) -> list[date]:
     bars = market_store.read_bars([benchmark_symbol], start, end, as_of=end)
     return sorted(bars["date"].unique().tolist())
-
-
-def _read_fundamentals(market_store: MarketStore, as_of: date) -> pd.DataFrame:
-    with market_store.get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM fundamentals WHERE filed_at <= ?", [as_of]
-        ).df()
 
 
 def run_backtest(
@@ -83,14 +74,24 @@ def run_backtest(
     """
     overrides = overrides or BacktestCostOverrides()
     start, end = request.start, request.end
-    benchmark_symbol = overrides.benchmark_symbol
+    benchmark_symbol = overrides.benchmark_symbol or deps.settings.backtest.benchmark
+    commission_pct = (
+        overrides.commission_pct
+        if overrides.commission_pct is not None
+        else deps.settings.backtest.commission_pct
+    )
+    slippage_pct = (
+        overrides.slippage_pct
+        if overrides.slippage_pct is not None
+        else deps.settings.backtest.slippage_pct
+    )
 
     effective_settings = deps.settings.model_copy(
         update={
             "backtest": deps.settings.backtest.model_copy(
                 update={
-                    "commission_pct": overrides.commission_pct,
-                    "slippage_pct": overrides.slippage_pct,
+                    "commission_pct": commission_pct,
+                    "slippage_pct": slippage_pct,
                     "benchmark": benchmark_symbol,
                 }
             )
@@ -100,7 +101,7 @@ def run_backtest(
     trading_days = _trading_days(deps.market_store, benchmark_symbol, start, end)
     all_symbols = sorted({*request.symbols, benchmark_symbol})
     bars = deps.market_store.read_bars(all_symbols, start, end, as_of=end)
-    fundamentals = _read_fundamentals(deps.market_store, end)
+    fundamentals = deps.market_store.read_fundamentals(end)
     pipeline = ScreeningPipeline(
         deps.strategies_config, deps.market_store, effective_settings
     )

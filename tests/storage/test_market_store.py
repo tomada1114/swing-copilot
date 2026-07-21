@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import cast
 
 import pandas as pd
 import pytest
+from duckdb import ConstraintException
 
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
@@ -212,3 +214,68 @@ class TestUpsertFundamentals:
         with market_store.get_connection() as conn:
             count = conn.execute("SELECT count(*) FROM fundamentals").fetchone()
         assert count == (0,)
+
+    def test_read_fundamentals_excludes_filings_after_as_of(self, market_store):
+        records = [
+            FundamentalsRecord(
+                accession_no=f"acc-{filed_at.date().isoformat()}",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                filed_at=filed_at,
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+            for filed_at in (
+                datetime(2026, 7, 10, tzinfo=UTC),
+                datetime(2026, 7, 25, tzinfo=UTC),
+            )
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.read_fundamentals(as_of=date(2026, 7, 20))
+
+        assert result["accession_no"].tolist() == ["acc-2026-07-10"]
+
+    def test_batch_rolls_back_when_a_later_record_is_invalid(self, market_store):
+        valid = FundamentalsRecord(
+            accession_no="valid",
+            symbol="AAPL",
+            form="10-Q",
+            fiscal_period_end=date(2026, 6, 30),
+            filed_at=datetime(2026, 7, 10, tzinfo=UTC),
+            revenue=1.0,
+            net_income=1.0,
+            fcf=1.0,
+            equity=1.0,
+            assets=2.0,
+            shares=1.0,
+            source_url="https://www.sec.gov/valid",
+            fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+        invalid = FundamentalsRecord(
+            accession_no="invalid",
+            symbol="MSFT",
+            form="10-Q",
+            fiscal_period_end=date(2026, 6, 30),
+            filed_at=datetime(2026, 7, 11, tzinfo=UTC),
+            revenue=1.0,
+            net_income=1.0,
+            fcf=1.0,
+            equity=1.0,
+            assets=2.0,
+            shares=1.0,
+            source_url=cast("str", None),
+            fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+
+        with pytest.raises(ConstraintException):
+            market_store.upsert_fundamentals([valid, invalid])
+
+        assert market_store.read_fundamentals(date(2026, 7, 20)).empty

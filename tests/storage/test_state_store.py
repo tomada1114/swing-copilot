@@ -183,9 +183,33 @@ class TestUniverseMembership:
             tuple(second),
         )
 
+    def test_as_of_returns_latest_snapshot_not_after_cutoff(self, state_store):
+        first = [UniverseMember("AAPL", "Apple Inc.", "Technology", "AAPL")]
+        future = [UniverseMember("MSFT", "Microsoft Corp.", "Technology", "MSFT")]
+        state_store.record_universe_membership(date(2026, 7, 13), first)
+        state_store.record_universe_membership(date(2026, 7, 20), future)
+
+        assert state_store.get_latest_universe_membership(date(2026, 7, 15)) == (
+            date(2026, 7, 13),
+            tuple(first),
+        )
+
+    def test_rerecording_same_date_replaces_removed_members(self, state_store):
+        snapshot_date = date(2026, 7, 20)
+        first = [UniverseMember("AAPL", "Apple", "Technology", "AAPL")]
+        corrected = [UniverseMember("MSFT", "Microsoft", "Technology", "MSFT")]
+        state_store.record_universe_membership(snapshot_date, first)
+
+        state_store.record_universe_membership(snapshot_date, corrected)
+
+        assert state_store.get_latest_universe_membership() == (
+            snapshot_date,
+            tuple(corrected),
+        )
+
 
 class TestRecordSignals:
-    def test_duplicate_natural_key_is_skipped_not_overwritten(self, state_store):
+    def test_duplicate_natural_key_is_updated_for_corrected_input(self, state_store):
         run_date = date(2026, 7, 20)
         hit = SignalHit(
             symbol="AAPL",
@@ -210,7 +234,7 @@ class TestRecordSignals:
                 "SELECT metrics_json FROM signals WHERE symbol = 'AAPL'"
             ).fetchall()
         assert len(rows) == 1
-        assert "100.0" in rows[0][0]
+        assert "999.0" in rows[0][0]
 
 
 class TestRecordCandidates:

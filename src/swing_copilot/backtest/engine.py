@@ -91,6 +91,8 @@ class _SimState:
     open_positions: dict[str, _OpenPosition] = field(default_factory=dict)
     closed_trades: list[Trade] = field(default_factory=list)
     benchmark_shares: int = 0
+    benchmark_cash: float = 0.0
+    benchmark_initialized: bool = False
 
 
 def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
@@ -154,7 +156,16 @@ class BacktestEngine:
         Returns:
             The full trade log, equity curves, and survivorship bias note.
         """
-        state = _SimState(cash=initial_cash)
+        if not trading_days:
+            return BacktestResult(
+                trades=(),
+                equity_curve=(),
+                benchmark_curve=(),
+                final_equity=initial_cash,
+                benchmark_final_equity=initial_cash,
+            )
+
+        state = _SimState(cash=initial_cash, benchmark_cash=initial_cash)
         pending_entries: list[Candidate] = []
         equity_curve: list[tuple[date, float]] = []
         benchmark_curve: list[tuple[date, float]] = []
@@ -165,10 +176,14 @@ class BacktestEngine:
             self._update_trailing_stops(day, bars, state)
             pending_entries = candidates_fn(day)
 
-            if state.benchmark_shares == 0:
+            if not state.benchmark_initialized:
                 benchmark_bar = _bar(bars, benchmark_symbol, day)
                 if benchmark_bar is not None:
                     state.benchmark_shares = int(initial_cash / benchmark_bar["close"])
+                    state.benchmark_cash -= (
+                        state.benchmark_shares * benchmark_bar["close"]
+                    )
+                    state.benchmark_initialized = True
 
             equity_curve.append(
                 (day, state.cash + self._mark_to_market(state, bars, day))
@@ -177,13 +192,15 @@ class BacktestEngine:
             benchmark_curve.append(
                 (
                     day,
-                    state.benchmark_shares * benchmark_bar["close"]
+                    state.benchmark_cash
+                    + state.benchmark_shares * benchmark_bar["close"]
                     if benchmark_bar is not None
                     else float("nan"),
                 )
             )
 
         self._liquidate_remaining(trading_days[-1], bars, state)
+        equity_curve[-1] = (trading_days[-1], state.cash)
 
         return BacktestResult(
             trades=tuple(state.closed_trades),
@@ -248,12 +265,12 @@ class BacktestEngine:
 
             exit_price: float | None = None
             exit_reason = ""
-            if position.days_held >= self._backtest_config.max_hold_days:
-                exit_price, exit_reason = bar["close"], "max_hold"
-            elif bar["open"] <= position.stop_price:
+            if bar["open"] <= position.stop_price:
                 exit_price, exit_reason = bar["open"], "stop"
             elif bar["low"] <= position.stop_price:
                 exit_price, exit_reason = position.stop_price, "stop"
+            elif position.days_held + 1 >= self._backtest_config.max_hold_days:
+                exit_price, exit_reason = bar["close"], "max_hold"
 
             if exit_price is not None:
                 self._settle_exit(state, position, day, exit_price, exit_reason)
@@ -268,8 +285,11 @@ class BacktestEngine:
         exit_price: float,
         exit_reason: str,
     ) -> None:
+        execution_price = exit_price * (1 - self._backtest_config.slippage_pct)
         proceeds = (
-            position.shares * exit_price * (1 - self._backtest_config.commission_pct)
+            position.shares
+            * execution_price
+            * (1 - self._backtest_config.commission_pct)
         )
         state.cash += proceeds
         state.closed_trades.append(
@@ -278,7 +298,7 @@ class BacktestEngine:
                 entry_date=position.entry_date,
                 entry_price=position.entry_price,
                 exit_date=exit_date,
-                exit_price=exit_price,
+                exit_price=execution_price,
                 shares=position.shares,
                 exit_reason=exit_reason,
             )

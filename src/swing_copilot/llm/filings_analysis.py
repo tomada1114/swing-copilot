@@ -9,6 +9,7 @@ LLM re-summarization across chunks (`docs/04_detailed_design.md` 6, "長文処�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from swing_copilot.llm.client import AnalyzeRequest
@@ -105,6 +106,7 @@ def analyze_filing(
         [
             *merged.interpretation,
             *merged.red_flags,
+            *merged.yoy_changes,
             *(fact.statement for fact in merged.facts),
         ]
     )
@@ -119,16 +121,19 @@ def _analyze_chunk(
 ) -> FilingAnalysis:
     chunk_source_id = f"{request.filing_text.source_id}:{chunk_index}"
     user_prompt = (
-        f"対象銘柄: {request.symbol}\n"
-        f"書類種別: {request.filing_type}\n"
+        f"対象銘柄: {escape(request.symbol, quote=False)}\n"
+        f"書類種別: {escape(request.filing_type, quote=False)}\n"
         f"提出日: {request.filing_text.published_at.date().isoformat()}\n\n"
         "以下は当該書類の抜粋です。\n\n"
-        f"{chunk_text}\n\n"
+        "<untrusted_filing_text>\n"
+        f"{escape(chunk_text, quote=False)}\n"
+        "</untrusted_filing_text>\n\n"
         "上記からFilingAnalysisスキーマに従いJSONを出力してください。"
     )
     analyze_request = AnalyzeRequest(
         run_id=request.run_id,
-        prompt=f"{_SYSTEM_PROMPT}\n\n{user_prompt}",
+        system_prompt=_SYSTEM_PROMPT,
+        prompt=user_prompt,
         source_ids=(chunk_source_id,),
         schema=FilingAnalysis,
         schema_version=request.schema_version,

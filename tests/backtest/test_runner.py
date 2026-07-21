@@ -95,3 +95,26 @@ def test_run_backtest_uses_default_overrides_when_none_given(settings, market_st
 
     assert result.trades == ()
     assert result.final_equity == pytest.approx(50_000.0)
+
+
+def test_run_backtest_uses_benchmark_from_settings_when_not_overridden(
+    settings, tmp_path
+):
+    store = MarketStore(
+        Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+    )
+    days = [date(2027, 1, 1 + i) for i in range(3)]
+    store.write_bars(bars_frame(_with_provider_columns(flat_bars("QQQ", days, 300.0))))
+    custom_settings = settings.model_copy(
+        update={"backtest": settings.backtest.model_copy(update={"benchmark": "QQQ"})}
+    )
+    deps = BacktestDependencies(
+        market_store=store,
+        universe=(),
+        settings=custom_settings,
+        strategies_config=STRATEGIES_CONFIG,
+    )
+
+    result = run_backtest(BacktestRequest([], days[0], days[-1], 50_000.0), deps)
+
+    assert len(result.benchmark_curve) == 3

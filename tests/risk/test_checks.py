@@ -253,3 +253,44 @@ class TestCorrelationWarnings:
 
         assert len(result[0].warnings) == 1
         assert result[0].warnings[0].warning_type == "data_quality"
+
+    def test_misaligned_trading_dates_produce_data_quality_warning(
+        self, settings, market_store
+    ):
+        lookback = settings.risk.correlation_lookback_days
+        candidate_start = AS_OF - timedelta(days=lookback + 1)
+        held_start = candidate_start + timedelta(days=1)
+        rows = []
+        for symbol, start in (("AAPL", candidate_start), ("MSFT", held_start)):
+            for index in range(lookback + 1):
+                close = 100.0 + index
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "date": start + timedelta(days=index),
+                        "open": close,
+                        "high": close + 1,
+                        "low": close - 1,
+                        "close": close,
+                        "volume": 1_000_000,
+                        "provider": "test",
+                        "fetched_at": pd.Timestamp("2027-01-01", tz="UTC"),
+                    }
+                )
+        market_store.write_bars(pd.DataFrame(rows))
+        checker = RiskChecker(
+            settings,
+            (
+                _member("AAPL", "Technology"),
+                _member("MSFT", "Technology"),
+            ),
+            market_store,
+        )
+
+        result = checker.check(
+            [_candidate("AAPL")],
+            portfolio=[_position("MSFT")],
+            account_equity=1_000_000.0,
+        )
+
+        assert result[0].warnings[0].warning_type == "data_quality"

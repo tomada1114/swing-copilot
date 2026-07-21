@@ -53,9 +53,9 @@ class UniverseStateStore(Protocol):
         ...  # pragma: no cover
 
     def get_latest_universe_membership(
-        self,
+        self, as_of: date | None = None
     ) -> tuple[date, tuple[UniverseMember, ...]] | None:
-        """Return the most recently persisted snapshot, if any."""
+        """Return the latest persisted snapshot not after `as_of`, if any."""
         ...  # pragma: no cover
 
 

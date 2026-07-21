@@ -20,10 +20,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 import edgar
 
+from swing_copilot.clock import SystemClock
 from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.text.base import TextItem
 
@@ -31,8 +33,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import date
 
+    from swing_copilot.clock import Clock
+
 _FUNDAMENTALS_FORMS = ("10-K", "10-Q")
 _MIN_REQUEST_INTERVAL_SECONDS = 0.1  # 10 requests/second cap
+_RETRY_DELAYS_SECONDS = (1.0, 2.0)  # 3 total attempts
 
 
 class _FinancialsLike(Protocol):
@@ -93,6 +98,10 @@ def _extract_fcf(financials: _FinancialsLike) -> float | None:
     return None
 
 
+def _filing_financials(filing: _FilingLike) -> _FinancialsLike:
+    return filing.obj().financials
+
+
 class EdgarClient:
     """Throttled, point-in-time SEC EDGAR fundamentals/filings client."""
 
@@ -103,6 +112,7 @@ class EdgarClient:
         company_factory: Callable[[str], _CompanyLike] = edgar.Company,
         clock: Callable[[], float] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
+        date_clock: Clock | None = None,
     ) -> None:
         """Create the client and declare `identity` to EDGAR.
 
@@ -112,11 +122,13 @@ class EdgarClient:
                 tests to avoid real network calls.
             clock: Injectable monotonic clock for rate-limit tests.
             sleep_fn: Injectable sleep function for rate-limit tests.
+            date_clock: Injectable wall clock for deterministic fetch timestamps.
         """
         edgar.set_identity(identity)
         self._company_factory = company_factory
         self._clock = clock or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
+        self._date_clock = date_clock or SystemClock()
         self._last_request_at: float | None = None
 
     def _throttle(self) -> None:
@@ -126,6 +138,17 @@ class EdgarClient:
             if wait > 0:
                 self._sleep_fn(wait)
         self._last_request_at = now
+
+    def _with_retries[T](self, operation: Callable[[], T]) -> T:
+        """Run one EDGAR boundary operation with a bounded retry policy."""
+        for delay in _RETRY_DELAYS_SECONDS:
+            self._throttle()
+            try:
+                return operation()
+            except Exception:
+                self._sleep_fn(delay)
+        self._throttle()
+        return operation()
 
     def fetch_fundamentals(
         self, symbol: str, as_of: datetime
@@ -139,17 +162,18 @@ class EdgarClient:
         Returns:
             One `FundamentalsRecord` per qualifying 10-K/10-Q filing.
         """
-        self._throttle()
-        company = self._company_factory(symbol)
-        filings = company.get_filings(form=list(_FUNDAMENTALS_FORMS))
+        filings = self._with_retries(
+            lambda: self._company_factory(symbol).get_filings(
+                form=list(_FUNDAMENTALS_FORMS)
+            )
+        )
 
         records = []
         for filing in filings:
             filed_at = _to_utc_datetime(filing.filing_date)
             if filed_at > as_of:
                 continue
-            self._throttle()
-            financials = filing.obj().financials
+            financials = self._with_retries(partial(_filing_financials, filing))
             records.append(
                 FundamentalsRecord(
                     accession_no=filing.accession_number,
@@ -164,26 +188,27 @@ class EdgarClient:
                     assets=financials.get_total_assets(),
                     shares=financials.get_shares_outstanding_basic(),
                     source_url=filing.filing_url,
-                    fetched_at=datetime.now(UTC),
+                    fetched_at=self._date_clock.now(),
                 )
             )
         return records
 
     def fetch_recent_filings(
-        self, symbol: str, form_types: list[str]
+        self, symbol: str, form_types: list[str], *, as_of: datetime
     ) -> list[FilingRef]:
         """Return recent filing references for the given form types (FR-07).
 
         Args:
             symbol: Ticker symbol.
             form_types: SEC form types to fetch (e.g. `["8-K"]`).
+            as_of: Only filings submitted at or before this instant are returned.
 
         Returns:
             One `FilingRef` per matching filing.
         """
-        self._throttle()
-        company = self._company_factory(symbol)
-        filings = company.get_filings(form=form_types)
+        filings = self._with_retries(
+            lambda: self._company_factory(symbol).get_filings(form=form_types)
+        )
         return [
             FilingRef(
                 accession_no=filing.accession_number,
@@ -193,25 +218,30 @@ class EdgarClient:
                 source_url=filing.filing_url,
             )
             for filing in filings
+            if _to_utc_datetime(filing.filing_date) <= as_of
         ]
 
-    def fetch_filing_texts(self, symbol: str, form_types: list[str]) -> list[TextItem]:
+    def fetch_filing_texts(
+        self, symbol: str, form_types: list[str], *, as_of: datetime
+    ) -> list[TextItem]:
         """Return recent filings' full text, normalized for text collection (FR-07).
 
         Args:
             symbol: Ticker symbol.
             form_types: SEC form types to fetch (e.g. `["8-K", "10-Q"]`).
+            as_of: Only filings submitted at or before this instant are returned.
 
         Returns:
             One `TextItem` per matching filing (`source_type="filing"`).
         """
-        self._throttle()
-        company = self._company_factory(symbol)
-        filings = company.get_filings(form=form_types)
+        filings = self._with_retries(
+            lambda: self._company_factory(symbol).get_filings(form=form_types)
+        )
 
         items = []
         for filing in filings:
-            self._throttle()
+            if _to_utc_datetime(filing.filing_date) > as_of:
+                continue
             items.append(
                 TextItem(
                     source_id=f"edgar:{filing.accession_number}",
@@ -220,8 +250,8 @@ class EdgarClient:
                     published_at=_to_utc_datetime(filing.filing_date),
                     title=f"{filing.form} - {symbol}",
                     source_url=filing.filing_url,
-                    content_text=filing.text(),
-                    fetched_at=datetime.now(UTC),
+                    content_text=self._with_retries(filing.text),
+                    fetched_at=self._date_clock.now(),
                 )
             )
         return items

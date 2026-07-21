@@ -106,8 +106,8 @@ class TestEntryFill:
             settings.risk.max_trade_risk_pct,
         )
 
-        # Position is still open at the end of this short window; verify via
-        # equity curve reacting to AAA's close on/after the fill day.
+        # Verify the open position on its fill day, before the mandatory
+        # end-of-window liquidation updates the final curve point.
         equity_by_day = dict(result.equity_curve)
         cost = (
             expected_shares
@@ -115,8 +115,8 @@ class TestEntryFill:
             * (1 + settings.backtest.commission_pct)
         )
         expected_cash_after_fill = INITIAL_CASH - cost
-        expected_equity_last_day = expected_cash_after_fill + expected_shares * 103.0
-        assert equity_by_day[days[3]] == pytest.approx(expected_equity_last_day)
+        expected_equity_on_fill_day = expected_cash_after_fill + expected_shares * 102.0
+        assert equity_by_day[days[2]] == pytest.approx(expected_equity_on_fill_day)
 
 
 class TestGapStop:
@@ -139,7 +139,7 @@ class TestGapStop:
 
         stop_trades = [t for t in result.trades if t.exit_reason == "stop"]
         assert len(stop_trades) == 1
-        assert stop_trades[0].exit_price == pytest.approx(80.0)
+        assert stop_trades[0].exit_price == pytest.approx(80.0 * (1 - 0.001))
         assert stop_trades[0].exit_date == days[3]
 
     def test_intraday_touch_fills_at_stop_price_not_low(self, engine):
@@ -165,7 +165,8 @@ class TestGapStop:
 
         stop_trades = [t for t in result.trades if t.exit_reason == "stop"]
         assert len(stop_trades) == 1
-        assert stop_trades[0].exit_price == pytest.approx(100.0 * 1.001 - 2.5 * 1.0)
+        raw_stop = 100.0 * 1.001 - 2.5 * 1.0
+        assert stop_trades[0].exit_price == pytest.approx(raw_stop * (1 - 0.001))
         assert stop_trades[0].exit_date == days[3]
 
 
@@ -183,8 +184,30 @@ class TestMaxHold:
 
         max_hold_trades = [t for t in result.trades if t.exit_reason == "max_hold"]
         assert len(max_hold_trades) == 1
-        # Entry fills on days[2]; forced exit lands max_hold sessions later.
-        assert max_hold_trades[0].exit_date == days[2 + max_hold]
+        # Entry day is holding session 1, so forced exit is session 60.
+        assert max_hold_trades[0].exit_date == days[2 + max_hold - 1]
+
+    def test_stop_takes_precedence_if_triggered_on_max_hold_day(self, settings):
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(update={"max_hold_days": 2})
+            }
+        )
+        engine = BacktestEngine(custom_settings)
+        days = TRADING_DAYS[:5]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days[:3], 100.0),
+            bar_row("AAA", days[3], (80.0, 81.0, 79.0, 80.0)),
+            bar_row("AAA", days[4], (80.0, 81.0, 79.0, 80.0)),
+        ]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda day: candidates.get(day, []), INITIAL_CASH
+        )
+
+        assert result.trades[0].exit_reason == "stop"
 
 
 class TestCashAndRankConstraints:
@@ -295,6 +318,42 @@ class TestBenchmarkAndReproducibility:
         result = engine.run(days, bars, _no_candidates, INITIAL_CASH)
 
         assert "survivorship" in result.survivorship_bias_note.lower()
+
+    def test_empty_trading_calendar_returns_unchanged_cash(self, engine):
+        result = engine.run([], bars_frame([]), _no_candidates, INITIAL_CASH)
+
+        assert result.trades == ()
+        assert result.final_equity == pytest.approx(INITIAL_CASH)
+        assert result.benchmark_final_equity == pytest.approx(INITIAL_CASH)
+
+    def test_final_equity_includes_exit_slippage_and_commission(self, settings, engine):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days,
+            bars_frame(rows),
+            lambda day: candidates.get(day, []),
+            INITIAL_CASH,
+        )
+
+        entry = 100.0 * (1 + settings.backtest.slippage_pct)
+        stop = entry - settings.backtest.exit_atr_multiple
+        shares = calc_position_size(
+            INITIAL_CASH,
+            entry,
+            stop,
+            settings.risk.max_position_pct,
+            settings.risk.max_trade_risk_pct,
+        )
+        entry_cost = shares * entry * (1 + settings.backtest.commission_pct)
+        exit_price = 100.0 * (1 - settings.backtest.slippage_pct)
+        exit_proceeds = shares * exit_price * (1 - settings.backtest.commission_pct)
+        assert result.final_equity == pytest.approx(
+            INITIAL_CASH - entry_cost + exit_proceeds
+        )
+        assert result.equity_curve[-1][1] == pytest.approx(result.final_equity)
 
 
 class TestTradePnl:

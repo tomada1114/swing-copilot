@@ -71,28 +71,30 @@ class FinnhubNewsClient:
                 self._sleep_fn(wait)
         self._last_request_at = now
 
-    def fetch_company_news(self, symbol: str, since: date) -> list[TextItem]:
+    def fetch_company_news(
+        self, symbol: str, since: date, *, as_of: date
+    ) -> list[TextItem]:
         """Fetch recent news for `symbol` published on or after `since`.
 
         Args:
             symbol: Ticker symbol.
             since: Earliest publication date to include.
+            as_of: Latest publication date to request; never inferred from today.
 
         Returns:
             News items normalized to `TextItem` (`source_type="news"`).
         """
         self._throttle()
-        until = self._date_clock.today()
         raw_items = self._http_get(
             FINNHUB_NEWS_URL,
             {
                 "symbol": symbol,
                 "from": since.isoformat(),
-                "to": until.isoformat(),
+                "to": as_of.isoformat(),
                 "token": self._api_key,
             },
         )
-        fetched_at = datetime.now(UTC)
+        fetched_at = self._date_clock.now()
         return [
             TextItem(
                 source_id=f"finnhub:{item['id']}",

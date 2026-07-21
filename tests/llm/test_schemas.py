@@ -40,6 +40,14 @@ class TestNewsSummary:
         with pytest.raises(ValidationError):
             SourcedFact.model_validate({"statement": "Revenue grew 10%"})
 
+    def test_fact_rejects_empty_source_ids(self):
+        with pytest.raises(ValidationError):
+            SourcedFact(statement="Revenue grew 10%", source_ids=[])
+
+    def test_fact_rejects_blank_source_id(self):
+        with pytest.raises(ValidationError):
+            SourcedFact(statement="Revenue grew 10%", source_ids=["   "])
+
 
 class TestFilingAnalysis:
     def test_guidance_direction_rejects_unknown_values(self):

@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 from swing_copilot.text.calendar_fred import FredCalendarClient, _real_http_get
+
+
+class FakeClock:
+    def now(self):
+        return datetime(2027, 2, 1, 12, tzinfo=UTC)
+
+    def today(self):
+        return date(2027, 2, 1)
 
 
 def _fake_response(*_args, **_kwargs):
@@ -21,7 +29,9 @@ def _fake_response(*_args, **_kwargs):
 
 class TestFetchCalendarEvents:
     def test_normalizes_to_text_item_schema(self):
-        client = FredCalendarClient("test-key", http_get=_fake_response)
+        client = FredCalendarClient(
+            "test-key", http_get=_fake_response, clock=FakeClock()
+        )
 
         items = client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
 
@@ -32,6 +42,7 @@ class TestFetchCalendarEvents:
         assert item.source_type == "calendar"
         assert item.title == "Employment Situation"
         assert item.published_at.date() == date(2027, 2, 5)
+        assert item.fetched_at == datetime(2027, 2, 1, 12, tzinfo=UTC)
 
     def test_passes_date_range_as_query_params(self):
         captured = {}

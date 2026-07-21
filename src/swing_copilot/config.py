@@ -8,9 +8,17 @@ needs a secret is actually enabled (`docs/04_detailed_design.md` 2.1 #6).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from swing_copilot.exceptions import ConfigError
@@ -196,6 +204,40 @@ class Settings(_StrictModel):
     report: ReportConfig = ReportConfig()
 
 
+RankingRule = Literal["rsi14_asc", "avg_volume_desc", "symbol_asc"]
+_DETERMINISTIC_RANKING: tuple[RankingRule, ...] = (
+    "rsi14_asc",
+    "avg_volume_desc",
+    "symbol_asc",
+)
+
+
+class StrategySpec(_StrictModel):
+    """Validated composition and ranking rules for one screening strategy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filters_all: tuple[str, ...]
+    signals_all: tuple[str, ...]
+    candidate_limit: int = Field(gt=0, le=10)
+    ranking: tuple[RankingRule, ...] = _DETERMINISTIC_RANKING
+
+    @model_validator(mode="after")
+    def _require_deterministic_ranking(self) -> StrategySpec:
+        if self.signals_all and self.ranking != _DETERMINISTIC_RANKING:
+            msg = "enabled strategies must use the deterministic P1/P2 ranking"
+            raise ValueError(msg)
+        return self
+
+
+class StrategiesConfig(_StrictModel):
+    """Typed contents of `config/strategies.yaml`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    strategies: dict[str, StrategySpec] = Field(min_length=1)
+
+
 def load_settings(path: str = "config/settings.yaml") -> Settings:
     """Load and validate `settings.yaml`.
 
@@ -224,6 +266,37 @@ def load_settings(path: str = "config/settings.yaml") -> Settings:
         return Settings.model_validate(raw)
     except ValidationError as exc:
         msg = f"Settings file failed validation: {settings_path}\n{exc}"
+        raise ConfigError(msg) from exc
+
+
+def load_strategies(path: str = "config/strategies.yaml") -> StrategiesConfig:
+    """Load and validate named screening strategies.
+
+    Args:
+        path: Path to the strategies YAML file.
+
+    Returns:
+        Typed strategy specifications with bounded candidate counts and the
+        deterministic P1/P2 ranking contract.
+
+    Raises:
+        ConfigError: The file is missing, malformed, or violates the schema.
+    """
+    strategies_path = Path(path)
+    if not strategies_path.is_file():
+        msg = f"Strategies file not found: {strategies_path}"
+        raise ConfigError(msg)
+
+    try:
+        raw = yaml.safe_load(strategies_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        msg = f"Strategies file is not valid YAML: {strategies_path}"
+        raise ConfigError(msg) from exc
+
+    try:
+        return StrategiesConfig.model_validate(raw)
+    except ValidationError as exc:
+        msg = f"Strategies file failed validation: {strategies_path}\n{exc}"
         raise ConfigError(msg) from exc
 
 

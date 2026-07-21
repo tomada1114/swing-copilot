@@ -11,6 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from swing_copilot.config import StrategiesConfig
+from swing_copilot.screening import (
+    fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
+)
+from swing_copilot.screening import (
+    technical_signals as _technical_signals,  # noqa: F401 - registers built-ins
+)
 from swing_copilot.screening.base import FILTER_REGISTRY, SIGNAL_REGISTRY, Candidate
 from swing_copilot.screening.indicators import symbol_bars, wilder_atr, wilder_rsi
 
@@ -29,7 +36,7 @@ class ScreeningPipeline:
 
     def __init__(
         self,
-        strategies_config: dict[str, Any],  # Any: arbitrary-depth parsed YAML
+        strategies_config: StrategiesConfig | dict[str, Any],
         market_store: MarketStore | None,
         settings: Settings,
         strategy_key: str = "default",
@@ -50,11 +57,16 @@ class ScreeningPipeline:
         """
         self._market_store = market_store
         self.strategy_key = strategy_key
-        spec = strategies_config["strategies"][strategy_key]
+        typed_config = (
+            strategies_config
+            if isinstance(strategies_config, StrategiesConfig)
+            else StrategiesConfig.model_validate(strategies_config)
+        )
+        spec = typed_config.strategies[strategy_key]
 
-        self._filters = [FILTER_REGISTRY[key](settings) for key in spec["filters_all"]]
-        self._signals = [SIGNAL_REGISTRY[key](settings) for key in spec["signals_all"]]
-        self._candidate_limit = int(spec["candidate_limit"])
+        self._filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
+        self._signals = [SIGNAL_REGISTRY[key](settings) for key in spec.signals_all]
+        self._candidate_limit = spec.candidate_limit
 
     def run(self, data: ScreeningInput) -> list[Candidate]:
         """Run the two-stage screen and return a ranked, capped candidate list.

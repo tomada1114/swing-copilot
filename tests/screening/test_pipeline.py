@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import date
 
 import pandas as pd
@@ -424,3 +426,27 @@ def test_registry_contains_default_strategy_building_blocks():
     assert "volume_min" in FILTER_REGISTRY
     assert "trend_sma" in SIGNAL_REGISTRY
     assert "pullback_rsi" in SIGNAL_REGISTRY
+
+
+def test_fresh_process_registers_builtin_components_without_test_side_effects():
+    code = """
+from swing_copilot.config import Settings
+from swing_copilot.screening.pipeline import ScreeningPipeline
+
+ScreeningPipeline(
+    {"strategies": {"default": {
+        "filters_all": ["volume_min"],
+        "signals_all": ["trend_sma"],
+        "candidate_limit": 10,
+    }}},
+    market_store=None,
+    settings=Settings(),
+)
+"""
+    result = subprocess.run(  # noqa: S603 - fixed interpreter and static test code
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

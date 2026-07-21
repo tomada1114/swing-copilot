@@ -216,23 +216,49 @@ class MarketStore:
         if not records:
             return
         with self.get_connection() as conn:
-            for record in records:
-                values = asdict(record)
-                conn.execute(
-                    _UPSERT_FUNDAMENTALS,
-                    [
-                        values["accession_no"],
-                        values["symbol"],
-                        values["form"],
-                        values["fiscal_period_end"],
-                        values["filed_at"],
-                        values["revenue"],
-                        values["net_income"],
-                        values["fcf"],
-                        values["equity"],
-                        values["assets"],
-                        values["shares"],
-                        values["source_url"],
-                        values["fetched_at"],
-                    ],
-                )
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for record in records:
+                    values = asdict(record)
+                    conn.execute(
+                        _UPSERT_FUNDAMENTALS,
+                        [
+                            values["accession_no"],
+                            values["symbol"],
+                            values["form"],
+                            values["fiscal_period_end"],
+                            values["filed_at"],
+                            values["revenue"],
+                            values["net_income"],
+                            values["fcf"],
+                            values["equity"],
+                            values["assets"],
+                            values["shares"],
+                            values["source_url"],
+                            values["fetched_at"],
+                        ],
+                    )
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
+
+    def read_fundamentals(self, as_of: date) -> pd.DataFrame:
+        """Read every fundamentals row filed on or before `as_of`.
+
+        Args:
+            as_of: Point-in-time filing cutoff, inclusive for the whole date.
+
+        Returns:
+            Fundamentals ordered deterministically by symbol, period, and filing time.
+        """
+        with self.get_connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM fundamentals
+                WHERE CAST(filed_at AS DATE) <= ?
+                ORDER BY symbol, fiscal_period_end, filed_at
+                """,
+                [as_of],
+            ).df()

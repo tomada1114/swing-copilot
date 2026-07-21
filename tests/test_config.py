@@ -10,8 +10,10 @@ from pydantic import ValidationError
 from swing_copilot.config import (
     Secrets,
     Settings,
+    StrategiesConfig,
     load_secrets,
     load_settings,
+    load_strategies,
     require_secrets,
 )
 from swing_copilot.exceptions import ConfigError
@@ -50,6 +52,47 @@ class TestLoadSettings:
         bad.write_text(valid_yaml + "\nbogus_top_level_field: 1\n")
         with pytest.raises(ConfigError):
             load_settings(str(bad))
+
+
+class TestLoadStrategies:
+    def test_loads_typed_default_strategy(self):
+        strategies = load_strategies("config/strategies.yaml")
+
+        assert isinstance(strategies, StrategiesConfig)
+        default = strategies.strategies["default"]
+        assert default.filters_all == (
+            "profitable_positive_fcf_equity",
+            "volume_min",
+        )
+        assert default.candidate_limit == 10
+
+    def test_rejects_invalid_candidate_limit(self, tmp_path):
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 0\n"
+            "    ranking: [rsi14_asc, avg_volume_desc, symbol_asc]\n"
+        )
+
+        with pytest.raises(ConfigError, match="failed validation"):
+            load_strategies(str(bad))
+
+    def test_rejects_nondeterministic_ranking(self, tmp_path):
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking: [avg_volume_desc]\n"
+        )
+
+        with pytest.raises(ConfigError, match="failed validation"):
+            load_strategies(str(bad))
 
 
 class TestLoadSecrets:

@@ -12,7 +12,11 @@ from typing import Protocol
 
 
 class Clock(Protocol):
-    """Abstracts "what day is it" so tests can inject a fixed date."""
+    """Abstracts wall-clock access so tests can inject a fixed instant."""
+
+    def now(self) -> datetime:
+        """Return the current timezone-aware UTC datetime."""
+        ...  # pragma: no cover
 
     def today(self) -> date:
         """Return the current UTC calendar date."""
@@ -22,6 +26,10 @@ class Clock(Protocol):
 class SystemClock:
     """Real clock, backed by the system's UTC date."""
 
+    def now(self) -> datetime:
+        """Return the current timezone-aware UTC datetime."""
+        return datetime.now(UTC)
+
     def today(self) -> date:
         """Return `datetime.now(UTC).date()`."""
-        return datetime.now(UTC).date()
+        return self.now().date()

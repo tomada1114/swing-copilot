@@ -74,13 +74,17 @@ P4対象の`data/eodhd_provider.py`はP1〜P2ではスタブも作成しない�
 
 以下はP1〜P2実装で解釈を委ねないアーキテクチャ契約である。後続の例示と矛盾した場合は本節を優先する。
 
-1. **時点整合性**: すべてのスクリーニング・レポート・バックテストは明示的な`as_of`を受け取る。財務情報は`filed_at <= as_of`、価格は`date <= as_of`だけを参照し、端末の現在日付を暗黙利用しない。
+1. **時点整合性**: すべてのスクリーニング・リスクチェック・レポート・バックテストは明示的な`as_of`を受け取る。財務/filingは`filed_at <= as_of`、価格は`date <= as_of`、ユニバース履歴は`snapshot_date <= as_of`だけを参照する。境界は包含とし、直前・同値・直後をテストする。端末時刻は`Clock`経由の取得/監査metadataに限定し、業務可視性の代用にしない。
 2. **単一構造化ストア**: 構造化データは`data/copilot.duckdb`へ集約し、株価時系列のみParquetへ外出しする。SQLiteは導入しない。`MarketStore`と`StateStore`は論理的な責務分離であり、同じ`Database`を共有する。
-3. **再実行可能性**: 毎回新しい`run_id`を作り、`runs`/`run_steps`に履歴を残す。業務データは自然キーupsert、LLM成功結果は`(model, prompt_hash, schema_version)`で再利用する。過去の成功だけを理由にステップ全体を飛ばさない。
+3. **再実行可能性と原子性**: 毎回新しい`run_id`を作り、`runs`/`run_steps`に履歴を残す。業務データは訂正可能な自然キーupsertとし、複数行の論理更新は1トランザクションで全件commit/rollbackする。snapshot置換では消えた行も削除する。Parquet/reportは同一directoryのtemp fileから`os.replace()`し、失敗時は旧destinationを保持する。LLM成功結果は完全なsystem+user promptのhashを用いる`(model,prompt_hash,schema_version)`で再利用するが、cache hitも現在のsource_id/出力ポリシーで再検証する。過去の成功だけを理由にステップ全体を飛ばさない。
 4. **決定的な候補生成**: 全Filterと全required SignalはAND条件。複数の`SignalHit`を銘柄単位の`Candidate`へ集約し、`(rsi14昇順, avg_volume降順, symbol昇順)`で順位付けして最大10件に絞る。根拠のない合成スコアは作らない。
 5. **同一ロジックの再利用**: 指標・Filter・Signalは純粋関数として日次処理とバックテストで共用する。バックテスト専用に似たロジックを再実装しない。
 6. **機能単位の秘密情報検証**: 設定ファイルは常にロード可能にし、秘密情報は使用する機能の開始時にだけ検証する。`--skip-llm`やオフラインE2EにAnthropic/Finnhub/FREDキーを要求しない。
 7. **境界と内部型**: Pydanticは設定・外部API・LLM JSONなどの境界だけに使用し、内部値は`@dataclass(frozen=True, slots=True)`またはEnumを使う。
+8. **外部境界の失敗契約**: 外部I/Oはtimeout、retry対象例外、総試行上限、backoffを明示し、rate limitを各試行へ適用する。設定/入力検証/プログラミングエラーをretryしない。通常pytestはsocket接続を既定拒否し、live canaryを分離する。
+9. **定量計算の整列**: 複数銘柄の時系列演算は取引日indexで整列する。相関はinner join後の重複しない共通日だけを使い、必要本数未満・定数系列・NaNはdata-qualityとして明示する。
+10. **バックテスト会計**: 買いと売りの双方へ不利なslippageとcommissionを適用し、stop/max-hold/最終強制清算を同じ決済関数へ集約する。final equityは清算後cashと一致し、SPY benchmarkは端株を買わない残cashを保持する。
+11. **LLM境界防御**: system instructionとuser/untrusted本文をAPI上で分離し、外部本文をescape済みdelimiter内のdataとして渡す。全factは非空・非blankで入力集合内の`source_ids`を持つ。CON-03、provenance、secret redactionは呼び出し元任せにせずgatewayでfresh/cache双方へ適用する。
 
 ### 2.2 モジュール依存ルール
 
@@ -102,6 +106,12 @@ pipeline/cli (composition root, imperative shell)
 - `pipeline/daily.py`に指標計算・SQL・HTML整形を置かない。各ステップは入力取得→application呼び出し→結果保存だけを行う。
 - Protocolは外部境界と複数実装が必要な箇所に限定する。クラス1つにつきinterface1つを作る設計は避ける。
 - registryは組み込みFilter/Signalの明示登録に限定し、動的import探索や第三者pluginロードは非目標とする。
+
+### 2.3 正本と矛盾の扱い
+
+- 要件・制約は`docs/01_requirements.md`、アーキテクチャと振る舞いは本書2.1節、現在のデータ/API形状は`models.py`・`storage/schema.py`・公開シグネチャ、品質コマンドは`justfile`/`pyproject.toml`を正本とする。
+- `docs/goal-prompts/**`は特定runの作業指示・判断履歴であり、本書を恒久的に上書きしない。そこで設計修正が判明した場合は、同じ変更で本書または要件へ還元する。
+- 正本間の矛盾を発見した場合、実装者は暗黙に片方を選ばない。既存利用者との互換性を保つ最小案を作り、差異と判断根拠を記録して古い側を更新する。テスト件数、coverage実績、branch/worktree状態は文書へ固定せずfresh commandを使う。
 
 ---
 
@@ -275,12 +285,12 @@ class EdgarClient:
         戻り値はstorage.market_storeのfundamentalsテーブルスキーマに対応するモデル。
         """
 
-    def fetch_recent_filings(self, symbol: str, form_types: list[str]) -> list["FilingRef"]:
-        """指定銘柄の直近提出書類（8-K, 10-Q等）の参照情報を返す（FR-07で利用）。"""
+    def fetch_recent_filings(self, symbol: str, form_types: list[str], *, as_of: datetime) -> list["FilingRef"]:
+        """指定銘柄のas_of以前の提出書類（8-K, 10-Q等）を返す（FR-07で利用）。"""
 ```
 
 **依存**: `edgartools`
-**エラー処理**: レート制限超過時はリトライ（指数バックオフ）。銘柄単位で取得失敗した場合はスキップしログ記録、バッチは継続する。
+**エラー処理**: EDGAR境界の一時障害は合計3試行（既定backoff 1秒、2秒）までとし、各試行前に10リクエスト/秒制限を適用する。fake clock/sleepで「一時失敗後成功」「3回で停止」「全試行がthrottle対象」を検証する。設定・入力検証エラーはretryしない。銘柄単位で取得失敗した場合はスキップしログ記録、バッチは継続する。
 
 ### 3.7 `storage/database.py` / `storage/market_store.py`
 
@@ -311,11 +321,13 @@ class MarketStore:
         """DuckDB経由でas_of以前の指定範囲の日足を読み出す。"""
 
     def upsert_fundamentals(self, records: list["FundamentalsRecord"]) -> None:
-        """fundamentalsテーブルへupsertする（symbol, fiscal_period が一意キー）。"""
+        """fundamentalsへaccession_noで訂正可能なupsertを1transactionで行う。"""
 
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """DuckDB接続を返す（screening/backtestからの直接SQL利用向け）。"""
 ```
+
+複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。Parquetはdestinationと同じdirectoryへtemp fileを書き、成功時だけ`os.replace()`する。書き込み/replace失敗時は従来partitionを保持し、tempをcleanupする。
 
 ### 3.8 `storage/state_store.py`
 
@@ -468,7 +480,7 @@ class ScreeningPipeline:
         """
 ```
 
-**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`を型検証した値オブジェクトで、required filters/signals、候補上限、順位規則を保持する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
+**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、固定の決定的順位規則を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、非決定的rankingは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
@@ -520,14 +532,15 @@ class RiskChecker:
     def check_correlation(self, candidate_symbol: str, portfolio: list["Position"], market_store: "MarketStore") -> list[CorrelationWarning]:
         """
         FR-06: エントリー候補（candidate_symbol）と既存保有銘柄（portfolio）それぞれについて、
-        直近risk.correlation_lookback_days営業日（デフォルト60）の日次リターンの
-        ピアソン相関係数を、market_store（Parquet/DuckDBの日足）から算出する。
+        日付重複を解消してdate index化した日次リターンを取引日でinner joinし、
+        直近risk.correlation_lookback_days個（デフォルト60）の共通リターンから
+        ピアソン相関係数を算出する。行番号や各系列の末尾位置では整列しない。
         いずれかの保有銘柄との相関がrisk.max_correlation（デフォルト0.7）を超える場合、
         CorrelationWarning（warning_type="high_correlation"、相手銘柄・相関値を含む）を
         リストへ追加してRiskAssessment.warningsへ格納する。
         **警告のみでブロックはしない**（意思決定支援の原則、CON-03整合。approvedの判定には
-        影響を与えない）。候補または保有銘柄のいずれかで直近60営業日分の日足データが
-        揃っていない場合はdata_quality警告を付け、相関チェックが未実施であることを
+        影響を与えない）。inner join後の共通returnが60件未満、日付重複で一意化不能、
+        NaN、またはいずれかが定数系列の場合はdata_quality警告を付け、相関チェックが未実施であることを
         レポートへ明示する。警告を黙って省略しない。
         """
 ```
@@ -573,9 +586,9 @@ class FilingAnalysis(BaseModel):
     guidance_direction: str  # 例: "positive" | "negative" | "neutral" | "not_disclosed"
 ```
 
-`SourcedFact`は`statement: str`と`source_ids: list[str]`を持ち、入力した記事/filingの安定IDだけを許可する。URLをLLMに再生成させない。
+`SourcedFact`は`statement: str`と1件以上の`source_ids: list[str]`を持つ。各IDはtrim後に空でなく、入力した記事/filingの安定ID集合の部分集合だけを許可する。URLをLLMに再生成させない。fresh応答だけでなくcacheから復元した応答も、現在requestの入力ID集合で再検証する。
 
-**設計原則（CON-03）**: `facts`と`interpretation`の分離だけでは幻覚を防げないため、各factに入力ソースIDを必須化し、レポートから原文へ辿れるようにする。「買うべき」「売るべき」等の命令形はプロンプトで禁止し、出力後にも禁止語検査を行う。違反時は再試行せず当該分析を失敗として縮退表示する。
+**設計原則（CON-03）**: `facts`と`interpretation`の分離だけでは幻覚を防げないため、各factに入力ソースIDを必須化し、レポートから原文へ辿れるようにする。「買うべき」「売るべき」等の命令形はプロンプトで禁止し、gatewayがfacts、interpretation、risk_flags、red_flags、yoy_changes等の全ユーザー表示文字列をfresh/cache双方で検査する。違反応答はcacheへ保存せず、再試行せず当該分析を失敗として縮退表示する。
 
 ### 3.16 `llm/client.py`（FR-08, NFR-05, NFR-06）
 
@@ -592,6 +605,7 @@ class LLMClient:
         self,
         *,
         run_id: UUID,
+        system_prompt: str,
         prompt: str,
         source_ids: tuple[str, ...],
         schema: type[BaseModel],
@@ -600,9 +614,10 @@ class LLMClient:
         max_tokens: int,
     ) -> BaseModel:
         """
-        Claude APIを呼び出し、schemaに準拠した構造化JSON出力をパースして返す。
+        system_promptはAPIのsystem field、promptはuser messageとして分離してClaude APIを呼び出し、
+        schemaに準拠した構造化JSON出力をパースして返す。
         呼び出し前に当月実績+概算額を予算上限と比較し、超過見込みならBudgetExceededを送出する。
-        呼び出しごとにrun_id、スキーマ名/版、秘密情報を含まないプロンプト全文、入力ソースID、
+        呼び出しごとにrun_id、スキーマ名/版、秘密情報をredactしたsystem+user prompt全文、入力ソースID、
         入出力トークン数、適用単価、コスト、レスポンスJSON全文をllm_callsへ記録する。
         レート制限・一時的エラーは指数バックオフでリトライする（具体的なリトライ回数・
         待機秒数、レート制限値は実装時に要確認）。
@@ -614,6 +629,8 @@ class LLMClient:
         呼び出し側から受け取った値をそのままAPIリクエストのmodelフィールドに使用する。
         """
 ```
+
+cache hashと入力token概算はsystem+user promptの両方を対象にする。外部本文はHTML/XML風delimiter内へescapeして格納し、本文が閉じdelimiterや追加命令を含んでもsystem instructionへ昇格しない。prompt、response、exception、audit detailの全経路でAPI key等をredactする。
 
 ### 3.17 `llm/summarize.py` / `llm/filings_analysis.py`（FR-08）
 
@@ -696,11 +713,12 @@ def run_backtest(
 
 **約定規則（固定）**:
 
-- 当日終値確定後の候補を翌営業日寄付で約定し、売買方向へ0.1%不利なスリッページと0.1%手数料を適用する。
+- 当日終値確定後の候補を翌営業日寄付で約定する。買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`、売り約定単価=`raw_exit * (1 - slippage_pct)`、売りcash増加=`shares * exit_execution * (1 - commission_pct)`とし、すべてのexit path（stop、max-hold、最終強制清算）へ同じ式を適用する。
 - 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。
-- トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。60営業日目の引けで強制決済する。
+- トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。60営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
 - 現在のS&P500構成銘柄しかない期間は、その事実と生存者バイアスを結果へ必ず表示する。
+- 最終日後に残るpositionは最終日価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。SPY benchmarkは整数株購入後の残cashをcurveへ含める。
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
@@ -1170,6 +1188,25 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 - **品質水準の意図**: 数値カバレッジはあくまで手段であり、目的は「実際にアプリを動かしたときにバグがないレベル」の品質を担保することである。そのため数値カバレッジに加えて以下のE2Eスモークテストを必須テストとして課す。
 - **E2Eスモークテスト（必須）**: 外部API（yfinance/EODHD, EDGAR, Finnhub, FRED, Claude API, Discord Webhook）を全て記録済みフィクスチャ/モックに差し替えた状態で、`copilot daily`相当のコマンド（`uv run copilot-daily --dry-run`等）を一気通貫実行し、`reports/`配下にHTMLレポートが生成されるまで正常終了（終了コード0）することを検証する。8.2節の統合テスト（5銘柄smoke test）をこのE2Eスモークテストの実装基盤として用いてよいが、外部APIを一切呼ばずフィクスチャ/モックのみで完結する経路を少なくとも1つ、CI/ローカルどちらでも実行可能な形で用意すること（8.2節の実APIを叩く`@pytest.mark.live`テストとは分離する）。
 
+### 8.5 アーキテクチャ適合テスト（必須）
+
+数値coverageや「costs/retries/rollbackをテストした」という項目名だけでは完了としない。変更領域に応じて、次の反例と期待結果を最低限含める。
+
+| 領域 | 必須の反例・oracle |
+|---|---|
+| 時点整合性 | `as_of`直前・同値・直後の価格、filing/fundamentals、universe snapshotを同じfixtureへ置き、包含境界だけが可視になる |
+| DuckDB | 複数rowの2件目以降へ失敗を注入し、先行rowを含め0件commit。その後の再実行が成功する |
+| snapshot/Parquet/report | replacementから消えたrowが削除される。temp write/replace失敗時は旧destinationが不変でtempが残らない |
+| 相関 | 日付がずれた系列、重複日、共通return不足、定数系列が誤相関ではなくdata_qualityになる |
+| バックテスト | 1株の買い/売りを手計算し、両側cost、stop優先、最終清算、benchmark残cashを厳密比較する |
+| 設定 | unknown field/key、空required signals、limit 0/11、非決定的rankingを外部call前に拒否する |
+| 外部adapter | retryable失敗→成功、非retryable即時失敗、総試行上限、各試行のthrottle/timeoutをfake timeで検証する |
+| LLM provenance | source_idsなし/空白/未知IDと、request IDが変わったcache hitを拒否する |
+| LLM safety | system/user分離、delimiter escape、全表示fieldのCON-03、full-prompt cache hash、prompt/response/exception redactionを検証する |
+| offline | autouse socket guardにより、injectし忘れた実接続が即時テスト失敗になる |
+
+PR/完了時の正本コマンドは非破壊の`just verify`とし、ruff、format check、mypy strict、line+branch coverage 95%以上のpytest、`mkdocs build --strict`、wheel smokeを実行する。`just check`はformatを変更し得る開発用コマンドであり、commit済みtreeの完了証拠には用いない。
+
 ---
 
 ## 9. 実装順序と受け入れ基準
@@ -1180,15 +1217,15 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 
 | ステップ | 内容 | 受け入れ基準 |
 |---|---|---|
-| P1-1 | 既存リポジトリをbootstrapでrenameし、アプリ向けにpyproject/justfileを更新 | テンプレートの既存8テストがgreenのまま、`my-package`/`my_package`の追跡対象残骸が0件、`just check`が終了コード0 |
-| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | `uv run python -c "from swing_copilot.config import load_settings; load_settings()"` が例外なく成功する |
-| P1-3 | `universe.py`（FR-01） | `UniverseMember`の取得・snapshot fallback・manual override・履歴保存を検証。シンボル変換前後とGICSセクターを保持 |
+| P1-1 | 既存リポジトリをbootstrapでrenameし、アプリ向けにpyproject/justfileを更新 | `my-package`/`my_package`の追跡対象残骸が0件で、commit済みtreeの`just verify`が終了コード0（固定テスト件数は条件にしない） |
+| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | 正常loadに加え、unknown field/key、空signals、limit 0/11、非決定的rankingを外部I/O前に拒否 |
+| P1-3 | `universe.py`（FR-01） | `UniverseMember`の取得・snapshot fallback・manual override・履歴保存を検証。直前/同日/未来snapshotから`as_of`以前の最新だけを選び、同日再保存で削除も反映 |
 | P1-4 | `data/base.py`, `data/yfinance_provider.py`（FR-02） | 契約テストで調整済みOHLC、複数ティッカーMultiIndex正規化、end日排他、部分失敗を検証 |
-| P1-5 | `storage/database.py`, `market_store.py`, `state_store.py` | 初回空状態、Parquet原子的upsert/訂正、DuckDB読出、runs/run_stepsの失敗後再実行を検証 |
-| P1-6 | `data/edgar.py`（FR-03） | 5銘柄fixtureをaccession_noでupsertし、`filed_at <= as_of`だけが返ることを検証 |
+| P1-5 | `storage/database.py`, `market_store.py`, `state_store.py` | 訂正upsert、2件目失敗時の全件rollback、snapshot完全置換、Parquet temp/replace失敗時の旧file保持と再実行を検証 |
+| P1-6 | `data/edgar.py`（FR-03） | `as_of`直前/同値/直後、identity、各試行throttle、一時失敗後成功、3試行上限、非retryable即時失敗をfake timeで検証 |
 | P1-7 | `screening/base.py`, `fundamental_filters.py`, `technical_signals.py`, `pipeline.py`（FR-04, FR-05） | 指標期待値、全条件AND、Candidate集約、決定的順位、最大10件、as_of境界を検証 |
-| P1-8 | `risk/`（FR-06） | approved/rejected/not_calculable、整数株数、セクター、相関、データ不足警告を検証 |
-| P1-9 | `backtest/`（FR-10） | 5銘柄fixtureで先読み防止・翌日寄付・ギャップストップ・60日決済・コスト・SPY比較・再現性を検証 |
+| P1-8 | `risk/`（FR-06） | approved/rejected/not_calculableに加え、相関の日付inner join、重複、共通本数不足、定数系列のdata_qualityを検証 |
+| P1-9 | `backtest/`（FR-10） | 先読み防止に加え、手計算fixtureでentry/全exitのcost、stop優先、最終清算後equity、SPY残cash、再現性を検証 |
 | P1-10 | `pipeline/daily.py`前半 | 固定`--as-of`のdry-runを2回実行し、別run_id、重複業務データなし、ステップ1〜4を検証 |
 | P1完了基準 | 全体 | `uv run pytest tests/` が通る。`uv run ruff check .` がエラー0件。`uv run mypy .`（strict）がエラー0件。line+branchカバレッジが全体95%以上（`--cov-fail-under=95`、8.4節）であること。 |
 
@@ -1196,13 +1233,13 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 
 | ステップ | 内容 | 受け入れ基準 |
 |---|---|---|
-| P2-1 | `text/`（FR-07） | Finnhub/EDGAR filings/FREDの取得関数がユニットテスト（モック）で通る |
-| P2-2 | `llm/schemas.py`, `llm/client.py`（FR-08） | structured output、source_id検証、拒否/エラー、上限付きリトライ、キャッシュ、価格不明、予算ゲート、監査記録をfakeで検証 |
-| P2-3 | `llm/summarize.py`, `llm/filings_analysis.py`（FR-08） | 6章のプロンプトでモックレスポンスをNewsSummary/FilingAnalysisへパースできる。facts/interpretationが分離されていることをテストで検証 |
+| P2-1 | `text/`（FR-07） | source identity、`as_of`境界、rate/retry/timeout、空/部分失敗をfakeで検証し、autouse socket guard下で完走 |
+| P2-2 | `llm/schemas.py`, `llm/client.py`（FR-08） | non-empty/known source_id、cache再検証、full-prompt hash、全表示fieldのCON-03、予算no-call、監査/例外redactionをfakeで検証 |
+| P2-3 | `llm/summarize.py`, `llm/filings_analysis.py`（FR-08） | system/user API分離、untrusted delimiter escape、chunk source、truncation、mergeを検証。本文中の命令がdataのまま保持される |
 | P2-4 | `report/chart_data.py`, `html_report.py`, `discord_notify.py`（FR-09） | LLMあり/なし、0候補、特殊文字/XSS入力、offline asset、attribution、免責、atomic latest更新をテスト |
 | P2-5 | `paper/journal.py`（FR-11, CON-04） | `PaperJournal.record_decision()`/`close_position()`のユニットテストが通る |
 | P2-6 | `pipeline/daily.py` 全9ステップ結線 | オフラインE2Eでrun_steps全9件とレポート再構成を検証。text/LLM/通知の個別失敗はdegraded、価格/保存/スクリーニング失敗はfailed非ゼロを検証 |
-| P2完了基準 | 全体 | `just check`、固定fixtureのE2Eスモーク、`uv run mkdocs build --strict`がgreen。実キーが利用可能なら20銘柄live canaryを1回実行し、無ければオフライン完了として理由を報告する。7営業日連続運用はP3開始前ゲートとして別途行う。 |
+| P2完了基準 | 全体 | commit済みtreeで`just verify`がgreen。実キーが利用可能なら20銘柄live canaryを1回実行し、無ければオフライン完了として理由を報告する。7営業日連続運用はP3開始前ゲートとして別途行う。 |
 
 P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本番切替）は本書のスコープ外の運用フェーズであり、`docs/00_human_preparation.md`のP3/P4項目と対応する。
 

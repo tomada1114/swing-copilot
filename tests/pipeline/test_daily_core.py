@@ -28,6 +28,9 @@ class FakeClock:
     def today(self):
         return AS_OF
 
+    def now(self):
+        return datetime(2027, 3, 1, 12, tzinfo=UTC)
+
 
 class FakeDataProvider:
     def __init__(self, bars: pd.DataFrame, failures: tuple[FetchFailure, ...] = ()):
@@ -135,6 +138,11 @@ class TestHappyPath:
         ]
         assert all(status == "success" for _step, status in steps)
 
+        bars = deps.market_store.read_bars(
+            ["AAPL", "MSFT"], AS_OF - timedelta(days=400), AS_OF, AS_OF
+        )
+        assert set(bars["fetched_at"]) == {pd.Timestamp("2027-03-01T12:00:00Z")}
+
 
 class TestIdempotency:
     def test_two_runs_get_distinct_run_ids_and_no_duplicate_bars(
@@ -240,9 +248,9 @@ class TestFatalStepFailure:
 
 
 class TestAsOfDefaulting:
-    def test_missing_as_of_falls_back_to_clock(self, deps):
+    def test_missing_as_of_uses_latest_date_in_fetched_bars(self, deps):
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
-        assert result.run_date == AS_OF
+        assert result.run_date == AS_OF - timedelta(days=1)
 
 
 class TestSymbolLimit:

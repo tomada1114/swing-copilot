@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from typing import TYPE_CHECKING, Protocol, cast
 
 from swing_copilot.llm.client import AnalyzeRequest
@@ -72,7 +73,8 @@ def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsS
     items = _newest_first(request.news_items)[: request.max_items]
     analyze_request = AnalyzeRequest(
         run_id=request.run_id,
-        prompt=f"{_SYSTEM_PROMPT}\n\n{_build_user_prompt(request, items)}",
+        system_prompt=_SYSTEM_PROMPT,
+        prompt=_build_user_prompt(request, items),
         source_ids=tuple(item.source_id for item in items),
         schema=NewsSummary,
         schema_version=request.schema_version,
@@ -103,18 +105,20 @@ def _build_user_prompt(request: NewsSummaryRequest, items: list[TextItem]) -> st
         f"対象期間: {request.period}\n\n"
         "以下は収集したニュース記事一覧です"
         "(各記事: source_id・タイトル・本文抜粋・URL・公開日)。\n\n"
-        f"{formatted}\n\n"
+        "<untrusted_news_items>\n"
+        f"{formatted}\n"
+        "</untrusted_news_items>\n\n"
         "上記からNewsSummaryスキーマに従いJSONを出力してください。\n"
         "sourcesフィールドには参照した記事のURLをすべて含めてください。"
     )
 
 
 def _format_news_item(item: TextItem, max_chars: int) -> str:
-    excerpt = item.content_text[:max_chars]
+    excerpt = escape(item.content_text[:max_chars], quote=False)
     return (
-        f"[source_id: {item.source_id}]\n"
-        f"タイトル: {item.title or '(不明)'}\n"
-        f"URL: {item.source_url}\n"
+        f"[source_id: {escape(item.source_id, quote=False)}]\n"
+        f"タイトル: {escape(item.title or '(不明)', quote=False)}\n"
+        f"URL: {escape(item.source_url, quote=False)}\n"
         f"公開日: {item.published_at.isoformat()}\n"
         f"本文抜粋: {excerpt}"
     )

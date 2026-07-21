@@ -59,7 +59,11 @@ class RiskAssessment:
 def _daily_returns(bars: pd.DataFrame, lookback_days: int) -> pd.Series | None:
     if bars.empty:
         return None
-    closes = bars.sort_values("date")["close"]
+    closes = (
+        bars.sort_values("date")
+        .drop_duplicates(subset="date", keep="last")
+        .set_index("date")["close"]
+    )
     if len(closes) < lookback_days + 1:
         return None
     returns = closes.tail(lookback_days + 1).pct_change().dropna()
@@ -239,7 +243,21 @@ class RiskChecker:
                 )
                 continue
 
-            correlation = candidate_returns.corr(position_returns)
+            aligned = pd.concat(
+                [
+                    candidate_returns.rename("candidate"),
+                    position_returns.rename("position"),
+                ],
+                axis=1,
+                join="inner",
+            ).dropna()
+            if len(aligned) < lookback or (aligned.nunique() <= 1).any():
+                warnings.append(
+                    CorrelationWarning(symbol, float("nan"), "data_quality")
+                )
+                continue
+
+            correlation = aligned["candidate"].corr(aligned["position"])
             if math.isnan(correlation):
                 warnings.append(
                     CorrelationWarning(symbol, float("nan"), "data_quality")

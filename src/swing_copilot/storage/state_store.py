@@ -218,41 +218,57 @@ class StateStore:
             members: Universe membership to persist.
         """
         with self._database.connect() as conn:
-            for member in members:
+            conn.execute("BEGIN TRANSACTION")
+            try:
                 conn.execute(
-                    """
-                    INSERT INTO universe_membership (
-                        snapshot_date, symbol, source_symbol, company_name,
-                        gics_sector, source
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (snapshot_date, symbol) DO UPDATE SET
-                        source_symbol = EXCLUDED.source_symbol,
-                        company_name = EXCLUDED.company_name,
-                        gics_sector = EXCLUDED.gics_sector,
-                        source = EXCLUDED.source
-                    """,
-                    [
-                        snapshot_date,
-                        member.symbol,
-                        member.source_symbol,
-                        member.company_name,
-                        member.gics_sector,
-                        _UNIVERSE_SOURCE,
-                    ],
+                    "DELETE FROM universe_membership WHERE snapshot_date = ?",
+                    [snapshot_date],
                 )
+                for member in members:
+                    conn.execute(
+                        """
+                        INSERT INTO universe_membership (
+                            snapshot_date, symbol, source_symbol, company_name,
+                            gics_sector, source
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            snapshot_date,
+                            member.symbol,
+                            member.source_symbol,
+                            member.company_name,
+                            member.gics_sector,
+                            _UNIVERSE_SOURCE,
+                        ],
+                    )
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
 
     def get_latest_universe_membership(
-        self,
+        self, as_of: date | None = None
     ) -> tuple[date, tuple[UniverseMember, ...]] | None:
-        """Return the most recently persisted universe snapshot, if any.
+        """Return the latest universe snapshot not after `as_of`, if any.
+
+        Args:
+            as_of: Optional point-in-time cutoff. `None` returns the newest snapshot.
 
         Returns:
             `(snapshot_date, members)` for the latest snapshot, or `None`.
         """
         with self._database.connect() as conn:
-            latest = conn.execute(
-                "SELECT max(snapshot_date) FROM universe_membership"
-            ).fetchone()
+            if as_of is None:
+                latest = conn.execute(
+                    "SELECT max(snapshot_date) FROM universe_membership"
+                ).fetchone()
+            else:
+                latest = conn.execute(
+                    "SELECT max(snapshot_date) FROM universe_membership "
+                    "WHERE snapshot_date <= ?",
+                    [as_of],
+                ).fetchone()
             if latest is None or latest[0] is None:
                 return None
             snapshot_date = latest[0]
@@ -281,7 +297,7 @@ class StateStore:
     def record_signals(
         self, signals: Sequence[SignalHit], run_date: date, strategy_key: str
     ) -> None:
-        """Record signal hits; duplicates for the same natural key are skipped.
+        """Upsert signal hits by their business natural key.
 
         Args:
             signals: Signal hits to record.

@@ -31,7 +31,7 @@ Changelog = "https://github.com/your-username/my-package/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = ["mypy>=2.1.0", "pre-commit>=4.6.0", "pytest>=8.0", "pytest-cov>=7.1.0", "ruff>=0.11"]
-docs = ["mkdocs-material>=9.7.6", "mkdocstrings[python]>=1.0.4"]
+docs = ["mkdocs-material>=9.7.6", "mkdocstrings[python]>=1.0.6"]
 
 # --------------------------------------------------------------------------- #
 #  uv

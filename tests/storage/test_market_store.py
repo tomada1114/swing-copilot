@@ -6,9 +6,9 @@ from datetime import UTC, date, datetime
 
 import pandas as pd
 import pytest
-from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
 
 from swing_copilot.storage.database import Database
+from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
 
 
 def _bars(rows: list[tuple[str, str, float, float, float, float, int]]) -> pd.DataFrame:

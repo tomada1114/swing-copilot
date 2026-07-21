@@ -107,6 +107,9 @@ jobs:
           path: dist
 
       - name: Create GitHub Release
+        # zizmor: ignore[superfluous-actions] auto-generates release notes and
+        # attaches dist/* artifacts, which plain `gh release create` cannot do
+        # in one step.
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           generate_release_notes: true

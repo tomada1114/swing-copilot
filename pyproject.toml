@@ -30,6 +30,7 @@ dependencies = [
     "yfinance>=0.2.48",
     "duckdb>=1.1",
     "pyarrow>=17.0",
+    "edgartools>=3.0",
 ]
 
 [project.urls]
@@ -177,6 +178,10 @@ disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
 module = "yfinance.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "edgar.*"
 ignore_missing_imports = true
 
 # --------------------------------------------------------------------------- #

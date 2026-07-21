@@ -1,0 +1,13 @@
+rules:
+  # docs.yml's deploy job needs persisted credentials so `mkdocs gh-deploy`
+  # can push the built site; this is documented in the workflow itself.
+  artipacked:
+    ignore:
+      - docs.yml:27:9
+
+  # softprops/action-gh-release is a deliberate, SHA-pinned choice for
+  # generating release notes; a raw `gh release create` script step is not
+  # a meaningful security improvement here.
+  superfluous-actions:
+    ignore:
+      - release.yml:134:15

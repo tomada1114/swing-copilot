@@ -1,0 +1,43 @@
+name: Label PR
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    name: Label by Conventional Commit type
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Apply label from PR title type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          type="${PR_TITLE%%:*}"
+          type="${type%%(*}"
+          case "$type" in
+            feat) label=enhancement ;;
+            fix) label=bug ;;
+            docs) label=documentation ;;
+            ci) label=ci ;;
+            *) echo "No label mapping for type: $type"; exit 0 ;;
+          esac
+          # Ensure the label exists — a default repo has no "ci" label, and
+          # `--add-label` fails on a missing one. `create` no-ops if present.
+          gh label create "$label" >/dev/null 2>&1 || true
+          # Best-effort: PRs from forks get a read-only GITHUB_TOKEN, so the
+          # write below is rejected there. Never fail the check over it.
+          gh pr edit "$PR_NUMBER" --add-label "$label" \
+            || echo "::notice::Could not apply label '$label' (fork PRs have a read-only token)."

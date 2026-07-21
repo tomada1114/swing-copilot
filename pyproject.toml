@@ -1,0 +1,192 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my-package"
+version = "0.1.0"
+description = "A short description of the project."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Your Name", email = "you@example.com" }]
+keywords = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/my-package"
+Documentation = "https://your-username.github.io/my-package"
+Repository = "https://github.com/your-username/my-package"
+Issues = "https://github.com/your-username/my-package/issues"
+Changelog = "https://github.com/your-username/my-package/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = ["mypy>=2.1.0", "pre-commit>=4.6.0", "pytest>=8.0", "pytest-cov>=7.1.0", "ruff>=0.11"]
+docs = ["mkdocs-material>=9.7.6", "mkdocstrings[python]>=1.0.4"]
+
+# --------------------------------------------------------------------------- #
+#  uv
+# --------------------------------------------------------------------------- #
+
+[tool.uv]
+exclude-newer = "2026-06-18T00:00:00Z"
+
+# --------------------------------------------------------------------------- #
+#  Build
+# --------------------------------------------------------------------------- #
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/my_package"]
+
+# --------------------------------------------------------------------------- #
+#  Ruff – linter & formatter
+# --------------------------------------------------------------------------- #
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    # --- Core ---
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    # --- Modern Python ---
+    "UP",   # pyupgrade
+    # --- Bug prevention ---
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "A",    # flake8-builtins
+    "ISC",  # flake8-implicit-str-concat
+    "ICN",  # flake8-import-conventions
+    # --- Code quality ---
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PIE",  # flake8-pie
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+    "ERA",  # eradicate (commented-out code)
+    "PL",   # pylint
+    # --- Performance ---
+    "PERF", # perflint
+    "FURB", # refurb
+    # --- Type checking ---
+    "TC",   # flake8-type-checking
+    # --- Style ---
+    "COM",  # flake8-commas
+    "PTH",  # flake8-use-pathlib
+    "SLF",  # flake8-self
+    "T20",  # flake8-print
+    "LOG",  # flake8-logging
+    # --- Documentation ---
+    "D",    # pydocstyle
+    # --- Testing ---
+    "PT",   # flake8-pytest-style
+    # --- Naming ---
+    "N",    # pep8-naming
+    # --- Error handling ---
+    "TRY",  # tryceratops
+    "EM",   # flake8-errmsg
+    # --- Datetime safety ---
+    "DTZ",  # flake8-datetimez
+    # --- Exception hygiene ---
+    "RSE",  # flake8-raise
+    # --- pygrep hooks ---
+    "PGH",  # pygrep-hooks
+    # --- Ruff-specific ---
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "COM812", # missing trailing comma — conflicts with formatter
+    "ISC001", # implicit string concatenation — conflicts with formatter
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # assert is fine in tests
+    "ARG001",  # unused arguments (fixtures)
+    "PLR2004", # magic numbers in tests
+    "T20",     # print in tests
+    "D1",      # missing docstrings — test names are self-documenting
+]
+"scripts/**" = [
+    "D1",  # missing docstrings — scripts are not a public API
+    "T20", # print is the expected output channel for CLI scripts
+]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# --------------------------------------------------------------------------- #
+#  mypy – strict type checking
+# --------------------------------------------------------------------------- #
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+enable_error_code = ["ignore-without-code", "redundant-cast", "truthy-bool"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+
+# --------------------------------------------------------------------------- #
+#  pytest
+# --------------------------------------------------------------------------- #
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-v",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+# --------------------------------------------------------------------------- #
+#  coverage
+# --------------------------------------------------------------------------- #
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+show_missing = true

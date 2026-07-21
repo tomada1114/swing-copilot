@@ -1795,6 +1795,7 @@ source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "edgartools" },
+    { name = "httpx" },
     { name = "lxml" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -1823,6 +1824,7 @@ docs = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.1" },
     { name = "edgartools", specifier = ">=3.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "lxml", specifier = ">=5.3" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=17.0" },

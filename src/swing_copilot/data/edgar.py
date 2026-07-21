@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Protocol
 import edgar
 
 from swing_copilot.storage.market_store import FundamentalsRecord
+from swing_copilot.text.base import TextItem
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,6 +58,7 @@ class _FilingLike(Protocol):
     filing_url: str
 
     def obj(self) -> _FilingObjLike: ...  # pragma: no cover
+    def text(self) -> str: ...  # pragma: no cover
 
 
 class _CompanyLike(Protocol):
@@ -192,3 +194,34 @@ class EdgarClient:
             )
             for filing in filings
         ]
+
+    def fetch_filing_texts(self, symbol: str, form_types: list[str]) -> list[TextItem]:
+        """Return recent filings' full text, normalized for text collection (FR-07).
+
+        Args:
+            symbol: Ticker symbol.
+            form_types: SEC form types to fetch (e.g. `["8-K", "10-Q"]`).
+
+        Returns:
+            One `TextItem` per matching filing (`source_type="filing"`).
+        """
+        self._throttle()
+        company = self._company_factory(symbol)
+        filings = company.get_filings(form=form_types)
+
+        items = []
+        for filing in filings:
+            self._throttle()
+            items.append(
+                TextItem(
+                    source_id=f"edgar:{filing.accession_number}",
+                    symbol=symbol,
+                    source_type="filing",
+                    published_at=_to_utc_datetime(filing.filing_date),
+                    title=f"{filing.form} - {symbol}",
+                    source_url=filing.filing_url,
+                    content_text=filing.text(),
+                    fetched_at=datetime.now(UTC),
+                )
+            )
+        return items

@@ -67,9 +67,13 @@ class FakeFiling:
         self.period_of_report = period_of_report
         self.filing_url = self.DEFAULT_URL
         self._obj = FakeFilingObj(financials)
+        self.filing_text = "Full filing text content."
 
     def obj(self):
         return self._obj
+
+    def text(self):
+        return self.filing_text
 
 
 class FakeCompany:
@@ -287,3 +291,28 @@ class TestRateLimiting:
         client.fetch_fundamentals("MSFT", datetime(2026, 7, 20, tzinfo=UTC))
 
         assert sleeps == []
+
+
+class TestFetchFilingTexts:
+    def test_returns_one_text_item_per_filing(self):
+        financials = FakeFinancials()
+        filing = FakeFiling(
+            "0001-26-000004", "8-K", date(2026, 7, 18), date(2026, 7, 18), financials
+        )
+        company = FakeCompany([filing])
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(company),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts("AAPL", ["8-K"])
+
+        assert len(items) == 1
+        item = items[0]
+        assert item.source_id == "edgar:0001-26-000004"
+        assert item.symbol == "AAPL"
+        assert item.source_type == "filing"
+        assert item.content_text == "Full filing text content."
+        assert item.source_url == FakeFiling.DEFAULT_URL
+        assert company.get_filings_calls == [["8-K"]]

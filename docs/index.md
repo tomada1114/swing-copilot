@@ -1,28 +1,14 @@
-# my-package
+# swing-copilot
 
-A short description of what this library does.
-
-## Installation
-
-=== "pip"
-
-    ```bash
-    pip install my-package
-    ```
-
-=== "uv"
-
-    ```bash
-    uv add my-package
-    ```
+A decision-support batch pipeline for US equity swing/position trading. It
+screens the S&P 500 universe, checks risk parameters, summarizes news and
+filings with an LLM, and renders a daily HTML report. It never places orders
+— the human always makes the final buy/sell decision.
 
 ## Quick Example
 
-```python
-from my_package import add
-
-result = add(1, 2)
-print(result)  # 3
+```bash
+uv run copilot-daily --dry-run
 ```
 
 ## Next Steps

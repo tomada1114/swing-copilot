@@ -26,7 +26,7 @@ in the `justfile`. Run a single test with
 ## Architecture
 
 ```
-src/my_package/
+src/swing_copilot/
 ├── __init__.py   # Public API — export everything users need here
 ├── py.typed      # PEP 561 marker for typed package
 └── core.py       # Placeholder module — replace and re-export via __init__.py

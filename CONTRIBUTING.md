@@ -50,7 +50,7 @@ uv run ruff check --fix .
 uv run ruff format .
 uv run ruff check .
 uv run mypy src scripts tests
-uv run pytest --cov=my_package --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=80
+uv run pytest --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
 uv build && uv run python scripts/smoke_test.py
 ```
 
@@ -67,7 +67,7 @@ uv build && uv run python scripts/smoke_test.py
 - All public functions and methods must have type annotations
 - mypy strict mode must pass
 - Ruff must pass with no warnings
-- Maintain or improve test coverage (minimum 80%)
+- Maintain or improve test coverage (minimum 95%)
 
 ### Commit Messages
 

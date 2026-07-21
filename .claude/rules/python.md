@@ -6,8 +6,9 @@ paths:
 
 ## Design
 
-- Keep modules under 300 lines; one logical concern per module
-- Keep functions under 40 lines; prefer 3 or fewer parameters (group related params with dataclass or TypedDict)
+- Treat 300-line modules and 40-line functions as review triggers, not absolute
+  correctness rules. Split only when doing so improves a real responsibility boundary
+- Prefer 3 or fewer parameters; group related parameters with a dataclass or TypedDict
 - Google-style docstrings (Args/Returns/Raises) on all public functions; document *why*, not what the type signature already says; don't document obvious code
 
 ## Error Handling
@@ -52,6 +53,21 @@ paths:
 
 - Sanitize file paths to prevent directory traversal (`pathlib.Path.resolve()` then check prefix)
 - Ruff's bandit rules (`S`) cover eval/exec/pickle/random misuse — do not suppress them with `noqa` without a written justification
+
+## Project Invariants
+
+- Use an explicit `as_of` for business visibility and an injected `Clock` for
+  wall time. Do not call `date.today()`/`datetime.now()` in domain logic or adapters
+- Repository reads must enforce their point-in-time cutoff, including the
+  inclusive equality boundary; never filter only at a distant caller
+- Wrap logical multi-row DuckDB writes in one explicit transaction and roll
+  back on failure. Correction upserts update prior business rows
+- Align market series by trading-date index before pairwise calculations
+- External adapters define timeout, retryable exception types, total attempts,
+  backoff, and rate limiting. Do not catch `Exception` as a retry policy unless
+  the boundary contract explicitly requires every exception to be retryable
+- Separate LLM system instructions from user/untrusted data at the API boundary;
+  centralize provenance, output-policy checks, caching, and audit redaction
 
 ## Constants and Naming
 

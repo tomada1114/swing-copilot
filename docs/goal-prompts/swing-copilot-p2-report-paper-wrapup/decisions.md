@@ -6,10 +6,12 @@ which still govern (never touch `.env`, never stage `.agents/`/`.codex/`, no TA-
 ## Pre-answered questions
 
 Q: The "ファンダメンタル" report block in the UI mockup shows EPS YoY and a 4-quarter profitability
-streak, which need a fundamentals-history query `MarketStore` doesn't have. Build it, or scope down?
+streak. `MarketStore.read_fundamentals(as_of)` now exists for internal screening, but should the
+report expose and analyze that full history, or scope down?
 A: Scope down. Add only `MarketStore.get_latest_fundamentals()` (single latest record) and drop the
 two derived rows from the template. — user answer, 2026-07-21. See `design.md` §2.1 for the exact
-fields to render instead. Do not add a multi-quarter history query for this phase.
+fields to render instead. Do not expose the multi-quarter screening query to the report in this
+phase.
 
 Q: `docs/04_detailed_design.md` §3.20 shows `PaperJournal.record_decision(signal_id: int, ...)` and
 `close_position(position_id: int, ...)`, but no `signal_id` column exists anywhere in the schema,
@@ -33,8 +35,8 @@ A: `PaperJournal.summarize_performance(market_store, as_of) -> PerformanceSummar
 - If a `tests/report`/`tests/paper` test would need real network access (Discord webhook, chart JS
   download) to pass, that's a design mistake — stop and fix the test to inject a fake, never relax
   the "offline" constraint.
-- If `just check`'s coverage gate (95%) is hard to hit for a specific fail-soft branch in
-  `pipeline/daily.py`, add the missing test case rather than lowering the threshold.
+- If `just verify`'s coverage gate (95%) is hard to hit for a specific fail-soft branch in
+  `pipeline/daily.py`, add the missing behavioral test case rather than lowering the threshold.
 - If blocked on a decision not covered here or in the original bundle's `decisions.md`, apply the
   narrowest change consistent with `docs/04_detailed_design.md`/`docs/05_ui_design.md`, note the
   divergence in your final report, and continue — do not stop for a decision you can reasonably infer.

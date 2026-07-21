@@ -13,8 +13,9 @@ JSON shape. One detail the doc doesn't spell out:
 
 **SMA200 lookback buffer**: to show correct SMA50/SMA200 values across a 6-month display window,
 `read_bars()` must be called with `start` pushed back by enough *trading* days to seed the SMA200
-window before the display window begins — not just 6 calendar months. Use a buffer of 200
-*calendar* days beyond the 6-month display start (safely covers 200 trading days) purely for the
+window before the display window begins — not just 6 calendar months. Use a buffer of at least 300
+*calendar* days beyond the 6-month display start (enough to cover 200 trading days under normal US
+market calendars, unlike a 200-calendar-day buffer) purely for the
 SMA calculation input; then slice the output `ohlcv`/`sma50`/`sma200` lists back down to the actual
 6-month display range before returning `ChartData`. Reuse `screening.indicators.sma` — do not
 reimplement SMA math here (`docs/04_detailed_design.md` 2.1 #5 shared-indicator invariant).
@@ -27,8 +28,9 @@ established pandas-NaN convention (see `risk/checks.py`, `backtest/engine.py`).
 
 ### 2.1 Fundamentals scope (resolved — do not expand)
 
-`MarketStore` currently has no read method for the `fundamentals` table at all (only
-`upsert_fundamentals`). Add exactly one:
+`MarketStore.read_fundamentals(as_of)` is the point-in-time, multi-row query used internally by the
+screening pipeline. The report should not load that full history when it needs one symbol. Add
+exactly one report-oriented query:
 
 ```python
 def get_latest_fundamentals(self, symbol: str, as_of: date) -> FundamentalsRecord | None:
@@ -43,10 +45,10 @@ The report's "ファンダメンタル" block shows only what one `FundamentalsR
 - 直近EPS = `net_income / shares` — `"N/A"` if either is `None`/zero.
 
 **Do NOT implement** "EPS YoY" or "黒字継続 N/4四半期" (the mockup shows these, but they require a
-multi-quarter fundamentals history query that doesn't exist yet and is out of scope for this pass —
-user decision, 2026-07-21). Omit those two rows from the template entirely rather than faking a
-value. List this as a known follow-up in your final report; do not add a new query method to chase
-it.
+multi-quarter fundamentals history analysis that is out of scope for this pass — user decision,
+2026-07-21). Omit those two rows from the template entirely rather than faking a value. List this
+as a known follow-up in your final report; do not expose or reuse the screening history query to
+chase it.
 
 ### 2.2 `classify_change` and badge mapping
 
@@ -74,9 +76,8 @@ rely on `select_autoescape`'s extension sniffing — `.j2` won't match its defau
 into the template with the `| tojson` filter so `<`, `>`, `&`, `</script>` are escaped automatically
 (`docs/05_ui_design.md` §8.4) — never mark LLM/news/company-name strings `| safe`.
 
-**Visual reference**: `docs/mockups/ui-mockup-morning-briefing.html` (absolute path:
-`/Users/masuyama/ghq/github.com/tomada1114/swing-copilot/docs/mockups/ui-mockup-morning-briefing.html`)
-is the literal CSS/HTML/structure to reproduce in `templates/report.html.j2` and
+**Visual reference**: `docs/mockups/ui-mockup-morning-briefing.html`, resolved from the repository
+root, is the literal CSS/HTML/structure to reproduce in `templates/report.html.j2` and
 `reports/assets/style.css` — copy its `<style>` block into `style.css` (drop the mockup-only
 `.mockup-banner` rule), and copy its section markup, replacing static dummy content with Jinja2
 variables/loops. The one structural deviation: replace the mockup's static `<svg class="candle-chart">`
@@ -161,7 +162,8 @@ class PerformanceSummary:
 
 `record_decision`'s idempotent upsert needs a new `StateStore.record_trade_decision(record)` method
 that delegates to a new `storage/paper_records.py` (same extraction pattern as `llm_records.py`/
-`audit_records.py` — keeps `state_store.py` from growing past the 300-line guideline). `close_position`
+`audit_records.py` — keeps the additional paper SQL isolated instead of growing `state_store.py`
+further). `close_position`
 needs a `StateStore.get_position(position_id) -> Position | None` (there's currently only
 `get_open_positions`, no single-position lookup) — add it. `summarize_performance` needs
 `StateStore.get_closed_positions(is_paper: bool = True) -> list[Position]` (sibling to the existing

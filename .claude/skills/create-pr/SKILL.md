@@ -2,7 +2,7 @@
 name: create-pr
 description: >
   Create or update pull requests following project conventions. Runs pre-checks
-  (just check), generates Conventional Commits title, fills PR template with
+  (`just verify`), generates a Conventional Commits title, fills the PR template with
   summary/test plan/checklist, and verifies all checklist items pass before
   creating via gh CLI. Use PROACTIVELY when: PR creation, pull request,
   create PR, open PR, submit PR, PR update, review request.
@@ -10,7 +10,9 @@ description: >
 
 # PR Creation Workflow
 
-All PR titles, bodies, and commit messages MUST be written in English.
+PR titles, bodies, and commit summaries may be written in Japanese or English.
+Conventional Commit type/scope tokens and branch names remain English/ASCII.
+Keep one prose language consistent within a PR.
 
 ## Dynamic Context
 
@@ -32,8 +34,8 @@ git status --short
 gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number,title,url
 ```
 
-- If uncommitted changes exist, **abort** and prompt to commit first
-  (running `just check` on uncommitted code can cause inconsistencies)
+- If uncommitted changes exist, **abort** and prompt to commit first so the
+  verified tree exactly matches the tree that will be pushed
 - If a PR already exists, switch to **update mode** (`gh pr edit`) instead of creating a new one
 - If on `main` branch, **abort** — PRs must come from feature branches
 
@@ -42,25 +44,41 @@ gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number,title,url
 Run the full quality check suite. This is the prerequisite for PR creation.
 
 ```bash
-just check
+just verify
 ```
 
-`just check` runs `fmt -> lint -> test` sequentially.
+`just verify` is non-mutating and runs `lint -> test -> docs-check -> smoke`.
 **If any step fails, abort PR creation** and report the failure.
 
-The `fmt` phase can modify tracked files. After `just check` succeeds, run
-`git status --short` again — if formatting produced changes, commit them
-(e.g. `style: apply formatting`) before proceeding, otherwise the pushed
-branch will not match the verified state.
+After it succeeds, run `git status --short` again. Any change means the pushed
+branch would not match the verified state; stop and investigate.
 
 On success, the following checklist items are verified:
-- Tests pass (`just test`)
-- Type checks pass (`just lint`)
-- Code is formatted (`just fmt`)
+- Tests and 95% line+branch coverage pass (`just test`)
+- Type checks and formatting pass (`just lint`)
+- Documentation builds strictly (`just docs-check`)
+- The built wheel passes the isolated smoke test (`just smoke`)
 
 ## Step 3: Additional Verification
 
 Analyze `git diff main..HEAD` to determine:
+
+**Behavioral invariant impact:**
+- `storage/**`: verify correction upserts, replacement deletion, and injected
+  mid-batch rollback
+- `data/**` or `text/**`: verify before/equal/after `as_of`, timeout, bounded
+  retries/rate limiting, and offline execution
+- `risk/**`: verify date-index alignment, minimum overlap, duplicates, and
+  constant/NaN series
+- `backtest/**`: verify no look-ahead, entry and exit costs, exit precedence,
+  benchmark residual cash, and final liquidation equity
+- `llm/**`: verify non-empty/known provenance, cache revalidation, CON-03 on all
+  displayed fields, system/user separation, delimiter escaping, and redaction
+- config or pipeline: verify fail-fast schema validation, fatal/fail-soft
+  boundaries, and safe reruns
+
+If a changed area lacks its applicable regression scenario, abort and report
+the missing evidence instead of treating coverage percentage as sufficient.
 
 **Public API changes:**
 - Check if `__init__.py`'s `__all__` was modified
@@ -94,7 +112,8 @@ Generate a title in Conventional Commits format:
 
 ## Step 5: Generate PR Body
 
-Follow the PR template from dynamic context. Write everything in English.
+Follow the PR template from dynamic context. Use Japanese or English according
+to the language already used by the change; keep the PR internally consistent.
 
 ### Summary
 
@@ -115,9 +134,8 @@ Fill each item based on verification results from Steps 2-3:
 
 | Item | Criteria |
 |------|----------|
-| Tests pass | `just test` passed |
-| Type checks pass | `just lint` passed |
-| Code is formatted | `just fmt` passed |
+| Full local verification | `just verify` passed on the committed tree |
+| Domain invariants reviewed | Every applicable changed-path scenario in Step 3 has evidence |
 | Documentation updated | Required only when public API changed. No change = checked |
 | No breaking changes | No breaking changes, or documented in Summary = checked |
 | PR title follows Conventional Commits | Guaranteed by Step 4 |

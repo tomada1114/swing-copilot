@@ -28,10 +28,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup instructions.
 ```bash
 uv sync --all-groups
 uv run pre-commit install --install-hooks
-just check
+just fmt
+just verify
 ```
 
-For packaging verification, run `just smoke` (or `uv build && uv run python scripts/smoke_test.py`)
+`just verify` is the non-mutating PR/release gate: lint and type checks, tests
+with 95% line+branch coverage, a strict docs build, and wheel smoke testing.
+For packaging verification alone, run `just smoke` (or `uv build && uv run python scripts/smoke_test.py`)
 to install the freshly built wheel into a temporary virtual environment and
 confirm the distribution imports from the wheel, not from `src/`.
 

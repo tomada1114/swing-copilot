@@ -11,7 +11,9 @@ description: >
 
 # Dependabot PR Integration
 
-All branch names, commit messages, PR titles, and PR bodies MUST be in English.
+Branch names and Conventional Commit type/scope tokens remain English/ASCII.
+Commit summaries, PR titles, and PR bodies may be Japanese or English; keep one
+prose language consistent within the integration PR.
 
 ## Operating Contract
 
@@ -138,11 +140,10 @@ git add uv.lock && git commit -m "deps: regenerate uv.lock"
 Verify locally before pushing:
 
 ```bash
-just check      # fmt + lint + test
-just smoke      # wheel builds and imports
+just verify     # lint + test + strict docs build + wheel smoke
 ```
 
-If `just check` fails, fix it on the branch if the fix is mechanical (a lint rule
+If `just verify` fails, fix it on the branch if the fix is mechanical (a lint rule
 renamed by a new ruff, a new mypy error). If it needs a judgement call, stop and
 report — do not merge around it.
 

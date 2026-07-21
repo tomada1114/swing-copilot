@@ -10,7 +10,8 @@
 | 読者 | 本書に基づき`templates/report.html.j2`・`report/html_report.py`・`report/chart_data.py`・`assets/style.css`を実装する開発者・実装エージェント（`/goal`による自律実装を含む） |
 | 前提文書 | `docs/03_basic_design.md`（コンポーネント設計）、`docs/04_detailed_design.md`（モジュール・スキーマ詳細） |
 | 併走成果物 | `reports/assets/`配下に置く実HTML/CSS/JSの参照見本として、ダミーデータ入りモックアップ `docs/mockups/ui-mockup-morning-briefing.html` を作成済み。デザイントークン・構造は本書と完全一致させること。実装時はこのモックアップを見た目の正として参照する。 |
-| バージョン | v1.0 |
+| バージョン | v1.1 |
+| 最終更新日 | 2026-07-21 |
 
 ---
 
@@ -24,7 +25,7 @@
 
 ### 原則2: 色は3値セマンティクスのみ
 
-上昇/下落/中立（up/down/neutral）の3値だけを意味的な色として使う。RSIの水準やスコアの高低を多段階のヒートマップ的な配色で表現することは禁止する。理由は2つ: (1)候補は最大10件・詳細指標も多いため、色数が増えるほど「どの色が何を意味するか」を都度参照する必要が生じ、5分判断という原則1に反する。(2)開発者1人が実装・保守する前提（NFR-02）で、配色ルールはシンプルであるほど実装・レビューの負荷が下がる。accent（琥珀）はブランド・警告・フォーカスの3用途に限定し、乱用しないことで「注意すべき箇所」としての希少性を保つ。
+上昇/下落/中立（up/down/neutral）の3値だけを意味的な色として使う。RSIやATRの水準を多段階のヒートマップ的な配色で表現することは禁止する。理由は2つ: (1)候補は最大10件・詳細指標も多いため、色数が増えるほど「どの色が何を意味するか」を都度参照する必要が生じ、5分判断という原則1に反する。(2)開発者1人が実装・保守する前提（NFR-02）で、配色ルールはシンプルであるほど実装・レビューの負荷が下がる。accent（琥珀）はブランド・警告・フォーカスの3用途に限定し、乱用しないことで「注意すべき箇所」としての希少性を保つ。
 
 **受け入れ基準**: 実装中に「もう1色増やしたい」という誘惑が生じた場合は、既存の3値（up/down/neutral）とアイコン・テキストの組み合わせで表現できないか先に検討すること。数値セルの背景色を段階的に変える実装（ヒートマップテーブル）は行わない。
 
@@ -58,7 +59,7 @@
 - **色の意味は3値（up/down/neutral）に固定する**。4値目以降の意味的な色（例: 「やや上昇」「強い下落」を別の色で塗り分ける）は導入しない。強弱は色ではなく数値そのもの・矢印記号・太さで表現する。
 - **`--accent`のホワイトリスト**: (1) ヘッダーのeyebrowテキスト「SWING COPILOT」、(2) リスク警告帯の左ボーダーおよびアイコン、(3) フォーカス時のアウトライン、(4) `<details>`のsummaryホバー等ごく軽微な強調。この4箇所以外（本文リンク色、通常ボタン、通常の見出し）には使わない。
 - **抽出理由バッジ（例: SMA200上抜け／RSI押し目／決算サプライズ）は常にニュートラル配色**（背景`--surface-2`、文字`--text-dim`、枠`--border`のpill）とする。抽出理由は「方向性」ではなく「カテゴリ」を表す情報のため、up/down色は使わない（原則2参照）。
-- **`--up`/`--down`は「値そのものの正負」にのみ連動させる**（前日比%、リターン、ポジション損益等）。判断が難しい派生指標（例: RSI・ATRの絶対値、スコア）はセマンティックカラーを付けず`--text`のプレーン表示とする。
+- **`--up`/`--down`は「値そのものの正負」にのみ連動させる**（前日比%、リターン、ポジション損益等）。判断が難しい派生指標（例: RSI・ATRの絶対値）はセマンティックカラーを付けず`--text`のプレーン表示とする。
 
 ### 3.3 up/down/neutral判定ルール（実装への受け入れ基準）
 
@@ -137,7 +138,7 @@
 |---|---|---|---|---|
 | 通常（全種共通） | `--surface-2` | `--text-dim` | 1px `--border` | pill（`border-radius: 999px`）、padding `4px 10px` |
 
-抽出理由バッジの文言は`SignalHit.signal_name`から日本語ラベルへの1:1マッピングとする。マッピング表は`report/html_report.py`内に定数として保持し、`screening/technical_signals.py`・`screening/fundamental_filters.py`へ新しいFilter/Signalが`@register_signal`/`@register_filter`で追加された際（NFR-07）は、このマッピング表にも1エントリ追加することを実装ルールとする。
+抽出理由バッジの文言は`Candidate.signal_names`から日本語ラベルへの1:1マッピングとする。未知のキーは非表示にせず、キー文字列を安全にエスケープして表示する。表示ラベルの追加漏れで候補根拠が消えないことを優先する。
 
 | `signal_name` | バッジ表示ラベル |
 |---|---|
@@ -198,13 +199,13 @@
 
 ### 7.1 ヘッダー
 
-- 内容: eyebrow「SWING COPILOT」（`--accent`、letter-spacing）+ ページタイトル「Morning Briefing — {run_date} ({曜日})」+ メタ行（実行時刻、データ鮮度＝最終株価取得タイムスタンプ、ユニバース銘柄数）。
-- データソース: `pipeline/daily.py`の実行メタ（`run_date`、各ステップの`duration_s`合計等から算出する実行時刻）← `run_log`（StateStore）。ユニバース銘柄数 ← `universe.py`（`get_sp500_symbols()`の件数、`config/universe_snapshot.csv`）。
+- 内容: eyebrow「SWING COPILOT」（`--accent`、letter-spacing）+ ページタイトル「Morning Briefing — {run_date} ({曜日})」+ メタ行（生成時刻、評価対象市場日、データ鮮度＝最新株価日、ユニバース銘柄数、run_id短縮表示）。
+- データソース: `pipeline/daily.py`の実行メタとDuckDBの`runs`/`run_steps`。ユニバース銘柄数は当該snapshot_dateの`universe_membership`件数。生成時刻と市場日を混同しない。
 
 ### 7.2 市場全体感ストリップ
 
 - 内容: SPY / QQQ / VIX / US10Yの現在値＋前日比バッジを横並びで表示。
-- データソース: `data/*_provider.py`（`DataProvider.get_universe_prices_latest()`相当）← `storage/market_store.py`。VIX・US10Yのシンボル・データ取得方法（株価APIで代替可能なティッカーを使うか、専用ソースを要するか）は`docs/04_detailed_design.md`の未決事項リストに準じ実装時に要確認とする。
+- データソース: `DataProvider.get_latest_bars()`と`MarketStore`。P1〜P2のyfinanceシンボルはSPY / QQQ / `^VIX` / `^TNX`に固定し、`^TNX`は「米10年債利回り（%）」として表示する。個別取得に失敗した項目は値を捏造せず「取得不可」と表示する。
 - 色判定: 3.3節のup/down/neutralルールを適用。
 
 ### 7.3 リスク警告帯（該当時のみ表示）
@@ -214,8 +215,8 @@
 
 ### 7.4 候補サマリーテーブル
 
-- 列: `#` / ティッカー+社名 / 抽出理由バッジ / 終値 / 前日比% / RSI14 / ATR14 / スコア / スパークライン(直近20日) / 詳細へのアンカーリンク。
-- データソース: `screening/pipeline.py`（`ScreeningPipeline.run()`が返す`SignalHit`一覧、`signal_name`・`context`）。RSI14/ATR14は`SignalHit.context`（`screening/technical_signals.py`が計算時に格納する値）から取得する。スコアは銘柄単位に複数`SignalHit`を集約した合成値とし、集約ロジック（重み付け等）は`report/html_report.py`側で定義する（`docs/04_detailed_design.md`にスコア集約の仕様が未記載のため、実装時に確定してよい設計判断ポイントとして明記する）。
+- 列: `#` / ティッカー+社名 / 抽出理由バッジ / 終値 / 前日比% / RSI14 / ATR14 / スパークライン(直近20日) / 詳細へのアンカーリンク。
+- データソース: `ScreeningPipeline.run()`が返す順位確定済み`Candidate`。RSI14/ATR14等は`Candidate.metrics`から取得する。根拠のない合成スコアは表示しない。順位は`docs/04_detailed_design.md` 2.1節の決定的規則による。
 - 受け入れ基準: 6.3節参照。行数は最大10件（要件上のユニバース候補上限）。
 
 ### 7.5 銘柄別詳細カード
@@ -224,19 +225,19 @@
 
 | ブロック | データソース |
 |---|---|
-| カードヘッダー（ティッカー/社名/セクター/抽出理由バッジ） | `screening/pipeline.py`の`SignalHit`、セクターは`universe.py`（GICSセクター、`config/universe_snapshot.csv`） |
+| カードヘッダー（ティッカー/社名/セクター/抽出理由バッジ） | `Candidate`と当該日の`universe_membership` |
 | チャート（ローソク足6ヶ月＋SMA50/SMA200＋出来高） | 新設`report/chart_data.py`が`storage/market_store.py`（`MarketStore.read_bars()`）から直近6ヶ月分のOHLCVを読み出し、SMA50/200を算出してJSON化（8章参照） |
-| テクニカル指標値 | `SignalHit.context`（RSI14、ATR14、SMA50/200等、`screening/technical_signals.py`） |
+| テクニカル指標値 | `Candidate.metrics`（RSI14、ATR14、SMA50/200等） |
 | ファンダメンタル値（PER, FCF, 自己資本比率, 直近EPS等） | `data/edgar.py`の`FundamentalsRecord`（`storage/market_store.py`の`fundamentals`テーブル） |
 | リスク計算（想定ポジションサイズ、ATRベースストップ目安価格、想定リスク%） | `risk/position_sizing.py`の`calc_position_size()`、`risk/checks.py`の`RiskAssessment` |
-| LLM要約ブロック | `llm/summarize.py`の`NewsSummary`（ニュース由来）＋`llm/filings_analysis.py`の`FilingAnalysis`（決算書由来）。一言結論はこの2つの`interpretation`から`report/html_report.py`が要約表示用に1行抽出・整形する（具体的な抽出ロジックは実装時に確定）。出典リンクは`NewsSummary.sources`（URL） |
+| LLM要約ブロック | `NewsSummary`＋`FilingAnalysis`。一言結論はニュースの`interpretation[0]`、無ければfilingの`interpretation[0]`、どちらも無ければ固定の中立文言とする。追加のLLM要約は呼ばない。各factのsource_idを`text_items.source_url`へ解決して表示する。 |
 
 **受け入れ基準（フェイルソフト整合）**: `news_summaries`/`filing_analyses`が`None`（`docs/03_basic_design.md`のフェイルソフト、ステップ5/6失敗時）の場合、LLM要約ブロックは「本日はニュース・開示分析を取得できませんでした」等の縮退表示とし、カードの他ブロック（テクニカル・ファンダメンタル・リスク・チャート）は通常通り描画する。カード自体を非表示にはしない。
 
 ### 7.6 フッター
 
-- 内容: 免責文言「本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください」+ TradingView attribution（"Charting by TradingView" テキストリンク、`https://www.tradingview.com/`）+ 生成メタ（バージョン、実行ID）。
-- データソース: 免責・attributionは静的文言（テンプレート固定文）。生成メタ（バージョン、実行ID）← `report/html_report.py`（実行ID=`run_log`の`run_date`または一意な`run_log_id`起点の識別子）。
+- 内容: 免責文言「本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください」+ TradingView attribution + 生成メタ（バージョン、run_id、run_stepsの成功/失敗/skip要約、縮退理由）。
+- データソース: 免責・attributionは固定文。生成メタはDuckDBの`runs`/`run_steps`。
 - 前日/翌日レポートへのナビリンク: `reports/`配下に存在するファイル名（日付）を`report/html_report.py`が走査し、存在すれば相対リンクを生成する。存在しない場合はリンク自体を出力しない（無効リンクを残さない）。
 
 ---
@@ -253,10 +254,10 @@
 
 | 系列 | Lightweight Charts API | 内容 |
 |---|---|---|
-| ローソク足 | `addCandlestickSeries`（v5の該当API、実装時に正式メソッド名を公式ドキュメントで要確認） | 直近6ヶ月の日足OHLC |
-| SMA50 | `addLineSeries` | `screening/technical_signals.py`と同一ロジックで計算した50日単純移動平均 |
-| SMA200 | `addLineSeries` | 同200日単純移動平均 |
-| 出来高 | `addHistogramSeries`（別スケール、`priceScaleId`をメインと分離し下部に表示） | 日次出来高、当日の陽線/陰線に応じた色 |
+| ローソク足 | `chart.addSeries(LightweightCharts.CandlestickSeries, options)` | 直近6ヶ月の日足OHLC |
+| SMA50 | `chart.addSeries(LightweightCharts.LineSeries, options)` | 共有indicator関数で計算した50日単純移動平均 |
+| SMA200 | `chart.addSeries(LightweightCharts.LineSeries, options)` | 同200日単純移動平均 |
+| 出来高 | `chart.addSeries(LightweightCharts.HistogramSeries, options)` | 別スケールの日次出来高 |
 
 ### 8.3 ダークテーマ設定値
 
@@ -298,7 +299,7 @@ volumeSeries.applyOptions({
 
 ### 8.4 テンプレートへ渡すJSONデータ構造
 
-`report/chart_data.py`が銘柄ごとに以下の構造を生成し、Jinja2テンプレート内に`<script type="application/json" id="chart-data-{ticker}">`として埋め込む（インラインスクリプトタグ内のJSONであり、外部fetchは行わない＝原則3の自己完結性を満たす）。
+`report/chart_data.py`が銘柄ごとに以下の構造を生成し、Jinja2テンプレート内に`<script type="application/json" id="chart-data-{ticker}">`として埋め込む。JSONはJinja2の`tojson`相当で`<`, `>`, `&`, `</script>`を安全にエスケープし、LLM・ニュース・社名等の外部文字列を`safe`指定しない。
 
 ```json
 {
@@ -381,19 +382,19 @@ def build_chart_data(symbol: str, market_store: "MarketStore", as_of: date, look
     """
     market_store.read_bars() から SMA200計算に必要な遡及バッファを含めて日足を読み出し、
     直近lookback_monthsのOHLCVと、その期間に対応するSMA50/SMA200を算出してChartDataを返す。
-    SMA計算はscreening/technical_signals.pyと同一のTA-Lib呼び出し（talib.SMA）を再利用し、
+    SMA計算はscreening/technical_signals.pyと同じ共有indicator関数を再利用し、
     スクリーニング結果とチャート表示のSMA値がロジック的に一致することを保証する。
     """
 ```
 
-**依存**: `storage/market_store.py`、`talib`（`screening/technical_signals.py`と共有）
+**依存**: `storage/market_store.py`、共有indicator関数
 **呼び出し元**: `report/html_report.py`（`render_report()`が候補銘柄ごとに呼び出し、テンプレートコンテキストへ`chart_data`として渡す）
 
 ### 10.2 `report/html_report.py`への追記
 
 - `render_report()`のテンプレートコンテキストに`chart_data: dict[str, ChartData]`（8.4節）、`market_strip: MarketStripData`（7.2節、SPY/QQQ/VIX/US10Y）、`correlation_warnings: list[CorrelationWarning]`（7.3節）を追加する。
 - 6.1節のシグナルバッジ日本語マッピング表、3.3節の`classify_change()`（up/down/neutral判定）をこのモジュール内のヘルパー関数として実装する。
-- `render_report()`実行後、`reports/{run_date}.html`保存に加え`reports/latest.html`へ同内容をコピーする（ファイル出力構成、下記10.4節）。
+- `render_report()`は一時ファイルへ書いてから`reports/{run_date}.html`へ原子的renameし、成功後だけ`reports/latest.html`も同様に置換する。途中失敗で前回のlatestを壊さない。
 
 ### 10.3 `webbrowser.open()`によるローカル自動表示
 
@@ -402,18 +403,18 @@ def build_chart_data(symbol: str, market_store: "MarketStore", as_of: date, look
 ```python
 import os, webbrowser
 
-def _maybe_open_report(report_path: Path) -> None:
+def _maybe_open_report(report_path: Path, options: DailyRunOptions) -> bool:
     """
     ローカル実行時（GitHub Actions等のCI環境ではない場合）のみ、
     生成されたレポートをデフォルトブラウザで自動的に開く。
     CI判定は環境変数 GITHUB_ACTIONS の有無で行う（GitHub Actionsが自動設定する変数）。
     """
-    if os.environ.get("GITHUB_ACTIONS"):
-        return
-    webbrowser.open(report_path.resolve().as_uri())
+    if options.is_dry_run or options.no_open or os.environ.get("CI"):
+        return False
+    return webbrowser.open(report_path.resolve().as_uri())
 ```
 
-**受け入れ基準**: ローカルで`uv run copilot-daily`を実行した場合、レポート生成成功後に自動でブラウザタブが開く。GitHub Actions環境（`GITHUB_ACTIONS=true`が自動設定される）では`webbrowser.open()`を呼び出さない（ヘッドレス環境でのエラー・ハングを避ける）。
+**受け入れ基準**: ローカルlive実行ではレポート生成成功後にブラウザを開く。`--dry-run`、`--no-open`、任意のCI（`CI`環境変数）では呼び出さない。`webbrowser.open()`が`False`を返してもレポート生成自体は成功扱いとし、step 9へ警告を記録する。
 
 ### 10.4 ファイル出力構成の確定（`docs/04_detailed_design.md` 2章への追記）
 
@@ -459,5 +460,5 @@ reports/assets/lightweight-charts.standalone.production.js として配置する
 
 - カラートークン10種はすべて背景資料の値と完全一致させた（独自の追加・変更なし。8.3節のSMA専用2色のみ、意図的な範囲限定の追加として明示した）。
 - ページ構成6セクションの順序は背景資料の指定順と一致させた。
-- 各セクションのデータソースは`docs/03_basic_design.md`・`docs/04_detailed_design.md`の実在モジュール名・スキーマ名（`SignalHit`, `RiskAssessment`, `CorrelationWarning`, `NewsSummary`, `FilingAnalysis`, `FundamentalsRecord`等）とすべて突き合わせ、存在しないモジュールを参照していないことを確認した。
-- スコア集約ロジックの詳細、VIX/US10Yの具体的データ取得元の2点は既存設計書に定めがなく、本書で「実装時に確定してよい設計判断ポイント」として明示した（未決事項の隠蔽をしない）。
+- 各セクションのデータソースは`Candidate`, `RiskAssessment`, `CorrelationWarning`, `NewsSummary`, `FilingAnalysis`, `FundamentalsRecord`および`runs`/`run_steps`へ統一した。
+- 合成スコアは削除し、候補順位と市場ストリップのシンボルを固定した。実装者へUI上の投資判断ロジックを委ねない。

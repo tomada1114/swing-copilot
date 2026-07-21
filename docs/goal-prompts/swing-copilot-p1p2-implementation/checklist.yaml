@@ -1,0 +1,78 @@
+meta:
+  ordering: strict
+  status_values: [pending, done]
+  update_rule: "Paste fresh acceptance output before changing an item to done. No implementation item may be skipped."
+  verify_all: "just check && uv run pytest tests/test_e2e_smoke.py -v && uv run mkdocs build --strict"
+items:
+  - id: P1-0
+    task: "Create the feature branch and preserve reviewed docs without touching user-owned untracked paths."
+    acceptance: "`git branch --show-current` prints feat/p1-p2-implementation; reviewed docs are committed or clean; `.agents/` and `.codex/` are not tracked."
+    status: pending
+  - id: P1-1
+    task: "Bootstrap names in place; update app metadata/dependencies/CLI and retain useful build/smoke checks."
+    acceptance: "`rg 'my-package|my_package|your-username|Your Name|you@example' --glob '!docs/goal-prompts/**'` has no unintended placeholder matches; `just check` and `just smoke` exit 0."
+    status: pending
+  - id: P1-2
+    task: "Implement typed config, feature-gated secrets, strategy config validation, domain models, and composition root."
+    acceptance: "`uv run pytest tests/test_config.py tests/test_models.py -v` exits 0, including no-secret offline load and invalid-config errors."
+    status: pending
+  - id: P1-3
+    task: "Implement point-in-time universe membership, snapshot fallback, and manual include/exclude."
+    acceptance: "`uv run pytest tests/test_universe.py -v` exits 0 for parse, symbol normalization, sector/name retention, fallback, override, and history."
+    status: pending
+  - id: P1-4
+    task: "Implement DataProvider contract and yfinance adapter with explicit adjusted OHLC normalization and partial-failure results."
+    acceptance: "`uv run pytest tests/data/test_provider_contract.py tests/data/test_yfinance_provider.py -v` exits 0, including MultiIndex, split fixture, exclusive end date, empty and partial failure cases."
+    status: pending
+  - id: P1-5
+    task: "Implement Database, atomic Parquet upsert, MarketStore, StateStore, schemas, runs and run_steps."
+    acceptance: "`uv run pytest tests/storage -v` exits 0 for empty first run, correction upsert, duplicate prevention, rollback, and failed-run recovery."
+    status: pending
+  - id: P1-6
+    task: "Implement edgartools adapter and point-in-time fundamentals."
+    acceptance: "`uv run pytest tests/data/test_edgar.py -v` exits 0 for identity, throttling, retries, accession upsert, normalization, and filed_at/as_of exclusion."
+    status: pending
+  - id: P1-7
+    task: "Implement shared pandas indicators, filters, signals, deterministic Candidate aggregation/ranking."
+    acceptance: "`uv run pytest tests/screening -v` exits 0 for known indicator values, boundaries, AND semantics, aggregation, stable order, max 10, and as_of."
+    status: pending
+  - id: P1-8
+    task: "Implement risk sizing, sector concentration, correlation, and explicit not_calculable/data-quality results."
+    acceptance: "`uv run pytest tests/risk -v` exits 0 for integer sizing, invalid stop, missing equity, sector limits, correlation boundary, and insufficient history."
+    status: pending
+  - id: P1-9
+    task: "Implement deterministic multi-symbol backtest using production screening logic."
+    acceptance: "`uv run pytest tests/backtest -v` exits 0 for no look-ahead, next-open fill, gap stop, trailing update timing, 60-day exit, costs, cash/rank constraints, SPY, and reproducibility."
+    status: pending
+  - id: P1-10
+    task: "Wire daily steps 1-4 with explicit as_of/run_id and fatal-error semantics."
+    acceptance: "`uv run pytest tests/pipeline/test_daily_core.py -v` exits 0; two identical dry runs have distinct run_ids and no duplicate business rows."
+    status: pending
+  - id: P2-1
+    task: "Implement Finnhub, EDGAR filing text, and FRED ports/adapters with source IDs and bounded input."
+    acceptance: "`uv run pytest tests/text -v` exits 0 for normalization, source identity, rate/retry limits, truncation, empty and partial failures."
+    status: pending
+  - id: P2-2
+    task: "Implement Claude gateway, structured schemas, provenance, bounded retries/cache, pricing and budget gate."
+    acceptance: "`uv run pytest tests/llm -v` exits 0 for schema/source validation, refusal/error, retry ceiling, cache key, unknown pricing, budget skip, and audit redaction."
+    status: pending
+  - id: P2-3
+    task: "Implement news and filing analysis prompts with prompt-injection resistance and deterministic chunk handling."
+    acceptance: "`uv run pytest tests/llm/test_analysis.py -v` exits 0 for sourced facts, untrusted instructions, forbidden advice, chunk cap, truncation disclosure, and merge behavior."
+    status: pending
+  - id: P2-4
+    task: "Implement chart data, offline HTML/assets, Discord adapter, atomic dated/latest reports and safe rendering."
+    acceptance: "`uv run pytest tests/report -v` exits 0 for zero/ten candidates, LLM present/degraded, XSS payloads, offline assets, v5 chart calls, attribution, disclaimer, and atomic latest."
+    status: pending
+  - id: P2-5
+    task: "Implement paper decisions/positions and performance summary in DuckDB."
+    acceptance: "`uv run pytest tests/paper -v` exits 0 for decision idempotency, position lifecycle, invalid transitions, P&L and SPY comparison."
+    status: pending
+  - id: P2-6
+    task: "Wire all nine steps and the fully offline five-symbol E2E path."
+    acceptance: "`uv run pytest tests/test_e2e_smoke.py tests/pipeline/test_failsoft.py -v` exits 0; text/LLM/notify failures degrade, while market/store/screening failures exit nonzero and remain rerunnable."
+    status: pending
+  - id: FINAL
+    task: "Update public API/docs/changelog, run complete verification, commit all implementation work, and optionally run live canary."
+    acceptance: "`just check`, `uv run pytest tests/test_e2e_smoke.py -v`, `uv run mkdocs build --strict`, and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."
+    status: pending

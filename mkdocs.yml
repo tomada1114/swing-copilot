@@ -1,9 +1,12 @@
-site_name: my-package
-site_description: A short description of the project.
-site_url: https://your-username.github.io/my-package
-repo_url: https://github.com/your-username/my-package
-repo_name: your-username/my-package
+site_name: swing-copilot
+site_description: Local decision-support tooling for U.S. stock swing trading.
+site_url: https://tomada1114.github.io/swing-copilot
+repo_url: https://github.com/tomada1114/swing-copilot
+repo_name: tomada1114/swing-copilot
 edit_uri: edit/main/docs/
+
+exclude_docs: |
+  goal-prompts/
 
 theme:
   name: material
@@ -58,6 +61,13 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Product Design:
+      - Human Preparation: 00_human_preparation.md
+      - Requirements: 01_requirements.md
+      - Project Plan: 02_project_plan.md
+      - Basic Design: 03_basic_design.md
+      - Detailed Design: 04_detailed_design.md
+      - UI Design: 05_ui_design.md
   - Getting Started: getting-started.md
   - API Reference: reference.md
   - Contributing: contributing.md

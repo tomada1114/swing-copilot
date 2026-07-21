@@ -132,10 +132,12 @@ class ScreeningPipeline:
             series["high"], series["low"], series["close"], _ATR_WINDOW
         ).iloc[-1]
         avg_volume = series["volume"].tail(_AVG_VOLUME_WINDOW).mean()
-        if pd.isna(rsi14) or pd.isna(atr14) or pd.isna(avg_volume):
+        close = series["close"].iloc[-1]
+        if pd.isna(rsi14) or pd.isna(atr14) or pd.isna(avg_volume) or pd.isna(close):
             return None
         return {
             "rsi14": float(rsi14),
             "atr14": float(atr14),
             "avg_volume": float(avg_volume),
+            "close": float(close),
         }

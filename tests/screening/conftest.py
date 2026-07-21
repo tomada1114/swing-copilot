@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
-import pytest
-
-from swing_copilot.config import load_settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,11 +17,6 @@ class FundamentalsSpec:
     fcf: float
     equity: float
     assets: float
-
-
-@pytest.fixture
-def settings():
-    return load_settings("config/settings.yaml")
 
 
 def make_bars(

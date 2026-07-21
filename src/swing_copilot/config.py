@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from swing_copilot.exceptions import ConfigError
@@ -36,6 +36,27 @@ class Secrets(BaseSettings):
     discord_webhook_url: str | None = None
     edgar_identity: str | None = None
     eodhd_api_key: str | None = None  # unused until the P4 EODHD provider
+
+    @field_validator(
+        "anthropic_api_key",
+        "finnhub_api_key",
+        "fred_api_key",
+        "discord_webhook_url",
+        "edgar_identity",
+        "eodhd_api_key",
+        mode="before",
+    )
+    @classmethod
+    def _blank_means_unset(cls, value: object) -> object:
+        """Treat a declared-but-empty `.env` entry (`KEY=`) as unset.
+
+        `.env.example`-style files often ship with keys present but blank;
+        python-dotenv reads that as `""`, not absent, so without this the
+        value would be silently treated as "configured".
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class _StrictModel(BaseModel):

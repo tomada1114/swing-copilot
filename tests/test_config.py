@@ -77,21 +77,32 @@ class TestLoadSecrets:
         assert secrets.anthropic_api_key == "sk-test-123"
 
 
+def _isolated_secrets(**overrides: str) -> Secrets:
+    """Build Secrets isolated from any real `.env` a developer has locally.
+
+    `env_file=".env"` reads whatever `.env` exists in the repo root a test
+    happens to run from; passing `_env_file=None` overrides that for a
+    single instantiation so these tests never depend on (or race with) a
+    developer's real, in-progress `.env` file.
+    """
+    return Secrets(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
 class TestRequireSecrets:
     def test_no_features_never_raises(self):
-        require_secrets(Secrets(), features=set())
+        require_secrets(_isolated_secrets(), features=set())
 
     def test_missing_feature_secret_raises_config_error(self):
         with pytest.raises(ConfigError, match="anthropic_api_key"):
-            require_secrets(Secrets(), features={"llm"})
+            require_secrets(_isolated_secrets(), features={"llm"})
 
     def test_present_feature_secret_passes(self):
-        secrets = Secrets(anthropic_api_key="sk-test")
+        secrets = _isolated_secrets(anthropic_api_key="sk-test")
         require_secrets(secrets, features={"llm"})
 
     def test_multiple_missing_secrets_all_reported(self):
         with pytest.raises(ConfigError) as exc_info:
-            require_secrets(Secrets(), features={"llm", "finnhub", "fred"})
+            require_secrets(_isolated_secrets(), features={"llm", "finnhub", "fred"})
         message = str(exc_info.value)
         assert "anthropic_api_key" in message
         assert "finnhub_api_key" in message
@@ -99,22 +110,26 @@ class TestRequireSecrets:
 
     def test_unknown_feature_raises_config_error(self):
         with pytest.raises(ConfigError, match="unknown feature"):
-            require_secrets(Secrets(), features={"not_a_real_feature"})
+            require_secrets(_isolated_secrets(), features={"not_a_real_feature"})
 
 
 class TestSecretsModel:
     def test_extra_env_vars_are_ignored(self, monkeypatch):
         monkeypatch.setenv("SOME_UNRELATED_ENV_VAR", "value")
-        Secrets()
+        _isolated_secrets()
 
     def test_all_fields_default_to_none(self):
-        secrets = Secrets()
+        secrets = _isolated_secrets()
         assert secrets.anthropic_api_key is None
         assert secrets.finnhub_api_key is None
         assert secrets.fred_api_key is None
         assert secrets.discord_webhook_url is None
         assert secrets.edgar_identity is None
         assert secrets.eodhd_api_key is None
+
+    def test_blank_env_value_is_treated_as_unset(self):
+        secrets = _isolated_secrets(anthropic_api_key="   ")
+        assert secrets.anthropic_api_key is None
 
 
 def test_settings_rejects_wrong_type_for_nested_field():

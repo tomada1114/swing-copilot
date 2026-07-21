@@ -28,6 +28,8 @@ dependencies = [
     "pandas>=2.2",
     "lxml>=5.3",
     "yfinance>=0.2.48",
+    "duckdb>=1.1",
+    "pyarrow>=17.0",
 ]
 
 [project.urls]

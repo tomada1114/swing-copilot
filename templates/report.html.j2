@@ -172,6 +172,8 @@
             <dt>ステータス</dt><dd>{{ card.risk.status }}</dd>
             <dt>想定ポジションサイズ</dt><dd>{{ card.risk.max_shares ~ "株" if card.risk.max_shares is not none else "算出不可" }}</dd>
             <dt>ATRストップ目安</dt><dd>{{ "%.2f"|format(card.risk.stop_price) if card.risk.stop_price is not none else "N/A" }}</dd>
+            <dt>想定リスク（対資金）</dt><dd>{{ "%.2f%%"|format(card.risk.expected_risk_pct) if card.risk.expected_risk_pct is not none else "N/A" }}</dd>
+            <dt>1銘柄上限比</dt><dd>{{ "資金の%.1f%%"|format(card.risk.position_value_pct) if card.risk.position_value_pct is not none else "N/A" }}</dd>
           </dl>
           {% if card.risk.reasons %}
           <p class="risk-flag">{{ card.risk.reasons | join("; ") }}</p>

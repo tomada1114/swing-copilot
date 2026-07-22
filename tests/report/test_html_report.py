@@ -104,6 +104,7 @@ def _context(
     risk_assessments: list[RiskAssessment] | None = None,
     news_summaries: list[NewsSummary] | None = None,
     filing_analyses: list[FilingAnalysis] | None = None,
+    account_equity_usd: float | None = None,
 ) -> ReportContext:
     return ReportContext(
         run_id=uuid4(),
@@ -114,6 +115,7 @@ def _context(
         risk_assessments=risk_assessments or [],
         news_summaries=news_summaries,
         filing_analyses=filing_analyses,
+        account_equity_usd=account_equity_usd,
     )
 
 
@@ -812,3 +814,147 @@ class TestRenderReportLLMSingleItemInterpretation:
         html = path.read_text(encoding="utf-8")
         assert html.count("Only one interpretation sentence.") == 1
         assert '<ul class="reasons">' not in html
+
+
+class TestRenderReportRiskCalculationBlock:
+    """`docs/05_ui_design.md` 7.5: 想定リスク% and 1銘柄上限比 in the risk block."""
+
+    def test_expected_risk_pct_and_position_value_pct_are_hand_computed(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AMD"]
+        _seed_market_and_symbols(market_store, symbols)
+        assessment = RiskAssessment(
+            symbol="AMD",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+        )
+        context = _context(
+            symbols, risk_assessments=[assessment], account_equity_usd=10_000.0
+        )
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        # expected_risk_pct = 10 * (100.0 - 95.0) / 10_000.0 * 100 = 0.50%
+        assert "<dt>想定リスク（対資金）</dt><dd>0.50%</dd>" in html  # noqa: RUF001 - full-width parens match the mockup label
+        # position_value_pct = 10 * 100.0 / 10_000.0 * 100 = 10.0%
+        assert "<dt>1銘柄上限比</dt><dd>資金の10.0%</dd>" in html
+
+    def test_account_equity_none_degrades_both_values_to_na(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AMD"]
+        _seed_market_and_symbols(market_store, symbols)
+        assessment = RiskAssessment(
+            symbol="AMD",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+        )
+        context = _context(
+            symbols, risk_assessments=[assessment], account_equity_usd=None
+        )
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert "<dt>想定リスク（対資金）</dt><dd>N/A</dd>" in html  # noqa: RUF001 - full-width parens match the mockup label
+        assert "<dt>1銘柄上限比</dt><dd>N/A</dd>" in html
+
+    @pytest.mark.parametrize("account_equity_usd", [0.0, -1.0])
+    def test_account_equity_at_or_below_zero_degrades_both_values_to_na(
+        self, market_store, state_store, tmp_path, account_equity_usd
+    ):
+        symbols = ["AMD"]
+        _seed_market_and_symbols(market_store, symbols)
+        assessment = RiskAssessment(
+            symbol="AMD",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+        )
+        context = _context(
+            symbols,
+            risk_assessments=[assessment],
+            account_equity_usd=account_equity_usd,
+        )
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert "<dt>想定リスク（対資金）</dt><dd>N/A</dd>" in html  # noqa: RUF001 - full-width parens match the mockup label
+        assert "<dt>1銘柄上限比</dt><dd>N/A</dd>" in html
+
+    def test_not_calculable_assessment_degrades_both_values_to_na(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AMD"]
+        _seed_market_and_symbols(market_store, symbols)
+        assessment = RiskAssessment(
+            symbol="AMD",
+            status="not_calculable",
+            max_shares=None,
+            entry_price=100.0,
+            stop_price=None,
+            reasons=("missing data",),
+        )
+        context = _context(
+            symbols, risk_assessments=[assessment], account_equity_usd=10_000.0
+        )
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert "<dt>想定リスク（対資金）</dt><dd>N/A</dd>" in html  # noqa: RUF001 - full-width parens match the mockup label
+        assert "<dt>1銘柄上限比</dt><dd>N/A</dd>" in html
+
+    def test_no_matching_risk_assessment_degrades_both_values_to_na(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AMD"]
+        _seed_market_and_symbols(market_store, symbols)
+        context = _context(symbols, risk_assessments=[], account_equity_usd=10_000.0)
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert "<dt>想定リスク（対資金）</dt><dd>N/A</dd>" in html  # noqa: RUF001 - full-width parens match the mockup label
+        assert "<dt>1銘柄上限比</dt><dd>N/A</dd>" in html

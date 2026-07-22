@@ -509,6 +509,7 @@ def _run_step_report(
         risk_assessments=ctx.risk_assessments,
         news_summaries=news_summaries,
         filing_analyses=filing_analyses,
+        account_equity_usd=deps.settings.risk.account_equity_usd,
     )
     try:
         report_path = render_report(

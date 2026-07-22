@@ -122,6 +122,7 @@ class ReportContext:
     risk_assessments: list[RiskAssessment]
     news_summaries: list[NewsSummary] | None
     filing_analyses: list[FilingAnalysis] | None
+    account_equity_usd: float | None = None
 
 
 def _market_strip(market_store: MarketStore, as_of: date) -> list[dict[str, object]]:
@@ -320,19 +321,53 @@ def _llm_block(
     }
 
 
-def _risk_block(assessment: RiskAssessment | None) -> dict[str, object]:
+def _expected_risk_pct(
+    assessment: RiskAssessment, account_equity_usd: float | None
+) -> float | None:
+    if (
+        account_equity_usd is None
+        or account_equity_usd <= 0
+        or assessment.max_shares is None
+        or assessment.entry_price is None
+        or assessment.stop_price is None
+    ):
+        return None
+    risk_per_share = assessment.entry_price - assessment.stop_price
+    return assessment.max_shares * risk_per_share / account_equity_usd * 100
+
+
+def _position_value_pct(
+    assessment: RiskAssessment, account_equity_usd: float | None
+) -> float | None:
+    if (
+        account_equity_usd is None
+        or account_equity_usd <= 0
+        or assessment.max_shares is None
+        or assessment.entry_price is None
+    ):
+        return None
+    position_value = assessment.max_shares * assessment.entry_price
+    return position_value / account_equity_usd * 100
+
+
+def _risk_block(
+    assessment: RiskAssessment | None, account_equity_usd: float | None
+) -> dict[str, object]:
     if assessment is None:
         return {
             "status": "not_calculable",
             "max_shares": None,
             "stop_price": None,
+            "expected_risk_pct": None,
+            "position_value_pct": None,
             "reasons": [],
         }
     return {
         "status": assessment.status,
         "max_shares": assessment.max_shares,
-        "entry_price": assessment.entry_price,
         "stop_price": assessment.stop_price,
+        "expected_risk_pct": _expected_risk_pct(assessment, account_equity_usd),
+        "position_value_pct": _position_value_pct(assessment, account_equity_usd),
         "reasons": list(assessment.reasons),
     }
 
@@ -368,7 +403,9 @@ def _detail_cards(
                 "fundamentals": _fundamentals_block(
                     market_store, candidate.symbol, context.run_date, close
                 ),
-                "risk": _risk_block(risk_by_symbol.get(candidate.symbol)),
+                "risk": _risk_block(
+                    risk_by_symbol.get(candidate.symbol), context.account_equity_usd
+                ),
                 "llm": _llm_block(
                     candidate.symbol,
                     context.news_summaries,

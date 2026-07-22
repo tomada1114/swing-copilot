@@ -428,3 +428,60 @@ class TestGetLatestFundamentals:
 
         assert result is not None
         assert result.accession_no == "acc-later-period"
+
+
+def _fetched_record(
+    symbol: str, accession_no: str, fetched_at: datetime
+) -> FundamentalsRecord:
+    return FundamentalsRecord(
+        accession_no=accession_no,
+        symbol=symbol,
+        form="10-Q",
+        fiscal_period_end=date(2026, 6, 30),
+        filed_at=datetime(2026, 7, 10, tzinfo=UTC),
+        revenue=1.0,
+        net_income=1.0,
+        fcf=1.0,
+        equity=1.0,
+        assets=2.0,
+        shares=1.0,
+        source_url="https://www.sec.gov/example",
+        fetched_at=fetched_at,
+    )
+
+
+class TestHasFundamentalsFetchedOn:
+    def test_returns_true_when_fetched_exactly_on_day(self, market_store):
+        market_store.upsert_fundamentals(
+            [_fetched_record("AAPL", "acc-1", datetime(2026, 7, 20, 9, tzinfo=UTC))]
+        )
+
+        assert market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+
+    def test_returns_false_for_a_symbol_with_no_fundamentals(self, market_store):
+        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+
+    def test_returns_false_when_fetched_one_day_before(self, market_store):
+        market_store.upsert_fundamentals(
+            [
+                _fetched_record(
+                    "AAPL", "acc-1", datetime(2026, 7, 19, 23, 59, tzinfo=UTC)
+                )
+            ]
+        )
+
+        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+
+    def test_returns_false_when_fetched_one_day_after(self, market_store):
+        market_store.upsert_fundamentals(
+            [_fetched_record("AAPL", "acc-1", datetime(2026, 7, 21, 0, 0, tzinfo=UTC))]
+        )
+
+        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+
+    def test_only_matches_the_requested_symbol(self, market_store):
+        market_store.upsert_fundamentals(
+            [_fetched_record("MSFT", "acc-1", datetime(2026, 7, 20, 9, tzinfo=UTC))]
+        )
+
+        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))

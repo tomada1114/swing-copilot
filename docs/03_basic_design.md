@@ -242,7 +242,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 - **フェイルソフトの原則（FR-12・NFR-04）**: 日次バッチはステップ(5)テキスト収集・(6)LLM分析が失敗しても、ステップ(7)レポート生成・(8)Discord通知は「スクリーニング＋リスクチェック結果のみの縮退版」として必ず完走する。これにより、外部テキストAPIやLLM APIの障害時でも、その日のスクリーニング結果を確実に人間へ届ける。
 - **各ステップの結果記録**: `runs`に実行全体、`run_steps`に9ステップそれぞれの成否・詳細・所要時間を記録する（NFR-05）。ステップ失敗時は後続ステップの実行可否を判断して処理を継続する。ただし(1)〜(4)の失敗はスクリーニング自体が成立しないため致命的終了とし、`runs.status=failed`を残す。
-- **冪等性と原子性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。LLMのみ完全なsystem+user promptから算出した`(model,prompt_hash,schema_version)`一致時に成功レスポンスを再利用する。
+- **冪等性と原子性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。LLMのみ完全なsystem+user promptから算出した`(model,prompt_hash,schema_version)`一致時に成功レスポンスを再利用する。（**live検証時の訂正（2026-07-22）**: fundamentalsステップ（`pipeline/daily.py` 2番目のステップ）は例外で、`MarketStore.has_fundamentals_fetched_on()`により当日`fetched_at`済みの銘柄はEDGARへの個別ネットワーク取得のみをスキップする。ステップ自体・自然キーupsertロジックは無条件スキップせず毎回実行するため、上記原則には反しない。詳細は`docs/04_detailed_design.md` 3.21節）
 - **欠損検知・リトライ（NFR-04）**: DataProvider・LLMClient等、外部I/Oを伴うコンポーネントはtimeout、retry対象例外、総試行上限、backoffを明示する。レート制御は各試行へ適用し、設定/検証/プログラミングエラーはretryしない。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し、後続処理は成功分のみで進める。
 - **断定的売買指示の禁止（CON-03）**: LLM出力スキーマは事実（`facts`）と推測（`interpretation`）をフィールドレベルで分離する。プロンプト指示だけに依存せず、gatewayで全ユーザー表示テキストを一元検査し、違反応答をcache/表示しない。cache hitもsource_idとCON-03を再検証する。
 

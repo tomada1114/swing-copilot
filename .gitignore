@@ -33,6 +33,10 @@ site/
 # Daily reports are regenerated locally each run; only authored/vendored
 # assets (templates/, reports/assets/) are version-controlled
 /reports/*.html
+/reports/dry_run/
+
+# Point-in-time universe fallback, auto-generated on first successful fetch
+/config/universe_snapshot.csv
 
 # IDE
 .vscode/

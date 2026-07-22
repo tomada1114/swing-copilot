@@ -103,6 +103,13 @@ class ExplodingLLMClient:
         raise RuntimeError(msg)
 
 
+class ExplodingCalendarClient:
+    def fetch_calendar_events(self, start, end):
+        del start, end
+        msg = "FRED unreachable"
+        raise RuntimeError(msg)
+
+
 class PartiallyFailingNewsClient:
     """Raises only for `failing_symbol`; returns real news for every other symbol."""
 
@@ -173,6 +180,15 @@ class FailingNotifier:
     def notify(self, summary, report_path):
         del summary, report_path
         return False
+
+
+class _AssertNeverCalledNotifier:
+    """Proves step 8 never reaches the real webhook client during dry-run."""
+
+    def notify(self, summary, report_path):
+        del summary, report_path
+        msg = "Notifier.notify() must not be called in dry-run mode"
+        raise AssertionError(msg)
 
 
 def _uptrending_bars(symbols: list[str], as_of: date, days: int = 260) -> pd.DataFrame:
@@ -270,6 +286,73 @@ class TestTextCollectionFailureDegrades:
         assert "本日はニュース・開示分析を取得できませんでした" in html
         # Non-LLM card content still renders normally (fail-soft, not hidden).
         assert "テクニカル" in html
+
+
+class TestTextStepDetailMessagesAreTruthful:
+    """`_text_step_outcome`'s detail must state what actually happened.
+
+    Distinguishes a calendar-only failure with no target symbols from
+    genuine per-symbol failures, and from both together.
+    """
+
+    def test_calendar_failure_with_zero_target_symbols_is_stated_truthfully(
+        self, base_deps, state_store, settings
+    ):
+        # No candidates and no held positions: guarantee zero target
+        # symbols by making the liquidity filter reject every symbol.
+        object.__setattr__(settings.technical_signals.volume, "min_avg_volume", 10**12)
+        deps = replace(base_deps, calendar_client=ExplodingCalendarClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            detail = conn.execute(
+                "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
+                [str(result.run_id)],
+            ).fetchone()[0]
+        assert detail == (
+            "calendar fetch failed; no target symbols (0 candidates, 0 held positions)"
+        )
+
+    def test_genuine_per_symbol_failures_are_distinguished_from_calendar_failure(
+        self, base_deps, state_store
+    ):
+        deps = replace(base_deps, news_client=ExplodingNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            detail = conn.execute(
+                "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
+                [str(result.run_id)],
+            ).fetchone()[0]
+        assert detail == (
+            "per-symbol fetch failed for 2/2 target symbol(s): ['AAPL', 'MSFT']"
+        )
+
+    def test_calendar_and_per_symbol_failures_are_both_reported(
+        self, base_deps, state_store
+    ):
+        deps = replace(
+            base_deps,
+            news_client=ExplodingNewsClient(),
+            calendar_client=ExplodingCalendarClient(),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            detail = conn.execute(
+                "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
+                [str(result.run_id)],
+            ).fetchone()[0]
+        assert detail == (
+            "calendar fetch failed and per-symbol fetch failed for "
+            "2/2 target symbol(s): ['AAPL', 'MSFT']"
+        )
 
 
 class TestLLMAnalysisFailureDegrades:
@@ -379,7 +462,13 @@ class TestNotifyFailureDegrades:
         object.__setattr__(settings.notification, "enabled", True)
         deps = replace(base_deps, notifier=FailingNotifier())
 
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        # A live (non-dry-run) run: dry-run mode always suppresses step 8
+        # (see `TestDryRunSuppressesNotification` below), so exercising the
+        # actual notify-failure path requires `is_dry_run=False`.
+        # `no_open=True` keeps step 9 from popping a real browser window.
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=False, no_open=True), deps
+        )
 
         assert result.status == RunStatus.DEGRADED
         assert result.exit_code == 0
@@ -387,6 +476,25 @@ class TestNotifyFailureDegrades:
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "8_notify") == "failed"
         assert _step_status(state_store, result.run_id, "9_open") == "success"
+
+
+class TestDryRunSuppressesNotification:
+    def test_dry_run_skips_notify_even_when_notification_is_enabled(
+        self, base_deps, state_store, settings
+    ):
+        object.__setattr__(settings.notification, "enabled", True)
+        deps = replace(base_deps, notifier=_AssertNeverCalledNotifier())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _step_status(state_store, result.run_id, "8_notify") == "skipped"
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            detail = conn.execute(
+                "SELECT detail FROM run_steps WHERE run_id = ? AND step = ?",
+                [str(result.run_id), "8_notify"],
+            ).fetchone()[0]
+        assert detail == "skipped: dry-run mode"
 
 
 class TestMarketFailureIsFatalAndRerunnable:

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from uuid import uuid4
 
+import duckdb
 import pytest
 from duckdb import ConstraintException
 
@@ -64,6 +65,148 @@ class TestRunLifecycle:
         state_store.complete_run(retry_run, RunStatus.SUCCESS)
 
         assert retry_run != failed_run
+
+
+class _FlakyConnection:
+    """Wraps a real DuckDB connection; raises on the Nth `UPDATE runs` call."""
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._update_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("UPDATE runs"):
+            self._update_calls += 1
+            if self._update_calls == self._fail_on_call:
+                msg = "simulated failure on a later UPDATE"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+class TestMarkStaleRunningRuns:
+    @staticmethod
+    def _backdate(state_store, run_id, started_at):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "UPDATE runs SET started_at = ? WHERE run_id = ?",
+                [started_at, str(run_id)],
+            )
+
+    def test_never_marks_the_run_performing_the_check_itself(self, state_store):
+        # A caller whose injected clock disagrees with the DB wall clock
+        # (e.g. tests with a future FakeClock) must not self-mark stale.
+        own_run = state_store.start_run(date(2026, 7, 19), RunMode.LIVE, "hash-a")
+        self._backdate(state_store, own_run, datetime(2026, 7, 19, 8, tzinfo=UTC))
+
+        marked = state_store.mark_stale_running_runs(
+            datetime(2026, 7, 20, tzinfo=UTC), own_run
+        )
+
+        assert marked == []
+
+    def test_marks_a_running_run_older_than_cutoff_as_failed(self, state_store):
+        stale_run = state_store.start_run(date(2026, 7, 19), RunMode.LIVE, "hash-a")
+        self._backdate(state_store, stale_run, datetime(2026, 7, 19, 8, tzinfo=UTC))
+        new_run_id = uuid4()
+
+        marked = state_store.mark_stale_running_runs(
+            datetime(2026, 7, 20, tzinfo=UTC), new_run_id
+        )
+
+        assert marked == [stale_run]
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT status, error_summary, completed_at FROM runs WHERE run_id = ?",
+                [str(stale_run)],
+            ).fetchone()
+        assert row[0] == "failed"
+        assert str(new_run_id) in row[1]
+        assert row[2] is not None
+
+    def test_leaves_a_run_started_exactly_at_cutoff_alone(self, state_store):
+        run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "hash-a")
+        cutoff = datetime(2026, 7, 20, 12, tzinfo=UTC)
+        self._backdate(state_store, run_id, cutoff)
+
+        marked = state_store.mark_stale_running_runs(cutoff, uuid4())
+
+        assert marked == []
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            status = conn.execute(
+                "SELECT status FROM runs WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert status == ("running",)
+
+    def test_leaves_a_run_started_just_after_cutoff_alone(self, state_store):
+        run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "hash-a")
+        cutoff = datetime(2026, 7, 20, 12, tzinfo=UTC)
+        self._backdate(state_store, run_id, cutoff + timedelta(seconds=1))
+
+        marked = state_store.mark_stale_running_runs(cutoff, uuid4())
+
+        assert marked == []
+
+    def test_does_not_touch_an_already_completed_run(self, state_store):
+        run_id = state_store.start_run(date(2026, 7, 19), RunMode.LIVE, "hash-a")
+        self._backdate(state_store, run_id, datetime(2026, 7, 19, 8, tzinfo=UTC))
+        state_store.complete_run(run_id, RunStatus.SUCCESS)
+
+        marked = state_store.mark_stale_running_runs(
+            datetime(2026, 7, 20, tzinfo=UTC), uuid4()
+        )
+
+        assert marked == []
+
+    def test_marks_multiple_stale_runs_oldest_started_at_first(self, state_store):
+        older = state_store.start_run(date(2026, 7, 18), RunMode.LIVE, "hash-a")
+        newer = state_store.start_run(date(2026, 7, 19), RunMode.LIVE, "hash-a")
+        self._backdate(state_store, older, datetime(2026, 7, 18, 8, tzinfo=UTC))
+        self._backdate(state_store, newer, datetime(2026, 7, 19, 8, tzinfo=UTC))
+
+        marked = state_store.mark_stale_running_runs(
+            datetime(2026, 7, 20, tzinfo=UTC), uuid4()
+        )
+
+        assert marked == [older, newer]
+
+    def test_rolls_back_entirely_when_a_later_update_fails(
+        self, state_store, monkeypatch
+    ):
+        first = state_store.start_run(date(2026, 7, 18), RunMode.LIVE, "hash-a")
+        second = state_store.start_run(date(2026, 7, 19), RunMode.LIVE, "hash-a")
+        self._backdate(state_store, first, datetime(2026, 7, 18, 8, tzinfo=UTC))
+        self._backdate(state_store, second, datetime(2026, 7, 19, 8, tzinfo=UTC))
+
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyConnection(real_connect(), fail_on_call=2),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.mark_stale_running_runs(
+                datetime(2026, 7, 20, tzinfo=UTC), uuid4()
+            )
+
+        # Rolled back entirely: the first UPDATE succeeded before the second
+        # one raised, but neither run's status was left changed.
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT run_id, status FROM runs ORDER BY run_id"
+            ).fetchall()
+        statuses = {str(run_id): status for run_id, status in rows}
+        assert statuses[str(first)] == "running"
+        assert statuses[str(second)] == "running"
 
 
 class TestRecordRunStep:

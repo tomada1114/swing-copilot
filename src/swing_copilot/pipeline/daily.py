@@ -17,11 +17,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
+import sys
 import time
+import traceback
 import webbrowser
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from swing_copilot.clock import SystemClock
@@ -53,7 +57,7 @@ from swing_copilot.report.html_report import (
 from swing_copilot.risk.checks import RiskChecker
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
-from swing_copilot.storage.database import Database
+from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.calendar_fred import FredCalendarClient
@@ -61,16 +65,17 @@ from swing_copilot.text.edgar_filings import fetch_recent_filings_text
 from swing_copilot.text.news_finnhub import FinnhubNewsClient
 from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Iterable
     from uuid import UUID
 
     import pandas as pd
     from pydantic import BaseModel
 
     from swing_copilot.clock import Clock
-    from swing_copilot.config import Settings, StrategiesConfig
+    from swing_copilot.config import Secrets, Settings, StrategiesConfig
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.llm.client import AnalyzeRequest
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
@@ -81,12 +86,13 @@ if TYPE_CHECKING:
     from swing_copilot.text.base import TextItem
     from swing_copilot.universe import UniverseMember
 
-_FUNDAMENTALS_LOOKBACK_DAYS = 400  # enough for SMA200 warmup / recent filings
+_PRICE_HISTORY_LOOKBACK_DAYS = 400  # enough for SMA200 warmup; unrelated to edgar.py's own fundamentals-fetch lookback constant
 _TEXT_LOOKBACK_DAYS = 14
 _FILING_FORM_TYPES = ["8-K", "10-Q"]
 _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
+_FUNDAMENTALS_PROGRESS_LOG_INTERVAL = 25
 
 
 class _EdgarClientLike(Protocol):
@@ -142,6 +148,10 @@ class DailyDependencies:
     universe: tuple[UniverseMember, ...]
     strategies_config: dict[str, Any]  # Any: arbitrary-depth parsed YAML
     clock: Clock
+    # Injectable monotonic time source for the NFR-03 run-timeout budget.
+    # Deliberately separate from `clock` (calendar/business time): this is
+    # wall-clock elapsed-time measurement, never a substitute for `as_of`.
+    monotonic: Callable[[], float] = time.perf_counter
     edgar_client: _EdgarClientLike | None = None
     news_client: _NewsClientLike | None = None
     calendar_client: _CalendarClientLike | None = None
@@ -160,6 +170,13 @@ class _StepOutcome:
     is_skipped: bool = False
 
 
+# A step skipped because the NFR-03 time budget is already exhausted: unlike
+# an ordinary "not configured" skip (`success=True, is_skipped=True`), this
+# degrades the run (`success=False`) even though it is recorded as `skipped`
+# in `run_steps` rather than `failed`.
+_TIME_BUDGET_STEP_OUTCOME = _StepOutcome(False, "time budget exceeded", is_skipped=True)
+
+
 @dataclass(frozen=True, slots=True)
 class _RunContext:
     """Screening-derived state steps 5-9 share (keeps step functions under 5 args)."""
@@ -174,6 +191,34 @@ class _RunContext:
 def _config_hash(settings: Settings) -> str:
     payload = json.dumps(settings.model_dump(mode="json"), sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _run_mode(options: DailyRunOptions) -> RunMode:
+    """Whether this invocation is `live` or `dry_run`.
+
+    Shared by `run_daily` and `_compose_dependencies`, which both need it
+    before a `run_id` exists.
+    """
+    return RunMode.DRY_RUN if options.is_dry_run else RunMode.LIVE
+
+
+def _paths_for_mode(mode: RunMode) -> tuple[Path, str]:
+    """Return the isolated `(db_path, output_dir)` to compose for `mode`.
+
+    A `--dry-run` invocation must never touch the live DuckDB file or
+    overwrite `reports/latest.html`: it gets its own DB file and its own
+    report subdirectory. `runs.mode` still distinguishes dry/live rows
+    *within* whichever DB a run wrote to (`docs/04_detailed_design.md` 3.21).
+
+    Args:
+        mode: Whether this run is `live` or `dry_run`.
+
+    Returns:
+        The DuckDB path and report output directory to compose with.
+    """
+    if mode is RunMode.DRY_RUN:
+        return Path("data/copilot_dry_run.duckdb"), "reports/dry_run"
+    return DEFAULT_DB_PATH, "reports"
 
 
 def _select_symbols(
@@ -214,7 +259,7 @@ def _run_step_prices(
     prefetched: BarFetchResult | None = None,
 ) -> _StepOutcome:
     if prefetched is None:
-        start = as_of - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
+        start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
         result = deps.data_provider.get_daily_bars(
             symbols, start, as_of + timedelta(days=1)
         )
@@ -233,38 +278,120 @@ def _run_step_prices(
     return _StepOutcome(True, detail)
 
 
+def _fetch_or_skip_fundamentals(
+    market_store: MarketStore,
+    edgar_client: _EdgarClientLike,
+    symbol: str,
+    as_of: date,
+    as_of_cutoff: datetime,
+) -> tuple[list[FundamentalsRecord], bool, bool]:
+    """Fetch one symbol's fundamentals, or skip a same-day rerun.
+
+    Args:
+        market_store: Used for the same-day-fetch check and, by the caller,
+            the eventual upsert.
+        edgar_client: Configured EDGAR client (never `None` here).
+        symbol: Ticker to fetch.
+        as_of: Run's evaluation date, both the filing cutoff and the
+            same-day-skip comparison date.
+        as_of_cutoff: `as_of` widened to end-of-day UTC for the filing cutoff.
+
+    Returns:
+        `(records, failed, was_skipped)`. `failed` is `True` only if the
+        network fetch itself raised; a same-day skip is never a failure.
+    """
+    if market_store.has_fundamentals_fetched_on(symbol, as_of):
+        logger.debug(
+            "fundamentals: %s already fetched today (%s), skipping fetch",
+            symbol,
+            as_of,
+        )
+        return [], False, True
+    try:
+        records = list(edgar_client.fetch_fundamentals(symbol, as_of_cutoff))
+    except Exception:
+        logger.exception("fundamentals fetch failed for %s", symbol)
+        return [], True, False
+    return records, False, False
+
+
+def _log_fundamentals_progress(position: int, total: int) -> None:
+    if position % _FUNDAMENTALS_PROGRESS_LOG_INTERVAL == 0:
+        logger.info("fundamentals: %d/%d symbols processed", position, total)
+    else:
+        logger.debug("fundamentals: %d/%d symbols processed", position, total)
+
+
 def _run_step_fundamentals(
-    deps: DailyDependencies, symbols: list[str], as_of: date
+    deps: DailyDependencies, symbols: list[str], as_of: date, deadline: float
 ) -> _StepOutcome:
-    if deps.edgar_client is None:
+    """Fetch/upsert fundamentals for `symbols`, filed on or before `as_of`.
+
+    Two fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
+
+    - Same-day rerun skip: a symbol already fetched today (`fetched_at`'s
+      date == `as_of`) is not re-fetched over the network. Correction
+      semantics are unaffected — the next day's run always re-fetches and
+      upserts by `accession_no`.
+    - NFR-03 time budget: once `deps.monotonic() >= deadline`, fetching
+      stops early with whatever records were already gathered upserted, and
+      the step still succeeds (not fatal) with a detail explaining the
+      partial completion, mirroring the existing partial-per-symbol-failure
+      convention below.
+    """
+    edgar_client = deps.edgar_client
+    if edgar_client is None:
         return _StepOutcome(
             True, "skipped: no EDGAR client configured", is_skipped=True
         )
 
     as_of_cutoff = datetime.combine(as_of, datetime.max.time(), tzinfo=UTC)
-    records = []
-    failed_symbols = []
-    for symbol in symbols:
-        try:
-            records.extend(deps.edgar_client.fetch_fundamentals(symbol, as_of_cutoff))
-        except Exception:
-            failed_symbols.append(symbol)
+    total = len(symbols)
+    records: list[FundamentalsRecord] = []
+    failed_symbols: list[str] = []
+    skipped_same_day = 0
+    budget_detail: str | None = None
 
+    for index, symbol in enumerate(symbols):
+        if deps.monotonic() >= deadline:
+            budget_detail = f"time budget exceeded after {index}/{total} symbols"
+            logger.warning("fundamentals step stopping early: %s", budget_detail)
+            break
+        symbol_records, failed, was_skipped = _fetch_or_skip_fundamentals(
+            deps.market_store, edgar_client, symbol, as_of, as_of_cutoff
+        )
+        records.extend(symbol_records)
+        failed_symbols.extend([symbol] if failed else [])
+        skipped_same_day += 1 if was_skipped else 0
+        _log_fundamentals_progress(index + 1, total)
+
+    if skipped_same_day:
+        logger.info(
+            "fundamentals: skipped %d/%d symbol(s) already fetched today",
+            skipped_same_day,
+            total,
+        )
     if records:
         deps.market_store.upsert_fundamentals(records)
-    if failed_symbols and not records:
+
+    if failed_symbols and not records and budget_detail is None:
         return _StepOutcome(
             False, f"EDGAR fetch failed for every symbol: {failed_symbols}"
         )
-    detail = f"failed symbols: {failed_symbols}" if failed_symbols else None
-    return _StepOutcome(True, detail)
+
+    details = []
+    if failed_symbols:
+        details.append(f"failed symbols: {failed_symbols}")
+    if budget_detail:
+        details.append(budget_detail)
+    return _StepOutcome(True, "; ".join(details) if details else None)
 
 
 def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
 ) -> tuple[_StepOutcome, list[Candidate]]:
     fundamentals = deps.market_store.read_fundamentals(as_of)
-    start = as_of - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
+    start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
 
     data = ScreeningInput(
@@ -302,6 +429,7 @@ def _fetch_symbol_text_items(
                 deps.news_client.fetch_company_news(symbol, since, as_of=as_of)
             )
         except Exception:
+            logger.exception("news fetch failed for %s", symbol)
             symbol_ok = False
     if deps.edgar_client is not None:
         try:
@@ -311,6 +439,7 @@ def _fetch_symbol_text_items(
                 )
             )
         except Exception:
+            logger.exception("filings text fetch failed for %s", symbol)
             symbol_ok = False
     return items, symbol_ok
 
@@ -328,23 +457,49 @@ def _fetch_calendar_items(
             )
         ), False
     except Exception:
+        logger.exception("calendar events fetch failed")
         return [], True
 
 
 def _text_step_outcome(
-    items: list[TextItem], failed_symbols: list[str], calendar_failed: bool
+    items: list[TextItem],
+    failed_symbols: list[str],
+    calendar_failed: bool,
+    symbol_count: int,
 ) -> tuple[_StepOutcome, list[TextItem] | None]:
     if not (failed_symbols or calendar_failed):
         return _StepOutcome(True), items
-    if not items:
-        return (
-            _StepOutcome(False, "text collection failed for every symbol/event"),
-            None,
+    if items:
+        detail = f"failed symbols: {failed_symbols}"
+        if calendar_failed:
+            detail += "; calendar events fetch failed"
+        return _StepOutcome(False, detail), items
+
+    # Nothing was collected at all: state truthfully *why*, distinguishing a
+    # calendar-only failure with no target symbols from genuine per-symbol
+    # failures -- a prior "text collection failed for every symbol/event"
+    # wording was misleading on a day with 0 candidates/0 positions and one
+    # transient calendar failure.
+    if symbol_count == 0:
+        detail = (
+            "calendar fetch failed; no target symbols (0 candidates, 0 held positions)"
         )
-    detail = f"failed symbols: {failed_symbols}"
-    if calendar_failed:
-        detail += "; calendar events fetch failed"
-    return _StepOutcome(False, detail), items
+    elif failed_symbols and calendar_failed:
+        detail = (
+            f"calendar fetch failed and per-symbol fetch failed for "
+            f"{len(failed_symbols)}/{symbol_count} target symbol(s): {failed_symbols}"
+        )
+    elif failed_symbols:
+        detail = (
+            f"per-symbol fetch failed for {len(failed_symbols)}/{symbol_count} "
+            f"target symbol(s): {failed_symbols}"
+        )
+    else:
+        detail = (
+            f"calendar fetch failed; {symbol_count} target symbol(s) "
+            "returned no text items"
+        )
+    return _StepOutcome(False, detail), None
 
 
 def _run_step_text(
@@ -375,7 +530,7 @@ def _run_step_text(
     if items:
         deps.state_store.record_text_items(items)
 
-    return _text_step_outcome(items, failed_symbols, calendar_failed)
+    return _text_step_outcome(items, failed_symbols, calendar_failed, len(symbols))
 
 
 def _run_step_llm(
@@ -535,7 +690,11 @@ def _run_step_notify(
     report_path: Path | None,
     candidates: list[Candidate],
     run_date: date,
+    *,
+    is_dry_run: bool,
 ) -> _StepOutcome:
+    if is_dry_run:
+        return _StepOutcome(True, "skipped: dry-run mode", is_skipped=True)
     if not deps.settings.notification.enabled or deps.notifier is None:
         return _StepOutcome(True, "skipped: notification disabled", is_skipped=True)
     if report_path is None:
@@ -591,6 +750,13 @@ def _record_step(
         status = StepStatus.SKIPPED
     else:
         status = StepStatus.SUCCESS if outcome.success else StepStatus.FAILED
+    logger.info(
+        "step %s finished: status=%s duration=%.2fs%s",
+        step,
+        status.value,
+        duration,
+        f" detail={outcome.detail}" if outcome.detail else "",
+    )
     deps.state_store.record_run_step(run_id, step, status, outcome.detail, duration)
 
 
@@ -606,7 +772,11 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         (prices, fundamentals, screening, risk) failed outright; steps 5-9
         degrade the run (`RunStatus.DEGRADED`) but keep `exit_code == 0`.
     """
-    mode = RunMode.DRY_RUN if options.is_dry_run else RunMode.LIVE
+    run_started_at = deps.monotonic()
+    budget_s = deps.settings.schedule.timeout_minutes * 60
+    deadline = run_started_at + budget_s
+
+    mode = _run_mode(options)
     fetch_cutoff = options.as_of or deps.clock.today()
     held_symbols = {
         position.symbol for position in deps.state_store.get_open_positions()
@@ -622,7 +792,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     run_date = fetch_cutoff
     if options.as_of is None:
         try:
-            start = fetch_cutoff - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
+            start = fetch_cutoff - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
             prefetched_prices = deps.data_provider.get_daily_bars(
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
             )
@@ -633,6 +803,25 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
             prefetch_error = f"unexpected error: {exc}"
 
     run_id = deps.state_store.start_run(run_date, mode, _config_hash(deps.settings))
+    logger.info(
+        "run %s started: mode=%s run_date=%s symbols=%d",
+        run_id,
+        mode.value,
+        run_date,
+        len(symbols),
+    )
+
+    # NFR-03 stuck-run detection: a run that crashed mid-execution never
+    # reaches `complete_run()` and would sit in `status='running'` forever.
+    stale_cutoff = deps.clock.now() - timedelta(seconds=budget_s)
+    stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
+    if stale_run_ids:
+        logger.warning(
+            "run %s: marked %d stale running run(s) as failed: %s",
+            run_id,
+            len(stale_run_ids),
+            stale_run_ids,
+        )
 
     candidates: list[Candidate] = []
     risk_assessments: list[RiskAssessment] = []
@@ -652,23 +841,36 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
             return _StepOutcome(False, prefetch_error)
         return _run_step_prices(deps, price_symbols, run_date, prefetched_prices)
 
+    # Time-budget policy for steps 1-4: only fundamentals (2) is gated (per
+    # symbol, inside `_run_step_fundamentals`) since it is the dominant
+    # network cost. Prices (1), screening (3), and risk (4) always run --
+    # prices is needed to establish `run_date`/bars at all, and screening/risk
+    # are cheap, local, and required to produce a report.
     fatal_steps: list[tuple[str, Callable[[], _StepOutcome]]] = [
         ("1_prices", _step_prices),
-        ("2_fundamentals", lambda: _run_step_fundamentals(deps, symbols, run_date)),
+        (
+            "2_fundamentals",
+            lambda: _run_step_fundamentals(deps, symbols, run_date, deadline),
+        ),
         ("3_screening", _step_screening),
         ("4_risk", _step_risk),
     ]
 
     for step_name, step_fn in fatal_steps:
+        logger.info("step %s starting", step_name)
         started_at = time.perf_counter()
         try:
             outcome = step_fn()
         except Exception as exc:
+            logger.exception("step %s raised unexpectedly", step_name)
             outcome = _StepOutcome(False, f"unexpected error: {exc}")
         _record_step(deps, run_id, step_name, outcome, started_at)
         if not outcome.success:
             deps.state_store.complete_run(
                 run_id, RunStatus.FAILED, error_summary=outcome.detail
+            )
+            logger.error(
+                "run %s failed at step %s: %s", run_id, step_name, outcome.detail
             )
             return DailyRunResult(run_id, run_date, RunStatus.FAILED, exit_code=1)
 
@@ -679,31 +881,59 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         risk_assessments=risk_assessments,
         held_symbols=frozenset(held_symbols),
     )
-    return _run_soft_steps(options, deps, ctx)
+    return _run_soft_steps(options, deps, ctx, deadline)
 
 
 def _run_soft_steps(
-    options: DailyRunOptions, deps: DailyDependencies, ctx: _RunContext
+    options: DailyRunOptions,
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
 ) -> DailyRunResult:
-    """Run steps 5-9: fail-soft text/LLM, then report/notify/browser-open."""
+    """Run steps 5-9: fail-soft text/LLM, then report/notify/browser-open.
+
+    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), and 8 (Discord
+    notify) are network-bound and are skipped outright once
+    `deps.monotonic() >= deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME`
+    (`is_skipped=True` but `success=False`) -- a *degrading* skip, distinct
+    from the ordinary "not configured" skip, so the run still ends up
+    `RunStatus.DEGRADED` even though nothing here technically raised. Steps 7
+    (report) and 9 (browser-open) are cheap/local and always attempt to
+    complete regardless of budget, so a timed-out run still produces a report.
+    """
     degraded = False
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
     started_at = time.perf_counter()
-    text_outcome, text_items = _run_step_text(
-        deps, text_symbols, ctx.run_date, skip=options.skip_text
-    )
+    if deps.monotonic() >= deadline:
+        logger.warning("step 5_text skipped: time budget exceeded")
+        text_outcome, text_items = _TIME_BUDGET_STEP_OUTCOME, None
+    else:
+        logger.info("step 5_text starting")
+        text_outcome, text_items = _run_step_text(
+            deps, text_symbols, ctx.run_date, skip=options.skip_text
+        )
     _record_step(deps, ctx.run_id, "5_text", text_outcome, started_at)
     degraded = degraded or not text_outcome.success
 
     started_at = time.perf_counter()
-    llm_outcome, news_summaries, filing_analyses = _run_step_llm(
-        deps, ctx, text_items, skip=options.skip_llm
-    )
+    if deps.monotonic() >= deadline:
+        logger.warning("step 6_llm skipped: time budget exceeded")
+        llm_outcome, news_summaries, filing_analyses = (
+            _TIME_BUDGET_STEP_OUTCOME,
+            None,
+            None,
+        )
+    else:
+        logger.info("step 6_llm starting")
+        llm_outcome, news_summaries, filing_analyses = _run_step_llm(
+            deps, ctx, text_items, skip=options.skip_llm
+        )
     _record_step(deps, ctx.run_id, "6_llm", llm_outcome, started_at)
     degraded = degraded or not llm_outcome.success
 
     started_at = time.perf_counter()
+    logger.info("step 7_report starting")
     report_outcome, report_path = _run_step_report(
         deps, ctx, news_summaries, filing_analyses
     )
@@ -711,17 +941,30 @@ def _run_soft_steps(
     degraded = degraded or not report_outcome.success
 
     started_at = time.perf_counter()
-    notify_outcome = _run_step_notify(deps, report_path, ctx.candidates, ctx.run_date)
+    if deps.monotonic() >= deadline:
+        logger.warning("step 8_notify skipped: time budget exceeded")
+        notify_outcome = _TIME_BUDGET_STEP_OUTCOME
+    else:
+        logger.info("step 8_notify starting")
+        notify_outcome = _run_step_notify(
+            deps,
+            report_path,
+            ctx.candidates,
+            ctx.run_date,
+            is_dry_run=options.is_dry_run,
+        )
     _record_step(deps, ctx.run_id, "8_notify", notify_outcome, started_at)
     degraded = degraded or not notify_outcome.success
 
     started_at = time.perf_counter()
+    logger.info("step 9_open starting")
     open_outcome = _run_step_open(deps, report_path, options)
     _record_step(deps, ctx.run_id, "9_open", open_outcome, started_at)
     degraded = degraded or not open_outcome.success
 
     final_status = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
     deps.state_store.complete_run(ctx.run_id, final_status, report_path=report_path)
+    logger.info("run %s completed: status=%s", ctx.run_id, final_status.value)
     return DailyRunResult(
         ctx.run_id, ctx.run_date, final_status, exit_code=0, report_path=report_path
     )
@@ -764,7 +1007,9 @@ def _compose_dependencies(
     secrets = load_secrets()
     require_secrets(secrets, _required_features(options, settings))
 
-    database = Database()
+    mode = _run_mode(options)
+    db_path, output_dir = _paths_for_mode(mode)
+    database = Database(db_path)
     market_store = MarketStore(database)
     state_store = StateStore(database)
     state_store.init_schema()
@@ -823,11 +1068,88 @@ def _compose_dependencies(
         calendar_client=calendar_client,
         llm_client=llm_client,
         notifier=notifier,
+        output_dir=output_dir,
     )
 
 
 def _monthly_budget_cap(settings: Settings) -> float:
     return settings.budget.monthly_cap_usd_prototype
+
+
+class _SecretRedactionFilter(logging.Filter):
+    """Replaces configured secret values with `"[REDACTED]"` in every record.
+
+    `text/calendar_fred.py` and `text/news_finnhub.py` send their API keys as
+    URL query parameters; a non-retried `httpx.HTTPStatusError` embeds the
+    full request URL in its message, so an uncaught traceback logged via
+    `logger.exception(...)` (`daily.py`'s fundamentals/news/filings/calendar
+    fetch steps) would otherwise print the real secret to stderr. Attached to
+    every root handler by `_configure_logging` so this applies regardless of
+    which module's logger emitted the record (AGENTS.md: "never log secrets").
+    """
+
+    def __init__(self, secrets: Iterable[str | None]) -> None:
+        super().__init__()
+        # Empty/`None` values are dropped, not just falsy-skipped at replace
+        # time: an empty pattern would otherwise match (and mangle) every
+        # message. Longest-first so a secret that is a substring of another
+        # configured secret is still fully redacted.
+        self._secrets = tuple(
+            sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+        )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._secrets:
+            return True
+
+        record.msg = self._redact(record.getMessage())
+        record.args = ()
+
+        if record.exc_info is not None:
+            formatted = "".join(traceback.format_exception(*record.exc_info))
+            record.exc_text = self._redact(formatted)
+            record.exc_info = None
+
+        return True
+
+    def _redact(self, value: str) -> str:
+        redacted = value
+        for secret in self._secrets:
+            redacted = redacted.replace(secret, "[REDACTED]")
+        return redacted
+
+
+def _configure_logging(secrets: Secrets) -> None:
+    """Configure root logging (INFO, to stderr) with secret redaction.
+
+    A live run's step progress and failures are always visible this way --
+    this batch otherwise has no other output surface until the HTML report is
+    written. A `_SecretRedactionFilter` seeded from every configured secret is
+    attached to each root handler so a leaked API key/webhook URL (record
+    message or exception traceback) never reaches stderr in the clear.
+
+    Factored out of `main()` so tests can exercise the redaction behavior
+    without invoking the whole CLI.
+
+    Args:
+        secrets: Loaded secrets to redact from now on. Unset (`None`/empty)
+            values are ignored.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    redaction_filter = _SecretRedactionFilter(
+        (
+            secrets.finnhub_api_key,
+            secrets.fred_api_key,
+            secrets.anthropic_api_key,
+            secrets.discord_webhook_url,
+        )
+    )
+    for handler in logging.root.handlers:
+        handler.addFilter(redaction_filter)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -836,6 +1158,7 @@ def main(argv: list[str] | None = None) -> None:
     Args:
         argv: Argument list, or `None` to use `sys.argv[1:]`.
     """
+    _configure_logging(load_secrets())
     options = _parse_args(argv)
     settings = load_settings()
     strategies = load_strategies()

@@ -166,6 +166,20 @@ def require_secrets(secrets: Secrets, features: set[str]) -> None:
 
 ### 3.2 `universe.py`（FR-01）
 
+> **live検証時の訂正（2026-07-22）**: `fetch_from_wikipedia()`を素の
+> `pd.read_html(WIKIPEDIA_SP500_URL)`のまま実運用したところ、Wikipediaが
+> デフォルトのurllib User-AgentへHTTP 403を返すことを確認した（新規
+> checkout後の初回live実行が`config/universe_snapshot.csv`フォールバック
+> なしで必ず`UniverseError`になっていた）。そのため取得経路を`httpx.get()`
+> （Wikimedia UAポリシーに沿った`"swing-copilot/<version> (https://github.com/
+> tomada1114/swing-copilot)"`形式のUser-Agent、`timeout=10.0`、
+> `follow_redirects=True`）に変更し、`data/edgar.py`の`_with_retries`と
+> 同じ固定バックオフ（`_RETRY_DELAYS_SECONDS = (1.0, 2.0)`、計3回試行、
+> 最終試行は無防備で例外を伝播）で`httpx.HTTPError`のみをリトライする。
+> 取得したHTMLは`io.StringIO`経由で従来どおり`pd.read_html`へ渡すため、
+> テーブルのパース・列名仕様（本節および3.2節末尾の記載）は変更ない。
+> パース/バリデーション失敗はリトライ対象外のまま。
+
 **責務**: S&P500構成銘柄シンボルリスト（GICSセクター付き）の取得・保存・週次更新。
 
 ```python
@@ -814,6 +828,68 @@ class PerformanceSummary:
 > 失敗してもバッチを止めず`RunStatus.DEGRADED`（`exit_code=0`）に留める
 > （`docs/03_basic_design.md` 7章）。
 
+> **live検証時の訂正（2026-07-22）**: 2026-07-21のlive実行検証で判明した3件を
+> 追加実装した。
+>
+> 1. **dry-runのDB/レポート出力分離**: `_compose_dependencies()`は
+>    `--dry-run`のとき`data/copilot_dry_run.duckdb`と`reports/dry_run/`
+>    を、live実行時は従来どおり`data/copilot.duckdb`（`storage/database.py`
+>    の`DEFAULT_DB_PATH`）と`reports/`を使う（`_paths_for_mode()`が
+>    `(db_path, output_dir)`を返す純粋関数）。以前は`--dry-run`が本節
+>    冒頭のブラウザ自動表示ゲート（`is_dry_run`/`no_open`/`CI`）以外
+>    どの分岐も持たず、live実行と同じDB・レポートディレクトリを共有して
+>    いた。`runs.mode`列（`RunMode.LIVE`/`RunMode.DRY_RUN`、4.2節）は
+>    廃止せず、どちらのDBに書いたrunでも引き続きそのDB内でdry/live行を
+>    区別する。
+> 2. **NFR-03タイムアウト予算の実施と停止run検知**: `settings.schedule.
+>    timeout_minutes`（既定35分、`config.py`の`ScheduleConfig`）を
+>    それまで未実施のまま放置していた。`run_daily()`開始時点の
+>    `DailyDependencies.monotonic()`（既定`time.perf_counter`、
+>    `Clock`とは別の注入可能な単調時計。カレンダー時刻の`Clock`と混同
+>    しない）を基準に`deadline`を算出する。ステップ2（fundamentals）は
+>    銘柄ループの各反復前に予算を確認し、超過時はそこまでの取得結果を
+>    upsertして`success=True`（致命的失敗ではなく部分完了）・詳細に
+>    `"time budget exceeded after N/M symbols"`を記録する。ステップ5
+>    （text）・6（llm）・8（Discord notify）はネットワークを伴うため、
+>    開始前に予算超過なら`run_steps.status='skipped'`かつ内部的には
+>    `success=False`として記録し（`_TIME_BUDGET_STEP_OUTCOME`）、
+>    通常の「未設定によるskip」とは区別してrun全体を`RunStatus.DEGRADED`
+>    に縮退させる。ステップ1（prices）・3（screening）・4（risk）・7
+>    （report）・9（browser-open）は予算に関わらず常に実行する（軽量・
+>    ローカル処理で、予算超過時もレポートを完成させるため）。あわせて
+>    `StateStore.mark_stale_running_runs()`を`run_daily()`開始直後に
+>    呼び、直前のタイムアウト予算より古い`started_at`を持つ
+>    `status='running'`行（クラッシュ等で`complete_run()`に到達せず
+>    残った行）を`status='failed'`・`error_summary`付きで一括更新する
+>    （1トランザクション、全件成功またはロールバック）。
+> 3. **fundamentals同日再実行スキップ**: `MarketStore.
+>    has_fundamentals_fetched_on(symbol, day)`を追加し、同じ`as_of`の
+>    当日中に既に`fetched_at`が記録済みの銘柄はEDGARへの再取得を
+>    スキップする（ログのみ、`run_steps.detail`には含めない）。
+>    `accession_no`キーの訂正upsert自体は変更せず、翌日以降の実行は
+>    従来どおり必ず再取得・upsertする。
+> 4. **CLI `--dry-run`契約の明確化（通知抑止）**: 本節冒頭のpseudocodeが
+>    記す「`dry_run=True`の場合、fixture/fake providerを必須とし、実
+>    ネットワークとブラウザ表示を禁止する」は、CLIの`--dry-run`実装が
+>    実際には一度も満たしたことのない理想化された記述だった
+>    （`_compose_dependencies()`は`--dry-run`でも常に実アダプタ一式を
+>    組み立てる）。今回の是正でCLIの`--dry-run`契約を次の4点のみを
+>    保証する縮小版として明文化する: (1) 上記1.のDB分離
+>    （`data/copilot_dry_run.duckdb`）、(2) レポート出力先分離
+>    （`reports/dry_run/`）、(3) ステップ9のブラウザ自動表示なし、
+>    (4) ステップ8のDiscord通知なし。(4)は本live検証で新たに発見された
+>    問題への対処で、`_run_step_notify()`が`is_dry_run`を最優先でチェック
+>    し、`settings.notification.enabled`の値によらず詳細
+>    `"skipped: dry-run mode"`で無条件にスキップする（従来は
+>    `--dry-run`でも通知が有効なら本物のDiscord webhookへ実際に投稿して
+>    しまっていた）。EDGAR/Finnhub/FRED/yfinance等の実プロバイダへの実
+>    ネットワークアクセス自体は`--dry-run`でも引き続き許可される。
+>    本節冒頭のfixture/fake provider必須・実ネットワーク全面禁止という
+>    原文の契約は、CLIの`--dry-run`ではなく8.4節のE2Eスモークテスト
+>    （外部APIを全て記録済みフィクスチャ/モックへ差し替え、
+>    `run_daily(options, deps)`を直接呼び出す経路）にのみ適用される、
+>    別文脈の契約として引き続き有効である。
+
 ```python
 def run_daily(
     options: "DailyRunOptions", deps: "DailyDependencies"
@@ -1325,7 +1401,7 @@ P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本�
 
 無人実装中に設計判断を残さない。以下はアーキテクチャ未決事項ではなく、実装時に公式一次情報とインストール済みバージョンを照合する外部事実である。事実が本書と異なる場合は同じ契約を満たす最小のAPI適合だけを行い、逸脱を報告する。
 
-1. **解決済み: S&P500構成銘柄リストの取得元（FR-01）**: WikipediaのList of S&P 500 companiesページのテーブルをpandas.read_htmlで取得する。取得結果はconfig/universe_snapshot.csvにスナップショット保存し、取得失敗時はスナップショットへフォールバックする。手動上書き（銘柄の追加・除外リスト）はsettings.yaml（`universe.manual_include`/`universe.manual_exclude`）で可能とする（詳細は本書3.2節）。テーブル構造は実装時に要確認。
+1. **解決済み: S&P500構成銘柄リストの取得元（FR-01）**: WikipediaのList of S&P 500 companiesページのテーブルをpandas.read_htmlで取得する。取得結果はconfig/universe_snapshot.csvにスナップショット保存し、取得失敗時はスナップショットへフォールバックする。手動上書き（銘柄の追加・除外リスト）はsettings.yaml（`universe.manual_include`/`universe.manual_exclude`）で可能とする（詳細は本書3.2節）。テーブル構造は実装時に要確認。**live検証時の訂正（2026-07-22）**: 取得経路自体はhttpx経由（明示的User-Agent・timeout・バウンデッドリトライ）に変わったが、取得後のHTMLをpandas.read_htmlへ渡す点は変わらない（詳細は本書3.2節）。
 2. **解決済み: セクター分類の取得元（FR-06）**: 項目1と同じソース（Wikipediaのユニバーステーブル）のGICS Sector列を使用する（本書3.2節・3.13節参照）。
 3. **edgartoolsの具体的なAPI**: 公式ドキュメント/リポジトリで`set_identity`または`EDGAR_IDENTITY`、Company/filing/XBRL取得APIを確認する。どのAPIでも`FundamentalsRecord`の時点整合契約は変更しない。
 4. **EODHDの具体的なエンドポイント・認証パラメータ・レート制限**: P4実装時にEODHD公式ドキュメントを確認する（`docs/00_human_preparation.md`項目8のサポート確認結果もあわせて反映）。

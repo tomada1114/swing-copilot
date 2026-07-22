@@ -58,9 +58,11 @@ class FakeClock:
 class FakeDataProvider:
     def __init__(self, bars: pd.DataFrame):
         self._bars = bars
+        self.requested_symbols: list[list[str]] = []
 
     def get_daily_bars(self, symbols, start, end):
-        del symbols, start, end
+        del start, end
+        self.requested_symbols.append(list(symbols))
         return BarFetchResult(bars=self._bars, failures=())
 
     def get_latest_bars(self, symbols, as_of):
@@ -278,6 +280,12 @@ class TestFiveSymbolEndToEnd:
                 [symbol], AS_OF - timedelta(days=5), AS_OF, AS_OF
             )
             assert not bars.empty
+
+        # The price step must have actually asked the provider for the
+        # market strip symbols, not just happened to already have their bars.
+        assert deps.data_provider.requested_symbols
+        requested = deps.data_provider.requested_symbols[-1]
+        assert set(MARKET_STRIP_SYMBOLS).issubset(requested)
 
     def test_notifier_is_called_with_the_generated_report_path(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)

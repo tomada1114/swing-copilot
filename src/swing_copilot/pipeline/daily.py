@@ -84,6 +84,9 @@ if TYPE_CHECKING:
 _FUNDAMENTALS_LOOKBACK_DAYS = 400  # enough for SMA200 warmup / recent filings
 _TEXT_LOOKBACK_DAYS = 14
 _FILING_FORM_TYPES = ["8-K", "10-Q"]
+_TEXT_SYMBOL_LIMIT = (
+    30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
+)
 
 
 class _EdgarClientLike(Protocol):
@@ -165,6 +168,7 @@ class _RunContext:
     run_date: date
     candidates: list[Candidate]
     risk_assessments: list[RiskAssessment]
+    held_symbols: frozenset[str]
 
 
 def _config_hash(settings: Settings) -> str:
@@ -179,6 +183,19 @@ def _select_symbols(
         return [member.symbol for member in universe]
     limited = [member.symbol for member in universe[:limit]]
     return sorted({*limited, *held_symbols})
+
+
+def _text_target_symbols(
+    held_symbols: frozenset[str], candidates: list[Candidate]
+) -> list[str]:
+    """Text/LLM target symbols: held positions + today's candidates (`docs/04_detailed_design.md` 3.14).
+
+    Held-first ordering so a symbol truncated by the NFR-03 cap is always a
+    candidate-only one, never a position the account actually holds.
+    """
+    candidate_symbols = {candidate.symbol for candidate in candidates}
+    ordered = [*sorted(held_symbols), *sorted(candidate_symbols - held_symbols)]
+    return ordered[:_TEXT_SYMBOL_LIMIT]
 
 
 def _stamp_bars(
@@ -273,6 +290,63 @@ def _run_step_risk(
     return _StepOutcome(True), assessments
 
 
+def _fetch_symbol_text_items(
+    deps: DailyDependencies, symbol: str, since: date, as_of: date
+) -> tuple[list[TextItem], bool]:
+    """Fetch one symbol's news + filing text; `False` if either source raised."""
+    items: list[TextItem] = []
+    symbol_ok = True
+    if deps.news_client is not None:
+        try:
+            items.extend(
+                deps.news_client.fetch_company_news(symbol, since, as_of=as_of)
+            )
+        except Exception:
+            symbol_ok = False
+    if deps.edgar_client is not None:
+        try:
+            items.extend(
+                fetch_recent_filings_text(
+                    deps.edgar_client, symbol, _FILING_FORM_TYPES, as_of
+                )
+            )
+        except Exception:
+            symbol_ok = False
+    return items, symbol_ok
+
+
+def _fetch_calendar_items(
+    deps: DailyDependencies, as_of: date
+) -> tuple[list[TextItem], bool]:
+    """Fetch calendar events; second element is `True` if the client raised."""
+    if deps.calendar_client is None:
+        return [], False
+    try:
+        return list(
+            deps.calendar_client.fetch_calendar_events(
+                as_of, as_of + timedelta(days=14)
+            )
+        ), False
+    except Exception:
+        return [], True
+
+
+def _text_step_outcome(
+    items: list[TextItem], failed_symbols: list[str], calendar_failed: bool
+) -> tuple[_StepOutcome, list[TextItem] | None]:
+    if not (failed_symbols or calendar_failed):
+        return _StepOutcome(True), items
+    if not items:
+        return (
+            _StepOutcome(False, "text collection failed for every symbol/event"),
+            None,
+        )
+    detail = f"failed symbols: {failed_symbols}"
+    if calendar_failed:
+        detail += "; calendar events fetch failed"
+    return _StepOutcome(False, detail), items
+
+
 def _run_step_text(
     deps: DailyDependencies, symbols: list[str], as_of: date, *, skip: bool
 ) -> tuple[_StepOutcome, list[TextItem] | None]:
@@ -287,32 +361,21 @@ def _run_step_text(
         )
 
     since = as_of - timedelta(days=_TEXT_LOOKBACK_DAYS)
-    as_of_cutoff = datetime.combine(as_of, datetime.max.time(), tzinfo=UTC)
-    try:
-        items: list[TextItem] = []
-        for symbol in symbols:
-            if deps.news_client is not None:
-                items.extend(
-                    deps.news_client.fetch_company_news(symbol, since, as_of=as_of)
-                )
-            if deps.edgar_client is not None:
-                items.extend(
-                    fetch_recent_filings_text(
-                        deps.edgar_client, symbol, _FILING_FORM_TYPES, as_of
-                    )
-                )
-        if deps.calendar_client is not None:
-            items.extend(
-                deps.calendar_client.fetch_calendar_events(
-                    as_of, as_of + timedelta(days=14)
-                )
-            )
-    except Exception as exc:
-        return _StepOutcome(False, f"unexpected error: {exc}"), None
+    items: list[TextItem] = []
+    failed_symbols: list[str] = []
+    for symbol in symbols:
+        symbol_items, symbol_ok = _fetch_symbol_text_items(deps, symbol, since, as_of)
+        items.extend(symbol_items)
+        if not symbol_ok:
+            failed_symbols.append(symbol)
 
-    deps.state_store.record_text_items(items)
-    _ = as_of_cutoff  # kept for symmetry with edgar's as_of_cutoff convention
-    return _StepOutcome(True), items
+    calendar_items, calendar_failed = _fetch_calendar_items(deps, as_of)
+    items.extend(calendar_items)
+
+    if items:
+        deps.state_store.record_text_items(items)
+
+    return _text_step_outcome(items, failed_symbols, calendar_failed)
 
 
 def _run_step_llm(
@@ -338,16 +401,29 @@ def _run_step_llm(
             None,
         )
 
-    try:
-        news_summaries = _summarize_news_per_candidate(
-            llm_client, deps, ctx, text_items
+    news_summaries, failed_news_symbols = _summarize_news_per_candidate(
+        llm_client, deps, ctx, text_items
+    )
+    filing_analyses, failed_filing_symbols = _analyze_filings_per_candidate(
+        llm_client, deps, ctx, text_items
+    )
+    failed_symbols = sorted({*failed_news_symbols, *failed_filing_symbols})
+
+    if not failed_symbols:
+        return _StepOutcome(True), news_summaries, filing_analyses
+    if news_summaries or filing_analyses:
+        return (
+            _StepOutcome(False, f"failed symbols: {failed_symbols}"),
+            news_summaries,
+            filing_analyses,
         )
-        filing_analyses = _analyze_filings_per_candidate(
-            llm_client, deps, ctx, text_items
-        )
-    except Exception as exc:
-        return _StepOutcome(False, f"unexpected error: {exc}"), None, None
-    return _StepOutcome(True), news_summaries, filing_analyses
+    return (
+        _StepOutcome(
+            False, f"LLM analysis failed for every candidate: {failed_symbols}"
+        ),
+        None,
+        None,
+    )
 
 
 def _summarize_news_per_candidate(
@@ -355,8 +431,9 @@ def _summarize_news_per_candidate(
     deps: DailyDependencies,
     ctx: _RunContext,
     text_items: list[TextItem],
-) -> list[NewsSummary]:
+) -> tuple[list[NewsSummary], list[str]]:
     summaries = []
+    failed_symbols = []
     for candidate in ctx.candidates:
         news_items = tuple(
             item
@@ -376,8 +453,11 @@ def _summarize_news_per_candidate(
             max_items=deps.settings.llm.max_news_items_per_symbol,
             max_chars_per_item=deps.settings.llm.max_news_chars_per_item,
         )
-        summaries.append(summarize_news(llm_client, request))
-    return summaries
+        try:
+            summaries.append(summarize_news(llm_client, request))
+        except Exception:
+            failed_symbols.append(candidate.symbol)
+    return summaries, failed_symbols
 
 
 def _analyze_filings_per_candidate(
@@ -385,8 +465,9 @@ def _analyze_filings_per_candidate(
     deps: DailyDependencies,
     ctx: _RunContext,
     text_items: list[TextItem],
-) -> list[FilingAnalysis]:
+) -> tuple[list[FilingAnalysis], list[str]]:
     analyses = []
+    failed_symbols = []
     for candidate in ctx.candidates:
         filing_items = [
             item
@@ -406,8 +487,11 @@ def _analyze_filings_per_candidate(
                 chunk_chars=deps.settings.llm.filing_chunk_chars,
                 max_chunks=deps.settings.llm.max_filing_chunks,
             )
-            analyses.append(analyze_filing(llm_client, request))
-    return analyses
+            try:
+                analyses.append(analyze_filing(llm_client, request))
+            except Exception:
+                failed_symbols.append(candidate.symbol)
+    return analyses, failed_symbols
 
 
 def _run_step_report(
@@ -592,6 +676,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         run_date=run_date,
         candidates=candidates,
         risk_assessments=risk_assessments,
+        held_symbols=frozenset(held_symbols),
     )
     return _run_soft_steps(options, deps, ctx)
 
@@ -601,7 +686,7 @@ def _run_soft_steps(
 ) -> DailyRunResult:
     """Run steps 5-9: fail-soft text/LLM, then report/notify/browser-open."""
     degraded = False
-    text_symbols = sorted({candidate.symbol for candidate in ctx.candidates})
+    text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
     started_at = time.perf_counter()
     text_outcome, text_items = _run_step_text(

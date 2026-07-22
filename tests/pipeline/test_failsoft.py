@@ -8,9 +8,11 @@ never corrupt state for a subsequent successful rerun.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pandas as pd
 import pytest
@@ -19,7 +21,9 @@ if TYPE_CHECKING:
     from uuid import UUID
 
 from swing_copilot.data.base import BarFetchResult
-from swing_copilot.models import DailyRunOptions, RunStatus
+from swing_copilot.llm.client import BudgetExceededError
+from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
+from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
@@ -97,6 +101,72 @@ class ExplodingLLMClient:
         del request
         msg = "Claude API unreachable"
         raise RuntimeError(msg)
+
+
+class PartiallyFailingNewsClient:
+    """Raises only for `failing_symbol`; returns real news for every other symbol."""
+
+    def __init__(self, failing_symbol: str):
+        self._failing_symbol = failing_symbol
+
+    def fetch_company_news(self, symbol, since, *, as_of):
+        del since
+        if symbol == self._failing_symbol:
+            msg = f"Finnhub unreachable for {symbol}"
+            raise RuntimeError(msg)
+        return [
+            TextItem(
+                source_id=f"news:{symbol}",
+                symbol=symbol,
+                source_type="news",
+                published_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+                title=f"{symbol} news",
+                source_url=f"https://example.com/{symbol}",
+                content_text=f"{symbol} announced a new product line.",
+                fetched_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
+            )
+        ]
+
+
+class PartiallyFailingLLMClient:
+    """Raises `BudgetExceededError` for one candidate only; a real fake for the rest."""
+
+    def __init__(self, failing_symbol: str):
+        self._failing_symbol = failing_symbol
+
+    def analyze(self, request):
+        match = re.search(r"対象銘柄: (\S+)", request.prompt)
+        symbol = match.group(1) if match else "UNKNOWN"
+        if symbol == self._failing_symbol:
+            msg = "Monthly LLM budget cap would be exceeded"
+            raise BudgetExceededError(msg)
+        if request.schema is NewsSummary:
+            return NewsSummary(
+                symbol=symbol,
+                period="test-period",
+                facts=[
+                    SourcedFact(
+                        statement="Fake fact.", source_ids=list(request.source_ids)
+                    )
+                ],
+                interpretation=["May indicate continued stability."],
+                sentiment=1,
+                risk_flags=[],
+                sources=["https://example.com"],
+            )
+        return FilingAnalysis(
+            symbol=symbol,
+            filing_type="10-Q",
+            facts=[
+                SourcedFact(
+                    statement="Fake filing fact.", source_ids=list(request.source_ids)
+                )
+            ],
+            interpretation=["May suggest steady operations."],
+            red_flags=[],
+            yoy_changes=[],
+            guidance_direction="neutral",
+        )
 
 
 class FailingNotifier:
@@ -218,6 +288,88 @@ class TestLLMAnalysisFailureDegrades:
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "6_llm") == "failed"
         assert _step_status(state_store, result.run_id, "7_report") == "success"
+
+
+class TestMixedOutcomeTextStepPreservesSuccesses:
+    def test_one_symbol_failing_keeps_the_other_symbols_news_and_degrades_the_run(
+        self, base_deps, state_store
+    ):
+        deps = replace(base_deps, news_client=PartiallyFailingNewsClient("MSFT"))
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "5_text") == "failed"
+        # step 6 still skips: no llm_client configured on base_deps.
+        assert _step_status(state_store, result.run_id, "6_llm") == "skipped"
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol FROM text_items WHERE source_type = 'news'"
+            ).fetchall()
+        # AAPL's news survived MSFT's fetch failure instead of being discarded.
+        assert {row[0] for row in rows} == {"AAPL"}
+
+
+class TestMixedOutcomeLLMStepPreservesSuccesses:
+    def test_one_candidates_budget_error_keeps_the_other_candidates_summary(
+        self, base_deps, state_store
+    ):
+        deps = replace(
+            base_deps,
+            news_client=FakeNewsClient(),
+            llm_client=PartiallyFailingLLMClient("MSFT"),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "6_llm") == "failed"
+        assert _step_status(state_store, result.run_id, "7_report") == "success"
+
+        html = result.report_path.read_text(encoding="utf-8")
+        # AAPL's summary survived MSFT's mid-loop BudgetExceededError instead
+        # of being discarded along with it.
+        assert "May indicate continued stability." in html
+        # Not the total-failure fallback: this is a partial, per-candidate
+        # degradation, not "no LLM output produced at all".
+        assert "本日はニュース・開示分析を取得できませんでした" not in html
+
+
+class TestHeldSymbolGetsTextCoverage:
+    def test_held_symbol_absent_from_todays_candidates_still_gets_text_coverage(
+        self, base_deps, state_store
+    ):
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol="TSLA",
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+            )
+        )
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol FROM text_items WHERE source_type = 'news'"
+            ).fetchall()
+        symbols_covered = {row[0] for row in rows}
+        # TSLA is held but not part of `universe`/today's screening candidates.
+        assert "TSLA" in symbols_covered
+        assert {"AAPL", "MSFT"} <= symbols_covered
 
 
 class TestNotifyFailureDegrades:

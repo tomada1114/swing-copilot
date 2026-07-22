@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -486,6 +487,46 @@ class TestRenderReportAtomicWrites:
         assert 'id="card-MSFT"' in latest_html
         assert 'id="card-AAPL"' not in latest_html
 
+    def test_replace_failure_preserves_previous_file_and_cleans_tmp(
+        self, market_store, state_store, tmp_path, monkeypatch
+    ):
+        output_dir = tmp_path / "reports"
+        _seed_market_and_symbols(market_store, ["AAPL"])
+        render_report(
+            _context(["AAPL"]),
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(output_dir),
+        )
+        previous_latest = (output_dir / "latest.html").read_text(encoding="utf-8")
+
+        _seed_market_and_symbols(market_store, ["MSFT"])
+
+        original_replace = Path.replace
+        replace_error_message = "simulated disk failure"
+
+        def failing_replace(self: Path, target: object) -> Path:
+            if self.name == ".latest.html.tmp":
+                raise OSError(replace_error_message)
+            return original_replace(self, target)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "replace", failing_replace)
+
+        with pytest.raises(OSError, match=replace_error_message):
+            render_report(
+                _context(["MSFT"]),
+                market_store,
+                state_store,
+                templates_dir="templates",
+                output_dir=str(output_dir),
+            )
+
+        assert (output_dir / "latest.html").read_text(
+            encoding="utf-8"
+        ) == previous_latest
+        assert list(output_dir.glob("*.tmp")) == []
+
 
 class TestRenderReportMarketStripUnavailable:
     def test_missing_index_bars_render_unavailable_label(
@@ -625,6 +666,64 @@ class TestRenderReportFundamentalsBlock:
         assert "<dt>自己資本比率</dt><dd>N/A</dd>" in html
         assert "<dt>直近EPS</dt><dd>N/A</dd>" in html
 
+    def test_missing_close_still_shows_eps_but_per_is_na(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AAPL"]
+        _seed_market_and_symbols(market_store, symbols)
+        market_store.upsert_fundamentals(
+            [
+                FundamentalsRecord(
+                    accession_no="acc-1",
+                    symbol="AAPL",
+                    form="10-Q",
+                    fiscal_period_end=date(2026, 6, 30),
+                    filed_at=datetime(2026, 7, 10, tzinfo=UTC),
+                    revenue=1_000_000.0,
+                    net_income=200_000.0,
+                    fcf=150_000.0,
+                    equity=5_000_000.0,
+                    assets=10_000_000.0,
+                    shares=1_000_000.0,
+                    source_url="https://www.sec.gov/example",
+                    fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+                )
+            ]
+        )
+        # No "close" key at all in metrics, matching how a candidate with no
+        # available close price is represented (design.md 2.1: EPS must not
+        # depend on close; only PER does).
+        context = ReportContext(
+            run_id=uuid4(),
+            run_date=_RUN_DATE,
+            generated_at=datetime(2026, 7, 20, 5, 16, tzinfo=UTC),
+            universe=_universe(symbols),
+            candidates=[
+                Candidate(
+                    symbol="AAPL",
+                    as_of=_RUN_DATE,
+                    signal_names=("trend_sma",),
+                    metrics={"rsi14": 55.0, "atr14": 4.2, "avg_volume": 3_000_000.0},
+                    rank=1,
+                )
+            ],
+            risk_assessments=[],
+            news_summaries=None,
+            filing_analyses=None,
+        )
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert "<dt>PER</dt><dd>N/A</dd>" in html
+        assert "<dt>直近EPS</dt><dd>$0.20</dd>" in html  # 200,000 / 1,000,000
+
 
 class TestRenderReportLLMPartialMatch:
     def test_symbol_absent_from_non_none_llm_lists_shows_neutral_message(
@@ -683,3 +782,33 @@ class TestRenderReportLLMPartialMatch:
         html = path.read_text(encoding="utf-8")
         assert "Filing-derived conclusion." in html
         assert "Regulatory scrutiny risk." in html
+
+
+class TestRenderReportLLMSingleItemInterpretation:
+    def test_single_item_interpretation_is_conclusion_only_not_duplicated(
+        self, market_store, state_store, tmp_path
+    ):
+        symbols = ["AAPL"]
+        _seed_market_and_symbols(market_store, symbols)
+        news = NewsSummary(
+            symbol="AAPL",
+            period="p",
+            facts=[SourcedFact(statement="Revenue grew.", source_ids=["news-1"])],
+            interpretation=["Only one interpretation sentence."],
+            sentiment=1,
+            risk_flags=[],
+            sources=[],
+        )
+        context = _context(symbols, news_summaries=[news], filing_analyses=None)
+
+        path = render_report(
+            context,
+            market_store,
+            state_store,
+            templates_dir="templates",
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        html = path.read_text(encoding="utf-8")
+        assert html.count("Only one interpretation sentence.") == 1
+        assert '<ul class="reasons">' not in html

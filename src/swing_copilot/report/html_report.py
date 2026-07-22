@@ -246,12 +246,16 @@ def _fundamentals_block(
     if record is None:
         return {"per": "N/A", "fcf": "N/A", "equity_ratio": "N/A", "eps": "N/A"}
 
-    per = "N/A"
+    # EPS depends only on the filing (net_income/shares); it must render even
+    # when `close` is unavailable (`design.md` 2.1). PER additionally needs a
+    # valid close and a positive EPS.
     eps_value: float | None = None
-    if record.net_income and record.shares and close is not None and close > 0:
+    if record.net_income and record.shares:
         eps_value = record.net_income / record.shares
-        if eps_value > 0:
-            per = f"{close / eps_value:.1f}x"
+
+    per = "N/A"
+    if eps_value is not None and eps_value > 0 and close is not None and close > 0:
+        per = f"{close / eps_value:.1f}x"
 
     fcf = f"${record.fcf:,.0f}" if record.fcf is not None else "N/A"
 
@@ -309,7 +313,7 @@ def _llm_block(
     return {
         "degraded": False,
         "conclusion": conclusion,
-        "reasons": interpretation[1:] if len(interpretation) > 1 else interpretation,
+        "reasons": interpretation[1:],
         "risk_flags": risk_flags,
         "facts": [fact.statement for fact in facts],
         "sources": _resolve_fact_sources(facts, url_by_id),
@@ -384,9 +388,22 @@ def _adjacent_reports(output_dir: Path, run_date: date) -> dict[str, str | None]
 
 
 def _atomic_write(path: Path, content: str) -> None:
+    """Write `content` to `path` via a same-directory temp file + `os.replace`.
+
+    On any failure, the previous `path` contents are left untouched and the
+    temp file is removed rather than left behind.
+
+    Args:
+        path: Destination file to replace.
+        content: Full file content to write.
+    """
     tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def render_report(

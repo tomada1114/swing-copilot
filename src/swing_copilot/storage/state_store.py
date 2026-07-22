@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from swing_copilot.models import Position, RunStatus, StepStatus
-from swing_copilot.storage import audit_records, llm_records
+from swing_copilot.storage import audit_records, llm_records, text_records
 from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from swing_copilot.screening.base import Candidate, SignalHit
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.llm_records import LLMCallRecord
+    from swing_copilot.text.base import TextItem
 
 _UNIVERSE_SOURCE = "wikipedia"
 
@@ -355,6 +356,25 @@ class StateStore:
         return llm_records.get_cached_response(
             self._database, model, prompt_hash, schema_version
         )
+
+    def record_text_items(self, items: Sequence[TextItem]) -> None:
+        """Persist collected text items, upserted by `source_id`.
+
+        Args:
+            items: Text items collected this run (news, filings, calendar).
+        """
+        text_records.record_text_items(self._database, items)
+
+    def get_source_urls(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """Resolve known `source_ids` to their `source_url`.
+
+        Args:
+            source_ids: Source IDs to resolve (e.g. an LLM fact's `source_ids`).
+
+        Returns:
+            A mapping for every `source_id` with a recorded text item.
+        """
+        return text_records.get_source_urls(self._database, source_ids)
 
     def get_monthly_llm_cost(self, as_of: date) -> float:
         """Return realized LLM cost for `as_of`'s calendar month.

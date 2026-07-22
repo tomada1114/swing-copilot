@@ -244,6 +244,40 @@ class MarketStore:
             else:
                 conn.execute("COMMIT")
 
+    def get_latest_fundamentals(
+        self, symbol: str, as_of: date
+    ) -> FundamentalsRecord | None:
+        """Return `symbol`'s most recently filed fundamentals row, if any.
+
+        Report-oriented single-record lookup (`docs/goal-prompts/
+        swing-copilot-p2-report-paper-wrapup/design.md` 2.1), distinct from
+        `read_fundamentals()`'s multi-row screening query.
+
+        Args:
+            symbol: Ticker to look up.
+            as_of: Point-in-time filing cutoff, inclusive for the whole date.
+
+        Returns:
+            The most recent matching row, or `None` if no filing for
+            `symbol` was filed at or before `as_of`.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT accession_no, symbol, form, fiscal_period_end, filed_at,
+                       revenue, net_income, fcf, equity, assets, shares,
+                       source_url, fetched_at
+                FROM fundamentals
+                WHERE symbol = ? AND CAST(filed_at AS DATE) <= ?
+                ORDER BY filed_at DESC
+                LIMIT 1
+                """,
+                [symbol, as_of],
+            ).fetchone()
+        if row is None:
+            return None
+        return FundamentalsRecord(*row)
+
     def read_fundamentals(self, as_of: date) -> pd.DataFrame:
         """Read every fundamentals row filed on or before `as_of`.
 

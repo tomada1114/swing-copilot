@@ -28,3 +28,13 @@ class TestDatabase:
             result = conn.execute("SELECT a FROM t").fetchall()
 
         assert result == [(42,)]
+
+    def test_session_timezone_is_utc_regardless_of_host_locale(self, tmp_path):
+        # TIMESTAMPTZ -> DATE casts (as_of point-in-time boundaries) must be
+        # deterministic no matter which timezone the host machine runs in.
+        database = Database(tmp_path / "copilot.duckdb")
+
+        with database.connect() as conn:
+            timezone = conn.execute("SELECT current_setting('TimeZone')").fetchone()
+
+        assert timezone == ("UTC",)

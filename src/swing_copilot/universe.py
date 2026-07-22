@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import io
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+import httpx
 import pandas as pd
 
+from swing_copilot import __version__
 from swing_copilot.exceptions import SwingCopilotError
 
 if TYPE_CHECKING:
@@ -27,6 +31,10 @@ if TYPE_CHECKING:
 WIKIPEDIA_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 DEFAULT_SNAPSHOT_PATH = Path("config/universe_snapshot.csv")
 _SNAPSHOT_FIELDS = ("symbol", "company_name", "gics_sector", "source_symbol")
+_RETRY_DELAYS_SECONDS = (1.0, 2.0)  # 3 total attempts, mirrors data/edgar.py
+_WIKIPEDIA_USER_AGENT = (
+    f"swing-copilot/{__version__} (https://github.com/tomada1114/swing-copilot)"
+)
 
 
 class UniverseError(SwingCopilotError):
@@ -64,9 +72,53 @@ def _normalize_symbol(source_symbol: str) -> str:
     return source_symbol.strip().replace(".", "-")
 
 
-def fetch_from_wikipedia() -> list[UniverseMember]:
-    """Fetch current S&P 500 membership from the Wikipedia constituents table."""
-    table = pd.read_html(WIKIPEDIA_SP500_URL)[0]
+def _get_wikipedia_page() -> str:
+    """Fetch the Wikipedia constituents page with a compliant User-Agent.
+
+    Wikipedia returns HTTP 403 to the default urllib User-Agent that a bare
+    ``pd.read_html(url)`` call would send, so the HTML is fetched explicitly
+    via `httpx` with a Wikimedia-UA-policy-compliant identity string first.
+    """
+    response = httpx.get(
+        WIKIPEDIA_SP500_URL,
+        headers={"User-Agent": _WIKIPEDIA_USER_AGENT},
+        timeout=10.0,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    return response.text
+
+
+def _fetch_wikipedia_html(sleep_fn: Callable[[float], None]) -> str:
+    """Fetch the constituents page HTML with bounded retry on transport errors.
+
+    Retries `httpx.HTTPError` (connection failures and non-2xx statuses,
+    including the 403 above) with a fixed backoff, mirroring
+    `data/edgar.py`'s `_with_retries`. The final attempt is unguarded so a
+    persistent failure propagates to the caller.
+    """
+    for delay in _RETRY_DELAYS_SECONDS:
+        try:
+            return _get_wikipedia_page()
+        except httpx.HTTPError:
+            sleep_fn(delay)
+    return _get_wikipedia_page()
+
+
+def fetch_from_wikipedia(
+    *, sleep_fn: Callable[[float], None] = time.sleep
+) -> list[UniverseMember]:
+    """Fetch current S&P 500 membership from the Wikipedia constituents table.
+
+    Args:
+        sleep_fn: Injectable sleep function used between retry attempts;
+            tests inject a fake to stay instant and offline.
+
+    Returns:
+        Normalized S&P 500 constituents.
+    """
+    html = _fetch_wikipedia_html(sleep_fn)
+    table = pd.read_html(io.StringIO(html))[0]
     return [
         UniverseMember(
             symbol=_normalize_symbol(str(row["Symbol"])),

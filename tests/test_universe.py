@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
+import httpx
 import pandas as pd
 import pytest
 
 from swing_copilot.universe import (
+    WIKIPEDIA_SP500_URL,
     UniverseError,
     UniverseFetchOptions,
     UniverseMember,
@@ -18,9 +20,62 @@ from swing_copilot.universe import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 AS_OF = date(2026, 7, 20)
+
+_CONSTITUENTS_HTML = """
+<table>
+<tr><th>Symbol</th><th>Security</th><th>GICS Sector</th></tr>
+<tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td></tr>
+<tr><td>BRK.B</td><td>Berkshire Hathaway</td><td>Financials</td></tr>
+</table>
+"""
+
+
+class _RecordedCall(TypedDict):
+    """One recorded `httpx.get` invocation, as seen by `_fake_httpx_get`."""
+
+    url: str
+    headers: dict[str, str]
+    timeout: float
+    follow_redirects: bool
+
+
+def _fake_httpx_get(
+    calls: list[_RecordedCall], responses: list[httpx.Response | Exception]
+) -> Callable[..., httpx.Response]:
+    """Build a fake `httpx.get` recording each call and popping a canned reply."""
+
+    def _get(
+        url: str, *, headers: dict[str, str], timeout: float, follow_redirects: bool
+    ) -> httpx.Response:
+        calls.append(
+            {
+                "url": url,
+                "headers": headers,
+                "timeout": timeout,
+                "follow_redirects": follow_redirects,
+            }
+        )
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    return _get
+
+
+def _ok_response(text: str = _CONSTITUENTS_HTML) -> httpx.Response:
+    return httpx.Response(
+        200, text=text, request=httpx.Request("GET", WIKIPEDIA_SP500_URL)
+    )
+
+
+def _status_error_response(status_code: int) -> httpx.Response:
+    return httpx.Response(
+        status_code, text="", request=httpx.Request("GET", WIKIPEDIA_SP500_URL)
+    )
 
 
 def _members(*rows: tuple[str, str, str, str]) -> list[UniverseMember]:
@@ -269,6 +324,11 @@ class TestFetchFromWikipedia:
                 "GICS Sector": ["Information Technology", "Financials"],
             }
         )
+        calls: list[_RecordedCall] = []
+        monkeypatch.setattr(
+            "swing_copilot.universe.httpx.get",
+            _fake_httpx_get(calls, [_ok_response()]),
+        )
         monkeypatch.setattr("swing_copilot.universe.pd.read_html", lambda _url: [table])
 
         result = fetch_from_wikipedia()
@@ -287,3 +347,92 @@ class TestFetchFromWikipedia:
                 source_symbol="BRK.B",
             ),
         ]
+
+    def test_sends_wikimedia_compliant_user_agent_and_timeout(self, monkeypatch):
+        calls: list[_RecordedCall] = []
+        monkeypatch.setattr(
+            "swing_copilot.universe.httpx.get",
+            _fake_httpx_get(calls, [_ok_response()]),
+        )
+
+        fetch_from_wikipedia()
+
+        assert len(calls) == 1
+        assert calls[0]["url"] == WIKIPEDIA_SP500_URL
+        assert calls[0]["timeout"] == 10.0
+        assert calls[0]["follow_redirects"] is True
+        user_agent = calls[0]["headers"]["User-Agent"]
+        assert user_agent.startswith("swing-copilot/")
+        assert "github.com/tomada1114/swing-copilot" in user_agent
+
+    def test_retries_with_backoff_then_propagates_after_persistent_403(
+        self, monkeypatch
+    ):
+        calls: list[_RecordedCall] = []
+        responses: list[httpx.Response | Exception] = [
+            _status_error_response(403) for _ in range(3)
+        ]
+        monkeypatch.setattr(
+            "swing_copilot.universe.httpx.get",
+            _fake_httpx_get(calls, responses),
+        )
+        sleeps: list[float] = []
+
+        with pytest.raises(httpx.HTTPStatusError):
+            fetch_from_wikipedia(sleep_fn=sleeps.append)
+
+        assert len(calls) == 3
+        assert sleeps == [1.0, 2.0]
+
+    def test_retries_transient_failure_then_succeeds(self, monkeypatch):
+        table = pd.DataFrame(
+            {
+                "Symbol": ["AAPL"],
+                "Security": ["Apple Inc."],
+                "GICS Sector": ["Information Technology"],
+            }
+        )
+        calls: list[_RecordedCall] = []
+        responses: list[httpx.Response | Exception] = [
+            _status_error_response(403),
+            _ok_response(),
+        ]
+        monkeypatch.setattr(
+            "swing_copilot.universe.httpx.get",
+            _fake_httpx_get(calls, responses),
+        )
+        monkeypatch.setattr("swing_copilot.universe.pd.read_html", lambda _url: [table])
+        sleeps: list[float] = []
+
+        result = fetch_from_wikipedia(sleep_fn=sleeps.append)
+
+        assert len(calls) == 2
+        assert sleeps == [1.0]
+        assert result == [
+            UniverseMember(
+                symbol="AAPL",
+                company_name="Apple Inc.",
+                gics_sector="Information Technology",
+                source_symbol="AAPL",
+            )
+        ]
+
+    def test_parse_error_after_successful_fetch_is_not_retried(self, monkeypatch):
+        calls: list[_RecordedCall] = []
+        monkeypatch.setattr(
+            "swing_copilot.universe.httpx.get",
+            _fake_httpx_get(calls, [_ok_response()]),
+        )
+
+        def _boom(_html):
+            msg = "malformed table"
+            raise ValueError(msg)
+
+        monkeypatch.setattr("swing_copilot.universe.pd.read_html", _boom)
+        sleeps: list[float] = []
+
+        with pytest.raises(ValueError, match="malformed table"):
+            fetch_from_wikipedia(sleep_fn=sleeps.append)
+
+        assert len(calls) == 1
+        assert sleeps == []

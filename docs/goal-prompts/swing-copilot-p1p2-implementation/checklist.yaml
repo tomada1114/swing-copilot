@@ -63,7 +63,7 @@ items:
   - id: P2-4
     task: "Implement chart data, offline HTML/assets, Discord adapter, atomic dated/latest reports and safe rendering."
     acceptance: "`uv run pytest tests/report -v` exits 0 for zero/ten candidates, LLM present/degraded, XSS payloads, offline assets, v5 chart calls, attribution, disclaimer, and atomic latest."
-    status: pending
+    status: done
   - id: P2-5
     task: "Implement paper decisions/positions and performance summary in DuckDB."
     acceptance: "`uv run pytest tests/paper -v` exits 0 for decision idempotency, position lifecycle, invalid transitions, P&L and SPY comparison."

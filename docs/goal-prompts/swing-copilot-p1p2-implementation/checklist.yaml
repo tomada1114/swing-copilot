@@ -71,7 +71,7 @@ items:
   - id: P2-6
     task: "Wire all nine steps and the fully offline five-symbol E2E path."
     acceptance: "`uv run pytest tests/test_e2e_smoke.py tests/pipeline/test_failsoft.py -v` exits 0; text/LLM/notify failures degrade, while market/store/screening failures exit nonzero and remain rerunnable."
-    status: pending
+    status: done
   - id: FINAL
     task: "Update public API/docs/changelog, run complete verification, commit all implementation work, and optionally run live canary."
     acceptance: "On the committed tree, `just verify` and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."

@@ -75,4 +75,4 @@ items:
   - id: FINAL
     task: "Update public API/docs/changelog, run complete verification, commit all implementation work, and optionally run live canary."
     acceptance: "On the committed tree, `just verify` and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."
-    status: pending
+    status: done

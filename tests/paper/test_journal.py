@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pandas as pd
 import pytest
@@ -35,7 +35,11 @@ def journal(state_store):
 
 
 def _open_position(
-    position_id=None, *, entry_price=100.0, shares=10, entry_date=date(2026, 7, 1)
+    position_id: UUID | None = None,
+    *,
+    entry_price: float = 100.0,
+    shares: int = 10,
+    entry_date: date = date(2026, 7, 1),
 ) -> Position:
     return Position(
         position_id=position_id or uuid4(),

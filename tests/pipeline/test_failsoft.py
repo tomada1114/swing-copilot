@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunStatus
@@ -159,13 +163,15 @@ def base_deps(settings, market_store, state_store, tmp_path):
     )
 
 
-def _step_status(state_store: StateStore, run_id, step: str) -> str:
+def _step_status(state_store: StateStore, run_id: UUID, step: str) -> str:
     with state_store._database.connect() as conn:  # noqa: SLF001
         row = conn.execute(
             "SELECT status FROM run_steps WHERE run_id = ? AND step = ?",
             [str(run_id), step],
         ).fetchone()
-    return row[0]
+    assert row is not None
+    status: str = row[0]
+    return status
 
 
 class TestTextCollectionFailureDegrades:
@@ -189,6 +195,7 @@ class TestTextCollectionFailureDegrades:
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
+        assert result.report_path is not None
         html = result.report_path.read_text(encoding="utf-8")
         assert "本日はニュース・開示分析を取得できませんでした" in html
         # Non-LLM card content still renders normally (fail-soft, not hidden).

@@ -354,6 +354,10 @@ class TestFundamentalsStepSkipped:
                 msg = "EDGAR unreachable"
                 raise RuntimeError(msg)
 
+            def fetch_filing_texts(self, symbol, form_types, *, as_of):
+                del symbol, form_types, as_of
+                return []
+
         universe = (_member("AAPL"),)
         deps_with_edgar = DailyDependencies(
             data_provider=FakeDataProvider(_bars_for(["AAPL"], AS_OF)),

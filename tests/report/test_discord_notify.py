@@ -15,7 +15,7 @@ _UNEXPECTED_CALL_MESSAGE = (
 )
 
 
-def _fake_post_ok(url: str, json: dict[str, object]) -> _FakeResponse:
+def _fake_post_ok(url, json):
     return _FakeResponse(204)
 
 

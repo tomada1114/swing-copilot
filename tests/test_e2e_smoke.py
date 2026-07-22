@@ -258,6 +258,7 @@ class TestFiveSymbolEndToEnd:
     def test_report_contains_every_candidate_and_llm_content(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
+        assert result.report_path is not None
         html = result.report_path.read_text(encoding="utf-8")
         for symbol in SYMBOLS:
             assert f'id="card-{symbol}"' in html
@@ -269,6 +270,7 @@ class TestFiveSymbolEndToEnd:
         # explicitly fetches them too.
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
+        assert result.report_path is not None
         html = result.report_path.read_text(encoding="utf-8")
         assert "取得不可" not in html
         for symbol in MARKET_STRIP_SYMBOLS:

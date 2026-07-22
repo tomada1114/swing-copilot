@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import date
-from uuid import uuid4
+from typing import Literal
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -98,7 +99,11 @@ class TestRecordTradeDecision:
 
 
 def _position(
-    position_id, *, status="open", close_date=None, close_price=None
+    position_id: UUID,
+    *,
+    status: Literal["open", "closed"] = "open",
+    close_date: date | None = None,
+    close_price: float | None = None,
 ) -> Position:
     return Position(
         position_id=position_id,

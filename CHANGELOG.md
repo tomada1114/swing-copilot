@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-daily` CLI (`uv run copilot-daily [--as-of] [--dry-run]
+  [--skip-text] [--skip-llm] [--limit N] [--no-open]`), wiring all nine
+  daily-batch steps: price/fundamentals/screening/risk (fatal on
+  failure), text collection and LLM analysis (fail-soft, degrade the
+  run without aborting it), report generation, Discord notification,
+  and local browser auto-open
+- `report/html_report.py` + `templates/report.html.j2` +
+  `reports/assets/style.css`: the daily Morning Briefing report —
+  market strip, risk warnings, ranked candidate table, and per-symbol
+  detail cards (TradingView Lightweight Charts v5, fundamentals, risk
+  sizing, a fail-soft LLM summary block), written atomically to
+  `reports/{run_date}.html` and `reports/latest.html`
+- `report/discord_notify.py`: optional Discord webhook notification
+  (`notification.enabled`), never raising — a failed send degrades the
+  run instead of stopping it
+- `paper/journal.py`: paper-trading decision log (idempotent
+  `record_decision`), position lifecycle (`close_position`, rejecting a
+  missing/already-closed position instead of a silent no-op), and
+  `summarize_performance()` (closed-trade P&L/win-rate vs. a SPY
+  buy-and-hold benchmark over the same span)
+- `MarketStore.get_latest_fundamentals()`, `StateStore.get_position()`/
+  `get_closed_positions()`/`record_trade_decision()`/
+  `record_text_items()`/`get_source_urls()`: report- and paper-trading-
+  oriented storage queries
 - Initial project structure
 - `scripts/bootstrap.py` deterministic template initializer: renames the
   package and replaces every placeholder (`swing-copilot`, `swing_copilot`,
@@ -68,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Database.connect()` now forces the DuckDB session `TimeZone` to UTC —
+  `TIMESTAMPTZ -> DATE` `as_of` boundary casts previously used the host
+  machine's local timezone, which could include or exclude a filing
+  near a UTC-midnight boundary depending on where the batch ran
+- The price step now also fetches the market strip's fixed index
+  symbols (SPY/QQQ/^VIX/^TNX), which are never S&P 500 constituents and
+  so previously never got bars written for the report's market strip
 - Switched to PEP 639 license metadata (`license-files`, dropped the
   redundant OSI trove classifier)
 - `CONTRIBUTING.md`'s manual mypy command now includes `tests`, matching

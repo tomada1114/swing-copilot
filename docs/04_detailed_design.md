@@ -657,29 +657,49 @@ def analyze_filing(
 
 ### 3.18 `report/html_report.py` / `report/discord_notify.py`（FR-09, NFR-07）
 
-```python
-def render_report(
-    run_id: UUID, run_date: date, candidates: list[Candidate], risk_assessments: list[RiskAssessment],
-    news_summaries: list[NewsSummary] | None, filing_analyses: list[FilingAnalysis] | None,
-) -> str:
-    """
-    templates/report.html.j2（Jinja2）を用いてHTMLレポートを生成し、
-    reports/{run_date}.html へ保存してパスを返す。
-    news_summaries/filing_analyses がNone（LLM分析失敗時）の場合は
-    スクリーニング結果のみの縮退版として描画する（FR-12フェイルソフト）。
-    """
+> **P2-4実装時の訂正（2026-07-22）**: 以下は実装済みの正確なシグネチャである。
+> `render_report()`は`ReportContext`（run_id/run_date/generated_at/universe/
+> candidates/risk_assessments/news_summaries/filing_analyses）を1引数へまとめ、
+> `market_store`・`state_store`（LLM factのsource_id解決用）・
+> `templates_dir`/`output_dir`を追加で受け取る（5引数超過のため`docs/
+> goal-prompts/swing-copilot-p2-report-paper-wrapup/design.md`が許可する
+> グループ化dataclassを採用）。戻り値は生成したHTML文字列ではなく、書き込んだ
+> `reports/{run_date}.html`への`Path`。`Notifier.notify()`は例外を送出しない
+> 代わりに`bool`（送信成功/失敗）を返す — `-> None`のままでは、呼び出し元
+> （`pipeline/daily.py`のstep 8）が「例外なしの失敗」を検知する手段がなく、
+> `run_steps`にfailedを記録できないため。
 
+```python
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
+
+from swing_copilot.report.html_report import ReportContext
+
+def render_report(
+    context: ReportContext,
+    market_store: "MarketStore",
+    state_store: "StateStore",
+    templates_dir: str = "templates",
+    output_dir: str = "reports",
+) -> Path:
+    """
+    templates/report.html.j2（Jinja2）を用いてHTMLレポートを生成し、
+    reports/{run_date}.html と reports/latest.html へ原子的に書き込んで
+    前者のPathを返す。context.news_summaries/filing_analysesがNone
+    （LLM分析失敗時）の場合はスクリーニング結果のみの縮退版として
+    描画する（FR-12フェイルソフト）。
+    """
 
 class Notifier(Protocol):
     """
     通知送信の抽象インターフェース（NFR-07）。DiscordNotifierはこの実装の1つである。
     """
 
-    def notify(self, summary: str, report_path: Path | None) -> None:
+    def notify(self, summary: str, report_path: Path | None) -> bool:
         """通知を送信する。summaryは通知本文（サマリテキスト）、report_pathは
-        言及するレポートファイルへのパス（Noneの場合はレポートへの言及なし）。"""
+        言及するレポートファイルへのパス（Noneの場合はレポートへの言及なし）。
+        戻り値は送信成功の真偽値。例外は送出しない。"""
         ...
 
 class DiscordNotifier:
@@ -688,10 +708,12 @@ class DiscordNotifier:
     def __init__(self, webhook_url: str):
         ...
 
-    def notify(self, summary: str, report_path: Path | None) -> None:
+    def notify(self, summary: str, report_path: Path | None) -> bool:
         """
         Discord Webhookへレポートの要約（サマリテキスト＋レポートへの言及）を送信する。
-        送信失敗時はrun_stepsにfailedを記録し、例外は送出しない（バッチ全体を止めない）。
+        送信失敗時はFalseを返し、例外は送出しない（バッチ全体を止めない）。
+        呼び出し元（pipeline/daily.py step 8）がFalseを見てrun_stepsに
+        failedを記録する。
         """
 ```
 
@@ -722,42 +744,96 @@ def run_backtest(
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
+> **P2-5実装時の訂正（2026-07-22）**: 以下の`signal_id: int`/`position_id: int`
+> は本節のpseudocodeが`storage/schema.py`のスキーマ確定前に書かれた記述であり、
+> `signal_id`列はどこにも存在せず、`positions.position_id`は`UUID`である。
+> 実装はスキーマを正本とし、`record_decision`の自然キーは
+> `trades_journal`の`UNIQUE (run_id, symbol, strategy_key)`制約に合わせて
+> `(run_id, symbol, strategy_key)`とした（`docs/goal-prompts/
+> swing-copilot-p2-report-paper-wrapup/decisions.md`参照）。
+
 ```python
+from uuid import UUID
+
 class PaperJournal:
-    """ペーパートレードの記帳。人間の判断（追随/見送り/修正）と仮想約定を記録する。"""
+    """ペーパートレードの記帳。人間の判断（追随/見送り/修正）と仮想約定を記録する。
+    StateStoreをラップし、positions/trades_journalへの2つ目の接続は持たない。"""
 
     def record_decision(
-        self, signal_id: int, decision: str, reason_memo: str,
-        virtual_fill_price: float | None,
+        self, run_id: UUID, symbol: str, strategy_key: str, decision: str,
+        reason_memo: str | None, virtual_fill_price: float | None,
     ) -> None:
         """
-        decisionは "followed" | "ignored" | "modified"。trades_journalへ記録する。
+        decisionは "followed" | "ignored" | "modified"。
+        trades_journalを(run_id, symbol, strategy_key)で自然キーupsertする
+        （同一キーの再記録は行を更新し、重複挿入しない）。
         CON-04（ペーパートレード検証ゲート）の実績データ元となる。
         """
 
-    def close_position(self, position_id: int, close_date: "date", close_price: float) -> None:
-        """オープン中のペーパーポジションをクローズし、positionsを更新する。"""
+    def close_position(self, position_id: UUID, close_date: "date", close_price: float) -> None:
+        """
+        オープン中のペーパーポジションをクローズし、positionsを更新する。
+        position_idが存在しない、または既にクローズ済みの場合は
+        PositionNotClosableError（SwingCopilotError派生）を送出する
+        ——サイレントなno-opにしない。
+        """
+
+    def summarize_performance(
+        self, market_store: "MarketStore", as_of: "date"
+    ) -> "PerformanceSummary":
+        """
+        クローズ済みペーパートレードの集計P&L・勝率と、同期間
+        （最古のクローズ済みentry_date..as_of）のSPYバイ&ホールド
+        リターンを返す（backtest/engine.pyのbenchmarkと同じ考え方を
+        実トレードへ適用）。SPY足が不足する場合はspy_return_pctがNone。
+        """
+```
+
+```python
+@dataclass(frozen=True, slots=True)
+class PerformanceSummary:
+    closed_trade_count: int
+    total_pnl_usd: float
+    win_rate: float          # クローズ済みトレードのうち含み益だった割合。0件ならOK 0.0
+    spy_return_pct: float | None  # SPY足が不足する場合はNone
 ```
 
 ### 3.21 `pipeline/daily.py`（FR-12）
 
+> **P2-6実装時の訂正（2026-07-22）**: `run_daily()`は`(options, deps)`の2引数を
+> 取る（`deps: DailyDependencies`が実/fakeの協力オブジェクト一式を運ぶ
+> composition-root値）。ステップ9の自動表示ゲートは`docs/05_ui_design.md`
+> 10.3が逐語指定する3条件（`is_dry_run` / `no_open` / `CI`環境変数）のみで、
+> `settings.report.auto_open`は判定に使わない
+> （10.3策定時点でこの3条件が確定仕様とされたため、本節の
+> 旧pseudocodeが挙げていた`report.auto_open`は現状未使用の予約フィールド
+> として`config.py`に残る — 将来この設定を実際にゲートへ組み込むか、
+> フィールド自体を削除するかは未決定のフォローアップ）。
+> ステップ1-4のいずれかが失敗した場合のみ`exit_code`が非ゼロになり、
+> ステップ5-9（テキスト収集・LLM分析・レポート・通知・自動表示）は
+> 失敗してもバッチを止めず`RunStatus.DEGRADED`（`exit_code=0`）に留める
+> （`docs/03_basic_design.md` 7章）。
+
 ```python
-def run_daily(options: "DailyRunOptions") -> "DailyRunResult":
+def run_daily(
+    options: "DailyRunOptions", deps: "DailyDependencies"
+) -> "DailyRunResult":
     """
     日次バッチのオーケストレータ。docs/03_basic_design.md 4章の9ステップを
     固定順で実行する。各ステップの成否・詳細・所要時間をrun_stepsへ記録する。
     最終ステップ(9)では、生成したレポートを webbrowser.open() でデフォルトブラウザに
-    自動表示する（settings.yamlのreport.auto_open、デフォルトtrue）。
+    自動表示する（is_dry_run/no_open/CI環境変数の3条件でのみ抑止）。
     dry_run=Trueの場合、fixture/fake providerを必須とし、実ネットワークとブラウザ表示を禁止する。
     skip_text/skip_llmはP1段階での動作確認用フラグ。
-    戻り値: プロセス終了コード（0=成功、非ゼロ=致命的失敗）。
+    戻り値: DailyRunResult.exit_code（0=成功/縮退成功、非ゼロ=ステップ1-4の致命的失敗）。
     CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--skip-llm] [--limit N] [--no-open]`
     （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ。`--no-open`: レポート生成後の自動ブラウザ表示を抑止する。いずれも通常運用では未指定）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
 
-def main() -> None:
-    """CLI引数をDailyRunOptionsへ変換し、DailyRunResult.exit_codeで終了する。"""
+def main(argv: list[str] | None = None) -> None:
+    """CLI引数をDailyRunOptionsへ変換し、実アダプタ一式をcomposeして実行、
+    DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
 
 ---

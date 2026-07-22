@@ -11,7 +11,7 @@ from datetime import date
 
 import pytest
 
-from swing_copilot.config import Secrets, load_settings
+from swing_copilot.config import Secrets, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.models import DailyRunOptions
 from swing_copilot.pipeline import daily as daily_module
@@ -119,7 +119,7 @@ class TestComposeDependencies:
     def test_missing_required_secret_raises_config_error(self, monkeypatch):
         monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
         settings = load_settings("config/settings.yaml")
-        strategies = daily_module.load_strategies("config/strategies.yaml")
+        strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="edgar_identity"):
             _compose_dependencies(
@@ -133,7 +133,7 @@ class TestComposeDependencies:
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
         settings = load_settings("config/settings.yaml")
-        strategies = daily_module.load_strategies("config/strategies.yaml")
+        strategies = load_strategies("config/strategies.yaml")
 
         deps = _compose_dependencies(
             DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
@@ -158,7 +158,7 @@ class TestComposeDependencies:
             ),
         )
         settings = load_settings("config/settings.yaml")
-        strategies = daily_module.load_strategies("config/strategies.yaml")
+        strategies = load_strategies("config/strategies.yaml")
 
         deps = _compose_dependencies(DailyRunOptions(), settings, strategies)
 
@@ -179,7 +179,7 @@ class TestComposeDependencies:
         )
         settings = load_settings("config/settings.yaml")
         object.__setattr__(settings.notification, "enabled", True)
-        strategies = daily_module.load_strategies("config/strategies.yaml")
+        strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="discord_webhook_url"):
             _compose_dependencies(

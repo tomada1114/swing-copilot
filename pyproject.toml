@@ -36,6 +36,9 @@ dependencies = [
     "jinja2>=3.1",
 ]
 
+[project.scripts]
+copilot-daily = "swing_copilot.pipeline.daily:main"
+
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"
 Documentation = "https://tomada1114.github.io/swing-copilot"

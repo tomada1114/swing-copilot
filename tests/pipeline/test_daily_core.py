@@ -1,4 +1,8 @@
-"""Tests for pipeline/daily.py steps 1-4: as_of/run_id, fatal errors, idempotency (FR-12)."""
+"""Tests for pipeline/daily.py's fatal steps 1-4 (FR-12).
+
+Fail-soft steps 5-9 are covered by tests/pipeline/test_failsoft.py and
+tests/test_e2e_smoke.py.
+"""
 
 from __future__ import annotations
 
@@ -102,7 +106,7 @@ def state_store(tmp_path):
 
 
 @pytest.fixture
-def deps(settings, market_store, state_store):
+def deps(settings, market_store, state_store, tmp_path):
     universe = (_member("AAPL"), _member("MSFT"))
     bars = _bars_for(["AAPL", "MSFT"], AS_OF)
     return DailyDependencies(
@@ -114,11 +118,12 @@ def deps(settings, market_store, state_store):
         strategies_config=STRATEGIES_CONFIG,
         clock=FakeClock(),
         edgar_client=None,
+        output_dir=str(tmp_path / "reports"),
     )
 
 
 class TestHappyPath:
-    def test_completes_all_four_steps_successfully(self, deps, state_store):
+    def test_completes_all_nine_steps_successfully(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
@@ -135,8 +140,15 @@ class TestHappyPath:
             "2_fundamentals",
             "3_screening",
             "4_risk",
+            "5_text",
+            "6_llm",
+            "7_report",
+            "8_notify",
+            "9_open",
         ]
-        assert all(status == "success" for _step, status in steps)
+        # 1/3/4/7/9 succeed outright; 2/5/6/8 are deliberate skips (no
+        # optional clients configured) — none of these are failures.
+        assert all(status in {"success", "skipped"} for _step, status in steps)
 
         bars = deps.market_store.read_bars(
             ["AAPL", "MSFT"], AS_OF - timedelta(days=400), AS_OF, AS_OF
@@ -172,8 +184,8 @@ class TestIdempotency:
             second_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(second.run_id)]
             ).fetchone()
-        assert first_steps == (4,)
-        assert second_steps == (4,)
+        assert first_steps == (9,)
+        assert second_steps == (9,)
 
 
 class TestFatalStepFailure:
@@ -260,9 +272,7 @@ class TestSymbolLimit:
 
 
 class TestFundamentalsStepSkipped:
-    def test_no_edgar_client_records_step_as_success_with_skip_detail(
-        self, deps, state_store
-    ):
+    def test_no_edgar_client_records_step_as_skipped(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -270,11 +280,11 @@ class TestFundamentalsStepSkipped:
                 "SELECT status, detail FROM run_steps WHERE run_id = ? AND step = '2_fundamentals'",
                 [str(result.run_id)],
             ).fetchone()
-        assert row[0] == "success"
+        assert row[0] == "skipped"
         assert "skipped" in row[1]
 
     def test_edgar_client_partial_failure_still_succeeds(
-        self, settings, market_store, state_store
+        self, settings, market_store, state_store, tmp_path
     ):
 
         class FakeEdgarClient:
@@ -305,6 +315,10 @@ class TestFundamentalsStepSkipped:
                 msg = "EDGAR unreachable"
                 raise RuntimeError(msg)
 
+            def fetch_filing_texts(self, symbol, form_types, *, as_of):
+                del symbol, form_types, as_of
+                return []
+
         universe = (_member("AAPL"), _member("MSFT"))
         deps_with_edgar = DailyDependencies(
             data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
@@ -315,6 +329,7 @@ class TestFundamentalsStepSkipped:
             strategies_config=STRATEGIES_CONFIG,
             clock=FakeClock(),
             edgar_client=FakeEdgarClient(),
+            output_dir=str(tmp_path / "reports"),
         )
 
         result = run_daily(

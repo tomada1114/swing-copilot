@@ -63,16 +63,16 @@ items:
   - id: P2-4
     task: "Implement chart data, offline HTML/assets, Discord adapter, atomic dated/latest reports and safe rendering."
     acceptance: "`uv run pytest tests/report -v` exits 0 for zero/ten candidates, LLM present/degraded, XSS payloads, offline assets, v5 chart calls, attribution, disclaimer, and atomic latest."
-    status: pending
+    status: done
   - id: P2-5
     task: "Implement paper decisions/positions and performance summary in DuckDB."
     acceptance: "`uv run pytest tests/paper -v` exits 0 for decision idempotency, position lifecycle, invalid transitions, P&L and SPY comparison."
-    status: pending
+    status: done
   - id: P2-6
     task: "Wire all nine steps and the fully offline five-symbol E2E path."
     acceptance: "`uv run pytest tests/test_e2e_smoke.py tests/pipeline/test_failsoft.py -v` exits 0; text/LLM/notify failures degrade, while market/store/screening failures exit nonzero and remain rerunnable."
-    status: pending
+    status: done
   - id: FINAL
     task: "Update public API/docs/changelog, run complete verification, commit all implementation work, and optionally run live canary."
     acceptance: "On the committed tree, `just verify` and `git status --short` satisfy goal.md DONE WHEN; live canary result or blocker is reported separately."
-    status: pending
+    status: done

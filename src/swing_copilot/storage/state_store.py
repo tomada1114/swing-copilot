@@ -11,11 +11,16 @@ land, without re-touching schema creation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from swing_copilot.models import Position, RunStatus, StepStatus
-from swing_copilot.storage import audit_records, llm_records
+from swing_copilot.storage import (
+    audit_records,
+    llm_records,
+    paper_records,
+    text_records,
+)
 from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
@@ -30,6 +35,8 @@ if TYPE_CHECKING:
     from swing_copilot.screening.base import Candidate, SignalHit
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.llm_records import LLMCallRecord
+    from swing_copilot.storage.paper_records import TradeDecisionRecord
+    from swing_copilot.text.base import TextItem
 
 _UNIVERSE_SOURCE = "wikipedia"
 
@@ -173,6 +180,26 @@ class StateStore:
                 ],
             )
 
+    _POSITION_COLUMNS = (
+        "position_id, symbol, is_paper, entry_date, entry_price, "
+        "shares, stop_price, status, close_date, close_price"
+    )
+
+    @staticmethod
+    def _position_from_row(row: tuple[Any, ...]) -> Position:  # Any: untyped DuckDB row
+        return Position(
+            position_id=row[0],
+            symbol=row[1],
+            is_paper=row[2],
+            entry_date=row[3],
+            entry_price=row[4],
+            shares=row[5],
+            stop_price=row[6],
+            status=row[7],
+            close_date=row[8],
+            close_price=row[9],
+        )
+
     def get_open_positions(self, is_paper: bool = True) -> list[Position]:
         """Return open positions matching `is_paper`.
 
@@ -184,29 +211,64 @@ class StateStore:
         """
         with self._database.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT position_id, symbol, is_paper, entry_date, entry_price,
-                       shares, stop_price, status, close_date, close_price
-                FROM positions
-                WHERE status = 'open' AND is_paper = ?
-                """,
+                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+                "FROM positions WHERE status = 'open' AND is_paper = ?",
                 [is_paper],
             ).fetchall()
-        return [
-            Position(
-                position_id=row[0],
-                symbol=row[1],
-                is_paper=row[2],
-                entry_date=row[3],
-                entry_price=row[4],
-                shares=row[5],
-                stop_price=row[6],
-                status=row[7],
-                close_date=row[8],
-                close_price=row[9],
-            )
-            for row in rows
-        ]
+        return [self._position_from_row(row) for row in rows]
+
+    def get_position(self, position_id: UUID) -> Position | None:
+        """Return one position by ID, regardless of status.
+
+        Args:
+            position_id: The position to look up.
+
+        Returns:
+            The matching position, or `None` if it doesn't exist.
+        """
+        with self._database.connect() as conn:
+            row = conn.execute(
+                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+                "FROM positions WHERE position_id = ?",
+                [str(position_id)],
+            ).fetchone()
+        return None if row is None else self._position_from_row(row)
+
+    def get_closed_positions(
+        self, is_paper: bool = True, as_of: date | None = None
+    ) -> list[Position]:
+        """Return closed positions matching `is_paper`.
+
+        Args:
+            is_paper: Whether to return paper or live positions.
+            as_of: Optional point-in-time cutoff; when given, only positions
+                with `close_date <= as_of` are returned (inclusive), so a
+                position closed after `as_of` never leaks into a summary
+                computed for that date. `None` returns every closed position
+                regardless of `close_date`.
+
+        Returns:
+            Closed positions, unordered.
+        """
+        query = (
+            f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+            "FROM positions WHERE status = 'closed' AND is_paper = ?"
+        )
+        params: list[Any] = [is_paper]
+        if as_of is not None:
+            query += " AND close_date <= ?"
+            params.append(as_of)
+        with self._database.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._position_from_row(row) for row in rows]
+
+    def record_trade_decision(self, record: TradeDecisionRecord) -> None:
+        """Upsert a paper-trading decision, keyed by `(run_id, symbol, strategy_key)`.
+
+        Args:
+            record: The decision to persist.
+        """
+        paper_records.record_trade_decision(self._database, record)
 
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]
@@ -355,6 +417,25 @@ class StateStore:
         return llm_records.get_cached_response(
             self._database, model, prompt_hash, schema_version
         )
+
+    def record_text_items(self, items: Sequence[TextItem]) -> None:
+        """Persist collected text items, upserted by `source_id`.
+
+        Args:
+            items: Text items collected this run (news, filings, calendar).
+        """
+        text_records.record_text_items(self._database, items)
+
+    def get_source_urls(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """Resolve known `source_ids` to their `source_url`.
+
+        Args:
+            source_ids: Source IDs to resolve (e.g. an LLM fact's `source_ids`).
+
+        Returns:
+            A mapping for every `source_id` with a recorded text item.
+        """
+        return text_records.get_source_urls(self._database, source_ids)
 
     def get_monthly_llm_cost(self, as_of: date) -> float:
         """Return realized LLM cost for `as_of`'s calendar month.

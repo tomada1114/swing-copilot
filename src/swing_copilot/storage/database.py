@@ -32,4 +32,8 @@ class Database:
             A new DuckDB connection to `db_path`.
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(self.db_path))
+        conn = duckdb.connect(str(self.db_path))
+        # TIMESTAMPTZ -> DATE casts (as_of point-in-time boundaries) must be
+        # deterministic regardless of the host machine's local timezone.
+        conn.execute("SET TimeZone='UTC'")
+        return conn

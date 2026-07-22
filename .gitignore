@@ -27,6 +27,13 @@ coverage.xml
 # Docs
 site/
 
+# Local runtime data (never committed; data/copilot.duckdb + data/bars/)
+/data/
+
+# Daily reports are regenerated locally each run; only authored/vendored
+# assets (templates/, reports/assets/) are version-controlled
+/reports/*.html
+
 # IDE
 .vscode/
 .idea/

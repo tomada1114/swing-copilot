@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<title>Morning Briefing — {{ run_date.isoformat() }}</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="page">
+
+  <header class="report-header">
+    <p class="eyebrow">SWING COPILOT</p>
+    <h1 class="page-title">Morning Briefing — {{ run_date.isoformat() }} ({{ run_date.strftime("%a") }})</h1>
+    <div class="meta-row">
+      <span>生成時刻 <span class="num">{{ generated_at.isoformat(timespec="seconds") }}</span></span>
+      <span class="dot">・</span>
+      <span>データ鮮度 <span class="num">{{ run_date.isoformat() }} 終値時点</span></span>
+      <span class="dot">・</span>
+      <span>ユニバース <span class="num">{{ universe_count }}</span> 銘柄</span>
+      <span class="dot">・</span>
+      <span>候補 <span class="num">{{ summary_rows | length }}</span></span>
+      <span class="dot">・</span>
+      <span>run_id <span class="num">{{ run_id|string | truncate(8, True, "") }}</span></span>
+    </div>
+  </header>
+
+  <section class="market-overview">
+    <p class="section-label">Market</p>
+    <div class="market-strip">
+      {% for item in market_strip %}
+      <div class="market-chip">
+        <div class="m-name">{{ item.label }}</div>
+        {% if item.value is none %}
+        <div class="m-value num">取得不可</div>
+        {% else %}
+        <div class="m-value num">{{ "%.2f"|format(item.value) }}</div>
+        <div class="m-change num m-{{ item.change_class }}">{{ "%+.2f%%"|format(item.pct_change * 100) }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if risk_warnings %}
+  <section class="risk-warning">
+    <p class="section-label">Risk Notice</p>
+    <div class="risk-banner">
+      <svg class="warn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 3L22 20H2L12 3Z" stroke="#E8B45A" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M12 9.5V14" stroke="#E8B45A" stroke-width="1.6" stroke-linecap="round"/>
+        <circle cx="12" cy="16.8" r="1" fill="#E8B45A"/>
+      </svg>
+      <div class="risk-body">
+        <strong>集中リスク注意:</strong>
+        <ul>
+          {% for warning in risk_warnings %}
+          <li>
+            候補 <span class="num">{{ warning.candidate_symbol }}</span> と保有中の
+            <span class="num">{{ warning.correlated_symbol }}</span> —
+            {% if warning.warning_type == "high_correlation" %}
+            相関 <span class="num">{{ "%.2f"|format(warning.correlation) }}</span>、集中リスクに注意。
+            {% else %}
+            相関の算出に十分な履歴データがありません（data quality）。
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="summary">
+    <p class="section-label">Candidates</p>
+    <div class="table-scroll">
+      <table class="summary-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>銘柄</th>
+            <th>抽出理由</th>
+            <th style="text-align:right;">終値</th>
+            <th style="text-align:right;">前日比</th>
+            <th style="text-align:right;">RSI14</th>
+            <th style="text-align:right;">ATR14</th>
+            <th>直近20日</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in summary_rows %}
+          <tr>
+            <td class="col-idx num">{{ row.rank }}</td>
+            <td class="col-ticker">
+              <div class="t-ticker">{{ row.symbol }}</div>
+              <div class="t-name">{{ row.company_name or "" }}</div>
+            </td>
+            <td>
+              {% for badge in row.badges %}<span class="badge">{{ badge }}</span>{% endfor %}
+            </td>
+            <td class="col-num">{{ "%.2f"|format(row.close) if row.close is not none else "N/A" }}</td>
+            <td class="col-num {% if row.change_class %}m-{{ row.change_class }}{% endif %}">
+              {{ "%+.2f%%"|format(row.pct_change * 100) if row.pct_change is not none else "N/A" }}
+            </td>
+            <td class="col-num">{{ "%.1f"|format(row.rsi14) if row.rsi14 is not none else "N/A" }}</td>
+            <td class="col-num">{{ "%.2f"|format(row.atr14) if row.atr14 is not none else "N/A" }}</td>
+            <td>
+              <svg viewBox="0 0 96 28" width="96" height="28" class="sparkline" role="img" aria-label="{{ row.symbol }}直近20日の終値推移">
+                <polyline points="{{ row.sparkline.points }}" fill="none" stroke="{{ row.sparkline.color }}" stroke-width="1.5"/>
+              </svg>
+            </td>
+            <td class="col-link"><a href="#card-{{ row.symbol }}">詳細 →</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="details">
+    <p class="section-label">Detail</p>
+
+    {% for card in cards %}
+    <article class="card" id="card-{{ card.symbol }}">
+      <div class="card-header">
+        <div class="ticker-block">
+          <div class="ticker">{{ card.symbol }}</div>
+          <div class="company">{{ card.company_name or "" }}</div>
+          <div class="sector">{{ card.sector or "" }}</div>
+        </div>
+        <div class="badges">
+          {% for badge in card.badges %}<span class="badge">{{ badge }}</span>{% endfor %}
+        </div>
+      </div>
+
+      <div class="chart-wrap">
+        <div class="chart-legend">
+          <span class="lg"><span class="swatch" style="background:var(--chart-sma-fast);"></span>SMA50</span>
+          <span class="lg"><span class="swatch" style="background:var(--chart-sma-slow);"></span>SMA200</span>
+          <span class="lg" style="margin-left:auto;">日足・6ヶ月</span>
+        </div>
+        <div id="chart-{{ card.symbol }}" class="chart-mount" role="img" aria-label="{{ card.symbol }}ローソク足チャート、6ヶ月分"></div>
+        <script type="application/json" id="chart-data-{{ card.symbol }}">{{ card.chart_data | tojson }}</script>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metrics-col">
+          <h4>テクニカル</h4>
+          <dl>
+            <dt>終値</dt><dd>{{ "%.2f"|format(card.technical.close) if card.technical.close is not none else "N/A" }}</dd>
+            <dt>SMA50</dt><dd>{{ "%.2f"|format(card.technical.sma50) if card.technical.sma50 is not none else "N/A" }}</dd>
+            <dt>SMA200</dt><dd>{{ "%.2f"|format(card.technical.sma200) if card.technical.sma200 is not none else "N/A" }}</dd>
+            <dt>RSI(14)</dt><dd>{{ "%.1f"|format(card.technical.rsi14) if card.technical.rsi14 is not none else "N/A" }}</dd>
+            <dt>ATR(14)</dt><dd>{{ "%.2f"|format(card.technical.atr14) if card.technical.atr14 is not none else "N/A" }}</dd>
+            <dt>20日平均出来高</dt><dd>{{ "%.1fM"|format(card.technical.avg_volume / 1000000) if card.technical.avg_volume is not none else "N/A" }}</dd>
+          </dl>
+        </div>
+        <div class="metrics-col">
+          <h4>ファンダメンタル</h4>
+          <dl>
+            <dt>PER</dt><dd>{{ card.fundamentals.per }}</dd>
+            <dt>FCF (直近開示)</dt><dd>{{ card.fundamentals.fcf }}</dd>
+            <dt>自己資本比率</dt><dd>{{ card.fundamentals.equity_ratio }}</dd>
+            <dt>直近EPS</dt><dd>{{ card.fundamentals.eps }}</dd>
+          </dl>
+        </div>
+        <div class="metrics-col">
+          <h4>リスク計算</h4>
+          <dl>
+            <dt>ステータス</dt><dd>{{ card.risk.status }}</dd>
+            <dt>想定ポジションサイズ</dt><dd>{{ card.risk.max_shares ~ "株" if card.risk.max_shares is not none else "算出不可" }}</dd>
+            <dt>ATRストップ目安</dt><dd>{{ "%.2f"|format(card.risk.stop_price) if card.risk.stop_price is not none else "N/A" }}</dd>
+            <dt>想定リスク（対資金）</dt><dd>{{ "%.2f%%"|format(card.risk.expected_risk_pct) if card.risk.expected_risk_pct is not none else "N/A" }}</dd>
+            <dt>1銘柄上限比</dt><dd>{{ "資金の%.1f%%"|format(card.risk.position_value_pct) if card.risk.position_value_pct is not none else "N/A" }}</dd>
+          </dl>
+          {% if card.risk.reasons %}
+          <p class="risk-flag">{{ card.risk.reasons | join("; ") }}</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="llm-block">
+        <p class="llm-label">LLM要約</p>
+        {% if card.llm.degraded %}
+        <p class="conclusion">{{ card.llm.message }}</p>
+        {% else %}
+        <p class="conclusion">{{ card.llm.conclusion }}</p>
+        {% if card.llm.reasons %}
+        <ul class="reasons">
+          {% for reason in card.llm.reasons %}<li>{{ reason }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if card.llm.risk_flags %}
+        <ul class="reasons">
+          {% for flag in card.llm.risk_flags %}<li class="risk-flag">{{ flag }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <details class="llm-detail">
+          <summary><span class="chevron">▸</span> 全文・出典を表示</summary>
+          <div class="full-text">
+            <h5>事実（facts）</h5>
+            {% for fact in card.llm.facts %}<p>{{ fact }}</p>{% endfor %}
+            <h5>出典</h5>
+            <ul class="sources">
+              {% for source in card.llm.sources %}
+              <li><a href="{{ source.url }}" target="_blank" rel="noopener">{{ source.source_id }}</a></li>
+              {% endfor %}
+            </ul>
+          </div>
+        </details>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+
+  </section>
+
+  <footer class="report-footer">
+    <p class="disclaimer">本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください。</p>
+    <div class="footer-meta">
+      <span>
+        Charting by <a class="attribution" href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a>
+        {% if adjacent_reports.previous %} ・ <a href="{{ adjacent_reports.previous }}.html">前日</a>{% endif %}
+        {% if adjacent_reports.next %} ・ <a href="{{ adjacent_reports.next }}.html">翌日</a>{% endif %}
+      </span>
+      <span>swing-copilot v{{ version }} ・ run_id: {{ run_id }}</span>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll("[id^='chart-data-']").forEach(function (dataEl) {
+    var symbol = dataEl.id.replace("chart-data-", "");
+    var data = JSON.parse(dataEl.textContent);
+    var mount = document.getElementById("chart-" + symbol);
+    if (!mount || typeof LightweightCharts === "undefined") { return; }
+
+    var chart = LightweightCharts.createChart(mount, {
+      width: mount.clientWidth,
+      height: 280,
+      layout: { background: { type: "solid", color: "transparent" }, textColor: "#9AA4B2" },
+      grid: { vertLines: { color: "#1E242C" }, horzLines: { color: "#1E242C" } },
+      timeScale: { borderColor: "#232A33" },
+      rightPriceScale: { borderColor: "#232A33" },
+    });
+
+    var candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
+      upColor: "#2EBD85", downColor: "#EF5350",
+      wickUpColor: "#2EBD85", wickDownColor: "#EF5350",
+      borderVisible: false,
+    });
+    candleSeries.setData(data.ohlcv);
+
+    var volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, { color: "#8B949E" });
+    volumeSeries.setData(data.ohlcv.map(function (bar) {
+      return { time: bar.time, value: bar.volume, color: bar.close >= bar.open ? "#2EBD85" : "#EF5350" };
+    }));
+
+    var sma50Series = chart.addSeries(LightweightCharts.LineSeries, { color: "#6FA8DC", lineWidth: 1 });
+    sma50Series.setData(data.sma50);
+
+    var sma200Series = chart.addSeries(LightweightCharts.LineSeries, { color: "#C79FEF", lineWidth: 1 });
+    sma200Series.setData(data.sma200);
+
+    chart.timeScale().fitContent();
+  });
+})();
+</script>
+
+</body>
+</html>

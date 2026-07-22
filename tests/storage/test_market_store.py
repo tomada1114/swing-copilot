@@ -279,3 +279,152 @@ class TestUpsertFundamentals:
             market_store.upsert_fundamentals([valid, invalid])
 
         assert market_store.read_fundamentals(date(2026, 7, 20)).empty
+
+
+class TestGetLatestFundamentals:
+    def test_returns_most_recently_filed_record_at_or_before_as_of(self, market_store):
+        records = [
+            FundamentalsRecord(
+                accession_no=f"acc-{filed_at.date().isoformat()}",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=filed_at,
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+            for filed_at in (
+                datetime(2026, 6, 1, tzinfo=UTC),
+                datetime(2026, 7, 10, tzinfo=UTC),
+                datetime(2026, 7, 25, tzinfo=UTC),
+            )
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is not None
+        assert result.accession_no == "acc-2026-07-10"
+
+    def test_boundary_includes_filing_filed_exactly_on_as_of(self, market_store):
+        record = FundamentalsRecord(
+            accession_no="acc-boundary",
+            symbol="AAPL",
+            form="10-Q",
+            fiscal_period_end=date(2026, 6, 30),
+            revenue=1.0,
+            net_income=1.0,
+            fcf=1.0,
+            equity=1.0,
+            assets=2.0,
+            shares=1.0,
+            source_url="https://www.sec.gov/example",
+            filed_at=datetime(2026, 7, 20, tzinfo=UTC),
+            fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
+        market_store.upsert_fundamentals([record])
+
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is not None
+        assert result.accession_no == "acc-boundary"
+
+    def test_excludes_filing_filed_after_as_of(self, market_store):
+        record = FundamentalsRecord(
+            accession_no="acc-future",
+            symbol="AAPL",
+            form="10-Q",
+            fiscal_period_end=date(2026, 6, 30),
+            revenue=1.0,
+            net_income=1.0,
+            fcf=1.0,
+            equity=1.0,
+            assets=2.0,
+            shares=1.0,
+            source_url="https://www.sec.gov/example",
+            filed_at=datetime(2026, 7, 21, tzinfo=UTC),
+            fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
+        market_store.upsert_fundamentals([record])
+
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is None
+
+    def test_only_considers_the_requested_symbol(self, market_store):
+        records = [
+            FundamentalsRecord(
+                accession_no=f"acc-{symbol}",
+                symbol=symbol,
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=datetime(2026, 7, 10, tzinfo=UTC),
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+            for symbol in ("AAPL", "MSFT")
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.get_latest_fundamentals("MSFT", as_of=date(2026, 7, 20))
+
+        assert result is not None
+        assert result.symbol == "MSFT"
+
+    def test_returns_none_when_symbol_has_no_fundamentals(self, market_store):
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is None
+
+    def test_deterministic_tiebreak_when_filed_at_ties(self, market_store):
+        tied_filed_at = datetime(2026, 7, 10, tzinfo=UTC)
+        records = [
+            FundamentalsRecord(
+                accession_no="acc-earlier-period",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 3, 31),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=tied_filed_at,
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            ),
+            FundamentalsRecord(
+                accession_no="acc-later-period",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=tied_filed_at,
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            ),
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is not None
+        assert result.accession_no == "acc-later-period"

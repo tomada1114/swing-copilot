@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-daily` CLI (`uv run copilot-daily [--as-of] [--dry-run]
+  [--skip-text] [--skip-llm] [--limit N] [--no-open]`), wiring all nine
+  daily-batch steps: price/fundamentals/screening/risk (fatal on
+  failure), text collection and LLM analysis (fail-soft, degrade the
+  run without aborting it), report generation, Discord notification,
+  and local browser auto-open
+- `report/html_report.py` + `templates/report.html.j2` +
+  `reports/assets/style.css`: the daily Morning Briefing report —
+  market strip, risk warnings, ranked candidate table, and per-symbol
+  detail cards (TradingView Lightweight Charts v5, fundamentals, risk
+  sizing, a fail-soft LLM summary block), written atomically to
+  `reports/{run_date}.html` and `reports/latest.html`
+- `report/discord_notify.py`: optional Discord webhook notification
+  (`notification.enabled`), never raising — a failed send degrades the
+  run instead of stopping it
+- `paper/journal.py`: paper-trading decision log (idempotent
+  `record_decision`), position lifecycle (`close_position`, rejecting a
+  missing/already-closed position instead of a silent no-op), and
+  `summarize_performance()` (closed-trade P&L/win-rate vs. a SPY
+  buy-and-hold benchmark over the same span)
+- `MarketStore.get_latest_fundamentals()`, `StateStore.get_position()`/
+  `get_closed_positions()`/`record_trade_decision()`/
+  `record_text_items()`/`get_source_urls()`: report- and paper-trading-
+  oriented storage queries
+- Report risk block now renders 想定リスク（対資金） and 1銘柄上限比
+  (both degrade to N/A without a configured account equity)
+- `PaperJournal.record_decision()` accepts an optional `position_id`, so a
+  recorded decision can be linked to the paper position it resulted in
+  (completing FR-11's signal-to-decision-to-fill-to-P&L traceability via
+  a correction re-record on the same natural key)
 - Initial project structure
 - `scripts/bootstrap.py` deterministic template initializer: renames the
   package and replaces every placeholder (`swing-copilot`, `swing_copilot`,
@@ -68,6 +98,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Database.connect()` now forces the DuckDB session `TimeZone` to UTC —
+  `TIMESTAMPTZ -> DATE` `as_of` boundary casts previously used the host
+  machine's local timezone, which could include or exclude a filing
+  near a UTC-midnight boundary depending on where the batch ran
+- The price step now also fetches the market strip's fixed index
+  symbols (SPY/QQQ/^VIX/^TNX), which are never S&P 500 constituents and
+  so previously never got bars written for the report's market strip
+- Steps 5/6 (text collection, LLM analysis) no longer discard every
+  already-collected symbol's result when one symbol/candidate fails —
+  each is isolated per-symbol, degrading the run instead of losing the
+  successful ones
+- Text/LLM target symbols now include held positions, not only today's
+  screening candidates, capped at 30 per NFR-03
+- `StateStore.get_closed_positions()` takes an `as_of` cutoff, and
+  `summarize_performance()` passes it, so a position closed after the
+  summary's `as_of` no longer leaks into the performance summary
+- `record_trade_decision()`'s correction upsert no longer overwrites the
+  original `created_at` audit timestamp
+- `_atomic_write()` (HTML report writer) now removes its temp file on a
+  write failure instead of leaving it behind
+- Fundamentals block's EPS no longer depends on a valid close price
+  (only PER does); a missing close previously hid a computable EPS
+- LLM summary block no longer renders a single-item interpretation's
+  sentence twice (once as the conclusion, once as its own reason)
+- Discord webhook notification now retries transport errors and HTTP
+  429/5xx up to 3 total attempts with deterministic backoff, instead of
+  giving up after one attempt; a non-retryable 4xx still fails fast
 - Switched to PEP 639 license metadata (`license-files`, dropped the
   redundant OSI trove classifier)
 - `CONTRIBUTING.md`'s manual mypy command now includes `tests`, matching

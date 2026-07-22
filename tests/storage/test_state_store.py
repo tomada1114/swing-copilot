@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
+from typing import cast
 from uuid import uuid4
 
 import pytest
+from duckdb import ConstraintException
 
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
 from swing_copilot.screening.base import Candidate, SignalHit
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 
 
@@ -294,3 +297,78 @@ class TestRecordRiskAssessments:
             ).fetchall()
         assert rows[0][0] == "approved"
         assert "MSFT" in rows[0][1]
+
+
+def _text_item(source_id: str, source_url: str) -> TextItem:
+    return TextItem(
+        source_id=source_id,
+        symbol="AAPL",
+        source_type="news",
+        published_at=datetime(2026, 7, 19, tzinfo=UTC),
+        title="Example headline",
+        source_url=source_url,
+        content_text="Example body text.",
+        fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+    )
+
+
+class TestTextItems:
+    def test_record_then_resolve_source_urls(self, state_store):
+        state_store.record_text_items(
+            [
+                _text_item("finnhub-1", "https://example.com/1"),
+                _text_item("finnhub-2", "https://example.com/2"),
+            ]
+        )
+
+        result = state_store.get_source_urls(["finnhub-1", "finnhub-2"])
+
+        assert result == {
+            "finnhub-1": "https://example.com/1",
+            "finnhub-2": "https://example.com/2",
+        }
+
+    def test_unknown_source_ids_are_silently_omitted(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1")]
+        )
+
+        result = state_store.get_source_urls(["finnhub-1", "unknown-id"])
+
+        assert result == {"finnhub-1": "https://example.com/1"}
+
+    def test_empty_source_ids_returns_empty_mapping(self, state_store):
+        assert state_store.get_source_urls([]) == {}
+
+    def test_rerecording_same_source_id_corrects_the_row(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/old")]
+        )
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/new")]
+        )
+
+        result = state_store.get_source_urls(["finnhub-1"])
+
+        assert result == {"finnhub-1": "https://example.com/new"}
+
+    def test_batch_rolls_back_entirely_when_a_later_item_is_invalid(self, state_store):
+        valid = _text_item("finnhub-1", "https://example.com/1")
+        invalid = _text_item("finnhub-2", "https://example.com/2")
+        # content_text is NOT NULL; force a constraint violation on the
+        # second row so at least one row would have succeeded in isolation.
+        invalid = TextItem(
+            source_id=invalid.source_id,
+            symbol=invalid.symbol,
+            source_type=invalid.source_type,
+            published_at=invalid.published_at,
+            title=invalid.title,
+            source_url=invalid.source_url,
+            content_text=cast("str", None),
+            fetched_at=invalid.fetched_at,
+        )
+
+        with pytest.raises(ConstraintException):
+            state_store.record_text_items([valid, invalid])
+
+        assert state_store.get_source_urls(["finnhub-1", "finnhub-2"]) == {}

@@ -8,8 +8,8 @@
 | 目的 | `docs/03_basic_design.md`のコンポーネント設計を、Claude Codeの`/goal`による自律実装エージェントがそのまま実装に着手できる粒度（モジュール構成、主要クラス/関数シグネチャ、データスキーマ、受け入れ基準）まで具体化する |
 | 前提文書 | `docs/00_human_preparation.md`, `docs/01_requirements.md`, `docs/03_basic_design.md` |
 | 記法凡例 | コード例中の型ヒントは実装意図を示す設計指示であり、実装時のライブラリバージョンにより微修正され得る。「実装時に要確認」の注記がある箇所は、本書執筆時点で仕様を断定せず、実装時に一次情報（公式ドキュメント等）を確認することを指示するものである。 |
-| バージョン | v1.1 |
-| 最終更新日 | 2026-07-21 |
+| バージョン | v1.2 |
+| 最終更新日 | 2026-07-22 |
 
 ---
 
@@ -52,19 +52,20 @@ swing-copilot/
 │   │   ├── summarize.py      # ニュース要約（モデルはsettings.yamlのllm.models.news_summaryで設定、デフォルトHaiku）
 │   │   └── filings_analysis.py  # 決算解釈（モデルはsettings.yamlのllm.models.filing_analysisで設定、デフォルトHaiku、FR-08）
 │   ├── report/
-│   │   ├── html_report.py    # Jinja2テンプレート
-│   │   ├── chart_data.py     # OHLC+SMAをJSONでテンプレートへ渡す（UI詳細はdocs/05_ui_design.md参照）
+│   │   ├── daily_brief.py    # 表示非依存の共通DailyBrief
+│   │   ├── terminal_report.py # Richによるstdout表示
+│   │   ├── markdown_report.py # Markdown原子保存
 │   │   └── discord_notify.py # FR-09（オプション機能）
 │   ├── backtest/
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
 │   │   └── runner.py         # FR-10
 │   ├── paper/
-│   │   └── journal.py        # FR-11 ペーパートレード記録
+│   │   ├── journal.py        # FR-11 ペーパートレード記録
+│   │   └── cli.py            # copilot-decision
 │   └── pipeline/
 │       └── daily.py          # FR-12 オーケストレータ（CLI: uv run copilot-daily）
-├── templates/report.html.j2
 ├── data/                     # Parquet/DuckDB（ローカルファイルシステムに永続化）
-├── reports/                  # 日次HTML出力
+├── reports/                  # run ID単位の生成Markdown
 └── tests/
 ```
 
@@ -103,7 +104,7 @@ pipeline/cli (composition root, imperative shell)
 
 - domain/application層はHTTPクライアント、環境変数、ファイルパス、現在時刻を直接参照しない。
 - adapter/repository層からpipelineへcallbackしない。依存方向はcomposition rootから内側へ向ける。
-- `pipeline/daily.py`に指標計算・SQL・HTML整形を置かない。各ステップは入力取得→application呼び出し→結果保存だけを行う。
+- `pipeline/daily.py`に指標計算・SQL・CLI/Markdown整形を置かない。各ステップは入力取得→application呼び出し→結果保存だけを行う。
 - Protocolは外部境界と複数実装が必要な箇所に限定する。クラス1つにつきinterface1つを作る設計は避ける。
 - registryは組み込みFilter/Signalの明示登録に限定し、動的import探索や第三者pluginロードは非目標とする。
 
@@ -149,7 +150,6 @@ class Settings(BaseModel):
     budget: "BudgetConfig"
     schedule: "ScheduleConfig"
     notification: "NotificationConfig"  # Discord通知（オプション機能）の有効/無効
-    report: "ReportConfig"              # レポート自動表示設定
 
 def load_settings(path: str = "config/settings.yaml") -> Settings:
     """settings.yamlを読み込みSettingsを返す。ファイル不在・スキーマ不整合はpydantic ValidationErrorを送出する。"""
@@ -649,61 +649,44 @@ cache hashと入力token概算はsystem+user promptの両方を対象にする�
 ### 3.17 `llm/summarize.py` / `llm/filings_analysis.py`（FR-08）
 
 ```python
-def summarize_news(
-    client: LLMClient, symbol: str, news_items: list["NewsItem"], model: str,
-) -> NewsSummary:
-    """llm/client.LLMClientを呼び出し、NewsSummaryを返す。プロンプトは本書6章参照。
+@dataclass(frozen=True, slots=True)
+class NewsSummaryRequest:
+    # run_id、銘柄、対象期間、ニュース、モデル/上限に加え、最大3件の判断履歴
+    decision_history: tuple[DecisionHistoryEntry, ...] = ()
 
-    modelは呼び出し元がsettings.yamlのllm.models.news_summary
-    （デフォルト: claude-haiku-4-5-20251001）から取得して渡す。関数内でモデルIDをハードコードしない。
-    """
+def summarize_news(client: LLMClient, request: NewsSummaryRequest) -> NewsSummary: ...
 
-def analyze_filing(
-    client: LLMClient, symbol: str, filing_text: "FilingText", model: str,
-) -> FilingAnalysis:
-    """llm/client.LLMClientを呼び出し、FilingAnalysisを返す。プロンプトは本書6章参照。
+@dataclass(frozen=True, slots=True)
+class FilingAnalysisRequest:
+    # run_id、銘柄、提出書類、モデル/chunk上限に加え、最大3件の判断履歴
+    decision_history: tuple[DecisionHistoryEntry, ...] = ()
 
-    modelは呼び出し元がsettings.yamlのllm.models.filing_analysis
-    （デフォルト: claude-haiku-4-5-20251001。精度重視の場合はSonnet等へ設定変更可）から
-    取得して渡す。関数内でモデルIDをハードコードしない。
-    """
+def analyze_filing(client: LLMClient, request: FilingAnalysisRequest) -> FilingAnalysis: ...
 ```
 
-### 3.18 `report/html_report.py` / `report/discord_notify.py`（FR-09, NFR-07）
+モデルIDは呼び出し元が`settings.yaml`から渡し、関数内へハードコードしない。
+判断履歴は同一銘柄・戦略の過去live runだけを新しい順に最大3件取得し、
+`<decision_history>`内へescapeする。通常live当日だけに注入し、dry-run、明示的な
+`--as-of`、バックテストでは空tupleとする。履歴は現在の事実でも命令でもなく、
+factsの`source_ids`へ追加しない。
 
-> **P2-4実装時の訂正（2026-07-22）**: 以下は実装済みの正確なシグネチャである。
-> `render_report()`は`ReportContext`（run_id/run_date/generated_at/universe/
-> candidates/risk_assessments/news_summaries/filing_analyses）を1引数へまとめ、
-> `market_store`・`state_store`（LLM factのsource_id解決用）・
-> `templates_dir`/`output_dir`を追加で受け取る（5引数超過のため`docs/
-> goal-prompts/swing-copilot-p2-report-paper-wrapup/design.md`が許可する
-> グループ化dataclassを採用）。戻り値は生成したHTML文字列ではなく、書き込んだ
-> `reports/{run_date}.html`への`Path`。`Notifier.notify()`は例外を送出しない
-> 代わりに`bool`（送信成功/失敗）を返す — `-> None`のままでは、呼び出し元
-> （`pipeline/daily.py`のstep 8）が「例外なしの失敗」を検知する手段がなく、
-> `run_steps`にfailedを記録できないため。
+### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
+
+`build_daily_brief()`が`DailyBriefContext`、`MarketStore`、`StateStore`から共通の`DailyBrief`を構築する。ターミナルとMarkdownはこの値だけを描画し、データ取得や判断ロジックを持たない。価格・財務読み取りは常に`context.run_date`を`as_of`へ渡す。
 
 ```python
-from pathlib import Path
-from typing import Protocol
-from uuid import UUID
-
-from swing_copilot.report.html_report import ReportContext
-
-def render_report(
-    context: ReportContext,
+def build_daily_brief(
+    context: DailyBriefContext,
     market_store: "MarketStore",
     state_store: "StateStore",
-    templates_dir: str = "templates",
-    output_dir: str = "reports",
+) -> DailyBrief: ...
+
+def render_terminal(brief: DailyBrief, status: RunStatus, *, width: int, color: bool) -> str: ...
+
+def write_markdown_report(
+    brief: DailyBrief, status: RunStatus, output_dir: str | Path
 ) -> Path:
-    """
-    templates/report.html.j2（Jinja2）を用いてHTMLレポートを生成し、
-    reports/{run_date}.html と reports/latest.html へ原子的に書き込んで
-    前者のPathを返す。context.news_summaries/filing_analysesがNone
-    （LLM分析失敗時）の場合はスクリーニング結果のみの縮退版として
-    描画する（FR-12フェイルソフト）。
-    """
+    """reports/<run_date>/<run_id>.mdとlatest.mdを原子的に書く。"""
 
 class Notifier(Protocol):
     """
@@ -726,12 +709,12 @@ class DiscordNotifier:
         """
         Discord Webhookへレポートの要約（サマリテキスト＋レポートへの言及）を送信する。
         送信失敗時はFalseを返し、例外は送出しない（バッチ全体を止めない）。
-        呼び出し元（pipeline/daily.py step 8）がFalseを見てrun_stepsに
+        呼び出し元（pipeline/daily.py step 7）がFalseを見てrun_stepsに
         failedを記録する。
         """
 ```
 
-将来メール通知やSlack通知を追加する場合も、`Notifier`を実装するクラス（例: `EmailNotifier`, `SlackNotifier`）を追加するだけで`pipeline/daily.py`から差し替え可能である（NFR-07）。
+MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`trades_journal`を更新し、生成ファイル内のmarker付き判断セクションを正本から再描画する。過去判断のLLM入力条件とdelimiterは`docs/05_ui_design.md` 7章を正とする。
 
 ### 3.19 `backtest/engine.py` / `backtest/runner.py`（FR-10）
 
@@ -814,31 +797,22 @@ class PerformanceSummary:
 
 ### 3.21 `pipeline/daily.py`（FR-12）
 
-> **P2-6実装時の訂正（2026-07-22）**: `run_daily()`は`(options, deps)`の2引数を
-> 取る（`deps: DailyDependencies`が実/fakeの協力オブジェクト一式を運ぶ
-> composition-root値）。ステップ9の自動表示ゲートは`docs/05_ui_design.md`
-> 10.3が逐語指定する3条件（`is_dry_run` / `no_open` / `CI`環境変数）のみで、
-> `settings.report.auto_open`は判定に使わない
-> （10.3策定時点でこの3条件が確定仕様とされたため、本節の
-> 旧pseudocodeが挙げていた`report.auto_open`は現状未使用の予約フィールド
-> として`config.py`に残る — 将来この設定を実際にゲートへ組み込むか、
-> フィールド自体を削除するかは未決定のフォローアップ）。
-> ステップ1-4のいずれかが失敗した場合のみ`exit_code`が非ゼロになり、
-> ステップ5-9（テキスト収集・LLM分析・レポート・通知・自動表示）は
-> 失敗してもバッチを止めず`RunStatus.DEGRADED`（`exit_code=0`）に留める
-> （`docs/03_basic_design.md` 7章）。
+`run_daily()`は`(options, deps)`の2引数を取り、`DailyDependencies`が
+実アダプタまたはfakeを運ぶcomposition rootとなる。固定8ステップのうち
+ステップ1〜4の失敗だけを致命的エラー（非ゼロ終了）とし、ステップ5〜8
+（テキスト、LLM、通知、出力）は`RunStatus.DEGRADED`へ縮退して終了コード0を
+保つ。主表示はステップ8でstdoutへ出す。併せて同じ`DailyBrief`からMarkdownを
+原子保存し、ブラウザ自動起動は行わない。
 
-> **live検証時の訂正（2026-07-22）**: 2026-07-21のlive実行検証で判明した3件を
+> **live検証時の訂正（2026-07-22）**: 2026-07-21のlive実行検証で判明した4件を
 > 追加実装した。
 >
 > 1. **dry-runのDB/レポート出力分離**: `_compose_dependencies()`は
 >    `--dry-run`のとき`data/copilot_dry_run.duckdb`と`reports/dry_run/`
 >    を、live実行時は従来どおり`data/copilot.duckdb`（`storage/database.py`
 >    の`DEFAULT_DB_PATH`）と`reports/`を使う（`_paths_for_mode()`が
->    `(db_path, output_dir)`を返す純粋関数）。以前は`--dry-run`が本節
->    冒頭のブラウザ自動表示ゲート（`is_dry_run`/`no_open`/`CI`）以外
->    どの分岐も持たず、live実行と同じDB・レポートディレクトリを共有して
->    いた。`runs.mode`列（`RunMode.LIVE`/`RunMode.DRY_RUN`、4.2節）は
+>    `(db_path, output_dir)`を返す純粋関数）。`runs.mode`列
+>    （`RunMode.LIVE`/`RunMode.DRY_RUN`、4.2節）は
 >    廃止せず、どちらのDBに書いたrunでも引き続きそのDB内でdry/live行を
 >    区別する。
 > 2. **NFR-03タイムアウト予算の実施と停止run検知**: `settings.schedule.
@@ -850,12 +824,12 @@ class PerformanceSummary:
 >    銘柄ループの各反復前に予算を確認し、超過時はそこまでの取得結果を
 >    upsertして`success=True`（致命的失敗ではなく部分完了）・詳細に
 >    `"time budget exceeded after N/M symbols"`を記録する。ステップ5
->    （text）・6（llm）・8（Discord notify）はネットワークを伴うため、
+>    （text）・6（llm）・7（Discord notify）はネットワークを伴うため、
 >    開始前に予算超過なら`run_steps.status='skipped'`かつ内部的には
 >    `success=False`として記録し（`_TIME_BUDGET_STEP_OUTCOME`）、
 >    通常の「未設定によるskip」とは区別してrun全体を`RunStatus.DEGRADED`
->    に縮退させる。ステップ1（prices）・3（screening）・4（risk）・7
->    （report）・9（browser-open）は予算に関わらず常に実行する（軽量・
+>    に縮退させる。ステップ1（prices）・3（screening）・4（risk）・8
+>    （output）は予算に関わらず常に実行する（軽量・
 >    ローカル処理で、予算超過時もレポートを完成させるため）。あわせて
 >    `StateStore.mark_stale_running_runs()`を`run_daily()`開始直後に
 >    呼び、直前のタイムアウト予算より古い`started_at`を持つ
@@ -868,16 +842,16 @@ class PerformanceSummary:
 >    スキップする（ログのみ、`run_steps.detail`には含めない）。
 >    `accession_no`キーの訂正upsert自体は変更せず、翌日以降の実行は
 >    従来どおり必ず再取得・upsertする。
-> 4. **CLI `--dry-run`契約の明確化（通知抑止）**: 本節冒頭のpseudocodeが
->    記す「`dry_run=True`の場合、fixture/fake providerを必須とし、実
->    ネットワークとブラウザ表示を禁止する」は、CLIの`--dry-run`実装が
->    実際には一度も満たしたことのない理想化された記述だった
+> 4. **CLI `--dry-run`契約の明確化（通知抑止）**: 旧pseudocodeが
+>    記した「`dry_run=True`の場合、fixture/fake providerを必須とし、実
+>    ネットワークを禁止する」は、CLIの`--dry-run`実装が
+>    実際には満たしたことのない理想化された記述だった
 >    （`_compose_dependencies()`は`--dry-run`でも常に実アダプタ一式を
->    組み立てる）。今回の是正でCLIの`--dry-run`契約を次の4点のみを
+>    組み立てる）。今回の是正でCLIの`--dry-run`契約を次の3点に
 >    保証する縮小版として明文化する: (1) 上記1.のDB分離
->    （`data/copilot_dry_run.duckdb`）、(2) レポート出力先分離
->    （`reports/dry_run/`）、(3) ステップ9のブラウザ自動表示なし、
->    (4) ステップ8のDiscord通知なし。(4)は本live検証で新たに発見された
+>    （`data/copilot_dry_run.duckdb`）、(2) Markdown出力先分離
+>    （`reports/dry_run/`）、(3) ステップ7のDiscord通知なし。(3)は
+>    live検証で発見された
 >    問題への対処で、`_run_step_notify()`が`is_dry_run`を最優先でチェック
 >    し、`settings.notification.enabled`の値によらず詳細
 >    `"skipped: dry-run mode"`で無条件にスキップする（従来は
@@ -895,15 +869,15 @@ def run_daily(
     options: "DailyRunOptions", deps: "DailyDependencies"
 ) -> "DailyRunResult":
     """
-    日次バッチのオーケストレータ。docs/03_basic_design.md 4章の9ステップを
+    日次バッチのオーケストレータ。docs/03_basic_design.md 4章の8ステップを
     固定順で実行する。各ステップの成否・詳細・所要時間をrun_stepsへ記録する。
-    最終ステップ(9)では、生成したレポートを webbrowser.open() でデフォルトブラウザに
-    自動表示する（is_dry_run/no_open/CI環境変数の3条件でのみ抑止）。
-    dry_run=Trueの場合、fixture/fake providerを必須とし、実ネットワークとブラウザ表示を禁止する。
+    最終ステップ(8)ではDailyBriefをstdoutへ表示し、Markdownを原子保存する。
+    CLIのdry_run=Trueでも実プロバイダへの接続を許すが、DB/出力先を分離し通知を抑止する。
+    offline E2Eではfixture/fake providerを注入し、実ネットワークを禁止する。
     skip_text/skip_llmはP1段階での動作確認用フラグ。
     戻り値: DailyRunResult.exit_code（0=成功/縮退成功、非ゼロ=ステップ1-4の致命的失敗）。
-    CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--skip-llm] [--limit N] [--no-open]`
-    （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ。`--no-open`: レポート生成後の自動ブラウザ表示を抑止する。いずれも通常運用では未指定）
+    CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--skip-llm] [--limit N]`
+    （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
 
@@ -1095,6 +1069,8 @@ DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しな
 | `NewsSummary` | `llm/schemas.py` | ニュース要約（FR-08） |
 | `FilingAnalysis` | `llm/schemas.py` | 決算書解釈（FR-08） |
 | `FundamentalsRecord` | `data/edgar.py` | ファンダメンタルズ1レコード |
+| `DailyBrief` | `report/daily_brief.py` | CLIとMarkdownの共通表示値 |
+| `DecisionHistoryEntry` | `storage/paper_records.py` | 次回LLMへ渡せる限定的な過去判断 |
 | `Position` / `DailyRunOptions` / `DailyRunResult` | `models.py` | 内部ドメイン値（frozen dataclass） |
 
 ---
@@ -1167,8 +1143,6 @@ schedule:
 notification:
   enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する
 
-report:
-  auto_open: true                  # 実行完了後、生成したレポートを webbrowser.open() でデフォルトブラウザに自動表示する
 ```
 
 ### 5.2 `config/strategies.yaml`（初期値）
@@ -1324,8 +1298,8 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 ### 8.2 統合テスト（5銘柄の小規模実データsmoke test）
 
 - **対象**: `pipeline/daily.py`のエンドツーエンド実行。
-- **方針**: 固定の5銘柄（AAPL, MSFT, JPM, XOM, JNJ）と固定`--as-of`に対し、fixture-backed fakeを注入して`uv run copilot-daily --dry-run`相当を実行し、終了コード0・HTML出力・`runs`/`run_steps`の9ステップ・候補/リスク/LLM参照の再構成を検証する。
-- **API呼び出しの扱い**: `--dry-run`はネットワークを禁止し、fixture-backed fakeのみを使う。live canaryはpytestから分離し、`uv run copilot-daily --limit 20 --no-open`として明示実行する。
+- **方針**: 固定の5銘柄（AAPL, MSFT, JPM, XOM, JNJ）と固定`--as-of`に対し、fixture-backed fakeを注入して`uv run copilot-daily --dry-run`相当を実行し、終了コード0・CLI/Markdown出力・`runs`/`run_steps`の8ステップ・候補/リスク/LLM参照の再構成を検証する。
+- **API呼び出しの扱い**: オフラインE2Eではfixture-backed fakeのみを使う。CLIの`--dry-run`は実プロバイダも利用できるため、live canaryはpytestから分離し、`uv run copilot-daily --dry-run --limit 20`として明示実行する。
 
 ### 8.3 fixtures方針
 
@@ -1338,7 +1312,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 - **カバレッジ閾値**: pytest-covによるline+branchカバレッジを全体で95%以上とする。uv-template既定の`justfile`の`test`レシピは`uv run pytest --cov=<package> --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=80`だが、本プロジェクトでは`--cov-fail-under=95`に引き上げる。`pyproject.toml`の`[tool.coverage.run]`（`branch = true`）はuv-templateの設定をそのまま踏襲する。
 - **カバレッジ除外ルール**: `# pragma: no cover`の使用は`if __name__ == "__main__":`ブロックとProtocol/ABCの抽象メソッド本体（`@abstractmethod`が付与されたメソッドの本体等）のみに限定する。上記以外の箇所での`# pragma: no cover`追加、およびテストの`@pytest.mark.skip`/`@pytest.mark.xfail`によるカバレッジ回避は禁止する。
 - **品質水準の意図**: 数値カバレッジはあくまで手段であり、目的は「実際にアプリを動かしたときにバグがないレベル」の品質を担保することである。そのため数値カバレッジに加えて以下のE2Eスモークテストを必須テストとして課す。
-- **E2Eスモークテスト（必須）**: 外部API（yfinance/EODHD, EDGAR, Finnhub, FRED, Claude API, Discord Webhook）を全て記録済みフィクスチャ/モックに差し替えた状態で、`copilot daily`相当のコマンド（`uv run copilot-daily --dry-run`等）を一気通貫実行し、`reports/`配下にHTMLレポートが生成されるまで正常終了（終了コード0）することを検証する。8.2節の統合テスト（5銘柄smoke test）をこのE2Eスモークテストの実装基盤として用いてよいが、外部APIを一切呼ばずフィクスチャ/モックのみで完結する経路を少なくとも1つ、CI/ローカルどちらでも実行可能な形で用意すること（8.2節の実APIを叩く`@pytest.mark.live`テストとは分離する）。
+- **E2Eスモークテスト（必須）**: 外部API（yfinance/EODHD, EDGAR, Finnhub, FRED, Claude API, Discord Webhook）を全て記録済みフィクスチャ/モックに差し替えた状態で、`copilot daily`相当を一気通貫実行し、CLI表示と`reports/`配下のMarkdown生成まで正常終了（終了コード0）することを検証する。8.2節の統合テスト（5銘柄smoke test）を実装基盤としてよいが、外部APIを一切呼ばずフィクスチャ/モックのみで完結する経路を少なくとも1つ、CI/ローカルどちらでも実行可能な形で用意する。実API canaryとは分離する。
 
 ### 8.5 アーキテクチャ適合テスト（必須）
 
@@ -1388,9 +1362,9 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 | P2-1 | `text/`（FR-07） | source identity、`as_of`境界、rate/retry/timeout、空/部分失敗をfakeで検証し、autouse socket guard下で完走 |
 | P2-2 | `llm/schemas.py`, `llm/client.py`（FR-08） | non-empty/known source_id、cache再検証、full-prompt hash、全表示fieldのCON-03、予算no-call、監査/例外redactionをfakeで検証 |
 | P2-3 | `llm/summarize.py`, `llm/filings_analysis.py`（FR-08） | system/user API分離、untrusted delimiter escape、chunk source、truncation、mergeを検証。本文中の命令がdataのまま保持される |
-| P2-4 | `report/chart_data.py`, `html_report.py`, `discord_notify.py`（FR-09） | LLMあり/なし、0候補、特殊文字/XSS入力、offline asset、attribution、免責、atomic latest更新をテスト |
+| P2-4 | `report/daily_brief.py`, `terminal_report.py`, `markdown_report.py`, `discord_notify.py`（FR-09） | LLMあり/なし、0候補、特殊文字、attribution、免責、atomic `latest.md`更新をテスト |
 | P2-5 | `paper/journal.py`（FR-11, CON-04） | `PaperJournal.record_decision()`/`close_position()`のユニットテストが通る |
-| P2-6 | `pipeline/daily.py` 全9ステップ結線 | オフラインE2Eでrun_steps全9件とレポート再構成を検証。text/LLM/通知の個別失敗はdegraded、価格/保存/スクリーニング失敗はfailed非ゼロを検証 |
+| P2-6 | `pipeline/daily.py` 全8ステップ結線 | オフラインE2Eでrun_steps全8件とCLI/Markdown再構成を検証。text/LLM/通知/出力の個別失敗はdegraded、価格/保存/スクリーニング失敗はfailed非ゼロを検証 |
 | P2完了基準 | 全体 | commit済みtreeで`just verify`がgreen。実キーが利用可能なら20銘柄live canaryを1回実行し、無ければオフライン完了として理由を報告する。7営業日連続運用はP3開始前ゲートとして別途行う。 |
 
 P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本番切替）は本書のスコープ外の運用フェーズであり、`docs/00_human_preparation.md`のP3/P4項目と対応する。
@@ -1409,5 +1383,4 @@ P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本�
 6. **解決済み: 35分以内（NFR-03）の実現方針**: 価格取得はyfinanceの一括ダウンロード（500銘柄バッチ）、ファンダメンタルズ更新は週1回・新規filingのみの増分更新、ニュース取得・LLM分析は保有＋候補の最大30銘柄に限定、EDGARアクセスは10リクエスト/秒上限を守るスロットリングを実装する（詳細は本書3.2, 3.4, 3.6, 3.14節および`docs/03_basic_design.md`8.3節参照）。実装後の実測に基づく追加チューニング（並列化要否等）の必要性はP1〜P2の実装時に判断する。
 7. **解決済み: 冪等性**: 2.1節と4.2節の自然キー、run_id、LLMキャッシュに従う。
 8. **解決済み: 統合テスト銘柄**: AAPL, MSFT, JPM, XOM, JNJを固定fixtureとして使う。
-9. **解決済み: 監視**: レポートフッターにrun_idとrun_steps要約を表示する。別ダッシュボードは作らない。
-10. **Lightweight Charts v5**: v5では`chart.addSeries(LightweightCharts.CandlestickSeries, options)`形式を使う。vendored版を固定し、その版の公式APIに合わせる。
+9. **解決済み: 監視**: CLIとMarkdown末尾にrun_id、run status、ステップ要約を表示する。別ダッシュボードは作らない。

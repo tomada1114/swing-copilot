@@ -2,8 +2,8 @@
 
 A decision-support batch pipeline for US equity swing/position trading. It
 screens the S&P 500 universe, checks risk parameters, summarizes news and
-filings with an LLM, and renders a daily HTML report. It never places orders
-— the human always makes the final buy/sell decision.
+filings with an LLM, prints a terminal brief, and archives generated Markdown.
+It never places orders — the human always makes the final buy/sell decision.
 
 ## Quick Example
 

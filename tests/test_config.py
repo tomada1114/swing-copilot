@@ -28,7 +28,6 @@ class TestLoadSettings:
         assert settings.llm.models.news_summary == "claude-haiku-4-5-20251001"
         assert settings.llm.models.filing_analysis == "claude-haiku-4-5-20251001"
         assert settings.notification.enabled is False
-        assert settings.report.auto_open is True
 
     def test_missing_file_raises_config_error(self, tmp_path):
         with pytest.raises(ConfigError, match="not found"):

@@ -318,6 +318,32 @@ class StateStore:
         """
         paper_records.record_trade_decision(self._database, record)
 
+    def get_decision_history(
+        self, symbol: str, strategy_key: str, before_date: date, limit: int
+    ) -> list[paper_records.DecisionHistoryEntry]:
+        """Return bounded prior live decisions for point-in-time LLM context."""
+        return paper_records.get_decision_history(
+            self._database, symbol, strategy_key, before_date, limit
+        )
+
+    def get_candidate_strategy_keys(self, run_id: UUID, symbol: str) -> tuple[str, ...]:
+        """Return strategies that produced a candidate in one run."""
+        return paper_records.get_candidate_strategy_keys(self._database, run_id, symbol)
+
+    def get_trade_decisions(
+        self, run_id: UUID
+    ) -> list[paper_records.TradeDecisionRecord]:
+        """Return all human decisions recorded for one run."""
+        return paper_records.get_trade_decisions(self._database, run_id)
+
+    def get_run_report_path(self, run_id: UUID) -> Path | None:
+        """Return the generated artifact path associated with a run."""
+        return paper_records.get_run_report_path(self._database, run_id)
+
+    def get_latest_run_report_path(self) -> Path | None:
+        """Return the newest completed generated artifact path."""
+        return paper_records.get_latest_run_report_path(self._database)
+
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]
     ) -> None:

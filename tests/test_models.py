@@ -83,7 +83,6 @@ class TestDailyRunOptions:
         assert options.skip_text is False
         assert options.skip_llm is False
         assert options.limit is None
-        assert options.no_open is False
 
     def test_explicit_values(self):
         options = DailyRunOptions(
@@ -92,7 +91,6 @@ class TestDailyRunOptions:
             skip_text=True,
             skip_llm=True,
             limit=5,
-            no_open=True,
         )
         assert options.as_of == date(2026, 7, 20)
         assert options.is_dry_run is True

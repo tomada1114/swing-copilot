@@ -1,7 +1,7 @@
 """Fail-soft boundary tests for pipeline/daily.py (FR-12, `docs/03_basic_design.md` 7).
 
 Text collection (5) and LLM analysis (6) failures degrade the run but never
-abort it: report (7), notify (8), and browser-open (9) always attempt to
+abort it: notification (7) and local output (8) still run when applicable.
 complete. Market/store/screening (1-4) failures are fatal, exit nonzero, and
 never corrupt state for a subsequent successful rerun.
 """
@@ -274,7 +274,7 @@ class TestTextCollectionFailureDegrades:
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "5_text") == "failed"
         assert _step_status(state_store, result.run_id, "6_llm") == "skipped"
-        assert _step_status(state_store, result.run_id, "7_report") == "success"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
 
     def test_degraded_report_shows_the_screening_only_fallback_message(self, base_deps):
         deps = replace(base_deps, news_client=ExplodingNewsClient())
@@ -282,10 +282,9 @@ class TestTextCollectionFailureDegrades:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.report_path is not None
-        html = result.report_path.read_text(encoding="utf-8")
-        assert "本日はニュース・開示分析を取得できませんでした" in html
-        # Non-LLM card content still renders normally (fail-soft, not hidden).
-        assert "テクニカル" in html
+        markdown = result.report_path.read_text(encoding="utf-8")
+        assert "本日はニュース・開示分析を取得できませんでした" in markdown
+        assert "## Candidates" in markdown
 
 
 class TestTextStepDetailMessagesAreTruthful:
@@ -370,7 +369,7 @@ class TestLLMAnalysisFailureDegrades:
         assert result.report_path is not None
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "6_llm") == "failed"
-        assert _step_status(state_store, result.run_id, "7_report") == "success"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
 
 
 class TestMixedOutcomeTextStepPreservesSuccesses:
@@ -414,15 +413,15 @@ class TestMixedOutcomeLLMStepPreservesSuccesses:
         assert result.report_path is not None
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "6_llm") == "failed"
-        assert _step_status(state_store, result.run_id, "7_report") == "success"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
 
-        html = result.report_path.read_text(encoding="utf-8")
+        markdown = result.report_path.read_text(encoding="utf-8")
         # AAPL's summary survived MSFT's mid-loop BudgetExceededError instead
         # of being discarded along with it.
-        assert "May indicate continued stability." in html
+        assert "May indicate continued stability." in markdown
         # Not the total-failure fallback: this is a partial, per-candidate
         # degradation, not "no LLM output produced at all".
-        assert "本日はニュース・開示分析を取得できませんでした" not in html
+        assert "本日はニュース・開示分析を取得できませんでした" not in markdown
 
 
 class TestHeldSymbolGetsTextCoverage:
@@ -462,20 +461,17 @@ class TestNotifyFailureDegrades:
         object.__setattr__(settings.notification, "enabled", True)
         deps = replace(base_deps, notifier=FailingNotifier())
 
-        # A live (non-dry-run) run: dry-run mode always suppresses step 8
+        # A live (non-dry-run) run: dry-run mode always suppresses step 7
         # (see `TestDryRunSuppressesNotification` below), so exercising the
         # actual notify-failure path requires `is_dry_run=False`.
-        # `no_open=True` keeps step 9 from popping a real browser window.
-        result = run_daily(
-            DailyRunOptions(as_of=AS_OF, is_dry_run=False, no_open=True), deps
-        )
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=False), deps)
 
         assert result.status == RunStatus.DEGRADED
         assert result.exit_code == 0
         assert result.report_path is not None
         assert result.report_path.is_file()
-        assert _step_status(state_store, result.run_id, "8_notify") == "failed"
-        assert _step_status(state_store, result.run_id, "9_open") == "success"
+        assert _step_status(state_store, result.run_id, "7_notify") == "failed"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
 
 
 class TestDryRunSuppressesNotification:
@@ -488,11 +484,11 @@ class TestDryRunSuppressesNotification:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        assert _step_status(state_store, result.run_id, "8_notify") == "skipped"
+        assert _step_status(state_store, result.run_id, "7_notify") == "skipped"
         with state_store._database.connect() as conn:  # noqa: SLF001
             detail = conn.execute(
                 "SELECT detail FROM run_steps WHERE run_id = ? AND step = ?",
-                [str(result.run_id), "8_notify"],
+                [str(result.run_id), "7_notify"],
             ).fetchone()[0]
         assert detail == "skipped: dry-run mode"
 

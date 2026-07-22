@@ -44,7 +44,7 @@ class TestRunLifecycle:
 
     def test_complete_run_updates_status_and_report_path(self, state_store, tmp_path):
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.DRY_RUN, "hash-a")
-        report_path = tmp_path / "reports" / "2026-07-20.html"
+        report_path = tmp_path / "reports" / "2026-07-20.md"
 
         state_store.complete_run(run_id, RunStatus.SUCCESS, report_path=report_path)
 

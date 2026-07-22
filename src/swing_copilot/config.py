@@ -183,12 +183,6 @@ class NotificationConfig(_StrictModel):
     enabled: bool = False
 
 
-class ReportConfig(_StrictModel):
-    """`report.*` in `settings.yaml`."""
-
-    auto_open: bool = True
-
-
 class Settings(_StrictModel):
     """Parsed, validated `config/settings.yaml`."""
 
@@ -201,7 +195,6 @@ class Settings(_StrictModel):
     budget: BudgetConfig = BudgetConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     notification: NotificationConfig = NotificationConfig()
-    report: ReportConfig = ReportConfig()
 
 
 RankingRule = Literal["rsi14_asc", "avg_volume_desc", "symbol_asc"]

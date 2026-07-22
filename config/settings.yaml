@@ -60,6 +60,3 @@ schedule:
 
 notification:
   enabled: false # Discord notification is opt-in; set DISCORD_WEBHOOK_URL to use it
-
-report:
-  auto_open: true # open the generated report in the default browser after a live run

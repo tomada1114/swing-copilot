@@ -33,11 +33,12 @@ dependencies = [
     "edgartools>=3.0",
     "httpx>=0.27",
     "anthropic>=0.100",
-    "jinja2>=3.1",
+    "rich>=14.0",
 ]
 
 [project.scripts]
 copilot-daily = "swing_copilot.pipeline.daily:main"
+copilot-decision = "swing_copilot.paper.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"

@@ -26,7 +26,7 @@ from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
     from uuid import UUID
 
@@ -111,6 +111,54 @@ class StateStore:
                     str(run_id),
                 ],
             )
+
+    def mark_stale_running_runs(self, cutoff: datetime, new_run_id: UUID) -> list[UUID]:
+        """Mark abandoned `status='running'` runs `failed` (NFR-03 stuck-run detection).
+
+        A run that crashed or was killed mid-execution (process kill,
+        machine sleep, ...) never reaches `complete_run()` and would
+        otherwise sit in `status='running'` forever. Any such row with
+        `started_at < cutoff` is presumed abandoned and marked `failed` in
+        one all-or-nothing transaction, so a mid-batch failure never leaves
+        some rows marked stale and others silently untouched.
+
+        Args:
+            cutoff: Runs started strictly before this instant are stale
+                (typically `deps.clock.now()` minus the NFR-03 timeout
+                budget).
+            new_run_id: The run performing this check, recorded in each
+                stale run's `error_summary` for audit. This run is always
+                excluded from marking, so a caller whose injected clock
+                disagrees with the database wall clock can never mark
+                itself stale.
+
+        Returns:
+            The `run_id`s marked stale, oldest `started_at` first.
+        """
+        with self._database.connect() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                stale_rows = conn.execute(
+                    "SELECT run_id FROM runs WHERE status = 'running' "
+                    "AND started_at < ? AND run_id != ? ORDER BY started_at",
+                    [cutoff, str(new_run_id)],
+                ).fetchall()
+                for (run_id,) in stale_rows:
+                    conn.execute(
+                        """
+                        UPDATE runs
+                        SET status = 'failed', completed_at = now(),
+                            error_summary = ?
+                        WHERE run_id = ?
+                        """,
+                        [f"marked stale by run {new_run_id}", run_id],
+                    )
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
+        return [run_id for (run_id,) in stale_rows]
 
     def record_run_step(
         self,

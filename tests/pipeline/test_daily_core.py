@@ -6,6 +6,7 @@ tests/test_e2e_smoke.py.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
@@ -48,6 +49,23 @@ class FakeDataProvider:
     def get_latest_bars(self, symbols, as_of):
         del symbols, as_of
         return BarFetchResult(bars=self._bars, failures=self._failures)
+
+
+class FakeMonotonic:
+    """Returns each value in order, then repeats the last one forever.
+
+    Mirrors a real monotonic clock: once "time" has passed a fixed point
+    (e.g. the NFR-03 deadline), it never goes back before it.
+    """
+
+    def __init__(self, *values: float):
+        self._values = list(values)
+        self._index = 0
+
+    def __call__(self) -> float:
+        value = self._values[min(self._index, len(self._values) - 1)]
+        self._index += 1
+        return value
 
 
 def _bars_for(symbols: list[str], as_of: date, days: int = 210) -> pd.DataFrame:
@@ -414,3 +432,131 @@ class TestUnexpectedStepException:
             ).fetchone()
         assert row[0] == "failed"
         assert "boom" in row[1]
+
+
+class TestTimeoutBudget:
+    """NFR-03 run-timeout budget (`deps.monotonic`/`settings.schedule.timeout_minutes`)."""
+
+    def test_no_breach_completes_normally(self, deps):
+        deps_with_monotonic = replace(deps, monotonic=FakeMonotonic(0.0))
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps_with_monotonic
+        )
+
+        assert result.status == RunStatus.SUCCESS
+
+    def test_mid_fundamentals_breach_degrades_but_the_run_still_completes(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        object.__setattr__(settings.schedule, "timeout_minutes", 1)  # 60s budget
+
+        class SlowEdgarClient:
+            def fetch_fundamentals(self, symbol, as_of):
+                del as_of
+                return [
+                    FundamentalsRecord(
+                        accession_no=f"acc-{symbol}",
+                        symbol=symbol,
+                        form="10-Q",
+                        fiscal_period_end=AS_OF,
+                        filed_at=datetime.combine(
+                            AS_OF, datetime.min.time(), tzinfo=UTC
+                        ),
+                        revenue=1.0,
+                        net_income=1.0,
+                        fcf=1.0,
+                        equity=1.0,
+                        assets=2.0,
+                        shares=1.0,
+                        source_url="https://www.sec.gov/example",
+                        fetched_at=datetime.combine(
+                            AS_OF, datetime.min.time(), tzinfo=UTC
+                        ),
+                    )
+                ]
+
+            def fetch_filing_texts(self, symbol, form_types, *, as_of):
+                del symbol, form_types, as_of
+                return []
+
+        universe = (_member("AAPL"), _member("MSFT"))
+        # run_started_at=0.0 -> deadline=60.0; index0(AAPL) check=10.0 (ok,
+        # fetched); index1(MSFT) check=70.0 (breach, stops before fetching).
+        deps_with_edgar = DailyDependencies(
+            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=universe,
+            strategies_config=STRATEGIES_CONFIG,
+            clock=FakeClock(),
+            edgar_client=SlowEdgarClient(),
+            monotonic=FakeMonotonic(0.0, 10.0, 70.0),
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps_with_edgar
+        )
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            fundamentals_row = conn.execute(
+                "SELECT status, detail FROM run_steps "
+                "WHERE run_id = ? AND step = '2_fundamentals'",
+                [str(result.run_id)],
+            ).fetchone()
+            text_row = conn.execute(
+                "SELECT status, detail FROM run_steps "
+                "WHERE run_id = ? AND step = '5_text'",
+                [str(result.run_id)],
+            ).fetchone()
+            report_row = conn.execute(
+                "SELECT status FROM run_steps WHERE run_id = ? AND step = '7_report'",
+                [str(result.run_id)],
+            ).fetchone()
+
+        # Not fatal: fundamentals stopped early with a partial result, not a
+        # failure -- one symbol was already fetched before the budget broke.
+        assert fundamentals_row[0] == "success"
+        assert "time budget exceeded after 1/2 symbols" in fundamentals_row[1]
+        # Once the budget is exceeded it stays exceeded, so the next
+        # network-bound step is skipped too -- this is what degrades the run.
+        assert text_row[0] == "skipped"
+        assert "time budget exceeded" in text_row[1]
+        # Cheap/local steps still ran and produced a report.
+        assert report_row[0] == "success"
+
+    def test_pre_step_breach_skips_network_steps_but_the_run_still_completes(
+        self, deps, state_store
+    ):
+        object.__setattr__(deps.settings.schedule, "timeout_minutes", 1)  # 60s budget
+        # run_started_at=0.0 -> deadline=60.0; by the time steps 5/6/8 check,
+        # "elapsed" is already far past the budget, even though nothing in
+        # the fatal steps (1-4) itself was individually slow.
+        deps_late = replace(deps, monotonic=FakeMonotonic(0.0, 999_999.0))
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps_late)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = dict(
+                conn.execute(
+                    "SELECT step, status FROM run_steps WHERE run_id = ?",
+                    [str(result.run_id)],
+                ).fetchall()
+            )
+        assert rows["5_text"] == "skipped"
+        assert rows["6_llm"] == "skipped"
+        assert rows["7_report"] == "success"
+        assert rows["8_notify"] == "skipped"
+        assert rows["9_open"] == "success"

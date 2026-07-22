@@ -7,22 +7,34 @@ developer's local `.env` (never read directly in this suite).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
+from pathlib import Path
 
+import httpx
 import pytest
 
 from swing_copilot.config import Secrets, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError
-from swing_copilot.models import DailyRunOptions
+from swing_copilot.models import DailyRunOptions, RunMode
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
     _compose_dependencies,
+    _configure_logging,
     _parse_args,
+    _paths_for_mode,
     _required_features,
     main,
 )
+from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.universe import UniverseMember
+
+
+def _make_status_error(message: str) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(401, request=request)
+    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 def _isolated_secrets(**overrides: str) -> Secrets:
@@ -186,6 +198,63 @@ class TestComposeDependencies:
                 DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
             )
 
+    def test_dry_run_composes_an_isolated_db_and_report_dir(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            daily_module,
+            "load_secrets",
+            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+        )
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+        monkeypatch.chdir(tmp_path)
+
+        deps = _compose_dependencies(
+            DailyRunOptions(is_dry_run=True, skip_text=True, skip_llm=True),
+            settings,
+            strategies,
+        )
+
+        assert deps.output_dir == "reports/dry_run"
+        assert deps.market_store._database.db_path == Path(  # noqa: SLF001
+            "data/copilot_dry_run.duckdb"
+        )
+
+    def test_live_run_composes_the_default_db_and_report_dir(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            daily_module,
+            "load_secrets",
+            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+        )
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+        monkeypatch.chdir(tmp_path)
+
+        deps = _compose_dependencies(
+            DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
+        )
+
+        assert deps.output_dir == "reports"
+        assert deps.market_store._database.db_path == DEFAULT_DB_PATH  # noqa: SLF001
+
+
+class TestPathsForMode:
+    def test_live_mode_uses_the_default_db_and_reports_dir(self):
+        db_path, output_dir = _paths_for_mode(RunMode.LIVE)
+
+        assert db_path == DEFAULT_DB_PATH
+        assert output_dir == "reports"
+
+    def test_dry_run_mode_uses_an_isolated_db_and_reports_subdir(self):
+        db_path, output_dir = _paths_for_mode(RunMode.DRY_RUN)
+
+        assert db_path == Path("data/copilot_dry_run.duckdb")
+        assert output_dir == "reports/dry_run"
+        assert db_path != DEFAULT_DB_PATH
+
 
 class TestMain:
     def test_parses_args_composes_and_exits_with_run_result_code(self, monkeypatch):
@@ -203,6 +272,7 @@ class TestMain:
 
             return _Result()
 
+        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(daily_module, "_compose_dependencies", fake_compose)
@@ -214,3 +284,57 @@ class TestMain:
         assert exc_info.value.code == 7
         assert calls["options"].is_dry_run is True
         assert calls["run_daily"] == (calls["options"], "fake-deps")
+
+
+class TestConfigureLoggingRedactsSecrets:
+    """Tests `_SecretRedactionFilter`, attached to root logging by `_configure_logging`.
+
+    It must strip every configured secret from both the record message and
+    any attached exception traceback (AGENTS.md: "never log secrets") -- see
+    `text/calendar_fred.py`/`text/news_finnhub.py`, which send their API keys
+    as URL query params that `httpx.HTTPStatusError` embeds verbatim in its
+    message.
+    """
+
+    def test_redacts_secret_from_message_and_traceback(self, caplog):
+        secrets = _isolated_secrets(
+            finnhub_api_key="finnhub-sekrit123",
+            fred_api_key="fred-sekrit456",
+            anthropic_api_key="sk-ant-sekrit789",
+            discord_webhook_url="https://discord.com/api/webhooks/sekrit-hook",
+        )
+        _configure_logging(secrets)
+        logger = logging.getLogger("swing_copilot.pipeline.daily.test")
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                error = _make_status_error(
+                    "401 error for url "
+                    "'https://fred.stlouisfed.org/releases?api_key=fred-sekrit456'"
+                )
+                raise error
+            except httpx.HTTPStatusError:
+                logger.exception("fetch failed for token=%s", "finnhub-sekrit123")
+
+        assert "fred-sekrit456" not in caplog.text
+        assert "finnhub-sekrit123" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+        # Both the rendered message line and the appended traceback text are
+        # redacted, not just one of the two.
+        record = caplog.records[-1]
+        assert "fred-sekrit456" not in record.message
+        assert "finnhub-sekrit123" not in record.message
+        assert record.exc_text is not None
+        assert "fred-sekrit456" not in record.exc_text
+        assert "[REDACTED]" in record.exc_text
+
+    def test_empty_and_none_secrets_are_never_redacted(self, caplog):
+        secrets = _isolated_secrets()  # every secret unset (None)
+        _configure_logging(secrets)
+        logger = logging.getLogger("swing_copilot.pipeline.daily.test")
+
+        with caplog.at_level(logging.ERROR):
+            logger.error("ordinary message with no secrets in it")
+
+        assert "ordinary message with no secrets in it" in caplog.text
+        assert "[REDACTED]" not in caplog.text

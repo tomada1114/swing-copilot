@@ -278,6 +278,33 @@ class MarketStore:
             return None
         return FundamentalsRecord(*row)
 
+    def has_fundamentals_fetched_on(self, symbol: str, day: date) -> bool:
+        """Return whether `symbol` already has a fundamentals row fetched on `day`.
+
+        Used to skip a same-day rerun's redundant EDGAR network fetch
+        (`pipeline/daily.py`'s fundamentals step). The correction upsert
+        keyed by `accession_no` is unaffected: a later day's run always
+        re-fetches and upserts, regardless of what this returns.
+
+        Args:
+            symbol: Ticker to check.
+            day: Calendar day to compare against `fetched_at`'s date.
+
+        Returns:
+            `True` if `fundamentals` has at least one row for `symbol` whose
+            `fetched_at` falls on `day`.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM fundamentals
+                WHERE symbol = ? AND CAST(fetched_at AS DATE) = ?
+                LIMIT 1
+                """,
+                [symbol, day],
+            ).fetchone()
+        return row is not None
+
     def read_fundamentals(self, as_of: date) -> pd.DataFrame:
         """Read every fundamentals row filed on or before `as_of`.
 

@@ -231,7 +231,9 @@ def deps(tmp_path):
 
 class TestFiveSymbolEndToEnd:
     def test_all_nine_steps_complete_and_produce_a_full_report(self, deps):
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        # Live mode (with the browser suppressed) exercises every step,
+        # including 8_notify, which dry-run mode intentionally skips.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, no_open=True), deps)
 
         assert result.status == RunStatus.SUCCESS
         assert result.exit_code == 0
@@ -288,7 +290,8 @@ class TestFiveSymbolEndToEnd:
         assert set(MARKET_STRIP_SYMBOLS).issubset(requested)
 
     def test_notifier_is_called_with_the_generated_report_path(self, deps):
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        # Dry-run suppresses notification, so this contract needs live mode.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, no_open=True), deps)
 
         assert len(deps.notifier.calls) == 1
         _summary, notified_path = deps.notifier.calls[0]

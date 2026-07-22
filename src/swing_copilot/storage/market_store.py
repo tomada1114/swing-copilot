@@ -269,7 +269,7 @@ class MarketStore:
                        source_url, fetched_at
                 FROM fundamentals
                 WHERE symbol = ? AND CAST(filed_at AS DATE) <= ?
-                ORDER BY filed_at DESC
+                ORDER BY filed_at DESC, fiscal_period_end DESC
                 LIMIT 1
                 """,
                 [symbol, as_of],

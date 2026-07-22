@@ -47,8 +47,7 @@ def record_trade_decision(database: Database, record: TradeDecisionRecord) -> No
                 position_id = EXCLUDED.position_id,
                 decision = EXCLUDED.decision,
                 reason_memo = EXCLUDED.reason_memo,
-                virtual_fill_price = EXCLUDED.virtual_fill_price,
-                created_at = EXCLUDED.created_at
+                virtual_fill_price = EXCLUDED.virtual_fill_price
             """,
             [
                 str(uuid4()),

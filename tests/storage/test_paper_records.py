@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -77,6 +77,50 @@ class TestRecordTradeDecision:
             ).fetchall()
         assert count == (1,)
         assert rows == [("followed", "changed my mind")]
+
+    def test_rerecording_same_natural_key_preserves_original_created_at(
+        self, state_store
+    ):
+        run_id = uuid4()
+        original = TradeDecisionRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            strategy_key="default",
+            position_id=None,
+            decision="ignored",
+            reason_memo="too risky",
+            virtual_fill_price=None,
+        )
+        state_store.record_trade_decision(original)
+
+        # Pin created_at to a sentinel in the past so the assertion below
+        # cannot pass by accident of two `now()` calls landing in the same
+        # tick — only a correct ON CONFLICT clause preserves it exactly.
+        sentinel_created_at = datetime(2020, 1, 1, tzinfo=UTC)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "UPDATE trades_journal SET created_at = ? WHERE run_id = ?",
+                [sentinel_created_at, str(run_id)],
+            )
+
+        correction = TradeDecisionRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            strategy_key="default",
+            position_id=None,
+            decision="followed",
+            reason_memo="changed my mind",
+            virtual_fill_price=151.0,
+        )
+        state_store.record_trade_decision(correction)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT created_at, decision FROM trades_journal WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row[0] == sentinel_created_at
+        assert row[1] == "followed"
 
     def test_different_strategy_keys_are_independent_rows(self, state_store):
         run_id = uuid4()
@@ -153,3 +197,49 @@ class TestGetClosedPositions:
 
     def test_returns_empty_list_when_none_closed(self, state_store):
         assert state_store.get_closed_positions(is_paper=True) == []
+
+    def test_as_of_none_returns_every_closed_position_regardless_of_close_date(
+        self, state_store
+    ):
+        closed_id = uuid4()
+        state_store.upsert_position(
+            _position(
+                closed_id,
+                status="closed",
+                close_date=date(2026, 7, 25),
+                close_price=110.0,
+            )
+        )
+
+        result = state_store.get_closed_positions(is_paper=True, as_of=None)
+
+        assert [p.position_id for p in result] == [closed_id]
+
+    def test_as_of_boundary_includes_position_closed_just_before_and_exactly_at(
+        self, state_store
+    ):
+        as_of = date(2026, 7, 20)
+        before_id, at_id, after_id = uuid4(), uuid4(), uuid4()
+        state_store.upsert_position(
+            _position(
+                before_id,
+                status="closed",
+                close_date=date(2026, 7, 19),
+                close_price=110.0,
+            )
+        )
+        state_store.upsert_position(
+            _position(at_id, status="closed", close_date=as_of, close_price=110.0)
+        )
+        state_store.upsert_position(
+            _position(
+                after_id,
+                status="closed",
+                close_date=date(2026, 7, 21),
+                close_price=110.0,
+            )
+        )
+
+        result = state_store.get_closed_positions(is_paper=True, as_of=as_of)
+
+        assert {p.position_id for p in result} == {before_id, at_id}

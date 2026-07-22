@@ -26,10 +26,15 @@ if TYPE_CHECKING:
     from swing_copilot.storage.state_store import StateStore
 
 _MIN_BARS_FOR_RETURN = 2
+_VALID_DECISIONS = frozenset({"followed", "ignored", "modified"})
 
 
 class PositionNotClosableError(SwingCopilotError):
     """Raised when `close_position()` cannot perform a real state transition."""
+
+
+class InvalidDecisionError(SwingCopilotError):
+    """Raised when `record_decision()` receives an unrecognized `decision` value."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +80,19 @@ class PaperJournal:
         Upserts `trades_journal` keyed on `(run_id, symbol, strategy_key)` —
         re-recording the same key updates the row (idempotent), it does not
         insert a duplicate.
+
+        Raises:
+            InvalidDecisionError: `decision` is not one of `"followed"`,
+                `"ignored"`, `"modified"` — checked fail-fast here so an
+                invalid value surfaces as a domain error, not a raw DuckDB
+                CHECK-constraint failure.
         """
+        if decision not in _VALID_DECISIONS:
+            msg = (
+                f"decision must be one of {sorted(_VALID_DECISIONS)}, got {decision!r}"
+            )
+            raise InvalidDecisionError(msg)
+
         self._state_store.record_trade_decision(
             TradeDecisionRecord(
                 run_id=run_id,
@@ -99,9 +116,10 @@ class PaperJournal:
             close_price: Virtual exit fill price.
 
         Raises:
-            PositionNotClosableError: `position_id` doesn't exist or is
-                already closed — closing must be a real state transition,
-                not a silent no-op.
+            PositionNotClosableError: `position_id` doesn't exist, is already
+                closed, `close_date` precedes `entry_date`, or `close_price`
+                is not positive — closing must be a real, valid state
+                transition, not a silent no-op or a garbage fill.
         """
         position = self._state_store.get_position(position_id)
         if position is None:
@@ -109,6 +127,15 @@ class PaperJournal:
             raise PositionNotClosableError(msg)
         if position.status == "closed":
             msg = f"position {position_id} is already closed"
+            raise PositionNotClosableError(msg)
+        if close_date < position.entry_date:
+            msg = (
+                f"close_date {close_date} precedes entry_date {position.entry_date} "
+                f"for position {position_id}"
+            )
+            raise PositionNotClosableError(msg)
+        if close_price <= 0:
+            msg = f"close_price must be positive, got {close_price}"
             raise PositionNotClosableError(msg)
 
         self._state_store.upsert_position(
@@ -137,7 +164,7 @@ class PaperJournal:
             simulation. `spy_return_pct` is `None` if SPY bars are
             insufficient for the span.
         """
-        closed = self._state_store.get_closed_positions(is_paper=True)
+        closed = self._state_store.get_closed_positions(is_paper=True, as_of=as_of)
         if not closed:
             return PerformanceSummary(
                 closed_trade_count=0,

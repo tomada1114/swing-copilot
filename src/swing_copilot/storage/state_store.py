@@ -234,21 +234,32 @@ class StateStore:
             ).fetchone()
         return None if row is None else self._position_from_row(row)
 
-    def get_closed_positions(self, is_paper: bool = True) -> list[Position]:
+    def get_closed_positions(
+        self, is_paper: bool = True, as_of: date | None = None
+    ) -> list[Position]:
         """Return closed positions matching `is_paper`.
 
         Args:
             is_paper: Whether to return paper or live positions.
+            as_of: Optional point-in-time cutoff; when given, only positions
+                with `close_date <= as_of` are returned (inclusive), so a
+                position closed after `as_of` never leaks into a summary
+                computed for that date. `None` returns every closed position
+                regardless of `close_date`.
 
         Returns:
             Closed positions, unordered.
         """
+        query = (
+            f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+            "FROM positions WHERE status = 'closed' AND is_paper = ?"
+        )
+        params: list[Any] = [is_paper]
+        if as_of is not None:
+            query += " AND close_date <= ?"
+            params.append(as_of)
         with self._database.connect() as conn:
-            rows = conn.execute(
-                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
-                "FROM positions WHERE status = 'closed' AND is_paper = ?",
-                [is_paper],
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [self._position_from_row(row) for row in rows]
 
     def record_trade_decision(self, record: TradeDecisionRecord) -> None:

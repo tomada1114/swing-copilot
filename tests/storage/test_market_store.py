@@ -387,3 +387,44 @@ class TestGetLatestFundamentals:
         result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
 
         assert result is None
+
+    def test_deterministic_tiebreak_when_filed_at_ties(self, market_store):
+        tied_filed_at = datetime(2026, 7, 10, tzinfo=UTC)
+        records = [
+            FundamentalsRecord(
+                accession_no="acc-earlier-period",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 3, 31),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=tied_filed_at,
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            ),
+            FundamentalsRecord(
+                accession_no="acc-later-period",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                filed_at=tied_filed_at,
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            ),
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.get_latest_fundamentals("AAPL", as_of=date(2026, 7, 20))
+
+        assert result is not None
+        assert result.accession_no == "acc-later-period"

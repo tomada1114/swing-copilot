@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import cast
 from uuid import uuid4
 
 import pytest
+from duckdb import ConstraintException
 
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
@@ -349,3 +351,24 @@ class TestTextItems:
         result = state_store.get_source_urls(["finnhub-1"])
 
         assert result == {"finnhub-1": "https://example.com/new"}
+
+    def test_batch_rolls_back_entirely_when_a_later_item_is_invalid(self, state_store):
+        valid = _text_item("finnhub-1", "https://example.com/1")
+        invalid = _text_item("finnhub-2", "https://example.com/2")
+        # content_text is NOT NULL; force a constraint violation on the
+        # second row so at least one row would have succeeded in isolation.
+        invalid = TextItem(
+            source_id=invalid.source_id,
+            symbol=invalid.symbol,
+            source_type=invalid.source_type,
+            published_at=invalid.published_at,
+            title=invalid.title,
+            source_url=invalid.source_url,
+            content_text=cast("str", None),
+            fetched_at=invalid.fetched_at,
+        )
+
+        with pytest.raises(ConstraintException):
+            state_store.record_text_items([valid, invalid])
+
+        assert state_store.get_source_urls(["finnhub-1", "finnhub-2"]) == {}

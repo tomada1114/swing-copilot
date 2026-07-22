@@ -13,6 +13,7 @@ _CONNECT_ERROR_MESSAGE = "boom"
 _UNEXPECTED_CALL_MESSAGE = (
     "real httpx.post must never be called in the offline test suite"
 )
+_UNEXPECTED_SLEEP_MESSAGE = "real time.sleep must never be called in tests"
 
 
 def _fake_post_ok(url, json):
@@ -69,12 +70,134 @@ class TestDiscordNotifierNotify:
 
         assert calls == [{"content": "summary only"}]
 
+    def test_success_on_first_attempt_makes_exactly_one_call_and_no_backoff(self):
+        calls = []
+        sleeps: list[float] = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            return _FakeResponse(204)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=sleeps.append,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is True
+        assert len(calls) == 1
+        assert sleeps == []
+
+    def test_400_response_is_not_retried_and_returns_false(self):
+        calls = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            return _FakeResponse(400)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook", http_post=fake_post
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is False
+        assert len(calls) == 1
+
+    def test_429_response_is_retried_then_succeeds(self):
+        responses = iter([_FakeResponse(429), _FakeResponse(204)])
+        calls = []
+        sleeps: list[float] = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            return next(responses)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=sleeps.append,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is True
+        assert len(calls) == 2
+        assert sleeps == [1.0]
+
+    def test_500_response_is_retried_then_succeeds(self):
+        responses = iter([_FakeResponse(500), _FakeResponse(204)])
+        calls = []
+        sleeps: list[float] = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            return next(responses)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=sleeps.append,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is True
+        assert len(calls) == 2
+        assert sleeps == [1.0]
+
+    def test_transport_error_then_success_retries_with_deterministic_backoff(self):
+        calls = []
+        sleeps: list[float] = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ConnectError(_CONNECT_ERROR_MESSAGE)
+            return _FakeResponse(204)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=sleeps.append,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is True
+        assert len(calls) == 2
+        assert sleeps == [1.0]
+
+    def test_all_attempts_fail_returns_false_after_ceiling_with_no_exception(self):
+        calls = []
+        sleeps: list[float] = []
+
+        def fake_post(url, json):
+            calls.append(1)
+            raise httpx.ConnectError(_CONNECT_ERROR_MESSAGE)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=sleeps.append,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is False
+        assert len(calls) == 3
+        assert sleeps == [1.0, 2.0]
+
     def test_non_2xx_response_returns_false_without_raising(self):
         def fake_post(url, json):
             return _FakeResponse(500)
 
         notifier = DiscordNotifier(
-            "https://discord.example/webhook", http_post=fake_post
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=lambda _delay: None,
         )
 
         result = notifier.notify("summary", None)
@@ -86,7 +209,9 @@ class TestDiscordNotifierNotify:
             raise httpx.ConnectError(_CONNECT_ERROR_MESSAGE)
 
         notifier = DiscordNotifier(
-            "https://discord.example/webhook", http_post=fake_post
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=lambda _delay: None,
         )
 
         result = notifier.notify("summary", None)
@@ -105,6 +230,25 @@ class TestDiscordNotifierNotify:
         result = notifier.notify("summary", None)
 
         assert result is True
+
+    def test_real_time_sleep_is_not_called_when_fake_injected(self, monkeypatch):
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError(_UNEXPECTED_SLEEP_MESSAGE)
+
+        monkeypatch.setattr("time.sleep", fail_if_called)
+
+        def fake_post(url, json):
+            raise httpx.ConnectError(_CONNECT_ERROR_MESSAGE)
+
+        notifier = DiscordNotifier(
+            "https://discord.example/webhook",
+            http_post=fake_post,
+            sleep_fn=lambda _delay: None,
+        )
+
+        result = notifier.notify("summary", None)
+
+        assert result is False
 
 
 class TestNotifierProtocolConformance:

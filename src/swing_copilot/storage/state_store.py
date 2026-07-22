@@ -11,11 +11,16 @@ land, without re-touching schema creation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from swing_copilot.models import Position, RunStatus, StepStatus
-from swing_copilot.storage import audit_records, llm_records, text_records
+from swing_copilot.storage import (
+    audit_records,
+    llm_records,
+    paper_records,
+    text_records,
+)
 from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
@@ -30,6 +35,7 @@ if TYPE_CHECKING:
     from swing_copilot.screening.base import Candidate, SignalHit
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.llm_records import LLMCallRecord
+    from swing_copilot.storage.paper_records import TradeDecisionRecord
     from swing_copilot.text.base import TextItem
 
 _UNIVERSE_SOURCE = "wikipedia"
@@ -174,6 +180,26 @@ class StateStore:
                 ],
             )
 
+    _POSITION_COLUMNS = (
+        "position_id, symbol, is_paper, entry_date, entry_price, "
+        "shares, stop_price, status, close_date, close_price"
+    )
+
+    @staticmethod
+    def _position_from_row(row: tuple[Any, ...]) -> Position:  # Any: untyped DuckDB row
+        return Position(
+            position_id=row[0],
+            symbol=row[1],
+            is_paper=row[2],
+            entry_date=row[3],
+            entry_price=row[4],
+            shares=row[5],
+            stop_price=row[6],
+            status=row[7],
+            close_date=row[8],
+            close_price=row[9],
+        )
+
     def get_open_positions(self, is_paper: bool = True) -> list[Position]:
         """Return open positions matching `is_paper`.
 
@@ -185,29 +211,53 @@ class StateStore:
         """
         with self._database.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT position_id, symbol, is_paper, entry_date, entry_price,
-                       shares, stop_price, status, close_date, close_price
-                FROM positions
-                WHERE status = 'open' AND is_paper = ?
-                """,
+                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+                "FROM positions WHERE status = 'open' AND is_paper = ?",
                 [is_paper],
             ).fetchall()
-        return [
-            Position(
-                position_id=row[0],
-                symbol=row[1],
-                is_paper=row[2],
-                entry_date=row[3],
-                entry_price=row[4],
-                shares=row[5],
-                stop_price=row[6],
-                status=row[7],
-                close_date=row[8],
-                close_price=row[9],
-            )
-            for row in rows
-        ]
+        return [self._position_from_row(row) for row in rows]
+
+    def get_position(self, position_id: UUID) -> Position | None:
+        """Return one position by ID, regardless of status.
+
+        Args:
+            position_id: The position to look up.
+
+        Returns:
+            The matching position, or `None` if it doesn't exist.
+        """
+        with self._database.connect() as conn:
+            row = conn.execute(
+                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+                "FROM positions WHERE position_id = ?",
+                [str(position_id)],
+            ).fetchone()
+        return None if row is None else self._position_from_row(row)
+
+    def get_closed_positions(self, is_paper: bool = True) -> list[Position]:
+        """Return closed positions matching `is_paper`.
+
+        Args:
+            is_paper: Whether to return paper or live positions.
+
+        Returns:
+            Closed positions, unordered.
+        """
+        with self._database.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
+                "FROM positions WHERE status = 'closed' AND is_paper = ?",
+                [is_paper],
+            ).fetchall()
+        return [self._position_from_row(row) for row in rows]
+
+    def record_trade_decision(self, record: TradeDecisionRecord) -> None:
+        """Upsert a paper-trading decision, keyed by `(run_id, symbol, strategy_key)`.
+
+        Args:
+            record: The decision to persist.
+        """
+        paper_records.record_trade_decision(self._database, record)
 
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]

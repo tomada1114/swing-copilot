@@ -66,6 +66,8 @@ class PaperJournal:
         decision: str,
         reason_memo: str | None,
         virtual_fill_price: float | None,
+        *,
+        position_id: UUID | None = None,
     ) -> None:
         """Record a human decision on one candidate.
 
@@ -76,6 +78,15 @@ class PaperJournal:
             decision: `"followed"` | `"ignored"` | `"modified"`.
             reason_memo: Optional free-text rationale.
             virtual_fill_price: Optional paper fill price if followed/modified.
+            position_id: The paper position this decision resulted in, once one
+                exists. Linking is a two-step workflow: record the decision
+                first (before any position exists, so `position_id` is left as
+                the default `None`); once a paper position is opened (via
+                `StateStore.upsert_position`), re-record the same
+                `(run_id, symbol, strategy_key)` natural key, this time
+                passing `position_id` — the upsert updates the existing row in
+                place, completing the signal-to-decision-to-fill-to-P&L link
+                (FR-11).
 
         Upserts `trades_journal` keyed on `(run_id, symbol, strategy_key)` —
         re-recording the same key updates the row (idempotent), it does not
@@ -85,11 +96,21 @@ class PaperJournal:
             InvalidDecisionError: `decision` is not one of `"followed"`,
                 `"ignored"`, `"modified"` — checked fail-fast here so an
                 invalid value surfaces as a domain error, not a raw DuckDB
-                CHECK-constraint failure.
+                CHECK-constraint failure. Also raised when `position_id` is
+                given together with `decision="ignored"`: an ignored
+                candidate never results in a paper position, so the pairing
+                is contradictory and rejected fail-fast rather than persisted
+                silently.
         """
         if decision not in _VALID_DECISIONS:
             msg = (
                 f"decision must be one of {sorted(_VALID_DECISIONS)}, got {decision!r}"
+            )
+            raise InvalidDecisionError(msg)
+        if position_id is not None and decision == "ignored":
+            msg = (
+                "position_id cannot be set when decision='ignored' — an "
+                "ignored candidate has no resulting paper position"
             )
             raise InvalidDecisionError(msg)
 
@@ -98,7 +119,7 @@ class PaperJournal:
                 run_id=run_id,
                 symbol=symbol,
                 strategy_key=strategy_key,
-                position_id=None,
+                position_id=position_id,
                 decision=decision,
                 reason_memo=reason_memo,
                 virtual_fill_price=virtual_fill_price,

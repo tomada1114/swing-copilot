@@ -101,6 +101,71 @@ class TestRecordDecisionIdempotency:
         with pytest.raises(InvalidDecisionError, match="decision"):
             journal.record_decision(uuid4(), "AAPL", "default", "maybe", None, None)
 
+    def test_recording_without_position_id_leaves_it_null(self, journal, state_store):
+        run_id = uuid4()
+
+        journal.record_decision(run_id, "AAPL", "default", "followed", None, 150.0)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT position_id FROM trades_journal WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [(None,)]
+
+    def test_linking_decision_to_a_paper_position_enables_pnl_traceability(
+        self, journal, state_store
+    ):
+        run_id = uuid4()
+        journal.record_decision(
+            run_id, "AAPL", "default", "followed", "looks good", 100.0
+        )
+
+        position = _open_position(entry_price=100.0, shares=10)
+        state_store.upsert_position(position)
+        journal.record_decision(
+            run_id,
+            "AAPL",
+            "default",
+            "followed",
+            "looks good",
+            100.0,
+            position_id=position.position_id,
+        )
+        journal.close_position(position.position_id, date(2026, 7, 15), 110.0)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                """
+                SELECT p.entry_price, p.close_price, p.shares
+                FROM trades_journal t
+                JOIN positions p ON p.position_id = t.position_id
+                WHERE t.run_id = ?
+                """,
+                [str(run_id)],
+            ).fetchone()
+        assert row is not None
+        entry_price, close_price, shares = row
+        pnl = (close_price - entry_price) * shares
+        assert pnl == pytest.approx(100.0)
+
+    def test_raises_when_position_id_given_with_ignored_decision(
+        self, journal, state_store
+    ):
+        position = _open_position()
+        state_store.upsert_position(position)
+
+        with pytest.raises(InvalidDecisionError, match="position_id"):
+            journal.record_decision(
+                uuid4(),
+                "AAPL",
+                "default",
+                "ignored",
+                None,
+                None,
+                position_id=position.position_id,
+            )
+
 
 class TestClosePositionLifecycle:
     def test_closes_an_open_position(self, journal, state_store):

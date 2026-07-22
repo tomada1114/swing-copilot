@@ -133,9 +133,15 @@ class PaperJournal:
         self, run_id: UUID, symbol: str, strategy_key: str,
         decision: str,  # "followed" | "ignored" | "modified"
         reason_memo: str | None, virtual_fill_price: float | None,
+        *, position_id: UUID | None = None,
     ) -> None:
         """Upsert trades_journal keyed on (run_id, symbol, strategy_key) — re-recording the
-        same key updates the row (idempotent), it does not insert a duplicate."""
+        same key updates the row (idempotent), it does not insert a duplicate. position_id
+        links this decision to its eventual paper position: record the decision first with
+        position_id left as None, then once StateStore.upsert_position() opens the position,
+        re-record the same natural key passing position_id to complete the link. Raises if
+        position_id is given together with decision='ignored' (contradictory: an ignored
+        candidate never results in a position)."""
 
     def close_position(self, position_id: UUID, close_date: date, close_price: float) -> None:
         """Close an open paper position via StateStore.upsert_position(status='closed', ...).

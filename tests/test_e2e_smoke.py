@@ -19,6 +19,7 @@ from swing_copilot.data.base import BarFetchResult
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
+from swing_copilot.report.html_report import MARKET_STRIP_SYMBOLS
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -208,7 +209,9 @@ def deps(tmp_path):
     object.__setattr__(settings.notification, "enabled", True)
 
     return DailyDependencies(
-        data_provider=FakeDataProvider(_uptrending_bars(SYMBOLS, AS_OF)),
+        data_provider=FakeDataProvider(
+            _uptrending_bars([*SYMBOLS, *MARKET_STRIP_SYMBOLS], AS_OF)
+        ),
         market_store=market_store,
         state_store=state_store,
         settings=settings,
@@ -259,6 +262,20 @@ class TestFiveSymbolEndToEnd:
         for symbol in SYMBOLS:
             assert f'id="card-{symbol}"' in html
         assert "May indicate continued stability." in html
+
+    def test_price_step_also_populates_the_market_strip(self, deps):
+        # The market strip's symbols (SPY/QQQ/^VIX/^TNX) are never part of
+        # the screening universe, so they only get bars if step 1 (prices)
+        # explicitly fetches them too.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        html = result.report_path.read_text(encoding="utf-8")
+        assert "取得不可" not in html
+        for symbol in MARKET_STRIP_SYMBOLS:
+            bars = deps.market_store.read_bars(
+                [symbol], AS_OF - timedelta(days=5), AS_OF, AS_OF
+            )
+            assert not bars.empty
 
     def test_notifier_is_called_with_the_generated_report_path(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)

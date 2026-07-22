@@ -45,7 +45,11 @@ from swing_copilot.models import (
     StepStatus,
 )
 from swing_copilot.report.discord_notify import DiscordNotifier
-from swing_copilot.report.html_report import ReportContext, render_report
+from swing_copilot.report.html_report import (
+    MARKET_STRIP_SYMBOLS,
+    ReportContext,
+    render_report,
+)
 from swing_copilot.risk.checks import RiskChecker
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
@@ -523,6 +527,10 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         position.symbol for position in deps.state_store.get_open_positions()
     }
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
+    # The market strip (SPY/QQQ/^VIX/^TNX) is never part of the screening
+    # universe, but its bars still need fetching here so the report has
+    # something to read (docs/05_ui_design.md 7.2).
+    price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
 
     prefetched_prices: BarFetchResult | None = None
     prefetch_error: str | None = None
@@ -531,7 +539,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         try:
             start = fetch_cutoff - timedelta(days=_FUNDAMENTALS_LOOKBACK_DAYS)
             prefetched_prices = deps.data_provider.get_daily_bars(
-                symbols, start, fetch_cutoff + timedelta(days=1)
+                price_symbols, start, fetch_cutoff + timedelta(days=1)
             )
             if not prefetched_prices.bars.empty:
                 latest = max(prefetched_prices.bars["date"])
@@ -557,7 +565,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     def _step_prices() -> _StepOutcome:
         if prefetch_error is not None:
             return _StepOutcome(False, prefetch_error)
-        return _run_step_prices(deps, symbols, run_date, prefetched_prices)
+        return _run_step_prices(deps, price_symbols, run_date, prefetched_prices)
 
     fatal_steps: list[tuple[str, Callable[[], _StepOutcome]]] = [
         ("1_prices", _step_prices),

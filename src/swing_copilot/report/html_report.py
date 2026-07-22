@@ -47,7 +47,10 @@ _UNBADGED_SIGNALS = frozenset({"volume_min"})
 _DEGRADED_LLM_MESSAGE = "本日はニュース・開示分析を取得できませんでした"
 _NEUTRAL_CONCLUSION = "ニュース・開示分析からの追加情報は今回ありません"
 
-_MARKET_STRIP_SYMBOLS = (
+# Public: pipeline/daily.py's price step also fetches these symbols so the
+# market strip has bars to read (`docs/05_ui_design.md` 7.2).
+MARKET_STRIP_SYMBOLS = ("SPY", "QQQ", "^VIX", "^TNX")
+_MARKET_STRIP_LABELS = (
     ("SPY", "SPY"),
     ("QQQ", "QQQ"),
     ("^VIX", "VIX"),
@@ -124,7 +127,7 @@ class ReportContext:
 def _market_strip(market_store: MarketStore, as_of: date) -> list[dict[str, object]]:
     start = as_of - timedelta(days=_MARKET_STRIP_LOOKBACK_DAYS)
     items: list[dict[str, object]] = []
-    for symbol, label in _MARKET_STRIP_SYMBOLS:
+    for symbol, label in _MARKET_STRIP_LABELS:
         bars = market_store.read_bars([symbol], start, as_of, as_of).sort_values("date")
         if len(bars) < _MIN_BARS_FOR_CHANGE:
             items.append(

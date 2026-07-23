@@ -171,6 +171,19 @@ class TestFundamentalFilterReasons:
         assert rejection.reason_code is RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME
         assert rejection.detail == {"net_income": -500000.0, "threshold": 0}
 
+    def test_missing_net_income_reports_null_not_nan(self, settings):
+        # Regression: a real EDGAR data gap (NaN net_income on the latest
+        # filed quarter) must not reach json_guard.dumps_safe() as a raw
+        # non-finite float — mirror the fcf/equity_ratio null-reporting
+        # convention already used for the same situation just below.
+        rows = _quarterly_rows("XYZ", [10.0, 10.0, 10.0, float("nan")])
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(data, settings)
+
+        assert rejection.reason_code is RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME
+        assert rejection.detail == {"net_income": None, "threshold": 0}
+
     def test_negative_fcf(self, settings):
         rows = _healthy_fundamentals("XYZ")
         for row in rows:

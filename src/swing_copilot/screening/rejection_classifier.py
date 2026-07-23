@@ -150,11 +150,17 @@ def _classify_fundamentals(
 
     latest = recent.iloc[0]
     if not (recent["net_income"] > 0).all():
+        # A NaN net_income (real data gap, distinct from a genuinely negative
+        # value) must report as null, not a non-finite float reaching
+        # json_guard.dumps_safe() — same convention as fcf/equity_ratio below.
+        net_income = (
+            float(latest["net_income"]) if pd.notna(latest["net_income"]) else None
+        )
         return RejectionRecord(
             symbol,
             RejectionStage.FUNDAMENTAL_FILTER,
             RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME,
-            {"net_income": float(latest["net_income"]), "threshold": 0},
+            {"net_income": net_income, "threshold": 0},
         )
     if config.require_positive_fcf and not (
         pd.notna(latest["fcf"]) and latest["fcf"] > 0

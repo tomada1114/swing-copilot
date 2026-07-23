@@ -8,9 +8,11 @@ is a one-line delegate) while its own module stays under the project's
 
 from __future__ import annotations
 
-import json
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from swing_copilot.storage.json_guard import dumps_safe
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,7 +61,7 @@ def record_signals(
                         strategy_key,
                         hit.signal_name,
                         hit.strength,
-                        json.dumps(dict(hit.metrics)),
+                        dumps_safe(dict(hit.metrics)),
                     ],
                 )
         except Exception:
@@ -91,7 +93,7 @@ def record_candidates(
                     strategy_key,
                     candidate.rank,
                     list(candidate.signal_names),
-                    json.dumps(dict(candidate.metrics)),
+                    dumps_safe(dict(candidate.metrics)),
                 ],
             )
 
@@ -130,7 +132,7 @@ def record_screening_results(
                         meta.strategy_key,
                         candidate.rank,
                         list(candidate.signal_names),
-                        json.dumps(dict(candidate.metrics)),
+                        dumps_safe(dict(candidate.metrics)),
                     ],
                 )
             for rejection in rejections:
@@ -150,7 +152,7 @@ def record_screening_results(
                         rejection.symbol,
                         rejection.stage.value,
                         rejection.reason_code.value,
-                        json.dumps(dict(rejection.detail)),
+                        dumps_safe(dict(rejection.detail)),
                         meta.as_of,
                     ],
                 )
@@ -194,13 +196,25 @@ def record_risk_assessments(
                     assessment.max_shares,
                     assessment.entry_price,
                     assessment.stop_price,
-                    json.dumps(list(assessment.reasons)),
-                    json.dumps(
+                    dumps_safe(list(assessment.reasons)),
+                    dumps_safe(
                         [
                             {
                                 "warning_type": warning.warning_type,
                                 "correlated_symbol": warning.correlated_symbol,
-                                "correlation": warning.correlation,
+                                # P1-04: risk/checks.py intentionally uses NaN
+                                # as `CorrelationWarning.correlation`'s
+                                # sentinel for "data_quality" (insufficient
+                                # history to compute a correlation). JSON has
+                                # no NaN literal, so persist that sentinel as
+                                # `null` -- the spec-compliant representation
+                                # of "not computable" -- rather than letting
+                                # dumps_safe reject the whole row.
+                                "correlation": (
+                                    warning.correlation
+                                    if math.isfinite(warning.correlation)
+                                    else None
+                                ),
                             }
                             for warning in assessment.warnings
                         ]
@@ -208,6 +222,6 @@ def record_risk_assessments(
                     assessment.shares_by_risk,
                     assessment.shares_by_position_cap,
                     assessment.binding_constraint,
-                    json.dumps(list(assessment.sizing_warnings)),
+                    dumps_safe(list(assessment.sizing_warnings)),
                 ],
             )

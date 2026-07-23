@@ -449,6 +449,36 @@ class TestRecordSignals:
         assert len(rows) == 1
         assert "999.0" in rows[0][0]
 
+    def test_rolls_back_entirely_when_a_later_hit_has_a_non_finite_metric(
+        self, state_store
+    ):
+        # P1-04 (Issue #13): dumps_safe raises before the guarded row's
+        # INSERT runs. That ValueError must still trigger the existing
+        # transaction's ROLLBACK -- an earlier, otherwise-valid hit in the
+        # same batch must not be left committed.
+        run_date = date(2026, 7, 20)
+        valid_hit = SignalHit(
+            symbol="AAPL",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": 100.0},
+        )
+        nan_hit = SignalHit(
+            symbol="MSFT",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": float("nan")},
+        )
+
+        with pytest.raises(ValueError, match="non-finite"):
+            state_store.record_signals([valid_hit, nan_hit], run_date, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM signals").fetchone()
+        assert count == (0,)
+
 
 class TestRecordCandidates:
     def test_records_one_row_per_candidate(self, state_store):
@@ -803,6 +833,41 @@ class TestRecordRiskAssessments:
             ).fetchall()
         assert rows[0][0] == "approved"
         assert "MSFT" in rows[0][1]
+
+    def test_data_quality_correlation_warnings_nan_sentinel_persists_as_json_null(
+        self, state_store
+    ):
+        # P1-04 (Issue #13): risk/checks.py::check_correlation intentionally
+        # uses NaN as CorrelationWarning.correlation's "not computable"
+        # sentinel for warning_type="data_quality". dumps_safe must not
+        # reject the whole row for this legitimate value -- it is persisted
+        # as JSON null (the spec-compliant representation) instead.
+        run_id = uuid4()
+        assessment = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+            warnings=(CorrelationWarning("MSFT", float("nan"), "data_quality"),),
+        )
+
+        state_store.record_risk_assessments([assessment], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT warnings_json FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        parsed = json.loads(row[0])
+        assert parsed == [
+            {
+                "warning_type": "data_quality",
+                "correlated_symbol": "MSFT",
+                "correlation": None,
+            }
+        ]
 
     def test_records_sizing_breakdown(self, state_store):
         # REQ-005: shares_by_risk/shares_by_position_cap/binding_constraint/

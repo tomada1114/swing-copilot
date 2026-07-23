@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +53,19 @@ def calc_position_size(
         raise ValueError(msg)
 
     risk_per_share = entry_price - stop_price
-    risk_based_shares = int((account_equity * max_trade_risk_pct) / risk_per_share)
-    position_based_shares = int((account_equity * max_position_pct) / entry_price)
+    # P1-04 (Issue #13, REQ-001/002): exact fractions.Fraction floor division
+    # instead of float division + int() truncation. Fraction(float) captures
+    # each input's exact binary value (not a re-rounded decimal string), and
+    # Fraction.__floordiv__ is exact integer floor division, so
+    # `shares * risk_per_share <= risk_budget` holds algebraically for every
+    # input, including extreme ones (e.g. account_equity=1e12, or
+    # max_trade_risk_pct as small as 0.0001%) where float division can round
+    # the quotient past an integer boundary.
+    risk_budget = Fraction(account_equity) * Fraction(max_trade_risk_pct)
+    risk_based_shares = risk_budget // Fraction(risk_per_share)
+
+    position_budget = Fraction(account_equity) * Fraction(max_position_pct)
+    position_based_shares = position_budget // Fraction(entry_price)
     return PositionSizeResult(
         shares_by_risk=risk_based_shares,
         shares_by_position_cap=position_based_shares,

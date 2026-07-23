@@ -373,6 +373,21 @@ class StateStore:
 
 **エラー処理**: DuckDB書き込みはステップ単位のトランザクションとし、失敗時はロールバックして呼び出し元へ例外を伝播する。`runs`/`run_steps`自体の記録失敗は標準エラーへ構造化ログを出し、非ゼロ終了する。
 
+**`storage/json_guard.py::dumps_safe()`（P1-04、roadmap §5、Issue #13）**: `storage/`配下でJSONカラム（`signals.metrics_json`、`candidates.metrics_json`、`screening_rejections.detail`、`risk_assessments.reasons_json`/`warnings_json`/`sizing_warnings_json`）へ書き込むすべての`json.dumps`呼び出しは`dumps_safe()`を経由する。
+
+```python
+def dumps_safe(value: object) -> str:
+    """反復（スタック）方式でNaN/Inf/-Infを事前検査してからjson.dumpsする。"""
+
+def _check_finite(value: object) -> None:
+    """明示的スタックでdict/list/tupleを走査する。再帰呼び出しは使わない
+    （深いネストでのRecursionError回避、REQ-004）。非有限floatを検出したら
+    書き込み前に、経路（例: "a.b[0].c"）付きのValueErrorを送出する。
+    """
+```
+
+第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。`llm_records.py`は`response_json`をすでに直列化済みの文字列として受け取るだけで自ら`json.dumps`しないため対象外（`llm/`側の別契約：CON-03・redaction）。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
+
 ### 3.9 `screening/base.py`（NFR-07）
 
 ```python
@@ -540,6 +555,15 @@ def calc_position_size(
     1トレードのリスク（資金のmax_trade_risk_pct、ストップ幅基準）と
     1銘柄の上限（資金のmax_position_pct）それぞれの株数を算出し、
     両方を満たす最大株数（両者の最小値）とともに返す。
+
+    P1-04（roadmap §5、Issue #13）: 公開シグネチャ・戻り値の型は変えず
+    （入出力はfloat/intのまま）、内部の床計算のみ`fractions.Fraction`の
+    厳密除算（`//`）に置換した。`Fraction(float)`は入力floatの2進数表現を
+    そのまま厳密な有理数として捉える（`str()`経由の再丸めではない）ため、
+    `shares_by_risk * risk_per_share <= risk_budget`（position_capも同様）が
+    構成的に成立する。float除算+`int()`切り捨てでは、極端な入力
+    （account_equity=1e12、max_trade_risk_pctが0.0001%程度まで小さい等）で
+    丸め誤差により床値が1株分ずれ得る。
     """
 
 class RiskChecker:

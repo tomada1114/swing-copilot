@@ -782,6 +782,8 @@ class DiscordNotifier:
 
 MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`trades_journal`を更新し、生成ファイル内のmarker付き判断セクションを正本から再描画する。過去判断のLLM入力条件とdelimiterは`docs/05_ui_design.md` 7章を正とする。
 
+**P1-05（roadmap §5、REQ-008）**: `DailyBriefContext`は実行時の戦略キーを保持する`strategy_key: str`フィールドを持つ（`pipeline/daily.py`の`_run_step_output()`が`deps.strategy_key`をそのまま渡す。1回の実行は常に単一戦略のため、`Candidate`側は候補ごとの戦略キーを持たない）。`BriefCandidate`は`past_decisions: tuple[BriefPastDecision, ...] = ()`を追加で持ち、`_candidate_brief()`が`state_store.get_decision_history(candidate.symbol, context.brief.strategy_key, context.brief.run_date, limit=3)`（LLM判断履歴と同じ3.17節の関数、`mode='live'`かつ`run_date < before_date`で point-in-time 安全・新しい順）の結果をそのままフィールドマッピングする。`BriefPastDecision`は`run_date` / `decision` / `reason_memo` / `realized_return_pct`の4フィールドのfrozen dataclass。`markdown_report.py::_candidate_section()`は各候補の`## <SYMBOL>`節内に「過去判断」小節（`### 過去判断`、日付/判断/理由/実現損益率のテーブル）を追加描画するが、`past_decisions`が空のときは見出しごと省略する（Facts/LLM risk flags/Sourcesと同じ0件時の描画方針）。terminal（`terminal_report.py`）は本節の対象外（変更なし）。
+
 ### 3.19 `backtest/engine.py` / `backtest/runner.py`（FR-10）
 
 ```python
@@ -983,6 +985,28 @@ def main(argv: list[str] | None = None) -> None:
     """CLI引数をDailyRunOptionsへ変換し、実アダプタ一式をcomposeして実行、
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
+
+### 3.22 `report/history_cli.py` / `storage/history_queries.py`（P1-05）
+
+`copilot-decision`（`paper/cli.py`）が判断記録の書き込み専用CLIであるのに対し、`copilot-history`はその読み出し専用の対となるCLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
+
+```text
+uv run copilot-history runs [--limit N] [--db PATH]
+uv run copilot-history run --run-id <UUID> [--db PATH]
+uv run copilot-history symbol <SYMBOL> [--db PATH]
+uv run copilot-history rejections --run-id <UUID> [--db PATH]
+uv run copilot-history performance [--db PATH]
+```
+
+| サブコマンド | 表示内容 | 裏付けるクエリ |
+|---|---|---|
+| `runs` | 直近N件のrun一覧（run_id, run_date, 候補数, 落選数, 判断数） | `history_queries.list_runs()`（`candidates`/`screening_rejections`/`trades_journal`をLEFT JOINしCOALESCEで0埋め、0件のrunも消えない） |
+| `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
+| `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
+| `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
+| `performance` | P1-06で拡張された`PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/r_multiple_omitted警告/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
+
+DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
 ---
 

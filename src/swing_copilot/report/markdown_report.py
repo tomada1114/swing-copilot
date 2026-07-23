@@ -168,6 +168,32 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
         lines.extend(
             f"- [{source.source_id}]({source.url})" for source in candidate.llm.sources
         )
+    lines.extend(_past_decisions_section(candidate))
+    return lines
+
+
+def _past_decisions_section(candidate: BriefCandidate) -> list[str]:
+    """REQ-008: 過去判断 subsection.
+
+    Omitted entirely (no heading) when empty, matching this file's
+    established style for optional per-candidate subsections (Facts/LLM
+    risk flags/Sources above).
+    """
+    if not candidate.past_decisions:
+        return []
+    lines = [
+        "",
+        "### 過去判断",
+        "",
+        "| Date | Decision | Reason | 実現損益率 |",
+        "|---|---|---|---:|",
+    ]
+    for past in candidate.past_decisions:
+        reason = (past.reason_memo or "-").replace("|", "\\|").replace("\n", " ")
+        lines.append(
+            f"| {past.run_date.isoformat()} | {past.decision} | {reason} | "
+            f"{_percent(past.realized_return_pct)} |"
+        )
     return lines
 
 

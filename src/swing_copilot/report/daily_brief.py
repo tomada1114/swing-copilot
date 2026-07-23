@@ -28,6 +28,10 @@ _SIGNAL_LABELS = {"trend_sma": "SMA200上抜け", "pullback_rsi": "RSI押し目"
 _HIDDEN_SIGNALS = frozenset({"volume_min"})
 _DEGRADED_LLM_MESSAGE = "本日はニュース・開示分析を取得できませんでした"
 _NEUTRAL_LLM_MESSAGE = "ニュース・開示分析からの追加情報は今回ありません"
+# REQ-008: "直近3件" -- mirrors `pipeline/daily.py`'s `_DECISION_HISTORY_LIMIT`
+# (same value, used for the LLM prompt's decision history), kept as an
+# independent constant here since `report/` must not depend on `pipeline/`.
+_PAST_DECISIONS_LIMIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,16 @@ class BriefFundamentals:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefPastDecision:
+    """One prior recorded decision for a candidate's "過去判断" section (REQ-008)."""
+
+    run_date: date
+    decision: str
+    reason_memo: str | None
+    realized_return_pct: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class BriefCandidate:
     """All terminal/Markdown presentation data for one ranked candidate."""
 
@@ -137,6 +151,10 @@ class BriefCandidate:
     fundamentals: BriefFundamentals
     risk: BriefRisk
     llm: BriefLlm
+    # REQ-008: newest-first, at most `_PAST_DECISIONS_LIMIT` entries -- see
+    # `_candidate_brief`. Defaults to `()` for markdown/terminal-only tests
+    # that don't exercise this section.
+    past_decisions: tuple[BriefPastDecision, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +190,10 @@ class DailyBriefContext:
     risk_assessments: list[RiskAssessment]
     news_summaries: list[NewsSummary] | None
     filing_analyses: list[FilingAnalysis] | None
+    # REQ-008: the single strategy this run screened with, used to scope
+    # `state_store.get_decision_history()` per candidate -- today's `Candidate`
+    # objects don't carry a per-candidate strategy_key (one run == one strategy).
+    strategy_key: str
     rejections: list[RejectionRecord] = field(default_factory=list)
     notices: tuple[str, ...] = ()
     # REQ-006: baked into each candidate's `BriefRisk` for `format_sizing()`,
@@ -291,6 +313,30 @@ def _candidate_brief(
             context.brief.filing_analyses,
             state_store,
         ),
+        past_decisions=_past_decisions(candidate.symbol, context.brief, state_store),
+    )
+
+
+def _past_decisions(
+    symbol: str, brief: DailyBriefContext, state_store: StateStore
+) -> tuple[BriefPastDecision, ...]:
+    """REQ-008: at most `_PAST_DECISIONS_LIMIT` prior decisions, newest first.
+
+    Delegates entirely to `state_store.get_decision_history()` -- already
+    point-in-time-safe (`mode='live'` and `run_date < before_date`) and
+    already ordered newest-first, so this is a pure field mapping.
+    """
+    history = state_store.get_decision_history(
+        symbol, brief.strategy_key, brief.run_date, _PAST_DECISIONS_LIMIT
+    )
+    return tuple(
+        BriefPastDecision(
+            run_date=entry.run_date,
+            decision=entry.decision,
+            reason_memo=entry.reason_memo,
+            realized_return_pct=entry.realized_return_pct,
+        )
+        for entry in history
     )
 
 

@@ -714,6 +714,7 @@ def _run_step_output(
         risk_assessments=output.run.risk_assessments,
         news_summaries=output.news_summaries,
         filing_analyses=output.filing_analyses,
+        strategy_key=deps.strategy_key,
         rejections=output.run.rejections,
         notices=output.notices,
         max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,

@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from swing_copilot.data.base import BarFetchResult, FetchFailure
-from swing_copilot.models import DailyRunOptions, RunStatus
+from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
@@ -23,6 +23,7 @@ from swing_copilot.screening import (
 )
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 
@@ -148,6 +149,24 @@ STRATEGIES_CONFIG = {
             "signals_all": ["trend_sma"],
             "candidate_limit": 10,
         }
+    }
+}
+
+# TestPastDecisionsThreading: a second strategy key, to distinguish "the
+# correct strategy_key threaded through" from "it happened to match the
+# only strategy that exists".
+TWO_STRATEGIES_CONFIG = {
+    "strategies": {
+        "default": {
+            "filters_all": ["volume_min"],
+            "signals_all": ["trend_sma"],
+            "candidate_limit": 10,
+        },
+        "growth_v2": {
+            "filters_all": ["volume_min"],
+            "signals_all": ["trend_sma"],
+            "candidate_limit": 10,
+        },
     }
 }
 
@@ -687,3 +706,66 @@ class TestScreeningRejections:
         report_text = result.report_path.read_text(encoding="utf-8")
         assert "## 落選サマリ" in report_text
         assert "該当なし(0件)" in report_text
+
+
+class TestPastDecisionsThreading:
+    """P1-05 REQ-008 strategy_key threading test.
+
+    `deps.strategy_key` must reach `DailyBriefContext` and scope each
+    candidate's `past_decisions` -- not merely coincidentally match the
+    shared "default" value.
+    """
+
+    def test_strategy_key_threads_into_past_decisions_end_to_end(
+        self, deps, state_store
+    ):
+        custom_deps = replace(
+            deps,
+            strategy_key="growth_v2",
+            strategies_config=TWO_STRATEGIES_CONFIG,
+        )
+        # A decision recorded under a different strategy_key than this run's
+        # own must not surface in `past_decisions`.
+        wrong_strategy_run = state_store.start_run(
+            AS_OF - timedelta(days=5), RunMode.LIVE, "cfg"
+        )
+        state_store.record_trade_decision(
+            TradeDecisionRecord(
+                run_id=wrong_strategy_run,
+                symbol="AAPL",
+                strategy_key="default",
+                position_id=None,
+                decision="followed",
+                reason_memo="wrong strategy decision",
+                virtual_fill_price=100.0,
+            )
+        )
+        right_strategy_run = state_store.start_run(
+            AS_OF - timedelta(days=3), RunMode.LIVE, "cfg"
+        )
+        state_store.record_trade_decision(
+            TradeDecisionRecord(
+                run_id=right_strategy_run,
+                symbol="AAPL",
+                strategy_key="growth_v2",
+                position_id=None,
+                decision="ignored",
+                reason_memo="correct strategy decision",
+                virtual_fill_price=None,
+            )
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), custom_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.brief is not None
+        aapl = next(c for c in result.brief.candidates if c.symbol == "AAPL")
+        assert len(aapl.past_decisions) == 1
+        assert aapl.past_decisions[0].decision == "ignored"
+        assert aapl.past_decisions[0].reason_memo == "correct strategy decision"
+
+        assert result.report_path is not None
+        report_text = result.report_path.read_text(encoding="utf-8")
+        assert "### 過去判断" in report_text
+        assert "correct strategy decision" in report_text
+        assert "wrong strategy decision" not in report_text

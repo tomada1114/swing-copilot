@@ -126,6 +126,9 @@ INIT_SCHEMA_STATEMENTS = (
         status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
         close_date    DATE,
         close_price   DOUBLE,
+        exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
+            'stop_loss','target','time_stop','manual','other','unknown'
+        )),
         created_at    TIMESTAMPTZ NOT NULL
     )
     """,
@@ -187,4 +190,17 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS binding_constraint VARCHAR",
     "ALTER TABLE risk_assessments "
     "ADD COLUMN IF NOT EXISTS sizing_warnings_json JSON DEFAULT '[]'",
+    # P1-06: additive column for a database created before this change.
+    # Unconstrained at the DB level for the same reason as above (DuckDB
+    # rejects ADD COLUMN with an inline CHECK); `close_position()` and the
+    # backfill below are the sole enforcement points for rows added via
+    # this path. Deliberately no column-level DEFAULT: a plain DEFAULT would
+    # also stamp 'unknown' onto still-open positions (wrong — they have no
+    # exit reason at all and must stay NULL), so the backfill below is
+    # scoped to already-closed rows only. Both statements are idempotent —
+    # safe to re-run on every startup against a fresh or already-upgraded
+    # database.
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR",
+    "UPDATE positions SET exit_reason = 'unknown' "
+    "WHERE status = 'closed' AND exit_reason IS NULL",
 )

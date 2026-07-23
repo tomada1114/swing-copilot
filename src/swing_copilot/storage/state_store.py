@@ -209,8 +209,9 @@ class StateStore:
                 """
                 INSERT INTO positions (
                     position_id, symbol, is_paper, entry_date, entry_price,
-                    shares, stop_price, status, close_date, close_price, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                    shares, stop_price, status, close_date, close_price,
+                    exit_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (position_id) DO UPDATE SET
                     symbol = EXCLUDED.symbol,
                     is_paper = EXCLUDED.is_paper,
@@ -220,7 +221,8 @@ class StateStore:
                     stop_price = EXCLUDED.stop_price,
                     status = EXCLUDED.status,
                     close_date = EXCLUDED.close_date,
-                    close_price = EXCLUDED.close_price
+                    close_price = EXCLUDED.close_price,
+                    exit_reason = EXCLUDED.exit_reason
                 """,
                 [
                     str(position.position_id),
@@ -233,12 +235,13 @@ class StateStore:
                     position.status,
                     position.close_date,
                     position.close_price,
+                    position.exit_reason,
                 ],
             )
 
     _POSITION_COLUMNS = (
         "position_id, symbol, is_paper, entry_date, entry_price, "
-        "shares, stop_price, status, close_date, close_price"
+        "shares, stop_price, status, close_date, close_price, exit_reason"
     )
 
     @staticmethod
@@ -254,6 +257,7 @@ class StateStore:
             status=row[7],
             close_date=row[8],
             close_price=row[9],
+            exit_reason=row[10],
         )
 
     def get_open_positions(self, is_paper: bool = True) -> list[Position]:
@@ -317,6 +321,56 @@ class StateStore:
         with self._database.connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._position_from_row(row) for row in rows]
+
+    def get_closed_positions_with_strategy(
+        self, is_paper: bool = True, as_of: date | None = None
+    ) -> list[tuple[Position, str | None]]:
+        """Return closed positions paired with their originating strategy_key.
+
+        A closed `Position` doesn't carry `strategy_key` directly — it lives
+        on `trades_journal`, linked via `position_id` (P1-06, REQ-007's
+        by-strategy breakdown).
+
+        Args:
+            is_paper: Whether to return paper or live positions.
+            as_of: Optional point-in-time cutoff; same `close_date <= as_of`
+                (inclusive) semantics as `get_closed_positions`.
+
+        Returns:
+            `(position, strategy_key)` pairs, unordered. `strategy_key` is
+            `None` when the position was never linked to a `trades_journal`
+            row (e.g. closed without ever recording a decision). Because
+            `trades_journal.position_id` is not itself uniquely constrained
+            (`UNIQUE (run_id, symbol, strategy_key)` is the real key), more
+            than one row could in principle reference the same
+            `position_id`; this picks the earliest-recorded row (by
+            `created_at`, tie-broken by `strategy_key`) deterministically —
+            a tie-break, not a new business rule.
+        """
+        qualified_columns = ", ".join(
+            f"p.{column.strip()}" for column in self._POSITION_COLUMNS.split(",")
+        )
+        query = f"""
+            SELECT {qualified_columns}, tj.strategy_key
+            FROM positions p
+            LEFT JOIN (
+                SELECT position_id, strategy_key,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY position_id
+                           ORDER BY created_at ASC, strategy_key ASC
+                       ) AS rn
+                FROM trades_journal
+                WHERE position_id IS NOT NULL
+            ) tj ON tj.position_id = p.position_id AND tj.rn = 1
+            WHERE p.status = 'closed' AND p.is_paper = ?
+        """  # noqa: S608 - constant column list, no user input interpolated
+        params: list[Any] = [is_paper]
+        if as_of is not None:
+            query += " AND p.close_date <= ?"
+            params.append(as_of)
+        with self._database.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [(self._position_from_row(row[:-1]), row[-1]) for row in rows]
 
     def record_trade_decision(self, record: TradeDecisionRecord) -> None:
         """Upsert a paper-trading decision, keyed by `(run_id, symbol, strategy_key)`.

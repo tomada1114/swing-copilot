@@ -833,32 +833,64 @@ class PaperJournal:
         CON-04（ペーパートレード検証ゲート）の実績データ元となる。
         """
 
-    def close_position(self, position_id: UUID, close_date: "date", close_price: float) -> None:
+    def close_position(
+        self, position_id: UUID, close_date: "date", close_price: float,
+        exit_reason: str,
+    ) -> None:
         """
         オープン中のペーパーポジションをクローズし、positionsを更新する。
-        position_idが存在しない、または既にクローズ済みの場合は
-        PositionNotClosableError（SwingCopilotError派生）を送出する
-        ——サイレントなno-opにしない。
+        exit_reasonは必須引数（P1-06/REQ-001/020）で
+        {stop_loss, target, time_stop, manual, other}の5値以外は拒否する
+        （"unknown"は移行専用のsentinelで、closeの入力としては拒否される）。
+        exit_reasonの検証はpositionを読む前に行う（フェイルファスト）。
+        position_idが存在しない、既にクローズ済み、close_dateが
+        entry_dateより前、close_priceが正でない、またはexit_reasonが
+        不正な場合はPositionNotClosableError（SwingCopilotError派生）を
+        送出する——サイレントなno-opにしない。いずれの拒否でもpositionの
+        状態は変化しない。
         """
 
     def summarize_performance(
         self, market_store: "MarketStore", as_of: "date"
     ) -> "PerformanceSummary":
         """
-        クローズ済みペーパートレードの集計P&L・勝率と、同期間
-        （最古のクローズ済みentry_date..as_of）のSPYバイ&ホールド
-        リターンを返す（backtest/engine.pyのbenchmarkと同じ考え方を
-        実トレードへ適用）。SPY足が不足する場合はspy_return_pctがNone。
+        クローズ済みペーパートレードの集計P&L・勝率・期待値・profit_factor・
+        R-multiple・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
+        entry_date..as_of）のSPYバイ&ホールドリターンを返す（P1-06,
+        backtest/engine.pyのbenchmarkと同じ考え方を実トレードへ適用）。
+        クローズ済み0件のときは全てのレート/比率フィールドがNone（例外は
+        発生させない）。SPY足が不足する場合はspy_return_pctがNone。
         """
 ```
 
 ```python
 @dataclass(frozen=True, slots=True)
+class PerformanceBreakdownRow:
+    key: str              # exit_reasonの値、strategy_key、または未連携行の"unknown"
+    trade_count: int
+    win_rate: float | None    # trade_count==0のときのみNone（実際には起こらない）
+    avg_pnl_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class PerformanceSummary:
     closed_trade_count: int
-    total_pnl_usd: float
-    win_rate: float          # クローズ済みトレードのうち含み益だった割合。0件ならOK 0.0
-    spy_return_pct: float | None  # SPY足が不足する場合はNone
+    total_pnl_usd: float      # 0件なら0.0（空集合の合計として well-defined）
+    win_rate: float | None    # 0件ならNone（未定義）。pnl>0=勝ち、pnl==0=中立
+                               # （分母には入るが勝ち数には数えない）、pnl<0=負け、
+                               # という固定の分類基準を採用（win_rateとprofit_factor
+                               # で共通）
+    spy_return_pct: float | None       # SPY足が不足する場合はNone
+    expectancy_usd: float | None       # 全クローズ済みトレードのpnl平均。0件ならNone
+    profit_factor: float | None        # 総益/総損の絶対値。損失トレードが0件ならNone
+    avg_r_multiple: float | None       # pnl/((entry-stop)*shares)の算出可能トレード平均
+    r_multiple_omitted_count: int      # R-multiple省略件数（stop未記録、または
+                                        # entry-stop<=0という防御的拡張）
+    r_multiple_omitted_warning: str | None  # 省略0件ならNone
+    by_exit_reason: tuple[PerformanceBreakdownRow, ...]  # exit_reason別内訳
+    by_strategy: tuple[PerformanceBreakdownRow, ...]     # 戦略別内訳
+                                        # （trades_journal.position_id経由。
+                                        # 未連携ポジションは"unknown"キー）
 ```
 
 ### 3.21 `pipeline/daily.py`（FR-12）
@@ -1097,9 +1129,16 @@ CREATE TABLE IF NOT EXISTS positions (
     status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
     close_date    DATE,
     close_price   DOUBLE,
+    exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
+        'stop_loss','target','time_stop','manual','other','unknown'
+    )),
     created_at    TIMESTAMPTZ NOT NULL
 );
+```
 
+`exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
+
+```sql
 CREATE TABLE IF NOT EXISTS trades_journal (
     journal_id          UUID PRIMARY KEY,
     run_id              UUID NOT NULL,

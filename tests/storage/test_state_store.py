@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import duckdb
 import pytest
@@ -46,6 +46,22 @@ _PRE_P1_03_RISK_ASSESSMENTS_TABLE = """
         reasons_json    JSON NOT NULL,
         warnings_json   JSON NOT NULL,
         PRIMARY KEY (run_id, symbol)
+    )
+"""
+
+_PRE_P1_06_POSITIONS_TABLE = """
+    CREATE TABLE IF NOT EXISTS positions (
+        position_id   UUID PRIMARY KEY,
+        symbol        VARCHAR NOT NULL,
+        is_paper      BOOLEAN NOT NULL DEFAULT 1,
+        entry_date    DATE NOT NULL,
+        entry_price   DOUBLE NOT NULL,
+        shares        BIGINT NOT NULL,
+        stop_price    DOUBLE,
+        status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
+        close_date    DATE,
+        close_price   DOUBLE,
+        created_at    TIMESTAMPTZ NOT NULL
     )
 """
 
@@ -100,6 +116,97 @@ class TestInitSchema:
                 [str(run_id)],
             ).fetchone()
         assert row == ("trade_risk", 200, 500)
+
+    def test_init_schema_backfills_unknown_exit_reason_for_closed_rows_only(
+        self, tmp_path
+    ):
+        # P1-06/REQ-002: a database created before this change has no
+        # exit_reason column at all. Migration must backfill 'unknown' onto
+        # already-closed rows, while a still-open row (which has no exit
+        # reason at all) stays NULL rather than also getting stamped.
+        database = Database(tmp_path / "pre_p1_06.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P1_06_POSITIONS_TABLE)
+            closed_id = str(uuid4())
+            open_id = str(uuid4())
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, now())
+                """,
+                [
+                    closed_id,
+                    "AAPL",
+                    True,
+                    date(2026, 7, 1),
+                    100.0,
+                    10,
+                    95.0,
+                    date(2026, 7, 10),
+                    110.0,
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, now())
+                """,
+                [open_id, "MSFT", True, date(2026, 7, 1), 200.0, 5, 190.0],
+            )
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        closed = store.get_position(UUID(closed_id))
+        opened = store.get_position(UUID(open_id))
+        assert closed is not None
+        assert opened is not None
+        assert closed.exit_reason == "unknown"
+        assert opened.exit_reason is None
+
+        # Idempotent: re-running must not disturb either row.
+        store.init_schema()
+        closed_again = store.get_position(UUID(closed_id))
+        opened_again = store.get_position(UUID(open_id))
+        assert closed_again is not None
+        assert opened_again is not None
+        assert closed_again.exit_reason == "unknown"
+        assert opened_again.exit_reason is None
+
+    def test_positions_check_constraint_rejects_invalid_exit_reason(self, state_store):
+        # REQ-001/020: exit_reason is limited to the closed enum at the
+        # schema level (fresh DB), independent of application validation.
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    exit_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, now())
+                """,
+                [
+                    str(uuid4()),
+                    "AAPL",
+                    True,
+                    date(2026, 7, 1),
+                    100.0,
+                    10,
+                    95.0,
+                    date(2026, 7, 10),
+                    110.0,
+                    "not_a_real_reason",
+                ],
+            )
 
 
 class TestRunLifecycle:
@@ -349,6 +456,157 @@ class TestOpenPositions:
         result = state_store.get_open_positions(is_paper=True)
 
         assert [position.symbol for position in result] == ["AAPL"]
+
+
+def _insert_trade_decision(  # noqa: PLR0913 - test helper, keyword-only for clarity
+    state_store: StateStore,
+    *,
+    run_id: UUID,
+    symbol: str,
+    strategy_key: str,
+    position_id: UUID,
+    created_at: datetime,
+) -> None:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            """
+            INSERT INTO trades_journal (
+                journal_id, run_id, symbol, strategy_key, position_id,
+                decision, reason_memo, virtual_fill_price, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'followed', NULL, NULL, ?)
+            """,
+            [
+                str(uuid4()),
+                str(run_id),
+                symbol,
+                strategy_key,
+                str(position_id),
+                created_at,
+            ],
+        )
+
+
+class TestClosedPositionsWithStrategy:
+    def test_pairs_a_closed_position_with_its_linked_strategy_key(self, state_store):
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="trend_follow",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+        )
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, "trend_follow")]
+
+    def test_strategy_key_is_none_when_no_trades_journal_row_links_the_position(
+        self, state_store
+    ):
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, None)]
+
+    def test_multiple_trades_journal_rows_for_one_position_pick_earliest_created_at(
+        self, state_store
+    ):
+        # trades_journal.position_id is not itself uniquely constrained
+        # (UNIQUE (run_id, symbol, strategy_key) is the real key), so more
+        # than one row can reference the same position_id. The tie-break is
+        # earliest created_at, tie-broken by strategy_key — deliberately
+        # NOT alphabetical-first, to prove created_at (not strategy_key) is
+        # the primary ordering.
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="zzz_earlier",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 9, 0, tzinfo=UTC),
+        )
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="aaa_later",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 11, 0, tzinfo=UTC),
+        )
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, "zzz_earlier")]
+
+    def test_as_of_boundary_immediately_before_at_and_after_cutoff(self, state_store):
+        as_of = date(2026, 7, 20)
+
+        def _closed(symbol: str, close_date: date) -> Position:
+            return Position(
+                position_id=uuid4(),
+                symbol=symbol,
+                is_paper=True,
+                entry_date=date(2026, 7, 1),
+                entry_price=100.0,
+                shares=10,
+                status="closed",
+                close_date=close_date,
+                close_price=110.0,
+                exit_reason="target",
+            )
+
+        before = _closed("BEFORE", date(2026, 7, 19))
+        at_cutoff = _closed("AT", as_of)
+        after = _closed("AFTER", date(2026, 7, 21))
+        for position in (before, at_cutoff, after):
+            state_store.upsert_position(position)
+
+        result = state_store.get_closed_positions_with_strategy(
+            is_paper=True, as_of=as_of
+        )
+
+        symbols = {position.symbol for position, _ in result}
+        assert symbols == {"BEFORE", "AT"}
 
 
 class TestUniverseMembership:

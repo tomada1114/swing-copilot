@@ -490,11 +490,12 @@ class ScreeningPipeline:
         """
         (1) 有効な全Filterの積集合を取る。
         (2) required_signals全てにヒットした銘柄だけをCandidateへ集約する。
-        (3) RSI14昇順、20日平均出来高降順、symbol昇順で安定ソートし、上位limit件を返す。
+        (3) 複合スコア score = Σ(weight_i × component_i)（P1-01, roadmap §5）を
+            候補ごとに算出し、score降順・symbol昇順で安定ソートして上位limit件を返す。
         """
 ```
 
-**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、固定の決定的順位規則を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、非決定的rankingは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
+**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidityの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
@@ -1158,12 +1159,19 @@ strategies:
       - pullback_rsi
     candidate_limit: 10
     ranking:
-      - rsi14_asc
-      - avg_volume_desc
-      - symbol_asc
+      # 複合ランキングスコアの重み（roadmap §5 P1-01）。出典なしの初期値で
+      # 未検証（要検証）。P2-10の感応度グリッドが検証対象。合計は1.0必須。
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2
 ```
 
-新しいフィルタ/シグナルを追加する場合、対応モジュールに登録クラスを追加し、本ファイルの`filters_all`/`signals_all`へキーを追加する。P1〜P2ではOR・重み付きスコアを導入しない。順位規則を追加する場合は同値時の最終tie-breakを必ず`symbol_asc`にして再現性を保つ。
+新しいフィルタ/シグナルを追加する場合、対応モジュールに登録クラスを追加し、本ファイルの`filters_all`/`signals_all`へキーを追加する。ランキングは複合スコア
+`score = Σ(weight_i × component_i)`（P1-01, roadmap §5）で決まる。各componentは
+[0,1]に正規化される: `rsi_pullback = clamp((rsi_threshold − rsi14) / rsi_threshold, 0, 1)`、
+`trend_quality = clamp((sma50/sma200 − 1) / 0.10, 0, 1)`、`liquidity`は候補集合内の
+`avg_volume20`パーセンタイル。同点時の最終tie-breakは必ず`symbol_asc`にして再現性を保つ。
 
 ---
 
@@ -1325,7 +1333,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | snapshot/Parquet/report | replacementから消えたrowが削除される。temp write/replace失敗時は旧destinationが不変でtempが残らない |
 | 相関 | 日付がずれた系列、重複日、共通return不足、定数系列が誤相関ではなくdata_qualityになる |
 | バックテスト | 1株の買い/売りを手計算し、両側cost、stop優先、最終清算、benchmark残cashを厳密比較する |
-| 設定 | unknown field/key、空required signals、limit 0/11、非決定的rankingを外部call前に拒否する |
+| 設定 | unknown field/key、空required signals、limit 0/11、ranking.score_weights合計≠1.0・負の重みを外部call前に拒否する |
 | 外部adapter | retryable失敗→成功、非retryable即時失敗、総試行上限、各試行のthrottle/timeoutをfake timeで検証する |
 | LLM provenance | source_idsなし/空白/未知IDと、request IDが変わったcache hitを拒否する |
 | LLM safety | system/user分離、delimiter escape、全表示fieldのCON-03、full-prompt cache hash、prompt/response/exception redactionを検証する |
@@ -1344,7 +1352,7 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 | ステップ | 内容 | 受け入れ基準 |
 |---|---|---|
 | P1-1 | 既存リポジトリをbootstrapでrenameし、アプリ向けにpyproject/justfileを更新 | `my-package`/`my_package`の追跡対象残骸が0件で、commit済みtreeの`just verify`が終了コード0（固定テスト件数は条件にしない） |
-| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | 正常loadに加え、unknown field/key、空signals、limit 0/11、非決定的rankingを外部I/O前に拒否 |
+| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | 正常loadに加え、unknown field/key、空signals、limit 0/11、ranking.score_weights合計≠1.0を外部I/O前に拒否 |
 | P1-3 | `universe.py`（FR-01） | `UniverseMember`の取得・snapshot fallback・manual override・履歴保存を検証。直前/同日/未来snapshotから`as_of`以前の最新だけを選び、同日再保存で削除も反映 |
 | P1-4 | `data/base.py`, `data/yfinance_provider.py`（FR-02） | 契約テストで調整済みOHLC、複数ティッカーMultiIndex正規化、end日排他、部分失敗を検証 |
 | P1-5 | `storage/database.py`, `market_store.py`, `state_store.py` | 訂正upsert、2件目失敗時の全件rollback、snapshot完全置換、Parquet temp/replace失敗時の旧file保持と再実行を検証 |

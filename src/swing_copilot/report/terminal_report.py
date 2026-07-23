@@ -10,7 +10,7 @@ from rich.table import Table
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
-    from swing_copilot.report.daily_brief import DailyBrief
+    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
 
 
 def render_terminal(
@@ -47,6 +47,8 @@ def render_terminal(
     table.add_column("Close", justify="right")
     table.add_column("Chg", justify="right")
     table.add_column("RSI", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Breakdown", justify="left")
     table.add_column("Signal", justify="left")
     table.add_column("Risk", justify="left")
     table.add_column("Shares", justify="right")
@@ -58,6 +60,8 @@ def render_terminal(
             _money(candidate.close),
             _percent(candidate.pct_change),
             _number(candidate.rsi14, digits=1),
+            _number(candidate.score, digits=3),
+            _score_breakdown(candidate),
             ", ".join(candidate.signals) or "-",
             candidate.risk.status,
             str(candidate.risk.max_shares)
@@ -82,6 +86,20 @@ def render_terminal(
         for notice in brief.notices:
             console.print(f"  - {notice}")
     return buffer.getvalue().rstrip() + "\n"
+
+
+def _score_breakdown(candidate: BriefCandidate) -> str:
+    if (
+        candidate.score_rsi_pullback is None
+        or candidate.score_trend_quality is None
+        or candidate.score_liquidity is None
+    ):
+        return "N/A"
+    return (
+        f"rsi {candidate.score_rsi_pullback:.2f} / "
+        f"trend {candidate.score_trend_quality:.2f} / "
+        f"liq {candidate.score_liquidity:.2f}"
+    )
 
 
 def _number(value: float | None, *, digits: int = 2) -> str:

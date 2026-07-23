@@ -103,7 +103,6 @@ STRATEGIES_CONFIG = {
             "filters_all": ["volume_min"],
             "signals_all": ["trend_sma"],
             "candidate_limit": 10,
-            "ranking": ["rsi14_asc", "avg_volume_desc", "symbol_asc"],
         }
     }
 }

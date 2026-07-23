@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
@@ -39,6 +40,10 @@ def _brief() -> DailyBrief:
                 pct_change=0.012,
                 rsi14=48.2,
                 atr14=4.1,
+                score=0.627,
+                score_rsi_pullback=0.167,
+                score_trend_quality=0.300,
+                score_liquidity=0.160,
                 signals=("RSI押し目",),
                 fundamentals=BriefFundamentals(
                     per="41.2x", fcf="$12,000", equity_ratio="52%", eps="$4.16"
@@ -89,6 +94,69 @@ def test_markdown_contains_auditable_details_and_source_urls() -> None:
     assert "売上高は前年同期比で増加した" in output
     assert "[news:123](https://example.com/news/123)" in output
     assert "本レポートは情報提供のみを目的とし、投資助言ではありません" in output
+
+
+def test_terminal_shows_score_column_and_breakdown() -> None:
+    # REQ-007
+    output = render_terminal(_brief(), RunStatus.SUCCESS, width=200, color=False)
+
+    assert "0.627" in output
+    assert "rsi 0.17 / trend 0.30 / liq 0.16" in output
+
+
+def test_markdown_shows_score_column_and_breakdown_table() -> None:
+    # REQ-008
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "| 1 | NVDA |" in output
+    assert "0.627" in output
+    assert "### Score breakdown" in output
+    assert "| rsi_pullback | 0.167 |" in output
+    assert "| trend_quality | 0.300 |" in output
+    assert "| liquidity | 0.160 |" in output
+
+
+def _brief_without_candidates() -> DailyBrief:
+    return replace(_brief(), candidates=())
+
+
+def test_terminal_renders_empty_candidate_set_without_error() -> None:
+    output = render_terminal(_brief_without_candidates(), RunStatus.SUCCESS, width=120)
+
+    assert "Candidates: 0" in output
+    assert "Score" in output  # header still renders
+
+
+def test_markdown_renders_empty_candidate_set_without_error() -> None:
+    output = render_markdown(_brief_without_candidates(), RunStatus.SUCCESS)
+
+    assert "## Candidates" in output
+    assert "### Score breakdown" not in output
+
+
+def _brief_with_missing_score() -> DailyBrief:
+    brief = _brief()
+    candidate = replace(
+        brief.candidates[0],
+        score=None,
+        score_rsi_pullback=None,
+        score_trend_quality=None,
+        score_liquidity=None,
+    )
+    return replace(brief, candidates=(candidate,))
+
+
+def test_terminal_shows_na_when_score_is_missing() -> None:
+    output = render_terminal(_brief_with_missing_score(), RunStatus.SUCCESS, width=200)
+
+    assert "N/A" in output
+
+
+def test_markdown_omits_breakdown_section_when_score_is_missing() -> None:
+    output = render_markdown(_brief_with_missing_score(), RunStatus.SUCCESS)
+
+    assert "### Score breakdown" not in output
+    assert "N/A" in output
 
 
 def test_markdown_is_written_per_run_and_latest_is_replaced(tmp_path: Path) -> None:

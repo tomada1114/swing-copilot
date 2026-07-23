@@ -40,8 +40,8 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
             "",
             "## Candidates",
             "",
-            "| Rank | Symbol | Close | Change | RSI14 | Signals | Risk | Shares | Stop |",
-            "|---:|---|---:|---:|---:|---|---|---:|---:|",
+            "| Rank | Symbol | Close | Change | RSI14 | Score | Signals | Risk | Shares | Stop |",
+            "|---:|---|---:|---:|---:|---:|---|---|---:|---:|",
         ]
     )
     lines.extend(
@@ -53,6 +53,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 _money(candidate.close),
                 _percent(candidate.pct_change),
                 _number(candidate.rsi14, digits=1),
+                _number(candidate.score, digits=3),
                 ", ".join(candidate.signals) or "-",
                 candidate.risk.status,
                 str(candidate.risk.max_shares)
@@ -147,6 +148,7 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     ]
     lines.extend(f"- Risk: {reason}" for reason in candidate.risk.reasons)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
+    lines.extend(_score_breakdown_section(candidate))
     if candidate.llm.facts:
         lines.extend(["", "### Facts", ""])
         lines.extend(f"- {fact}" for fact in candidate.llm.facts)
@@ -159,6 +161,29 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
             f"- [{source.source_id}]({source.url})" for source in candidate.llm.sources
         )
     return lines
+
+
+def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
+    """REQ-008: a per-candidate table of the composite score's weighted components."""
+    if (
+        candidate.score is None
+        or candidate.score_rsi_pullback is None
+        or candidate.score_trend_quality is None
+        or candidate.score_liquidity is None
+    ):
+        return []
+    return [
+        "",
+        "### Score breakdown",
+        "",
+        f"- Total: {candidate.score:.3f}",
+        "",
+        "| Component | Weighted value |",
+        "|---|---:|",
+        f"| rsi_pullback | {candidate.score_rsi_pullback:.3f} |",
+        f"| trend_quality | {candidate.score_trend_quality:.3f} |",
+        f"| liquidity | {candidate.score_liquidity:.3f} |",
+    ]
 
 
 def _atomic_write(path: Path, content: str) -> None:

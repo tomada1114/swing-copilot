@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pandas as pd
+import pytest
 
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.report.daily_brief import DailyBriefContext, build_daily_brief
@@ -72,7 +74,15 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
         symbol="AAPL",
         as_of=AS_OF,
         signal_names=("volume_min", "trend_sma", "custom"),
-        metrics={"close": 110.0, "rsi14": 45.0, "atr14": 3.0},
+        metrics={
+            "close": 110.0,
+            "rsi14": 45.0,
+            "atr14": 3.0,
+            "score": 0.627,
+            "score_rsi_pullback": 0.167,
+            "score_trend_quality": 0.300,
+            "score_liquidity": 0.160,
+        },
         rank=1,
     )
     risks = (
@@ -158,6 +168,34 @@ def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:
         "filing:1",
     }
     assert all(call[3] == AS_OF for call in market_store.read_calls)
+    assert candidate.score == pytest.approx(0.627)
+    assert candidate.score_rsi_pullback == pytest.approx(0.167)
+    assert candidate.score_trend_quality == pytest.approx(0.300)
+    assert candidate.score_liquidity == pytest.approx(0.160)
+
+
+def test_missing_score_fields_produce_none() -> None:
+    context = _context()
+    no_score_candidate = Candidate(
+        symbol="AAPL",
+        as_of=AS_OF,
+        signal_names=(),
+        metrics={"close": 110.0, "rsi14": 45.0, "atr14": 3.0},
+        rank=1,
+    )
+    context = replace(context, candidates=[no_score_candidate])
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    candidate = brief.candidates[0]
+    assert candidate.score is None
+    assert candidate.score_rsi_pullback is None
+    assert candidate.score_trend_quality is None
+    assert candidate.score_liquidity is None
 
 
 def test_missing_data_produces_explicit_fallbacks() -> None:

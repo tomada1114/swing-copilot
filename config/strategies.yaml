@@ -8,6 +8,10 @@ strategies:
       - pullback_rsi
     candidate_limit: 10
     ranking:
-      - rsi14_asc
-      - avg_volume_desc
-      - symbol_asc
+      # Composite ranking score weights (roadmap §5 P1-01). Unvalidated
+      # defaults (要検証); P2-10's sensitivity grid is the intended follow-up.
+      # Must sum to 1.0.
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2

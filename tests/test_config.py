@@ -73,13 +73,21 @@ class TestLoadStrategies:
             "    filters_all: []\n"
             "    signals_all: [trend_sma]\n"
             "    candidate_limit: 0\n"
-            "    ranking: [rsi14_asc, avg_volume_desc, symbol_asc]\n"
         )
 
         with pytest.raises(ConfigError, match="failed validation"):
             load_strategies(str(bad))
 
-    def test_rejects_nondeterministic_ranking(self, tmp_path):
+    def test_default_score_weights_sum_to_one(self):
+        strategies = load_strategies("config/strategies.yaml")
+
+        weights = strategies.strategies["default"].ranking.score_weights
+        assert weights.rsi_pullback == pytest.approx(0.5)
+        assert weights.trend_quality == pytest.approx(0.3)
+        assert weights.liquidity == pytest.approx(0.2)
+
+    def test_rejects_score_weights_not_summing_to_one(self, tmp_path):
+        # REQ-020: sum != 1.0 must fail fast, naming the strategy and the sum.
         bad = tmp_path / "strategies.yaml"
         bad.write_text(
             "strategies:\n"
@@ -87,11 +95,78 @@ class TestLoadStrategies:
             "    filters_all: []\n"
             "    signals_all: [trend_sma]\n"
             "    candidate_limit: 10\n"
-            "    ranking: [avg_volume_desc]\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.5\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.3\n"
+        )
+
+        with pytest.raises(ConfigError, match="default") as exc_info:
+            load_strategies(str(bad))
+        assert "1.1" in str(exc_info.value)
+
+    def test_rejects_negative_score_weight(self, tmp_path):
+        # REQ-021
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: -0.1\n"
+            "        trend_quality: 0.9\n"
+            "        liquidity: 0.2\n"
         )
 
         with pytest.raises(ConfigError, match="failed validation"):
             load_strategies(str(bad))
+
+    def test_rejects_unknown_score_weight_key(self, tmp_path):
+        # REQ-022
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.5\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.1\n"
+            "        foo: 0.1\n"
+        )
+
+        with pytest.raises(ConfigError, match="foo"):
+            load_strategies(str(bad))
+
+    def test_custom_score_weights_summing_to_one_are_accepted(self, tmp_path):
+        # REQ-030
+        good = tmp_path / "strategies.yaml"
+        good.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.6\n"
+            "        trend_quality: 0.2\n"
+            "        liquidity: 0.2\n"
+        )
+
+        strategies = load_strategies(str(good))
+
+        weights = strategies.strategies["default"].ranking.score_weights
+        assert weights.rsi_pullback == pytest.approx(0.6)
+        assert weights.trend_quality == pytest.approx(0.2)
+        assert weights.liquidity == pytest.approx(0.2)
 
 
 class TestLoadSecrets:

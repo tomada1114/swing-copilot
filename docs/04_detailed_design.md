@@ -518,14 +518,28 @@ class RiskAssessment:
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[CorrelationWarning, ...] = ()
+    # P1-03 (roadmap §5): サイジング内訳と binding constraint。
+    shares_by_risk: int | None = None
+    shares_by_position_cap: int | None = None
+    binding_constraint: str = "not_calculable"
+    # {"trade_risk","position_cap","sector","correlation","not_calculable"}
+    sizing_warnings: tuple[str, ...] = ()  # {"WIDE_STOP","SMALL_ACCOUNT_FRICTION"}
+
+@dataclass(frozen=True, slots=True)
+class PositionSizeResult:
+    """P1-03: shares_by_risk/shares_by_position_capの中間値付きサイジング結果。"""
+    shares_by_risk: int
+    shares_by_position_cap: int
+    shares: int  # min(shares_by_risk, shares_by_position_cap)、床計算
 
 def calc_position_size(
     account_equity: float, entry_price: float, stop_price: float,
     max_position_pct: float, max_trade_risk_pct: float,
-) -> int:
+) -> PositionSizeResult:
     """
     1トレードのリスク（資金のmax_trade_risk_pct、ストップ幅基準）と
-    1銘柄の上限（資金のmax_position_pct）の両方を満たす最大株数を返す。
+    1銘柄の上限（資金のmax_position_pct）それぞれの株数を算出し、
+    両方を満たす最大株数（両者の最小値）とともに返す。
     """
 
 class RiskChecker:
@@ -542,6 +556,19 @@ class RiskChecker:
         を満たすかを判定する。セクター判定に必要な銘柄→セクターのマッピングは、
         universe.pyが取得・保存するGICSセクター（config/universe_snapshot.csv、
         本書3.2節参照）を用いる。
+
+        P1-03: binding_constraintは、株数を計算不能な入力（missing価格/ATR、
+        account_equity未設定、無効なストップ幅）ならnot_calculable、セクター集中
+        で却下ならsector（他の値がどうであれ最優先）、それ以外はshares_by_risk
+        <= shares_by_position_capならtrade_risk、そうでなければposition_cap
+        （同値の場合はtrade_riskを優先、決定的）。correlationは列挙値として
+        用意するが、相関チェックは現状ブロックしない警告のみのため到達しない
+        （P4-17でポートフォリオヒートを導入するまでの既知の未到達分岐）。
+        損切り幅（entry_price - stop_price）/ entry_price が
+        risk.wide_stop_threshold_pct（既定10.0%）を超える場合はWIDE_STOP、
+        最終sharesが0に切り捨てられる場合、またはリスク予算
+        （account_equity × max_trade_risk_pct）が$1未満（P1-03の判断基準、
+        要検証）の場合はSMALL_ACCOUNT_FRICTIONをsizing_warningsへ追加する。
         """
 
     def check_correlation(self, candidate_symbol: str, portfolio: list["Position"], market_store: "MarketStore") -> list[CorrelationWarning]:
@@ -674,6 +701,20 @@ factsの`source_ids`へ追加しない。
 ### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
 
 `build_daily_brief()`が`DailyBriefContext`、`MarketStore`、`StateStore`から共通の`DailyBrief`を構築する。ターミナルとMarkdownはこの値だけを描画し、データ取得や判断ロジックを持たない。価格・財務読み取りは常に`context.run_date`を`as_of`へ渡す。
+
+**P1-03（roadmap §5）**: `BriefRisk`は`RiskAssessment`のサイジング内訳
+（`shares_by_risk`/`shares_by_position_cap`/`binding_constraint`/
+`sizing_warnings`）に加え、`DailyBriefContext.max_trade_risk_pct`/
+`max_position_pct`（実行時の`settings.risk.*`値、`RiskAssessment`自体は
+算出結果のみを持ち設定値を持たないため`_risk_brief()`で注入）を保持する。
+`format_sizing(risk: BriefRisk) -> str`が両者から表示文字列を組み立て、
+terminal/markdown共通で使う: `max_shares`が`None`なら`"-"`、`0`なら
+binding_constraintによらず`"0株（摩擦: 資金規模過小）"`、それ以外は
+binding_constraintに応じて`"128株（制約: リスク1.0%）"`
+（trade_risk、%は`max_trade_risk_pct`）、
+`"40株（制約: ポジション上限2.0%）"`（position_cap、%は`max_position_pct`）、
+`"N株（制約: セクター集中）"`（sector）、`"N株（制約: 相関）"`（correlation、
+現状のcorrelationはブロックしない警告のみのため実運用では到達しない）を返す。
 
 ```python
 def build_daily_brief(
@@ -1006,9 +1047,21 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     stop_price      DOUBLE,
     reasons_json    JSON NOT NULL,
     warnings_json   JSON NOT NULL,
+    -- P1-03 (roadmap §5): サイジング内訳。
+    shares_by_risk          BIGINT,
+    shares_by_position_cap  BIGINT,
+    binding_constraint      VARCHAR
+        CHECK (binding_constraint IN (
+            'trade_risk','position_cap','sector','correlation','not_calculable'
+        )),
+    sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, symbol)
 );
+```
 
+P1-03より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かない（既存テーブル形状に対してno-op）ため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS ...`で追加列を後付けする。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK/NOT NULL制約付与を未サポートのため、この経路で追加された列はアプリケーション側でのみ整合性が保証される（既存DBをALTER経由でアップグレードした場合、`CREATE TABLE`側のCHECK制約はDB層では効かない）。
+
+```sql
 CREATE TABLE IF NOT EXISTS positions (
     position_id   UUID PRIMARY KEY,
     symbol        VARCHAR NOT NULL,
@@ -1114,6 +1167,7 @@ risk:
   max_sector_pct: 0.30        # 同一セクター上限30%
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
+  wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:
   min_profitable_quarters: 4   # 直近4四半期黒字
@@ -1310,6 +1364,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 同一セクター上限 | 30% | `risk.max_sector_pct=0.30` |
 | 保有銘柄との相関警告閾値 | ピアソン相関 0.7 超で警告（ブロックしない） | `risk.max_correlation=0.7` |
 | 相関計算の参照期間 | 直近60営業日の日次リターン | `risk.correlation_lookback_days=60` |
+| WIDE_STOP警告閾値 | 損切り幅がエントリー価格の10%超（P1-03、要検証） | `risk.wide_stop_threshold_pct=10.0` |
 
 ---
 

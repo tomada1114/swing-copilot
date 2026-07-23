@@ -104,7 +104,7 @@ class TestEntryFill:
             expected_stop,
             settings.risk.max_position_pct,
             settings.risk.max_trade_risk_pct,
-        )
+        ).shares
 
         # Verify the open position on its fill day, before the mandatory
         # end-of-window liquidation updates the final curve point.
@@ -346,7 +346,7 @@ class TestBenchmarkAndReproducibility:
             stop,
             settings.risk.max_position_pct,
             settings.risk.max_trade_risk_pct,
-        )
+        ).shares
         entry_cost = shares * entry * (1 + settings.backtest.commission_pct)
         exit_price = 100.0 * (1 - settings.backtest.slippage_pct)
         exit_proceeds = shares * exit_price * (1 - settings.backtest.commission_pct)

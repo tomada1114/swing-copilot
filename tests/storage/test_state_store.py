@@ -34,6 +34,22 @@ def state_store(tmp_path):
     return store
 
 
+_PRE_P1_03_RISK_ASSESSMENTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS risk_assessments (
+        run_id          UUID NOT NULL,
+        symbol          VARCHAR NOT NULL,
+        status          VARCHAR NOT NULL
+            CHECK (status IN ('approved','rejected','not_calculable')),
+        max_shares      BIGINT,
+        entry_price     DOUBLE,
+        stop_price      DOUBLE,
+        reasons_json    JSON NOT NULL,
+        warnings_json   JSON NOT NULL,
+        PRIMARY KEY (run_id, symbol)
+    )
+"""
+
+
 class TestInitSchema:
     def test_is_idempotent(self, state_store):
         state_store.init_schema()
@@ -41,6 +57,49 @@ class TestInitSchema:
 
     def test_empty_positions_on_first_run(self, state_store):
         assert state_store.get_open_positions() == []
+
+    def test_init_schema_upgrades_a_pre_p1_03_risk_assessments_table(self, tmp_path):
+        # Simulate a database created before P1-03: risk_assessments exists
+        # with the old 8-column shape (no sizing-breakdown columns).
+        database = Database(tmp_path / "pre_p1_03.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P1_03_RISK_ASSESSMENTS_TABLE)
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        run_id = uuid4()
+        with database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_assessments (
+                    run_id, symbol, status, max_shares, entry_price,
+                    stop_price, reasons_json, warnings_json,
+                    shares_by_risk, shares_by_position_cap,
+                    binding_constraint, sizing_warnings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(run_id),
+                    "AAPL",
+                    "approved",
+                    200,
+                    50.0,
+                    45.0,
+                    "[]",
+                    "[]",
+                    200,
+                    500,
+                    "trade_risk",
+                    "[]",
+                ],
+            )
+            row = conn.execute(
+                "SELECT binding_constraint, shares_by_risk, shares_by_position_cap "
+                "FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == ("trade_risk", 200, 500)
 
 
 class TestRunLifecycle:
@@ -744,6 +803,80 @@ class TestRecordRiskAssessments:
             ).fetchall()
         assert rows[0][0] == "approved"
         assert "MSFT" in rows[0][1]
+
+    def test_records_sizing_breakdown(self, state_store):
+        # REQ-005: shares_by_risk/shares_by_position_cap/binding_constraint/
+        # sizing_warnings all persist alongside the existing columns.
+        run_id = uuid4()
+        assessment = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=200,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=500,
+            binding_constraint="trade_risk",
+            sizing_warnings=("WIDE_STOP",),
+        )
+
+        state_store.record_risk_assessments([assessment], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                """
+                SELECT shares_by_risk, shares_by_position_cap,
+                       binding_constraint, sizing_warnings_json
+                FROM risk_assessments WHERE run_id = ?
+                """,
+                [str(run_id)],
+            ).fetchone()
+        assert row[0] == 200
+        assert row[1] == 500
+        assert row[2] == "trade_risk"
+        assert "WIDE_STOP" in row[3]
+
+    def test_rerun_correction_upserts_sizing_breakdown(self, state_store):
+        # Natural-key rerun (same run_id, symbol) must overwrite the sizing
+        # breakdown, not silently keep the stale first-write values.
+        run_id = uuid4()
+        first = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=200,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=500,
+            binding_constraint="trade_risk",
+        )
+        second = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=40,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=40,
+            binding_constraint="position_cap",
+        )
+
+        state_store.record_risk_assessments([first], run_id)
+        state_store.record_risk_assessments([second], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT max_shares, shares_by_position_cap, binding_constraint "
+                "FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == (40, 40, "position_cap")
 
 
 def _text_item(source_id: str, source_url: str) -> TextItem:

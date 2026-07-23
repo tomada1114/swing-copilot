@@ -69,6 +69,82 @@ def _brief() -> DailyBrief:
     )
 
 
+def _brief_with_sizing(risk: BriefRisk) -> DailyBrief:
+    base = _brief()
+    candidate = replace(base.candidates[0], risk=risk)
+    return replace(base, candidates=(candidate,))
+
+
+def test_terminal_shows_the_binding_constraint_sizing_string() -> None:
+    # REQ-006 worked example: trade_risk binds.
+    risk = BriefRisk(
+        status="approved",
+        max_shares=200,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=200,
+        shares_by_position_cap=500,
+        binding_constraint="trade_risk",
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.25,
+    )
+    # A wide console avoids Rich wrapping the cell across two lines, which
+    # would otherwise split this literal substring apart.
+    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    assert "200株（制約: リスク1.0%）" in output
+
+
+def test_markdown_shows_the_binding_constraint_sizing_string() -> None:
+    # REQ-006 worked example: position_cap binds.
+    risk = BriefRisk(
+        status="approved",
+        max_shares=40,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=200,
+        shares_by_position_cap=40,
+        binding_constraint="position_cap",
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.02,
+    )
+    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+    assert "40株（制約: ポジション上限2.0%）" in output
+
+
+def test_terminal_shows_zero_shares_without_exception() -> None:
+    # REQ-020 boundary: a floored-to-zero trade renders Example 4's wording,
+    # not an exception or a bare "0".
+    risk = BriefRisk(
+        status="approved",
+        max_shares=0,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=1,
+        shares_by_position_cap=0,
+        binding_constraint="position_cap",
+        sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.001,
+    )
+    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    assert "0株（摩擦: 資金規模過小）" in output
+
+
+def test_markdown_still_shows_dash_for_not_calculable_max_shares() -> None:
+    risk = BriefRisk(
+        status="not_calculable",
+        max_shares=None,
+        stop_price=None,
+        reasons=("missing candidate price/ATR data",),
+        warnings=(),
+    )
+    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+    assert "| not_calculable | - |" in output
+
+
 def test_terminal_output_is_a_compact_decision_brief() -> None:
     output = render_terminal(_brief(), RunStatus.DEGRADED, width=120, color=False)
 

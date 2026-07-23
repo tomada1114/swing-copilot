@@ -2,6 +2,20 @@
 
 Split out from `state_store.py` to keep that module under the project's
 300-line guideline; this file is schema only, no behavior.
+
+There is no formal migration runner: `INIT_SCHEMA_STATEMENTS`' `CREATE TABLE
+IF NOT EXISTS` is a no-op against a database that already has an older shape
+of a table. Additive column changes to an existing table (e.g. P1-03's
+`risk_assessments` columns) go in `ALTER_SCHEMA_STATEMENTS` instead, run
+after `INIT_SCHEMA_STATEMENTS` in `StateStore.init_schema()`, using `ALTER
+TABLE ... ADD COLUMN IF NOT EXISTS` so re-running is a no-op on both a fresh
+database (columns already exist from `CREATE TABLE`) and an already-upgraded
+one. DuckDB (as of 1.5.x) rejects `ADD COLUMN` with an inline `CHECK` or
+`NOT NULL` constraint ("Adding columns with constraints not yet supported"),
+so altered columns are unconstrained at the database level even where the
+matching `CREATE TABLE` column has a `CHECK`/`NOT NULL` — application code
+is the sole enforcement point for rows added to a pre-P1-03 database via this
+path.
 """
 
 from __future__ import annotations
@@ -90,6 +104,13 @@ INIT_SCHEMA_STATEMENTS = (
         stop_price      DOUBLE,
         reasons_json    JSON NOT NULL,
         warnings_json   JSON NOT NULL,
+        shares_by_risk          BIGINT,
+        shares_by_position_cap  BIGINT,
+        binding_constraint      VARCHAR
+            CHECK (binding_constraint IN (
+                'trade_risk','position_cap','sector','correlation','not_calculable'
+            )),
+        sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
         PRIMARY KEY (run_id, symbol)
     )
     """,
@@ -155,4 +176,15 @@ INIT_SCHEMA_STATEMENTS = (
         created_at      TIMESTAMPTZ NOT NULL
     )
     """,
+)
+
+# P1-03: additive columns for a database created before this change. See the
+# module docstring for why these are unconstrained (no CHECK/NOT NULL).
+ALTER_SCHEMA_STATEMENTS = (
+    "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS shares_by_risk BIGINT",
+    "ALTER TABLE risk_assessments "
+    "ADD COLUMN IF NOT EXISTS shares_by_position_cap BIGINT",
+    "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS binding_constraint VARCHAR",
+    "ALTER TABLE risk_assessments "
+    "ADD COLUMN IF NOT EXISTS sizing_warnings_json JSON DEFAULT '[]'",
 )

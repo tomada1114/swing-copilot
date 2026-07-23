@@ -21,7 +21,7 @@ from swing_copilot.storage import (
     paper_records,
     text_records,
 )
-from swing_copilot.storage.schema import INIT_SCHEMA_STATEMENTS
+from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
@@ -54,9 +54,16 @@ class StateStore:
         self._database = database
 
     def init_schema(self) -> None:
-        """Create every table this store owns (idempotent, additive only)."""
+        """Create every table this store owns (idempotent, additive only).
+
+        Also applies `ALTER_SCHEMA_STATEMENTS` so an existing database from
+        before an additive column change (e.g. P1-03's `risk_assessments`
+        columns) picks them up; both statement sets are safe to re-run.
+        """
         with self._database.connect() as conn:
             for statement in INIT_SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            for statement in ALTER_SCHEMA_STATEMENTS:
                 conn.execute(statement)
 
     def start_run(self, run_date: date, mode: RunMode, config_hash: str) -> UUID:

@@ -716,6 +716,8 @@ def _run_step_output(
         filing_analyses=output.filing_analyses,
         rejections=output.run.rejections,
         notices=output.notices,
+        max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
+        max_position_pct=deps.settings.risk.max_position_pct,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)

@@ -139,6 +139,10 @@ ignore = [
     "COM812", # missing trailing comma — conflicts with formatter
     "ISC001", # implicit string concatenation — conflicts with formatter
 ]
+# Japanese full-width parentheses are intentional report-string typography
+# (P1-03 REQ-006, e.g. "128株（制約: リスク1.0%）"), not lookalike-confusable
+# ASCII mistakes.
+allowed-confusables = ["（", "）"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

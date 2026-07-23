@@ -171,15 +171,21 @@ def record_risk_assessments(
                 """
                 INSERT INTO risk_assessments (
                     run_id, symbol, status, max_shares, entry_price,
-                    stop_price, reasons_json, warnings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    stop_price, reasons_json, warnings_json,
+                    shares_by_risk, shares_by_position_cap,
+                    binding_constraint, sizing_warnings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, symbol) DO UPDATE SET
                     status = EXCLUDED.status,
                     max_shares = EXCLUDED.max_shares,
                     entry_price = EXCLUDED.entry_price,
                     stop_price = EXCLUDED.stop_price,
                     reasons_json = EXCLUDED.reasons_json,
-                    warnings_json = EXCLUDED.warnings_json
+                    warnings_json = EXCLUDED.warnings_json,
+                    shares_by_risk = EXCLUDED.shares_by_risk,
+                    shares_by_position_cap = EXCLUDED.shares_by_position_cap,
+                    binding_constraint = EXCLUDED.binding_constraint,
+                    sizing_warnings_json = EXCLUDED.sizing_warnings_json
                 """,
                 [
                     str(run_id),
@@ -199,5 +205,9 @@ def record_risk_assessments(
                             for warning in assessment.warnings
                         ]
                     ),
+                    assessment.shares_by_risk,
+                    assessment.shares_by_position_cap,
+                    assessment.binding_constraint,
+                    json.dumps(list(assessment.sizing_warnings)),
                 ],
             )

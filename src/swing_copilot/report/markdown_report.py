@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from swing_copilot.report.daily_brief import format_sizing
+
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
     from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
@@ -56,9 +58,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 _number(candidate.score, digits=3),
                 ", ".join(candidate.signals) or "-",
                 candidate.risk.status,
-                str(candidate.risk.max_shares)
-                if candidate.risk.max_shares is not None
-                else "-",
+                format_sizing(candidate.risk),
                 _money(candidate.risk.stop_price),
             )
         )

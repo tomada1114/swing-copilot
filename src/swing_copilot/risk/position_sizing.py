@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSizeResult:
+    """Sizing breakdown (P1-03): which cap produced the final share count.
+
+    `shares` is the floored minimum of the two intermediate values, with
+    ties broken toward `shares_by_risk` (`RiskChecker` uses this to derive
+    `binding_constraint`).
+    """
+
+    shares_by_risk: int
+    shares_by_position_cap: int
+    shares: int
+
 
 def calc_position_size(
     account_equity: float,
@@ -9,7 +25,7 @@ def calc_position_size(
     stop_price: float,
     max_position_pct: float,
     max_trade_risk_pct: float,
-) -> int:
+) -> PositionSizeResult:
     """Return the largest share count satisfying both risk caps.
 
     Args:
@@ -21,7 +37,8 @@ def calc_position_size(
             measured by the entry-to-stop distance.
 
     Returns:
-        The floored share count satisfying both caps.
+        The risk-based and position-cap-based share counts plus their
+        floored minimum, satisfying both caps.
 
     Raises:
         ValueError: `entry_price` is not positive, or `stop_price` is at or
@@ -35,6 +52,10 @@ def calc_position_size(
         raise ValueError(msg)
 
     risk_per_share = entry_price - stop_price
-    risk_based_shares = (account_equity * max_trade_risk_pct) / risk_per_share
-    position_based_shares = (account_equity * max_position_pct) / entry_price
-    return int(min(risk_based_shares, position_based_shares))
+    risk_based_shares = int((account_equity * max_trade_risk_pct) / risk_per_share)
+    position_based_shares = int((account_equity * max_position_pct) / entry_price)
+    return PositionSizeResult(
+        shares_by_risk=risk_based_shares,
+        shares_by_position_cap=position_based_shares,
+        shares=min(risk_based_shares, position_based_shares),
+    )

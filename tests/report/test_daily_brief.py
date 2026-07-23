@@ -13,8 +13,10 @@ import pytest
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.report.daily_brief import (
     BriefRejectionCount,
+    BriefRisk,
     DailyBriefContext,
     build_daily_brief,
+    format_sizing,
 )
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
 from swing_copilot.screening.base import (
@@ -268,3 +270,102 @@ def test_zero_rejections_produces_empty_rejection_counts() -> None:
     )
 
     assert brief.rejection_counts == ()
+
+
+def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
+    # REQ-005/REQ-006: RiskAssessment's sizing breakdown and the run's
+    # configured percentages both reach the rendered BriefRisk.
+    context = _context()
+    context = replace(
+        context,
+        risk_assessments=[
+            RiskAssessment(
+                symbol="AAPL",
+                status="approved",
+                max_shares=200,
+                entry_price=50.0,
+                stop_price=45.0,
+                reasons=(),
+                warnings=(),
+                shares_by_risk=200,
+                shares_by_position_cap=500,
+                binding_constraint="trade_risk",
+                sizing_warnings=("WIDE_STOP",),
+            )
+        ],
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.25,
+    )
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    risk = brief.candidates[0].risk
+    assert risk.shares_by_risk == 200
+    assert risk.shares_by_position_cap == 500
+    assert risk.binding_constraint == "trade_risk"
+    assert risk.sizing_warnings == ("WIDE_STOP",)
+    assert risk.max_trade_risk_pct == 0.01
+    assert risk.max_position_pct == 0.25
+
+
+class TestFormatSizing:
+    """P1-03 (REQ-006): the compact "128株（制約: リスク1.0%）"-style string."""
+
+    def test_not_calculable_renders_dash(self) -> None:
+        risk = BriefRisk("not_calculable", None, None, (), ())
+        assert format_sizing(risk) == "-"
+
+    def test_zero_shares_uses_example_4_friction_wording(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            0,
+            45.0,
+            (),
+            (),
+            binding_constraint="position_cap",
+            sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.001,
+        )
+        assert format_sizing(risk) == "0株（摩擦: 資金規模過小）"
+
+    def test_issue_example_1_trade_risk_string(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            128,
+            None,
+            (),
+            (),
+            binding_constraint="trade_risk",
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.25,
+        )
+        assert format_sizing(risk) == "128株（制約: リスク1.0%）"
+
+    def test_issue_example_2_position_cap_string(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            40,
+            None,
+            (),
+            (),
+            binding_constraint="position_cap",
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.02,
+        )
+        assert format_sizing(risk) == "40株（制約: ポジション上限2.0%）"
+
+    def test_sector_binding_uses_a_dedicated_label(self) -> None:
+        risk = BriefRisk("rejected", 12, None, (), (), binding_constraint="sector")
+        assert format_sizing(risk) == "12株（制約: セクター集中）"
+
+    def test_correlation_binding_uses_a_dedicated_label(self) -> None:
+        # Currently unreachable in production (correlation never blocks),
+        # but format_sizing must still render it correctly for
+        # completeness/future-proofing.
+        risk = BriefRisk("approved", 5, None, (), (), binding_constraint="correlation")
+        assert format_sizing(risk) == "5株（制約: 相関）"

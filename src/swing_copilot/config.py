@@ -92,6 +92,9 @@ class RiskConfig(_StrictModel):
     max_sector_pct: float = 0.30
     max_correlation: float = 0.7
     correlation_lookback_days: int = 60
+    # Stop distance as a % of entry price above which a WIDE_STOP sizing
+    # warning is raised (roadmap §5 P1-03, 要検証).
+    wide_stop_threshold_pct: float = 10.0
 
 
 class FundamentalFilterConfig(_StrictModel):

@@ -12,6 +12,7 @@ risk:
   max_sector_pct: 0.30 # same-sector exposure cap
   max_correlation: 0.7 # warn (do not block) above this Pearson correlation
   correlation_lookback_days: 60
+  wide_stop_threshold_pct: 10.0 # % of entry price; WIDE_STOP warning above this (要検証)
 
 fundamental_filters:
   min_profitable_quarters: 4 # net_income > 0 for the last N quarters

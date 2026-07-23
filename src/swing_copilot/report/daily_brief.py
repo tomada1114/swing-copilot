@@ -58,6 +58,12 @@ class BriefLlm:
     sources: tuple[BriefSource, ...] = ()
 
 
+_CONSTRAINT_LABELS = {
+    "sector": "セクター集中",
+    "correlation": "相関",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class BriefRisk:
     """Position-sizing and portfolio-risk result for one candidate."""
@@ -67,6 +73,39 @@ class BriefRisk:
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[str, ...]
+    # P1-03 sizing breakdown (REQ-005/REQ-006).
+    shares_by_risk: int | None = None
+    shares_by_position_cap: int | None = None
+    binding_constraint: str = "not_calculable"
+    sizing_warnings: tuple[str, ...] = ()
+    max_trade_risk_pct: float | None = None
+    max_position_pct: float | None = None
+
+
+def format_sizing(risk: BriefRisk) -> str:
+    """REQ-006: a compact `"128株（制約: リスク1.0%）"`-style sizing summary.
+
+    Returns `"-"` when `max_shares` is `None` (not calculable, the pre-P1-03
+    fallback existing snapshots assert on). A final share count of `0`
+    always renders with Example 4's friction wording regardless of which
+    constraint was binding, since a floored-to-zero trade is unplaceable
+    either way.
+    """
+    if risk.max_shares is None:
+        return "-"
+    if risk.max_shares == 0:
+        return "0株（摩擦: 資金規模過小）"
+    if risk.binding_constraint == "trade_risk" and risk.max_trade_risk_pct is not None:
+        return (
+            f"{risk.max_shares}株（制約: リスク{risk.max_trade_risk_pct * 100:.1f}%）"
+        )
+    if risk.binding_constraint == "position_cap" and risk.max_position_pct is not None:
+        pct = risk.max_position_pct * 100
+        return f"{risk.max_shares}株（制約: ポジション上限{pct:.1f}%）"
+    label = _CONSTRAINT_LABELS.get(risk.binding_constraint)
+    if label is not None:
+        return f"{risk.max_shares}株（制約: {label}）"
+    return f"{risk.max_shares}株"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +174,11 @@ class DailyBriefContext:
     filing_analyses: list[FilingAnalysis] | None
     rejections: list[RejectionRecord] = field(default_factory=list)
     notices: tuple[str, ...] = ()
+    # REQ-006: baked into each candidate's `BriefRisk` for `format_sizing()`,
+    # since `RiskAssessment` itself only carries computed outputs, not the
+    # config percentages that produced them.
+    max_trade_risk_pct: float = 0.01
+    max_position_pct: float = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +280,11 @@ def _candidate_brief(
         fundamentals=_fundamentals(
             market_store, candidate.symbol, context.brief.run_date, close
         ),
-        risk=_risk_brief(context.assessment),
+        risk=_risk_brief(
+            context.assessment,
+            context.brief.max_trade_risk_pct,
+            context.brief.max_position_pct,
+        ),
         llm=_llm_brief(
             candidate.symbol,
             context.brief.news_summaries,
@@ -281,7 +329,11 @@ def _fundamentals(
     return BriefFundamentals(per, fcf, equity_ratio, eps)
 
 
-def _risk_brief(assessment: RiskAssessment | None) -> BriefRisk:
+def _risk_brief(
+    assessment: RiskAssessment | None,
+    max_trade_risk_pct: float,
+    max_position_pct: float,
+) -> BriefRisk:
     if assessment is None:
         return BriefRisk("not_calculable", None, None, (), ())
     warnings = tuple(
@@ -298,6 +350,12 @@ def _risk_brief(assessment: RiskAssessment | None) -> BriefRisk:
         assessment.stop_price,
         assessment.reasons,
         warnings,
+        shares_by_risk=assessment.shares_by_risk,
+        shares_by_position_cap=assessment.shares_by_position_cap,
+        binding_constraint=assessment.binding_constraint,
+        sizing_warnings=assessment.sizing_warnings,
+        max_trade_risk_pct=max_trade_risk_pct,
+        max_position_pct=max_position_pct,
     )
 
 

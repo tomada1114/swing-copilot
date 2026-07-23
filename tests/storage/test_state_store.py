@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from uuid import uuid4
@@ -12,7 +13,14 @@ from duckdb import ConstraintException
 
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
-from swing_copilot.screening.base import Candidate, SignalHit
+from swing_copilot.screening.base import (
+    Candidate,
+    RejectionReasonCode,
+    RejectionRecord,
+    RejectionStage,
+    SignalHit,
+)
+from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
@@ -416,6 +424,302 @@ class TestRecordCandidates:
         with state_store._database.connect() as conn:  # noqa: SLF001
             count = conn.execute("SELECT count(*) FROM candidates").fetchone()
         assert count == (2,)
+
+
+class _FlakyRejectionConnection:
+    """Wraps a real connection; raises on the Nth `INSERT INTO screening_rejections`.
+
+    Mirrors `_FlakyConnection` above but targets the rejections table so the
+    rollback test can inject a failure *after* at least one candidate row
+    and one rejection row have already been inserted in the same
+    transaction (REQ-004/REQ-020).
+    """
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO screening_rejections"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later rejection insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+class TestRecordScreeningResults:
+    """P1-02: `screening_rejections` table and its atomic write (REQ-001..REQ-040)."""
+
+    def test_records_one_row_per_candidate_and_rejection(self, state_store):
+        # REQ-001: each stage/reason_code combination reaches the DB.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=("trend_sma",),
+                metrics={"rsi14": 40.0},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="LOWQ",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 1, "required_quarters": 4},
+            ),
+            RejectionRecord(
+                symbol="NETINC",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME,
+                detail={"net_income": -500000.0, "threshold": 0},
+            ),
+            RejectionRecord(
+                symbol="LOWVOL",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={"avg_volume": 100.0, "threshold": 1_000_000},
+            ),
+            RejectionRecord(
+                symbol="NOTREND",
+                stage=RejectionStage.TECHNICAL_SIGNAL,
+                reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                detail={"close": 99.0, "sma_long": 101.0},
+            ),
+        ]
+
+        state_store.record_screening_results(
+            candidates,
+            rejections,
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            candidate_rows = conn.execute(
+                "SELECT symbol, rank FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchall()
+            rejection_rows = conn.execute(
+                "SELECT symbol, stage, reason_code FROM screening_rejections "
+                "WHERE run_id = ? ORDER BY symbol",
+                [str(run_id)],
+            ).fetchall()
+        assert candidate_rows == [("AAPL", 1)]
+        assert rejection_rows == [
+            ("LOWQ", "data_quality", "DATA_INSUFFICIENT_HISTORY"),
+            ("LOWVOL", "fundamental_filter", "FILTER_LOW_LIQUIDITY"),
+            ("NETINC", "fundamental_filter", "FILTER_NEGATIVE_NET_INCOME"),
+            ("NOTREND", "technical_signal", "SIGNAL_TREND_NOT_MET"),
+        ]
+
+    def test_detail_json_round_trips_observed_value_and_threshold(self, state_store):
+        # REQ-003: detail JSON preserves the exact observed value/threshold.
+        run_id = uuid4()
+        rejection = RejectionRecord(
+            symbol="XYZ",
+            stage=RejectionStage.FUNDAMENTAL_FILTER,
+            reason_code=RejectionReasonCode.FILTER_LOW_EQUITY_RATIO,
+            detail={"equity_ratio": 0.24, "threshold": 0.30},
+        )
+
+        state_store.record_screening_results(
+            [], [rejection], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT detail FROM screening_rejections WHERE run_id = ? AND symbol = ?",
+                [str(run_id), "XYZ"],
+            ).fetchone()
+        assert json.loads(row[0]) == {"equity_ratio": 0.24, "threshold": 0.30}
+
+    def test_invalid_reason_code_violates_check_constraint(self, state_store):
+        # REQ-002: reason_code is limited to the closed enum at the schema
+        # level, independent of application-layer validation.
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO screening_rejections (
+                    run_id, symbol, stage, reason_code, detail, as_of
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(uuid4()),
+                    "XYZ",
+                    "fundamental_filter",
+                    "NOT_A_REAL_REASON_CODE",
+                    "{}",
+                    date(2026, 7, 20),
+                ],
+            )
+
+    def test_invalid_stage_violates_check_constraint(self, state_store):
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO screening_rejections (
+                    run_id, symbol, stage, reason_code, detail, as_of
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(uuid4()),
+                    "XYZ",
+                    "not_a_real_stage",
+                    "DATA_INSUFFICIENT_HISTORY",
+                    "{}",
+                    date(2026, 7, 20),
+                ],
+            )
+
+    def test_rolls_back_both_tables_when_a_later_rejection_insert_fails(
+        self, state_store, monkeypatch
+    ):
+        # REQ-004/REQ-020, Example 3: candidates=5 rejections=3, fails on the
+        # 3rd rejection insert (after >=1 candidate and >=1 rejection already
+        # succeeded in the same transaction) -> zero rows from this run.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol=f"C{i}",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=i,
+            )
+            for i in range(1, 6)
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol=f"R{i}",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            )
+            for i in range(1, 4)
+        ]
+
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=3),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                candidates,
+                rejections,
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            candidate_count = conn.execute(
+                "SELECT count(*) FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+            rejection_count = conn.execute(
+                "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert candidate_count == (0,)
+        assert rejection_count == (0,)
+
+    def test_rerun_after_failure_succeeds(self, state_store, monkeypatch):
+        # A rerun with a fresh run_id after a rolled-back failure must
+        # succeed cleanly (no partial state left behind to conflict with).
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="R1",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            ),
+            RejectionRecord(
+                symbol="R2",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            ),
+        ]
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=2),
+        )
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                candidates,
+                rejections,
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            )
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        retry_run_id = uuid4()
+        state_store.record_screening_results(
+            candidates,
+            rejections,
+            ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20)),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            counts = conn.execute(
+                "SELECT "
+                "(SELECT count(*) FROM candidates WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_rejections WHERE run_id = ?)",
+                [str(retry_run_id), str(retry_run_id)],
+            ).fetchone()
+        assert counts == (1, 2)
+
+    def test_all_pass_fixture_writes_zero_rejection_rows(self, state_store):
+        # REQ-010 boundary at the storage level: an empty rejections list is
+        # a legitimate, error-free write.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=1,
+            )
+        ]
+
+        state_store.record_screening_results(
+            candidates, [], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (0,)
 
 
 class TestRecordRiskAssessments:

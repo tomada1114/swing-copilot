@@ -984,6 +984,19 @@ CREATE TABLE IF NOT EXISTS candidates (
     UNIQUE (run_id, strategy_key, rank)
 );
 
+CREATE TABLE IF NOT EXISTS screening_rejections (
+    run_id       UUID NOT NULL,
+    symbol       VARCHAR NOT NULL,
+    stage        VARCHAR NOT NULL CHECK (stage IN ('data_quality','fundamental_filter','technical_signal')),
+    reason_code  VARCHAR NOT NULL CHECK (reason_code IN (
+        'FILTER_NEGATIVE_NET_INCOME','FILTER_NEGATIVE_FCF','FILTER_LOW_EQUITY_RATIO',
+        'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY'
+    )),
+    detail       JSON NOT NULL,
+    as_of        DATE NOT NULL,
+    PRIMARY KEY (run_id, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1056,6 +1069,12 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 ```
 
 同一プロセス内で`(model, prompt_hash, schema_version)`に一致する最新の`status='success'`を先に検索し、存在すればAPIを呼ばず再利用する。失敗・予算超過も監査イベントとして複数回記録できるよう、テーブルにはこの3列のUNIQUE制約を置かない。P1〜P2は単一プロセス実行のため、分散ロックは導入しない。
+
+`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——`ScreeningPipeline._ranking_metrics()`が生の日足からランキング指標を再計算するのと同じ設計判断（本節冒頭2.1 #4）で、各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は決定的な優先順位（データ不足 → ファンダフィルタ → 流動性 → `strategies.yaml`のシグナル順）で行われ、1銘柄1段階につき`reason_code`は必ず1つに定まる。`reason_code`列挙は現行の`profitable_positive_fcf_equity`・`volume_min`・`trend_sma`・`pullback_rsi`の4つのFilter/Signalに固定でひも付いており、将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
+
+**Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
+
+`report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
 
 DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しないようにする。空の型付きrelationを先に作る、または最初の書き込み後にビューを作成する実装とし、初期状態のテストを必須とする。
 

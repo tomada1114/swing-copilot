@@ -68,7 +68,9 @@ class FakeMonotonic:
         return value
 
 
-def _bars_for(symbols: list[str], as_of: date, days: int = 210) -> pd.DataFrame:
+def _bars_for(
+    symbols: list[str], as_of: date, days: int = 210, volume: int = 2_000_000
+) -> pd.DataFrame:
     rows = []
     for symbol in symbols:
         for i in range(days):
@@ -82,10 +84,52 @@ def _bars_for(symbols: list[str], as_of: date, days: int = 210) -> pd.DataFrame:
                     "high": price + 1,
                     "low": price - 1,
                     "close": price,
-                    "volume": 2_000_000,
+                    "volume": volume,
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _healthy_fundamentals(symbol: str) -> list[FundamentalsRecord]:
+    """Fundamentals that pass `ProfitablePositiveFCFEquityFilter` cleanly.
+
+    Needed even when a strategy's `filters_all` doesn't include
+    `profitable_positive_fcf_equity`: the P1-02 rejection classifier mirrors
+    that filter's threshold logic unconditionally (screening/
+    rejection_classifier.py), so a symbol with no fundamentals on file would
+    otherwise be misclassified as DATA_INSUFFICIENT_HISTORY instead of the
+    reason this fixture actually targets.
+    """
+    quarter_ends = [
+        date(2026, 3, 31),
+        date(2026, 6, 30),
+        date(2026, 9, 30),
+        date(2026, 12, 31),
+    ]
+    filed_ats = [
+        datetime(2026, 4, 15, tzinfo=UTC),
+        datetime(2026, 7, 15, tzinfo=UTC),
+        datetime(2026, 10, 15, tzinfo=UTC),
+        datetime(2027, 1, 15, tzinfo=UTC),
+    ]
+    return [
+        FundamentalsRecord(
+            accession_no=f"acc-{symbol}-{i}",
+            symbol=symbol,
+            form="10-Q",
+            fiscal_period_end=quarter_ends[i],
+            filed_at=filed_ats[i],
+            revenue=100.0,
+            net_income=10.0,
+            fcf=10.0,
+            equity=60.0,
+            assets=100.0,
+            shares=1_000_000.0,
+            source_url="https://www.sec.gov/example",
+            fetched_at=datetime(2027, 1, 20, tzinfo=UTC),
+        )
+        for i in range(4)
+    ]
 
 
 def _member(symbol: str) -> UniverseMember:
@@ -285,6 +329,24 @@ class TestSymbolLimit:
     def test_limit_restricts_universe_to_first_n_symbols(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=1), deps)
         assert result.status == RunStatus.SUCCESS
+
+    def test_limit_excludes_never_fetched_symbols_from_screening_rejections(
+        self, deps, state_store
+    ):
+        # P1-02 regression: `deps.universe` has AAPL+MSFT, but `limit=1`
+        # narrows this run's actual fetch scope to AAPL only. MSFT must not
+        # appear in `screening_rejections` -- it was never fetched this run,
+        # so classifying it at all would be a spurious rejection, not a
+        # genuine screening outcome.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=1), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol FROM screening_rejections WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchall()
+        assert rows == []
 
 
 class TestFundamentalsStepSkipped:
@@ -557,3 +619,71 @@ class TestTimeoutBudget:
         assert rows["6_llm"] == "skipped"
         assert rows["7_notify"] == "skipped"
         assert rows["8_output"] == "success"
+
+
+class TestScreeningRejections:
+    """P1-02: `screening_rejections` end-to-end through the daily pipeline."""
+
+    def test_liquidity_rejection_is_recorded_and_reported(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        universe = (_member("AAPL"), _member("MSFT"), _member("LOWVOL"))
+        bars = pd.concat(
+            [
+                _bars_for(["AAPL", "MSFT"], AS_OF),
+                _bars_for(["LOWVOL"], AS_OF, volume=100),
+            ]
+        )
+        market_store.upsert_fundamentals(
+            [
+                *_healthy_fundamentals("AAPL"),
+                *_healthy_fundamentals("MSFT"),
+                *_healthy_fundamentals("LOWVOL"),
+            ]
+        )
+        deps = DailyDependencies(
+            data_provider=FakeDataProvider(bars),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=universe,
+            strategies_config=STRATEGIES_CONFIG,
+            clock=FakeClock(),
+            edgar_client=None,
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, stage, reason_code FROM screening_rejections "
+                "WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchall()
+        assert rows == [("LOWVOL", "fundamental_filter", "FILTER_LOW_LIQUIDITY")]
+
+        assert result.report_path is not None
+        report_text = result.report_path.read_text(encoding="utf-8")
+        assert "## 落選サマリ" in report_text
+        assert "FILTER_LOW_LIQUIDITY" in report_text
+        assert "| 1 |" in report_text
+
+    def test_all_pass_reports_zero_rejections(self, deps, state_store):
+        # REQ-010 boundary: both AAPL/MSFT pass, so screening_rejections has
+        # zero rows and the report's summary renders without error.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchone()
+        assert count == (0,)
+
+        assert result.report_path is not None
+        report_text = result.report_path.read_text(encoding="utf-8")
+        assert "## 落選サマリ" in report_text
+        assert "該当なし(0件)" in report_text

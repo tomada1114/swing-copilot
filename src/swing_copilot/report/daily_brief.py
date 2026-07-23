@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate
+    from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.universe import UniverseMember
@@ -100,6 +101,14 @@ class BriefCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefRejectionCount:
+    """One `reason_code`'s tally for the 落選サマリ section (P1-02)."""
+
+    reason_code: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
 class DailyBrief:
     """One run's presentation-neutral decision-support result."""
 
@@ -108,6 +117,7 @@ class DailyBrief:
     generated_at: datetime
     market: tuple[BriefMarketItem, ...]
     candidates: tuple[BriefCandidate, ...]
+    rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
 
 
@@ -123,6 +133,7 @@ class DailyBriefContext:
     risk_assessments: list[RiskAssessment]
     news_summaries: list[NewsSummary] | None
     filing_analyses: list[FilingAnalysis] | None
+    rejections: list[RejectionRecord] = field(default_factory=list)
     notices: tuple[str, ...] = ()
 
 
@@ -160,7 +171,19 @@ def build_daily_brief(
         generated_at=context.generated_at,
         market=_market_items(market_store, context.run_date),
         candidates=candidates,
+        rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
+    )
+
+
+def _rejection_counts(
+    rejections: list[RejectionRecord],
+) -> tuple[BriefRejectionCount, ...]:
+    """Tally rejections by `reason_code`, alphabetically for a stable render."""
+    counts = Counter(rejection.reason_code.value for rejection in rejections)
+    return tuple(
+        BriefRejectionCount(reason_code, count)
+        for reason_code, count in sorted(counts.items())
     )
 
 

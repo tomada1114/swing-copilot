@@ -15,6 +15,7 @@ from swing_copilot.report.daily_brief import (
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
+    BriefRejectionCount,
     BriefRisk,
     BriefSource,
     DailyBrief,
@@ -125,6 +126,51 @@ def test_terminal_renders_empty_candidate_set_without_error() -> None:
 
     assert "Candidates: 0" in output
     assert "Score" in output  # header still renders
+
+
+def _brief_with_rejections() -> DailyBrief:
+    return replace(
+        _brief(),
+        rejection_counts=(
+            BriefRejectionCount("FILTER_LOW_LIQUIDITY", 3),
+            BriefRejectionCount("SIGNAL_RSI_NOT_MET", 1),
+        ),
+    )
+
+
+def test_terminal_shows_rejection_summary_counts() -> None:
+    # REQ-005: 落選サマリ, reason_code別件数.
+    output = render_terminal(_brief_with_rejections(), RunStatus.SUCCESS, width=120)
+
+    assert "落選サマリ" in output
+    assert "FILTER_LOW_LIQUIDITY" in output
+    assert "3" in output
+    assert "SIGNAL_RSI_NOT_MET" in output
+
+
+def test_markdown_shows_rejection_summary_table() -> None:
+    output = render_markdown(_brief_with_rejections(), RunStatus.SUCCESS)
+
+    assert "## 落選サマリ" in output
+    assert "FILTER_LOW_LIQUIDITY" in output
+    assert "| 3 |" in output
+    assert "SIGNAL_RSI_NOT_MET" in output
+
+
+def test_terminal_renders_empty_rejection_summary_without_error() -> None:
+    # REQ-010 boundary: zero rejections renders a "0件" style message, no
+    # exception.
+    output = render_terminal(_brief(), RunStatus.SUCCESS, width=120)
+
+    assert "落選サマリ" in output
+    assert "0件" in output
+
+
+def test_markdown_renders_empty_rejection_summary_without_error() -> None:
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "## 落選サマリ" in output
+    assert "0件" in output
 
 
 def test_markdown_renders_empty_candidate_set_without_error() -> None:

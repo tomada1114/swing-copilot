@@ -81,6 +81,13 @@ def render_terminal(
                 "  Sources: "
                 + ", ".join(source.source_id for source in candidate.llm.sources)
             )
+    console.print("\n[bold]落選サマリ[/bold]")
+    if brief.rejection_counts:
+        for item in brief.rejection_counts:
+            console.print(f"  {item.reason_code}: {item.count}件")
+    else:
+        console.print("  該当なし(0件)")
+
     if brief.notices:
         console.print("\n[bold]Warnings[/bold]")
         for notice in brief.notices:

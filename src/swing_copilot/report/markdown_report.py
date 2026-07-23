@@ -67,6 +67,14 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
     )
     for candidate in brief.candidates:
         lines.extend(_candidate_section(candidate))
+    lines.extend(["", "## 落選サマリ", ""])
+    if brief.rejection_counts:
+        lines.extend(["| reason_code | 件数 |", "|---|---:|"])
+        lines.extend(
+            f"| {item.reason_code} | {item.count} |" for item in brief.rejection_counts
+        )
+    else:
+        lines.append("該当なし(0件)")
     if brief.notices:
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {notice}" for notice in brief.notices)

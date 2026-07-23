@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -20,13 +20,14 @@ from swing_copilot.screening.base import (
     FILTER_REGISTRY,
     SIGNAL_REGISTRY,
     Candidate,
+    RejectionReasonCode,
     ScreeningInput,
     SignalHit,
     register_signal,
 )
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.universe import UniverseMember
-from tests.screening.conftest import make_bars
+from tests.screening.conftest import FundamentalsSpec, make_bars, make_fundamentals_row
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -66,6 +67,43 @@ def _uptrend_bars(
     return make_bars(
         symbol, _uptrend_closes(days, base=base), start=date(2026, 1, 1), volume=volume
     )
+
+
+def _healthy_fundamentals_df(symbols: list[str]) -> pd.DataFrame:
+    """Fundamentals rows that pass `ProfitablePositiveFCFEquityFilter` cleanly.
+
+    Used by `TestRunWithRejections` so a symbol rejected only by `volume_min`
+    doesn't also (correctly, but confusingly for that test's purpose) get
+    classified as fundamentals-`DATA_INSUFFICIENT_HISTORY` -- the rejection
+    classifier mirrors the fundamentals check unconditionally, regardless of
+    whether `profitable_positive_fcf_equity` is actually in `filters_all`.
+    """
+    rows = []
+    quarter_ends = [
+        date(2025, 3, 31),
+        date(2025, 6, 30),
+        date(2025, 9, 30),
+        date(2025, 12, 31),
+    ]
+    filed_ats = [
+        datetime(2025, 4, 15, tzinfo=UTC),
+        datetime(2025, 7, 15, tzinfo=UTC),
+        datetime(2025, 10, 15, tzinfo=UTC),
+        datetime(2026, 1, 15, tzinfo=UTC),
+    ]
+    for symbol in symbols:
+        for i in range(4):
+            spec = FundamentalsSpec(
+                accession_no=f"acc-{symbol}-{i}",
+                fiscal_period_end=quarter_ends[i],
+                filed_at=filed_ats[i],
+                net_income=10.0,
+                fcf=10.0,
+                equity=60.0,
+                assets=100.0,
+            )
+            rows.append(make_fundamentals_row(symbol, spec))
+    return pd.DataFrame(rows)
 
 
 class TestAndSemantics:
@@ -689,3 +727,103 @@ ScreeningPipeline(
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+class TestRunWithRejections:
+    """P1-02: `run_with_rejections()` shares `run()`'s candidate output."""
+
+    def test_candidates_match_run_exactly(self, settings):
+        bars = pd.concat(
+            [
+                _uptrend_bars("PASSES", volume=2_000_000),
+                _uptrend_bars("LOW_VOLUME", volume=100),
+            ]
+        )
+        universe = (_member("PASSES"), _member("LOW_VOLUME"))
+        data = ScreeningInput(
+            as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
+        )
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        via_run = pipeline.run(data)
+        result = pipeline.run_with_rejections(data)
+
+        assert result.candidates == via_run
+
+    def test_rejects_liquidity_failure_with_the_divergence_reason_code(self, settings):
+        # STRATEGIES_CONFIG: filters_all=["volume_min"], signals_all=["trend_sma"].
+        # Fundamentals are healthy for both symbols so the rejection
+        # classifier's (always-on) fundamentals mirror doesn't mask the
+        # liquidity rejection this test targets.
+        bars = pd.concat(
+            [
+                _uptrend_bars("PASSES", volume=2_000_000),
+                _uptrend_bars("LOW_VOLUME", volume=100),
+            ]
+        )
+        universe = (_member("PASSES"), _member("LOW_VOLUME"))
+        data = ScreeningInput(
+            as_of=AS_OF,
+            universe=universe,
+            fundamentals=_healthy_fundamentals_df(["PASSES", "LOW_VOLUME"]),
+            bars=bars,
+        )
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        result = pipeline.run_with_rejections(data)
+
+        assert [c.symbol for c in result.candidates] == ["PASSES"]
+        assert [r.symbol for r in result.rejections] == ["LOW_VOLUME"]
+        assert (
+            result.rejections[0].reason_code is RejectionReasonCode.FILTER_LOW_LIQUIDITY
+        )
+
+    def test_all_pass_fixture_has_zero_rejections(self, settings):
+        # REQ-010 boundary at the pipeline level: all universe symbols
+        # become candidates -> rejections is empty, no exception.
+        bars = pd.concat(
+            [
+                _uptrend_bars("AAPL", volume=2_000_000),
+                _uptrend_bars("MSFT", volume=2_000_000),
+            ]
+        )
+        universe = (_member("AAPL"), _member("MSFT"))
+        data = ScreeningInput(
+            as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
+        )
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        result = pipeline.run_with_rejections(data)
+
+        assert len(result.candidates) == 2
+        assert result.rejections == []
+
+    def test_no_signals_configured_produces_no_rejections(self, settings):
+        bars = _uptrend_bars("AAPL")
+        universe = (_member("AAPL"),)
+        data = ScreeningInput(
+            as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
+        )
+        strategies_config = {
+            "strategies": {
+                "default": {
+                    "filters_all": [],
+                    "signals_all": [],
+                    "candidate_limit": 10,
+                }
+            }
+        }
+        pipeline = ScreeningPipeline(
+            strategies_config, market_store=None, settings=settings
+        )
+
+        result = pipeline.run_with_rejections(data)
+
+        assert result.candidates == []
+        assert result.rejections == []

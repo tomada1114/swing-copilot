@@ -66,6 +66,20 @@ INIT_SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS screening_rejections (
+        run_id       UUID NOT NULL,
+        symbol       VARCHAR NOT NULL,
+        stage        VARCHAR NOT NULL CHECK (stage IN ('data_quality','fundamental_filter','technical_signal')),
+        reason_code  VARCHAR NOT NULL CHECK (reason_code IN (
+            'FILTER_NEGATIVE_NET_INCOME','FILTER_NEGATIVE_FCF','FILTER_LOW_EQUITY_RATIO',
+            'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY'
+        )),
+        detail       JSON NOT NULL,
+        as_of        DATE NOT NULL,
+        PRIMARY KEY (run_id, symbol)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS risk_assessments (
         run_id          UUID NOT NULL,
         symbol          VARCHAR NOT NULL,

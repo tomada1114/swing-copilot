@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 
     from swing_copilot.models import RunMode
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate, SignalHit
+    from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
+    from swing_copilot.storage.audit_records import ScreeningRunMeta
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.llm_records import LLMCallRecord
     from swing_copilot.storage.paper_records import TradeDecisionRecord
@@ -454,6 +455,25 @@ class StateStore:
         """
         audit_records.record_candidates(
             self._database, candidates, run_id, strategy_key
+        )
+
+    def record_screening_results(
+        self,
+        candidates: Sequence[Candidate],
+        rejections: Sequence[RejectionRecord],
+        meta: ScreeningRunMeta,
+    ) -> None:
+        """Record one run's candidates and rejections in one transaction.
+
+        REQ-004/REQ-020: both tables commit or roll back together.
+
+        Args:
+            candidates: Ranked candidates to record.
+            rejections: Classified rejection records to record.
+            meta: `(run_id, strategy_key, as_of)` shared by every row.
+        """
+        audit_records.record_screening_results(
+            self._database, candidates, rejections, meta
         )
 
     def record_risk_assessments(

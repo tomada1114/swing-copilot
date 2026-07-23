@@ -18,12 +18,18 @@ from swing_copilot.screening import (
 from swing_copilot.screening import (
     technical_signals as _technical_signals,  # noqa: F401 - registers built-ins
 )
-from swing_copilot.screening.base import FILTER_REGISTRY, SIGNAL_REGISTRY, Candidate
+from swing_copilot.screening.base import (
+    FILTER_REGISTRY,
+    SIGNAL_REGISTRY,
+    Candidate,
+    ScreeningResult,
+)
 from swing_copilot.screening.indicators import sma, symbol_bars, wilder_atr, wilder_rsi
+from swing_copilot.screening.rejection_classifier import classify_rejections
 
 if TYPE_CHECKING:
     from swing_copilot.config import ScoreWeights, Settings
-    from swing_copilot.screening.base import ScreeningInput
+    from swing_copilot.screening.base import ScreeningInput, SignalHit
     from swing_copilot.storage.market_store import MarketStore
 
 _RSI_WINDOW = 14
@@ -75,6 +81,7 @@ class ScreeningPipeline:
         self._candidate_limit = spec.candidate_limit
         self._rsi_threshold = settings.technical_signals.pullback.rsi_threshold
         self._score_weights: ScoreWeights = spec.ranking.score_weights
+        self._settings = settings
 
     def run(self, data: ScreeningInput) -> list[Candidate]:
         """Run the two-stage screen and return a ranked, capped candidate list.
@@ -86,6 +93,43 @@ class ScreeningPipeline:
             At most `candidate_limit` candidates, ranked by descending
             composite score (`score = sum(weight_i * component_i)`, P1-01),
             with symbol ascending as the deterministic tiebreak (REQ-010).
+        """
+        return self.run_with_rejections(data).candidates
+
+    def run_with_rejections(self, data: ScreeningInput) -> ScreeningResult:
+        """Run the two-stage screen and also classify every rejected symbol.
+
+        Args:
+            data: Point-in-time screening input.
+
+        Returns:
+            `candidates` identical to `run()`'s output; `rejections` covers
+            every universe symbol that did not pass every configured Filter
+            and every configured Signal (P1-02, roadmap §5). See
+            `rejection_classifier.classify_rejections` for the exact
+            priority order and its one intentional gap (candidate_limit
+            truncation is not itself a rejection reason).
+        """
+        candidates, candidate_symbols, hits_by_signal = self._build_candidates(data)
+        rejections = classify_rejections(
+            data,
+            self._settings,
+            candidate_symbols=candidate_symbols,
+            signal_order=[signal.name for signal in self._signals],
+            hits_by_signal=hits_by_signal,
+        )
+        return ScreeningResult(candidates=candidates, rejections=rejections)
+
+    def _build_candidates(
+        self, data: ScreeningInput
+    ) -> tuple[list[Candidate], set[str], list[list[SignalHit]]]:
+        """Shared filter->signal->rank body for `run()`/`run_with_rejections()`.
+
+        Returns:
+            The ranked, capped candidate list; the pre-limit set of symbols
+            that passed every Filter and every Signal (before ranking/
+            candidate_limit truncation, used by the rejection classifier);
+            and each signal's raw hits, in configured order.
         """
         filtered = {member.symbol for member in data.universe}
         for filter_ in self._filters:
@@ -124,7 +168,7 @@ class ScreeningPipeline:
         self._score_rows(rows)
         rows.sort(key=lambda row: (-row[2]["score"], row[0]))
         limited = rows[: self._candidate_limit]
-        return [
+        candidates = [
             Candidate(
                 symbol=symbol,
                 as_of=data.as_of,
@@ -134,6 +178,7 @@ class ScreeningPipeline:
             )
             for index, (symbol, signal_names, metrics) in enumerate(limited)
         ]
+        return candidates, candidate_symbols, hits_by_signal
 
     def _score_rows(
         self, rows: list[tuple[str, tuple[str, ...], dict[str, float]]]

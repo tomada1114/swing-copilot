@@ -11,9 +11,18 @@ import pandas as pd
 import pytest
 
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
-from swing_copilot.report.daily_brief import DailyBriefContext, build_daily_brief
+from swing_copilot.report.daily_brief import (
+    BriefRejectionCount,
+    DailyBriefContext,
+    build_daily_brief,
+)
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
-from swing_copilot.screening.base import Candidate
+from swing_copilot.screening.base import (
+    Candidate,
+    RejectionReasonCode,
+    RejectionRecord,
+    RejectionStage,
+)
 from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.universe import UniverseMember
 
@@ -212,3 +221,50 @@ def test_missing_data_produces_explicit_fallbacks() -> None:
     assert candidate.risk.status == "not_calculable"
     assert candidate.llm.degraded is True
     assert "取得できませんでした" in candidate.llm.conclusion
+
+
+def test_rejection_counts_are_tallied_by_reason_code_alphabetically() -> None:
+    context = replace(
+        _context(),
+        rejections=[
+            RejectionRecord(
+                symbol="A",
+                stage=RejectionStage.TECHNICAL_SIGNAL,
+                reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                detail={},
+            ),
+            RejectionRecord(
+                symbol="B",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={},
+            ),
+            RejectionRecord(
+                symbol="C",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={},
+            ),
+        ],
+    )
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    assert brief.rejection_counts == (
+        BriefRejectionCount("FILTER_LOW_LIQUIDITY", 2),
+        BriefRejectionCount("SIGNAL_TREND_NOT_MET", 1),
+    )
+
+
+def test_zero_rejections_produces_empty_rejection_counts() -> None:
+    brief = build_daily_brief(
+        _context(),
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    assert brief.rejection_counts == ()

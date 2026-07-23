@@ -1,4 +1,4 @@
-"""Fully offline five-symbol E2E smoke test for all nine daily-batch steps (FR-12).
+"""Fully offline five-symbol E2E smoke test for all eight daily-batch steps (FR-12).
 
 Every external port (`DataProvider`, text clients, `EdgarClient`, LLM client,
 `Notifier`, `Clock`) is a fake — no real network/API call anywhere, matching
@@ -17,17 +17,19 @@ import pytest
 from swing_copilot.config import load_settings
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
-from swing_copilot.models import DailyRunOptions, RunStatus
+from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
-from swing_copilot.report.html_report import MARKET_STRIP_SYMBOLS
+from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
 from swing_copilot.screening import (
     technical_signals as _technical_signals,  # noqa: F401 - registers built-ins
 )
+from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
@@ -130,7 +132,11 @@ class FakeCalendarClient:
 
 
 class FakeLLMClient:
+    def __init__(self):
+        self.requests = []
+
     def analyze(self, request):
+        self.requests.append(request)
         match = re.search(r"対象銘柄: (\S+)", request.prompt)
         symbol = match.group(1) if match else "UNKNOWN"
         if request.schema is NewsSummary:
@@ -230,16 +236,17 @@ def deps(tmp_path):
 
 
 class TestFiveSymbolEndToEnd:
-    def test_all_nine_steps_complete_and_produce_a_full_report(self, deps):
-        # Live mode (with the browser suppressed) exercises every step,
-        # including 8_notify, which dry-run mode intentionally skips.
-        result = run_daily(DailyRunOptions(as_of=AS_OF, no_open=True), deps)
+    def test_all_eight_steps_complete_and_produce_a_markdown_brief(self, deps):
+        # Live mode exercises notification; dry-run intentionally skips it.
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
         assert result.status == RunStatus.SUCCESS
         assert result.exit_code == 0
         assert result.report_path is not None
         assert result.report_path.is_file()
-        assert (result.report_path.parent / "latest.html").is_file()
+        assert result.report_path.suffix == ".md"
+        assert (result.report_path.parent.parent / "latest.md").is_file()
+        assert result.brief is not None
 
         with deps.state_store._database.connect() as conn:  # noqa: SLF001
             steps = conn.execute(
@@ -253,20 +260,19 @@ class TestFiveSymbolEndToEnd:
             "4_risk",
             "5_text",
             "6_llm",
-            "7_report",
-            "8_notify",
-            "9_open",
+            "7_notify",
+            "8_output",
         ]
         assert all(status == "success" for _step, status in steps)
 
-    def test_report_contains_every_candidate_and_llm_content(self, deps):
+    def test_markdown_contains_every_candidate_and_llm_content(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.report_path is not None
-        html = result.report_path.read_text(encoding="utf-8")
+        markdown = result.report_path.read_text(encoding="utf-8")
         for symbol in SYMBOLS:
-            assert f'id="card-{symbol}"' in html
-        assert "May indicate continued stability." in html
+            assert f"## {symbol}" in markdown
+        assert "May indicate continued stability." in markdown
 
     def test_price_step_also_populates_the_market_strip(self, deps):
         # The market strip's symbols (SPY/QQQ/^VIX/^TNX) are never part of
@@ -275,8 +281,8 @@ class TestFiveSymbolEndToEnd:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.report_path is not None
-        html = result.report_path.read_text(encoding="utf-8")
-        assert "取得不可" not in html
+        markdown = result.report_path.read_text(encoding="utf-8")
+        assert "N/A" not in markdown.split("## Candidates", maxsplit=1)[0]
         for symbol in MARKET_STRIP_SYMBOLS:
             bars = deps.market_store.read_bars(
                 [symbol], AS_OF - timedelta(days=5), AS_OF, AS_OF
@@ -289,13 +295,14 @@ class TestFiveSymbolEndToEnd:
         requested = deps.data_provider.requested_symbols[-1]
         assert set(MARKET_STRIP_SYMBOLS).issubset(requested)
 
-    def test_notifier_is_called_with_the_generated_report_path(self, deps):
+    def test_notifier_is_called_with_summary_before_output_is_archived(self, deps):
         # Dry-run suppresses notification, so this contract needs live mode.
-        result = run_daily(DailyRunOptions(as_of=AS_OF, no_open=True), deps)
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
         assert len(deps.notifier.calls) == 1
         _summary, notified_path = deps.notifier.calls[0]
-        assert notified_path == result.report_path
+        assert notified_path is None
+        assert result.report_path is not None
 
     def test_rerun_is_idempotent_and_gets_a_new_run_id(self, deps):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -308,3 +315,80 @@ class TestFiveSymbolEndToEnd:
             SYMBOLS, AS_OF - timedelta(days=400), AS_OF, AS_OF
         )
         assert not bars.duplicated(subset=["symbol", "date"]).any()
+
+    def test_live_current_run_includes_bounded_prior_human_decision_context(self, deps):
+        prior_id = deps.state_store.start_run(
+            AS_OF - timedelta(days=2), RunMode.LIVE, "prior"
+        )
+        deps.state_store.record_candidates(
+            [
+                Candidate(
+                    "AAPL",
+                    AS_OF - timedelta(days=2),
+                    ("trend_sma",),
+                    {"close": 100.0},
+                    1,
+                )
+            ],
+            prior_id,
+            "default",
+        )
+        deps.state_store.record_trade_decision(
+            TradeDecisionRecord(
+                run_id=prior_id,
+                symbol="AAPL",
+                strategy_key="default",
+                position_id=None,
+                decision="ignored",
+                reason_memo="相関が高かった",
+                virtual_fill_price=None,
+            )
+        )
+
+        run_daily(DailyRunOptions(), deps)
+
+        aapl_requests = [
+            request
+            for request in deps.llm_client.requests
+            if "対象銘柄: AAPL" in request.prompt
+        ]
+        assert aapl_requests
+        assert any("<decision_history>" in request.prompt for request in aapl_requests)
+        assert any("相関が高かった" in request.prompt for request in aapl_requests)
+
+    def test_explicit_as_of_run_does_not_include_decision_history(self, deps):
+        prior_id = deps.state_store.start_run(
+            AS_OF - timedelta(days=1), RunMode.LIVE, "prior"
+        )
+        deps.state_store.record_candidates(
+            [
+                Candidate(
+                    "AAPL",
+                    AS_OF - timedelta(days=1),
+                    ("trend_sma",),
+                    {"close": 100.0},
+                    1,
+                )
+            ],
+            prior_id,
+            "default",
+        )
+        deps.state_store.record_trade_decision(
+            TradeDecisionRecord(
+                run_id=prior_id,
+                symbol="AAPL",
+                strategy_key="default",
+                position_id=None,
+                decision="ignored",
+                reason_memo="過去の判断",
+                virtual_fill_price=None,
+            )
+        )
+
+        run_daily(DailyRunOptions(as_of=AS_OF), deps)
+
+        assert deps.llm_client.requests
+        assert all(
+            "<decision_history>" not in request.prompt
+            for request in deps.llm_client.requests
+        )

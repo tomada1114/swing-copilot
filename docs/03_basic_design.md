@@ -9,8 +9,8 @@
 | 読者 | 本システムの詳細設計・実装を行う開発者・実装エージェント（Claude Codeの `/goal` による自律実装を含む） |
 | 前提文書 | `docs/00_human_preparation.md`（人間の下準備）、`docs/01_requirements.md`（要件定義書、FR/NFR/CONのID定義元） |
 | 後続文書 | `docs/04_detailed_design.md`（詳細設計書。本書のコンポーネント設計をモジュール・クラス・スキーマレベルまで具体化する） |
-| バージョン | v1.1 |
-| 最終更新日 | 2026-07-21 |
+| バージョン | v1.2 |
+| 最終更新日 | 2026-07-22 |
 
 本書は要件定義書（`docs/01_requirements.md`）で定義された要件ID（FR-01〜FR-12、NFR-01〜NFR-07、CON-01〜CON-04）を前提とし、それらを満たすシステム構成・データフロー・データストア・外部インターフェース・エラー処理方針・運用設計・セキュリティ設計を定める。要件そのものの再定義は行わない。
 
@@ -20,7 +20,7 @@
 
 ## 2. システム全体構成
 
-swing-copilotは、利用者がローカルマシンで手動実行するコマンドを起点に、価格・ファンダメンタルズ・テキスト情報を外部APIから収集し、スクリーニング・リスクチェック・LLM分析を経てHTMLレポート（実行後に自動でブラウザ表示）とDiscord通知（オプション機能）を生成する、単一プロセスのバッチパイプラインである。証券会社APIとの接続や自動発注は行わない。
+swing-copilotは、利用者がローカルマシンで手動実行するコマンドを起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェック・LLM分析を経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。Discord通知はオプションであり、自動発注は行わない。
 
 採用するアーキテクチャパターンは次の通り。
 
@@ -51,7 +51,8 @@ flowchart TD
         RISK["risk/checks.py<br/>FR-06"]
         TXT["text/*<br/>FR-07"]
         LLM["llm/*<br/>FR-08"]
-        RPT["report/html_report.py<br/>FR-09"]
+        BRIEF["report/daily_brief.py<br/>FR-09"]
+        OUT["terminal_report.py / markdown_report.py"]
         NOTIFY["report/discord_notify.py<br/>FR-09"]
     end
 
@@ -81,12 +82,14 @@ flowchart TD
     TXT --> LLM
     CLAUDE --> LLM
     LLM --> DUCKDB
-    SCR --> RPT
-    RISK --> RPT
-    LLM --> RPT
-    DUCKDB --> RPT
-    RPT --> HTMLOUT[("reports/*.html")]
-    RPT --> NOTIFY
+    SCR --> BRIEF
+    RISK --> BRIEF
+    LLM --> BRIEF
+    DUCKDB --> BRIEF
+    BRIEF --> OUT
+    OUT --> STDOUT["stdout"]
+    OUT --> MDOUT[("reports/<date>/<run_id>.md")]
+    BRIEF --> NOTIFY
     NOTIFY --> DISCORD
 
     DUCKDB -.-> BT
@@ -95,7 +98,7 @@ flowchart TD
     PAPER -.-> DUCKDB
 ```
 
-実行環境はローカルマシンのみであり、利用者が任意のタイミングで1日1回、同一のCLIエントリポイント（`uv run copilot-daily`）を手動実行する。GitHub Actions等による自動実行は行わない。`data/`（Parquet/DuckDB）と`reports/`（HTML）はいずれもローカルファイルシステムのパスにそのまま永続化される。
+実行環境はローカルマシンのみであり、利用者が1日1回`uv run copilot-daily`を手動実行する。`data/`（Parquet/DuckDB）と`reports/`（生成Markdown）はローカルへ永続化する。判断は`uv run copilot-decision`で明示的に記録する。
 
 ---
 
@@ -118,10 +121,12 @@ flowchart TD
 | LLMClient | `llm/client.py` | Claude API呼び出しの共通ラッパー（リトライ・コスト記録） | FR-08, NFR-05, NFR-06 |
 | LLM分析（要約） | `llm/summarize.py` | LLMによるニュース要約（事実/推測分離、使用モデルは`settings.yaml`の`llm.models.news_summary`で設定、デフォルトHaiku） | FR-08 |
 | LLM分析（決算解釈） | `llm/filings_analysis.py` | LLMによる決算書解釈（事実/推測分離、使用モデルは`settings.yaml`の`llm.models.filing_analysis`で設定、デフォルトHaiku。精度重視の場合はSonnet等へ設定変更可） | FR-08 |
-| レポート生成 | `report/html_report.py` | Jinja2による日次HTMLレポート生成（実行後にデフォルトブラウザへ自動表示。ダークテーマ・TradingView Lightweight Chartsでのローソク足+SMA表示等のUI詳細は`docs/05_ui_design.md`参照） | FR-09 |
+| 日次ブリーフ構築 | `report/daily_brief.py` | 市場・候補・リスク・LLM結果を表示非依存の値へ集約 | FR-09 |
+| CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |
 | Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（オプション機能、デフォルト無効） | FR-09 |
 | バックテスト | `backtest/` | 日次ロジックを再利用する複数銘柄ポートフォリオシミュレータ、SPY買い持ちとの比較 | FR-10 |
 | ペーパートレード記帳 | `paper/journal.py` | 人間の判断（追随/見送り/修正）と仮想約定の記録 | FR-11, CON-04 |
+| 判断記録CLI | `paper/cli.py` | 候補検証、判断upsert、Markdown判断欄の再生成 | FR-11 |
 | 日次オーケストレータ | `pipeline/daily.py` | 全ステップの実行順制御・冪等性・フェイルソフト | FR-12, NFR-04 |
 | 設定ロード | `config.py` | `settings.yaml`/`strategies.yaml`/環境変数の統合ロード | NFR-06 |
 
@@ -129,7 +134,7 @@ flowchart TD
 
 ## 4. データフロー（日次バッチのシーケンス）
 
-`pipeline/daily.py` は以下の9ステップを固定順で実行する。起動時に一意な`run_id`を発行し、評価対象日`run_date`は「取得済み日足の最新取引日」または明示された`--as-of`から決める。端末のローカル日付を市場日として扱わない。ステップ(5)テキスト収集・(6)LLM分析が失敗しても、ステップ(7)(8)は「スクリーニング結果のみの縮退版」で完走する（フェイルソフト、FR-12・NFR-04）。同じ`run_date`を再実行しても、各データの自然キーupsertと同一入力のLLMキャッシュによって重複を作らない。一方、実行履歴は別の`run_id`として残す。
+`pipeline/daily.py` は以下の8ステップを固定順で実行する。起動時に一意な`run_id`を発行し、`run_date`は取得済み日足の最新取引日または明示された`--as-of`から決める。ステップ(5)テキスト収集・(6)LLM分析が失敗しても、ステップ(8)はスクリーニング結果のみの縮退版を出力する。同じ`run_date`の再実行でも業務データを重複させず、実行履歴は別`run_id`で残す。
 
 ```mermaid
 sequenceDiagram
@@ -141,7 +146,7 @@ sequenceDiagram
     participant RC as RiskChecker
     participant TXT as text/*
     participant LLM as llm/*
-    participant RPT as report/html_report.py
+    participant OUT as report/daily_brief + renderers
     participant DC as report/discord_notify.py
     participant MS as MarketStore(DuckDB+Parquet)
     participant ST as StateStore(DuckDB)
@@ -182,14 +187,12 @@ sequenceDiagram
         D->>ST: run_steps(step=6, status=success)
     end
 
-    D->>RPT: (7) レポート生成（(5)(6)失敗時は縮退版）
+    D->>DC: (7) Discord通知（notification.enabled=trueの場合のみ）
     D->>ST: run_steps(step=7, status)
 
-    D->>DC: (8) Discord通知（notification.enabled=trueの場合のみ、オプション機能）
+    D->>OUT: (8) DailyBrief構築、Markdown原子保存、stdout表示
+    OUT-->>Local: CLI日次ブリーフ
     D->>ST: run_steps(step=8, status)
-
-    D->>D: (9) レポートを webbrowser.open() でデフォルトブラウザに自動表示（report.auto_open=trueの場合）
-    D->>ST: run_steps(step=9, status)
 ```
 
 ---
@@ -240,8 +243,8 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 ## 7. エラー処理・フェイルソフト方針
 
-- **フェイルソフトの原則（FR-12・NFR-04）**: 日次バッチはステップ(5)テキスト収集・(6)LLM分析が失敗しても、ステップ(7)レポート生成・(8)Discord通知は「スクリーニング＋リスクチェック結果のみの縮退版」として必ず完走する。これにより、外部テキストAPIやLLM APIの障害時でも、その日のスクリーニング結果を確実に人間へ届ける。
-- **各ステップの結果記録**: `runs`に実行全体、`run_steps`に9ステップそれぞれの成否・詳細・所要時間を記録する（NFR-05）。ステップ失敗時は後続ステップの実行可否を判断して処理を継続する。ただし(1)〜(4)の失敗はスクリーニング自体が成立しないため致命的終了とし、`runs.status=failed`を残す。
+- **フェイルソフトの原則（FR-12・NFR-04）**: ステップ(5)・(6)が失敗しても、ステップ(8)は候補とリスクを含む縮退ブリーフを生成する。
+- **各ステップの結果記録**: `runs`に実行全体、`run_steps`に8ステップの成否・詳細・所要時間を記録する。(1)〜(4)の失敗は致命的終了とする。
 - **冪等性と原子性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。LLMのみ完全なsystem+user promptから算出した`(model,prompt_hash,schema_version)`一致時に成功レスポンスを再利用する。（**live検証時の訂正（2026-07-22）**: fundamentalsステップ（`pipeline/daily.py` 2番目のステップ）は例外で、`MarketStore.has_fundamentals_fetched_on()`により当日`fetched_at`済みの銘柄はEDGARへの個別ネットワーク取得のみをスキップする。ステップ自体・自然キーupsertロジックは無条件スキップせず毎回実行するため、上記原則には反しない。詳細は`docs/04_detailed_design.md` 3.21節）
 - **欠損検知・リトライ（NFR-04）**: DataProvider・LLMClient等、外部I/Oを伴うコンポーネントはtimeout、retry対象例外、総試行上限、backoffを明示する。レート制御は各試行へ適用し、設定/検証/プログラミングエラーはretryしない。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し、後続処理は成功分のみで進める。
 - **断定的売買指示の禁止（CON-03）**: LLM出力スキーマは事実（`facts`）と推測（`interpretation`）をフィールドレベルで分離する。プロンプト指示だけに依存せず、gatewayで全ユーザー表示テキストを一元検査し、違反応答をcache/表示しない。cache hitもsource_idとCON-03を再検証する。
@@ -260,9 +263,8 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 すべてのデータはローカルファイルシステムのパスにそのまま永続化される。実行環境がステートレスに破棄されることはないため、永続化のためのコミット操作は不要である。
 - `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）
-- `reports/`（当日分のHTMLレポート）
-
-日次バッチの最終ステップ(9)では、生成したレポートを`webbrowser.open()`でデフォルトブラウザに自動表示する（`settings.yaml`の`report.auto_open`、デフォルト`true`）。
+- `reports/<run_date>/<run_id>.md`（run別生成Markdown）
+- `reports/latest.md`（最新runの便宜コピー）
 
 ### 8.3 実行時間
 
@@ -305,9 +307,9 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | FR-06 | リスク管理チェック | `risk/position_sizing.py`, `risk/checks.py` |
 | FR-07 | テキスト収集 | `text/news_finnhub.py`, `text/edgar_filings.py`, `text/calendar_fred.py` |
 | FR-08 | LLM分析（事実/推測分離） | `llm/client.py`, `llm/schemas.py`, `llm/summarize.py`, `llm/filings_analysis.py` |
-| FR-09 | HTMLレポート＋Discord通知 | `report/html_report.py`, `report/discord_notify.py` |
+| FR-09 | CLI・Markdown＋Discord通知 | `report/daily_brief.py`, `report/terminal_report.py`, `report/markdown_report.py`, `report/discord_notify.py` |
 | FR-10 | バックテスト（対S&P500） | `backtest/strategies.py`, `backtest/runner.py` |
-| FR-11 | ペーパートレード記録 | `paper/journal.py`, `storage/state_store.py`（DuckDB） |
+| FR-11 | ペーパートレード記録 | `paper/journal.py`, `paper/cli.py`, `storage/state_store.py`（DuckDB） |
 | FR-12 | 日次バッチ（冪等・フェイルソフト） | `pipeline/daily.py` |
 | NFR-01 | コスト（試作月$5以内） | `llm/client.py`（コスト記録）、モデル選定（`settings.yaml`の`llm.models`設定、デフォルト全Haiku） |
 | NFR-02 | 1人保守 | 全体アーキテクチャ（シンプルな単一バッチ構成、`config.py`による設定一元化） |

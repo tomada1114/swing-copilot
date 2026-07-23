@@ -58,7 +58,6 @@ class TestParseArgs:
                 "--skip-llm",
                 "--limit",
                 "5",
-                "--no-open",
             ]
         )
 
@@ -68,7 +67,6 @@ class TestParseArgs:
             skip_text=True,
             skip_llm=True,
             limit=5,
-            no_open=True,
         )
 
 
@@ -269,6 +267,7 @@ class TestMain:
 
             class _Result:
                 exit_code = 7
+                brief = None
 
             return _Result()
 

@@ -1,3 +1,3 @@
-"""Report rendering: chart data, HTML generation, and notification (FR-09)."""
+"""CLI/Markdown reporting and optional notification (FR-09)."""
 
 from __future__ import annotations

@@ -141,7 +141,7 @@ def deps(settings, market_store, state_store, tmp_path):
 
 
 class TestHappyPath:
-    def test_completes_all_nine_steps_successfully(self, deps, state_store):
+    def test_completes_all_eight_steps_successfully(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
@@ -160,11 +160,10 @@ class TestHappyPath:
             "4_risk",
             "5_text",
             "6_llm",
-            "7_report",
-            "8_notify",
-            "9_open",
+            "7_notify",
+            "8_output",
         ]
-        # 1/3/4/7/9 succeed outright; 2/5/6/8 are deliberate skips (no
+        # 1/3/4/8 succeed outright; 2/5/6/7 are deliberate skips (no
         # optional clients configured) — none of these are failures.
         assert all(status in {"success", "skipped"} for _step, status in steps)
 
@@ -202,8 +201,8 @@ class TestIdempotency:
             second_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(second.run_id)]
             ).fetchone()
-        assert first_steps == (9,)
-        assert second_steps == (9,)
+        assert first_steps == (8,)
+        assert second_steps == (8,)
 
 
 class TestFatalStepFailure:
@@ -516,8 +515,8 @@ class TestTimeoutBudget:
                 "WHERE run_id = ? AND step = '5_text'",
                 [str(result.run_id)],
             ).fetchone()
-            report_row = conn.execute(
-                "SELECT status FROM run_steps WHERE run_id = ? AND step = '7_report'",
+            output_row = conn.execute(
+                "SELECT status FROM run_steps WHERE run_id = ? AND step = '8_output'",
                 [str(result.run_id)],
             ).fetchone()
 
@@ -530,13 +529,13 @@ class TestTimeoutBudget:
         assert text_row[0] == "skipped"
         assert "time budget exceeded" in text_row[1]
         # Cheap/local steps still ran and produced a report.
-        assert report_row[0] == "success"
+        assert output_row[0] == "success"
 
     def test_pre_step_breach_skips_network_steps_but_the_run_still_completes(
         self, deps, state_store
     ):
         object.__setattr__(deps.settings.schedule, "timeout_minutes", 1)  # 60s budget
-        # run_started_at=0.0 -> deadline=60.0; by the time steps 5/6/8 check,
+        # run_started_at=0.0 -> deadline=60.0; by the time steps 5/6/7 check,
         # "elapsed" is already far past the budget, even though nothing in
         # the fatal steps (1-4) itself was individually slow.
         deps_late = replace(deps, monotonic=FakeMonotonic(0.0, 999_999.0))
@@ -557,6 +556,5 @@ class TestTimeoutBudget:
             )
         assert rows["5_text"] == "skipped"
         assert rows["6_llm"] == "skipped"
-        assert rows["7_report"] == "success"
-        assert rows["8_notify"] == "skipped"
-        assert rows["9_open"] == "success"
+        assert rows["7_notify"] == "skipped"
+        assert rows["8_output"] == "success"

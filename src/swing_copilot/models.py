@@ -19,13 +19,15 @@ if TYPE_CHECKING:
     from typing import Literal
     from uuid import UUID
 
+    from swing_copilot.report.daily_brief import DailyBrief
+
     PositionStatus = Literal["open", "closed"]
 else:
     PositionStatus = str
 
 
 class RunMode(Enum):
-    """Whether a daily batch run touches real network/browser resources."""
+    """Whether a daily batch run touches live external resources."""
 
     LIVE = "live"
     DRY_RUN = "dry_run"
@@ -73,7 +75,6 @@ class DailyRunOptions:
     skip_text: bool = False
     skip_llm: bool = False
     limit: int | None = None
-    no_open: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,3 +86,4 @@ class DailyRunResult:
     status: RunStatus
     exit_code: int
     report_path: Path | None = None
+    brief: DailyBrief | None = None

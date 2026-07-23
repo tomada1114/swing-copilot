@@ -6,8 +6,8 @@
 
 A decision-support batch pipeline for US equity swing/position trading. It
 screens the S&P 500 universe, checks risk parameters, summarizes news and
-filings with an LLM, and renders a daily HTML report — all run locally with a
-single command. It never places orders; the human always makes the final
+filings with an LLM, prints a readable terminal brief, and archives Markdown —
+all run locally. It never places orders; the human always makes the final
 buy/sell decision (see `docs/01_requirements.md`).
 
 ## Quickstart
@@ -16,6 +16,20 @@ buy/sell decision (see `docs/01_requirements.md`).
 uv sync --all-groups
 cp .env.example .env  # fill in API keys for the features you enable
 uv run copilot-daily --dry-run
+```
+
+The final decision-support brief is written to stdout. Generated Markdown is
+stored under `reports/<run-date>/<run-id>.md`, with `reports/latest.md` as a
+convenience copy. DuckDB remains the source of truth.
+
+Record a human decision against an audited candidate with:
+
+```bash
+uv run copilot-decision \
+  --run-id <run-id> \
+  --symbol AAPL \
+  --decision ignored \
+  --reason "相関リスクが高いため"
 ```
 
 See `docs/00_human_preparation.md` for the full setup checklist and

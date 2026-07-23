@@ -1,15 +1,14 @@
-"""Daily batch orchestrator, all nine steps (FR-12).
+"""Daily batch orchestrator, all eight steps (FR-12).
 
 Wires price update -> fundamentals update -> screening -> risk check ->
-text collection -> LLM analysis -> report -> notify -> browser-open with
+text collection -> LLM analysis -> notify -> CLI/Markdown output with
 explicit `as_of`/`run_id` semantics. Steps 1-4 are fatal on failure
 (screening cannot meaningfully proceed without them,
 `docs/03_basic_design.md` 7): any of them failing aborts the run
-(`runs.status=failed`, nonzero exit code) without touching steps 5-9.
+(`runs.status=failed`, nonzero exit code) without touching steps 5-8.
 Steps 5 (text) and 6 (LLM) are fail-soft: their failure degrades the run
-(`runs.status=degraded`) but never aborts it — steps 7 (report), 8 (Discord
-notify), and 9 (browser auto-open) always attempt to complete, rendering a
-screening-only report when `news_summaries`/`filing_analyses` are `None`.
+(`runs.status=degraded`) but never aborts it. Notification is optional and
+the local output step always attempts to produce a screening-only brief.
 """
 
 from __future__ import annotations
@@ -18,11 +17,10 @@ import argparse
 import hashlib
 import json
 import logging
-import os
+import shutil
 import sys
 import time
 import traceback
-import webbrowser
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -48,12 +46,15 @@ from swing_copilot.models import (
     RunStatus,
     StepStatus,
 )
-from swing_copilot.report.discord_notify import DiscordNotifier
-from swing_copilot.report.html_report import (
+from swing_copilot.report.daily_brief import (
     MARKET_STRIP_SYMBOLS,
-    ReportContext,
-    render_report,
+    DailyBrief,
+    DailyBriefContext,
+    build_daily_brief,
 )
+from swing_copilot.report.discord_notify import DiscordNotifier
+from swing_copilot.report.markdown_report import write_markdown_report
+from swing_copilot.report.terminal_report import render_terminal
 from swing_copilot.risk.checks import RiskChecker
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
@@ -93,6 +94,7 @@ _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
 _FUNDAMENTALS_PROGRESS_LOG_INTERVAL = 25
+_DECISION_HISTORY_LIMIT = 3
 
 
 class _EdgarClientLike(Protocol):
@@ -159,7 +161,6 @@ class DailyDependencies:
     notifier: Notifier | None = None
     provider_name: str = "yfinance"
     strategy_key: str = "default"
-    templates_dir: str = "templates"
     output_dir: str = "reports"
 
 
@@ -188,6 +189,17 @@ class _RunContext:
     held_symbols: frozenset[str]
 
 
+@dataclass(frozen=True, slots=True)
+class _OutputContext:
+    """Grouped inputs for the final local-output step."""
+
+    run: _RunContext
+    news_summaries: list[NewsSummary] | None
+    filing_analyses: list[FilingAnalysis] | None
+    notices: tuple[str, ...]
+    status: RunStatus
+
+
 def _config_hash(settings: Settings) -> str:
     payload = json.dumps(settings.model_dump(mode="json"), sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
@@ -206,7 +218,7 @@ def _paths_for_mode(mode: RunMode) -> tuple[Path, str]:
     """Return the isolated `(db_path, output_dir)` to compose for `mode`.
 
     A `--dry-run` invocation must never touch the live DuckDB file or
-    overwrite `reports/latest.html`: it gets its own DB file and its own
+    overwrite `reports/latest.md`: it gets its own DB file and its own
     report subdirectory. `runs.mode` still distinguishes dry/live rows
     *within* whichever DB a run wrote to (`docs/04_detailed_design.md` 3.21).
 
@@ -539,6 +551,7 @@ def _run_step_llm(
     text_items: list[TextItem] | None,
     *,
     skip: bool,
+    include_decision_history: bool,
 ) -> tuple[_StepOutcome, list[NewsSummary] | None, list[FilingAnalysis] | None]:
     llm_client = deps.llm_client
     if skip:
@@ -557,10 +570,10 @@ def _run_step_llm(
         )
 
     news_summaries, failed_news_symbols = _summarize_news_per_candidate(
-        llm_client, deps, ctx, text_items
+        llm_client, deps, ctx, text_items, include_decision_history
     )
     filing_analyses, failed_filing_symbols = _analyze_filings_per_candidate(
-        llm_client, deps, ctx, text_items
+        llm_client, deps, ctx, text_items, include_decision_history
     )
     failed_symbols = sorted({*failed_news_symbols, *failed_filing_symbols})
 
@@ -586,6 +599,7 @@ def _summarize_news_per_candidate(
     deps: DailyDependencies,
     ctx: _RunContext,
     text_items: list[TextItem],
+    include_decision_history: bool,
 ) -> tuple[list[NewsSummary], list[str]]:
     summaries = []
     failed_symbols = []
@@ -607,6 +621,16 @@ def _summarize_news_per_candidate(
             schema_version=deps.settings.llm.schema_version,
             max_items=deps.settings.llm.max_news_items_per_symbol,
             max_chars_per_item=deps.settings.llm.max_news_chars_per_item,
+            decision_history=tuple(
+                deps.state_store.get_decision_history(
+                    candidate.symbol,
+                    deps.strategy_key,
+                    ctx.run_date,
+                    _DECISION_HISTORY_LIMIT,
+                )
+            )
+            if include_decision_history
+            else (),
         )
         try:
             summaries.append(summarize_news(llm_client, request))
@@ -620,6 +644,7 @@ def _analyze_filings_per_candidate(
     deps: DailyDependencies,
     ctx: _RunContext,
     text_items: list[TextItem],
+    include_decision_history: bool,
 ) -> tuple[list[FilingAnalysis], list[str]]:
     analyses = []
     failed_symbols = []
@@ -641,6 +666,16 @@ def _analyze_filings_per_candidate(
                 schema_version=deps.settings.llm.schema_version,
                 chunk_chars=deps.settings.llm.filing_chunk_chars,
                 max_chunks=deps.settings.llm.max_filing_chunks,
+                decision_history=tuple(
+                    deps.state_store.get_decision_history(
+                        candidate.symbol,
+                        deps.strategy_key,
+                        ctx.run_date,
+                        _DECISION_HISTORY_LIMIT,
+                    )
+                )
+                if include_decision_history
+                else (),
             )
             try:
                 analyses.append(analyze_filing(llm_client, request))
@@ -649,34 +684,30 @@ def _analyze_filings_per_candidate(
     return analyses, failed_symbols
 
 
-def _run_step_report(
+def _run_step_output(
     deps: DailyDependencies,
-    ctx: _RunContext,
-    news_summaries: list[NewsSummary] | None,
-    filing_analyses: list[FilingAnalysis] | None,
-) -> tuple[_StepOutcome, Path | None]:
-    context = ReportContext(
-        run_id=ctx.run_id,
-        run_date=ctx.run_date,
+    output: _OutputContext,
+) -> tuple[_StepOutcome, Path | None, DailyBrief | None]:
+    context = DailyBriefContext(
+        run_id=output.run.run_id,
+        run_date=output.run.run_date,
         generated_at=deps.clock.now(),
         universe=deps.universe,
-        candidates=ctx.candidates,
-        risk_assessments=ctx.risk_assessments,
-        news_summaries=news_summaries,
-        filing_analyses=filing_analyses,
-        account_equity_usd=deps.settings.risk.account_equity_usd,
+        candidates=output.run.candidates,
+        risk_assessments=output.run.risk_assessments,
+        news_summaries=output.news_summaries,
+        filing_analyses=output.filing_analyses,
+        notices=output.notices,
     )
     try:
-        report_path = render_report(
-            context,
-            deps.market_store,
-            deps.state_store,
-            templates_dir=deps.templates_dir,
-            output_dir=deps.output_dir,
-        )
+        brief = build_daily_brief(context, deps.market_store, deps.state_store)
     except Exception as exc:
-        return _StepOutcome(False, f"unexpected error: {exc}"), None
-    return _StepOutcome(True), report_path
+        return _StepOutcome(False, f"brief construction failed: {exc}"), None, None
+    try:
+        report_path = write_markdown_report(brief, output.status, deps.output_dir)
+    except Exception as exc:
+        return _StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
+    return _StepOutcome(True), report_path, brief
 
 
 def _notification_summary(candidates: list[Candidate], run_date: date) -> str:
@@ -687,7 +718,6 @@ def _notification_summary(candidates: list[Candidate], run_date: date) -> str:
 
 def _run_step_notify(
     deps: DailyDependencies,
-    report_path: Path | None,
     candidates: list[Candidate],
     run_date: date,
     *,
@@ -697,45 +727,10 @@ def _run_step_notify(
         return _StepOutcome(True, "skipped: dry-run mode", is_skipped=True)
     if not deps.settings.notification.enabled or deps.notifier is None:
         return _StepOutcome(True, "skipped: notification disabled", is_skipped=True)
-    if report_path is None:
-        return _StepOutcome(True, "skipped: no report was generated", is_skipped=True)
-
-    sent = deps.notifier.notify(
-        _notification_summary(candidates, run_date), report_path
-    )
+    sent = deps.notifier.notify(_notification_summary(candidates, run_date), None)
     if not sent:
         return _StepOutcome(False, "Discord webhook notification failed")
     return _StepOutcome(True)
-
-
-def _maybe_open_report(report_path: Path, options: DailyRunOptions) -> bool:
-    """Auto-open `report_path` in the default browser for a local live run.
-
-    Never invoked during `--dry-run`, `--no-open`, or any CI environment
-    (`docs/05_ui_design.md` 10.3).
-
-    Args:
-        report_path: Path to the generated report.
-        options: Parsed CLI options.
-
-    Returns:
-        Whether `webbrowser.open()` reported success. A `False` return does
-        not fail report generation — the caller records it as a warning.
-    """
-    if options.is_dry_run or options.no_open or os.environ.get("CI"):
-        return False
-    return webbrowser.open(report_path.resolve().as_uri())
-
-
-def _run_step_open(
-    deps: DailyDependencies, report_path: Path | None, options: DailyRunOptions
-) -> _StepOutcome:
-    if report_path is None:
-        return _StepOutcome(True, "skipped: no report was generated", is_skipped=True)
-    opened = _maybe_open_report(report_path, options)
-    detail = None if opened else "browser not opened (dry-run/no-open/CI, or refused)"
-    _ = deps  # kept for symmetry with the other step functions
-    return _StepOutcome(True, detail)
 
 
 def _record_step(
@@ -761,7 +756,7 @@ def _record_step(
 
 
 def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResult:
-    """Run the full nine-step daily batch.
+    """Run the full eight-step daily batch.
 
     Args:
         options: Parsed CLI options (`--as-of`, `--limit`, `--dry-run`, ...).
@@ -769,7 +764,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
 
     Returns:
         The run outcome. `exit_code` is nonzero only if one of steps 1-4
-        (prices, fundamentals, screening, risk) failed outright; steps 5-9
+        (prices, fundamentals, screening, risk) failed outright; steps 5-8
         degrade the run (`RunStatus.DEGRADED`) but keep `exit_code == 0`.
     """
     run_started_at = deps.monotonic()
@@ -783,8 +778,8 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     }
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
     # The market strip (SPY/QQQ/^VIX/^TNX) is never part of the screening
-    # universe, but its bars still need fetching here so the report has
-    # something to read (docs/05_ui_design.md 7.2).
+    # universe, but its bars still need fetching here so the brief has market
+    # context to show.
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
 
     prefetched_prices: BarFetchResult | None = None
@@ -890,16 +885,16 @@ def _run_soft_steps(
     ctx: _RunContext,
     deadline: float,
 ) -> DailyRunResult:
-    """Run steps 5-9: fail-soft text/LLM, then report/notify/browser-open.
+    """Run steps 5-8: fail-soft text/LLM, notification, then local output.
 
-    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), and 8 (Discord
+    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), and 7 (Discord
     notify) are network-bound and are skipped outright once
     `deps.monotonic() >= deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME`
     (`is_skipped=True` but `success=False`) -- a *degrading* skip, distinct
     from the ordinary "not configured" skip, so the run still ends up
-    `RunStatus.DEGRADED` even though nothing here technically raised. Steps 7
-    (report) and 9 (browser-open) are cheap/local and always attempt to
-    complete regardless of budget, so a timed-out run still produces a report.
+    `RunStatus.DEGRADED` even though nothing here technically raised. Step 8
+    is cheap/local and always attempts to complete regardless of budget, so a
+    timed-out run still produces terminal output and a Markdown archive.
     """
     degraded = False
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
@@ -927,46 +922,66 @@ def _run_soft_steps(
     else:
         logger.info("step 6_llm starting")
         llm_outcome, news_summaries, filing_analyses = _run_step_llm(
-            deps, ctx, text_items, skip=options.skip_llm
+            deps,
+            ctx,
+            text_items,
+            skip=options.skip_llm,
+            include_decision_history=(not options.is_dry_run and options.as_of is None),
         )
     _record_step(deps, ctx.run_id, "6_llm", llm_outcome, started_at)
     degraded = degraded or not llm_outcome.success
 
     started_at = time.perf_counter()
-    logger.info("step 7_report starting")
-    report_outcome, report_path = _run_step_report(
-        deps, ctx, news_summaries, filing_analyses
-    )
-    _record_step(deps, ctx.run_id, "7_report", report_outcome, started_at)
-    degraded = degraded or not report_outcome.success
-
-    started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
-        logger.warning("step 8_notify skipped: time budget exceeded")
+        logger.warning("step 7_notify skipped: time budget exceeded")
         notify_outcome = _TIME_BUDGET_STEP_OUTCOME
     else:
-        logger.info("step 8_notify starting")
+        logger.info("step 7_notify starting")
         notify_outcome = _run_step_notify(
             deps,
-            report_path,
             ctx.candidates,
             ctx.run_date,
             is_dry_run=options.is_dry_run,
         )
-    _record_step(deps, ctx.run_id, "8_notify", notify_outcome, started_at)
+    _record_step(deps, ctx.run_id, "7_notify", notify_outcome, started_at)
     degraded = degraded or not notify_outcome.success
 
+    status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
+    notices = tuple(
+        f"{label}: {outcome.detail}"
+        for label, outcome in (
+            ("text", text_outcome),
+            ("LLM", llm_outcome),
+            ("notification", notify_outcome),
+        )
+        if outcome.detail is not None
+        and (not outcome.success or not outcome.is_skipped)
+    )
     started_at = time.perf_counter()
-    logger.info("step 9_open starting")
-    open_outcome = _run_step_open(deps, report_path, options)
-    _record_step(deps, ctx.run_id, "9_open", open_outcome, started_at)
-    degraded = degraded or not open_outcome.success
+    logger.info("step 8_output starting")
+    output_outcome, report_path, brief = _run_step_output(
+        deps,
+        _OutputContext(
+            run=ctx,
+            news_summaries=news_summaries,
+            filing_analyses=filing_analyses,
+            notices=notices,
+            status=status_before_output,
+        ),
+    )
+    _record_step(deps, ctx.run_id, "8_output", output_outcome, started_at)
+    degraded = degraded or not output_outcome.success
 
     final_status = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
     deps.state_store.complete_run(ctx.run_id, final_status, report_path=report_path)
     logger.info("run %s completed: status=%s", ctx.run_id, final_status.value)
     return DailyRunResult(
-        ctx.run_id, ctx.run_date, final_status, exit_code=0, report_path=report_path
+        ctx.run_id,
+        ctx.run_date,
+        final_status,
+        exit_code=0,
+        report_path=report_path,
+        brief=brief,
     )
 
 
@@ -977,7 +992,6 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser.add_argument("--skip-text", action="store_true")
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--no-open", action="store_true")
     args = parser.parse_args(argv)
     return DailyRunOptions(
         as_of=args.as_of,
@@ -985,7 +999,6 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         skip_text=args.skip_text,
         skip_llm=args.skip_llm,
         limit=args.limit,
-        no_open=args.no_open,
     )
 
 
@@ -1123,8 +1136,8 @@ def _configure_logging(secrets: Secrets) -> None:
     """Configure root logging (INFO, to stderr) with secret redaction.
 
     A live run's step progress and failures are always visible this way --
-    this batch otherwise has no other output surface until the HTML report is
-    written. A `_SecretRedactionFilter` seeded from every configured secret is
+    this batch otherwise has no other output surface until the final brief is
+    rendered. A `_SecretRedactionFilter` seeded from every configured secret is
     attached to each root handler so a leaked API key/webhook URL (record
     message or exception traceback) never reaches stderr in the clear.
 
@@ -1164,6 +1177,16 @@ def main(argv: list[str] | None = None) -> None:
     strategies = load_strategies()
     deps = _compose_dependencies(options, settings, strategies)
     result = run_daily(options, deps)
+    if result.brief is not None:
+        width = shutil.get_terminal_size(fallback=(120, 24)).columns
+        sys.stdout.write(
+            render_terminal(
+                result.brief,
+                result.status,
+                width=width,
+                color=sys.stdout.isatty(),
+            )
+        )
     raise SystemExit(result.exit_code)
 
 

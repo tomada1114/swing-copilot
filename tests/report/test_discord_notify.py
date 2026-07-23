@@ -45,13 +45,13 @@ class TestDiscordNotifierNotify:
             "https://discord.example/webhook", http_post=fake_post
         )
 
-        result = notifier.notify("5 candidates today", Path("reports/2026-07-20.html"))
+        result = notifier.notify("5 candidates today", Path("reports/2026-07-20.md"))
 
         assert result is True
         assert calls == [
             (
                 "https://discord.example/webhook",
-                {"content": "5 candidates today\nreports/2026-07-20.html"},
+                {"content": "5 candidates today\nreports/2026-07-20.md"},
             )
         ]
 

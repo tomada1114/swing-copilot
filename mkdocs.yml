@@ -68,6 +68,7 @@ nav:
       - Basic Design: 03_basic_design.md
       - Detailed Design: 04_detailed_design.md
       - UI Design: 05_ui_design.md
+      - Reliability Roadmap: 06_reliability_roadmap.md
   - Getting Started: getting-started.md
   - API Reference: reference.md
   - Contributing: contributing.md

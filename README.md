@@ -32,6 +32,15 @@ uv run copilot-decision \
   --reason "相関リスクが高いため"
 ```
 
+Review past runs, candidates, rejections, and paper-trading performance
+read-only with:
+
+```bash
+uv run copilot-history runs
+uv run copilot-history symbol AAPL
+uv run copilot-history performance
+```
+
 See `docs/00_human_preparation.md` for the full setup checklist and
 `docs/03_basic_design.md` / `docs/04_detailed_design.md` for the architecture.
 

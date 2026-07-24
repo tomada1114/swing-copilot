@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reliability phase 1 (judgment-basis visibility and numeric robustness):
+  composite screening scores with a per-candidate breakdown
+  (`rsi_pullback`/`trend_quality`/`liquidity`, configurable via
+  `strategies.yaml`'s `ranking.score_weights`); a `screening_rejections`
+  ledger recording why each non-candidate symbol was screened out, with a
+  reason-code summary in terminal/markdown reports; explicit position-sizing
+  binding constraints (`shares_by_risk`/`shares_by_position_cap`/
+  `binding_constraint`) plus `WIDE_STOP`/`SMALL_ACCOUNT_FRICTION` warnings;
+  exact `fractions.Fraction`-based share-count floor arithmetic and a
+  common NaN/Inf write guard (`storage/json_guard.py`) for every JSON
+  column under `storage/`; `PaperJournal.summarize_performance()` extended
+  with win rate, expectancy, profit factor, average R-multiple, and
+  exit-reason/strategy breakdowns (`Position.exit_reason` is now required
+  on close); and a new read-only `copilot-history` CLI (`runs`, `run
+  --run-id`, `symbol`, `rejections --run-id`, `performance`) plus a "過去判断"
+  (past decisions) section in the daily Markdown report.
 - `copilot-daily` CLI (`uv run copilot-daily [--as-of] [--dry-run]
   [--skip-text] [--skip-llm] [--limit N] [--no-open]`), wiring all nine
   daily-batch steps: price/fundamentals/screening/risk (fatal on
@@ -98,6 +114,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Screening rejection detail no longer reports a raw NaN `net_income` (a
+  real EDGAR data gap) as a non-finite JSON value — it now reports `null`,
+  matching the existing `fcf`/`equity_ratio` convention; the raw NaN
+  previously reached the new NaN/Inf write guard and made
+  `copilot-daily --dry-run` fail at the screening step for affected symbols
 - `Database.connect()` now forces the DuckDB session `TimeZone` to UTC —
   `TIMESTAMPTZ -> DATE` `as_of` boundary casts previously used the host
   machine's local timezone, which could include or exclude a filing

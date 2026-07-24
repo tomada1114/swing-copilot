@@ -373,6 +373,21 @@ class StateStore:
 
 **エラー処理**: DuckDB書き込みはステップ単位のトランザクションとし、失敗時はロールバックして呼び出し元へ例外を伝播する。`runs`/`run_steps`自体の記録失敗は標準エラーへ構造化ログを出し、非ゼロ終了する。
 
+**`storage/json_guard.py::dumps_safe()`（P1-04、roadmap §5、Issue #13）**: `storage/`配下でJSONカラム（`signals.metrics_json`、`candidates.metrics_json`、`screening_rejections.detail`、`risk_assessments.reasons_json`/`warnings_json`/`sizing_warnings_json`）へ書き込むすべての`json.dumps`呼び出しは`dumps_safe()`を経由する。
+
+```python
+def dumps_safe(value: object) -> str:
+    """反復（スタック）方式でNaN/Inf/-Infを事前検査してからjson.dumpsする。"""
+
+def _check_finite(value: object) -> None:
+    """明示的スタックでdict/list/tupleを走査する。再帰呼び出しは使わない
+    （深いネストでのRecursionError回避、REQ-004）。非有限floatを検出したら
+    書き込み前に、経路（例: "a.b[0].c"）付きのValueErrorを送出する。
+    """
+```
+
+第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。`llm_records.py`は`response_json`をすでに直列化済みの文字列として受け取るだけで自ら`json.dumps`しないため対象外（`llm/`側の別契約：CON-03・redaction）。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
+
 ### 3.9 `screening/base.py`（NFR-07）
 
 ```python
@@ -490,11 +505,12 @@ class ScreeningPipeline:
         """
         (1) 有効な全Filterの積集合を取る。
         (2) required_signals全てにヒットした銘柄だけをCandidateへ集約する。
-        (3) RSI14昇順、20日平均出来高降順、symbol昇順で安定ソートし、上位limit件を返す。
+        (3) 複合スコア score = Σ(weight_i × component_i)（P1-01, roadmap §5）を
+            候補ごとに算出し、score降順・symbol昇順で安定ソートして上位limit件を返す。
         """
 ```
 
-**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、固定の決定的順位規則を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、非決定的rankingは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
+**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidityの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
@@ -517,14 +533,37 @@ class RiskAssessment:
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[CorrelationWarning, ...] = ()
+    # P1-03 (roadmap §5): サイジング内訳と binding constraint。
+    shares_by_risk: int | None = None
+    shares_by_position_cap: int | None = None
+    binding_constraint: str = "not_calculable"
+    # {"trade_risk","position_cap","sector","correlation","not_calculable"}
+    sizing_warnings: tuple[str, ...] = ()  # {"WIDE_STOP","SMALL_ACCOUNT_FRICTION"}
+
+@dataclass(frozen=True, slots=True)
+class PositionSizeResult:
+    """P1-03: shares_by_risk/shares_by_position_capの中間値付きサイジング結果。"""
+    shares_by_risk: int
+    shares_by_position_cap: int
+    shares: int  # min(shares_by_risk, shares_by_position_cap)、床計算
 
 def calc_position_size(
     account_equity: float, entry_price: float, stop_price: float,
     max_position_pct: float, max_trade_risk_pct: float,
-) -> int:
+) -> PositionSizeResult:
     """
     1トレードのリスク（資金のmax_trade_risk_pct、ストップ幅基準）と
-    1銘柄の上限（資金のmax_position_pct）の両方を満たす最大株数を返す。
+    1銘柄の上限（資金のmax_position_pct）それぞれの株数を算出し、
+    両方を満たす最大株数（両者の最小値）とともに返す。
+
+    P1-04（roadmap §5、Issue #13）: 公開シグネチャ・戻り値の型は変えず
+    （入出力はfloat/intのまま）、内部の床計算のみ`fractions.Fraction`の
+    厳密除算（`//`）に置換した。`Fraction(float)`は入力floatの2進数表現を
+    そのまま厳密な有理数として捉える（`str()`経由の再丸めではない）ため、
+    `shares_by_risk * risk_per_share <= risk_budget`（position_capも同様）が
+    構成的に成立する。float除算+`int()`切り捨てでは、極端な入力
+    （account_equity=1e12、max_trade_risk_pctが0.0001%程度まで小さい等）で
+    丸め誤差により床値が1株分ずれ得る。
     """
 
 class RiskChecker:
@@ -541,6 +580,19 @@ class RiskChecker:
         を満たすかを判定する。セクター判定に必要な銘柄→セクターのマッピングは、
         universe.pyが取得・保存するGICSセクター（config/universe_snapshot.csv、
         本書3.2節参照）を用いる。
+
+        P1-03: binding_constraintは、株数を計算不能な入力（missing価格/ATR、
+        account_equity未設定、無効なストップ幅）ならnot_calculable、セクター集中
+        で却下ならsector（他の値がどうであれ最優先）、それ以外はshares_by_risk
+        <= shares_by_position_capならtrade_risk、そうでなければposition_cap
+        （同値の場合はtrade_riskを優先、決定的）。correlationは列挙値として
+        用意するが、相関チェックは現状ブロックしない警告のみのため到達しない
+        （P4-17でポートフォリオヒートを導入するまでの既知の未到達分岐）。
+        損切り幅（entry_price - stop_price）/ entry_price が
+        risk.wide_stop_threshold_pct（既定10.0%）を超える場合はWIDE_STOP、
+        最終sharesが0に切り捨てられる場合、またはリスク予算
+        （account_equity × max_trade_risk_pct）が$1未満（P1-03の判断基準、
+        要検証）の場合はSMALL_ACCOUNT_FRICTIONをsizing_warningsへ追加する。
         """
 
     def check_correlation(self, candidate_symbol: str, portfolio: list["Position"], market_store: "MarketStore") -> list[CorrelationWarning]:
@@ -674,6 +726,20 @@ factsの`source_ids`へ追加しない。
 
 `build_daily_brief()`が`DailyBriefContext`、`MarketStore`、`StateStore`から共通の`DailyBrief`を構築する。ターミナルとMarkdownはこの値だけを描画し、データ取得や判断ロジックを持たない。価格・財務読み取りは常に`context.run_date`を`as_of`へ渡す。
 
+**P1-03（roadmap §5）**: `BriefRisk`は`RiskAssessment`のサイジング内訳
+（`shares_by_risk`/`shares_by_position_cap`/`binding_constraint`/
+`sizing_warnings`）に加え、`DailyBriefContext.max_trade_risk_pct`/
+`max_position_pct`（実行時の`settings.risk.*`値、`RiskAssessment`自体は
+算出結果のみを持ち設定値を持たないため`_risk_brief()`で注入）を保持する。
+`format_sizing(risk: BriefRisk) -> str`が両者から表示文字列を組み立て、
+terminal/markdown共通で使う: `max_shares`が`None`なら`"-"`、`0`なら
+binding_constraintによらず`"0株（摩擦: 資金規模過小）"`、それ以外は
+binding_constraintに応じて`"128株（制約: リスク1.0%）"`
+（trade_risk、%は`max_trade_risk_pct`）、
+`"40株（制約: ポジション上限2.0%）"`（position_cap、%は`max_position_pct`）、
+`"N株（制約: セクター集中）"`（sector）、`"N株（制約: 相関）"`（correlation、
+現状のcorrelationはブロックしない警告のみのため実運用では到達しない）を返す。
+
 ```python
 def build_daily_brief(
     context: DailyBriefContext,
@@ -715,6 +781,8 @@ class DiscordNotifier:
 ```
 
 MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`trades_journal`を更新し、生成ファイル内のmarker付き判断セクションを正本から再描画する。過去判断のLLM入力条件とdelimiterは`docs/05_ui_design.md` 7章を正とする。
+
+**P1-05（roadmap §5、REQ-008）**: `DailyBriefContext`は実行時の戦略キーを保持する`strategy_key: str`フィールドを持つ（`pipeline/daily.py`の`_run_step_output()`が`deps.strategy_key`をそのまま渡す。1回の実行は常に単一戦略のため、`Candidate`側は候補ごとの戦略キーを持たない）。`BriefCandidate`は`past_decisions: tuple[BriefPastDecision, ...] = ()`を追加で持ち、`_candidate_brief()`が`state_store.get_decision_history(candidate.symbol, context.brief.strategy_key, context.brief.run_date, limit=3)`（LLM判断履歴と同じ3.17節の関数、`mode='live'`かつ`run_date < before_date`で point-in-time 安全・新しい順）の結果をそのままフィールドマッピングする。`BriefPastDecision`は`run_date` / `decision` / `reason_memo` / `realized_return_pct`の4フィールドのfrozen dataclass。`markdown_report.py::_candidate_section()`は各候補の`## <SYMBOL>`節内に「過去判断」小節（`### 過去判断`、日付/判断/理由/実現損益率のテーブル）を追加描画するが、`past_decisions`が空のときは見出しごと省略する（Facts/LLM risk flags/Sourcesと同じ0件時の描画方針）。terminal（`terminal_report.py`）は本節の対象外（変更なし）。
 
 ### 3.19 `backtest/engine.py` / `backtest/runner.py`（FR-10）
 
@@ -767,32 +835,64 @@ class PaperJournal:
         CON-04（ペーパートレード検証ゲート）の実績データ元となる。
         """
 
-    def close_position(self, position_id: UUID, close_date: "date", close_price: float) -> None:
+    def close_position(
+        self, position_id: UUID, close_date: "date", close_price: float,
+        exit_reason: str,
+    ) -> None:
         """
         オープン中のペーパーポジションをクローズし、positionsを更新する。
-        position_idが存在しない、または既にクローズ済みの場合は
-        PositionNotClosableError（SwingCopilotError派生）を送出する
-        ——サイレントなno-opにしない。
+        exit_reasonは必須引数（P1-06/REQ-001/020）で
+        {stop_loss, target, time_stop, manual, other}の5値以外は拒否する
+        （"unknown"は移行専用のsentinelで、closeの入力としては拒否される）。
+        exit_reasonの検証はpositionを読む前に行う（フェイルファスト）。
+        position_idが存在しない、既にクローズ済み、close_dateが
+        entry_dateより前、close_priceが正でない、またはexit_reasonが
+        不正な場合はPositionNotClosableError（SwingCopilotError派生）を
+        送出する——サイレントなno-opにしない。いずれの拒否でもpositionの
+        状態は変化しない。
         """
 
     def summarize_performance(
         self, market_store: "MarketStore", as_of: "date"
     ) -> "PerformanceSummary":
         """
-        クローズ済みペーパートレードの集計P&L・勝率と、同期間
-        （最古のクローズ済みentry_date..as_of）のSPYバイ&ホールド
-        リターンを返す（backtest/engine.pyのbenchmarkと同じ考え方を
-        実トレードへ適用）。SPY足が不足する場合はspy_return_pctがNone。
+        クローズ済みペーパートレードの集計P&L・勝率・期待値・profit_factor・
+        R-multiple・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
+        entry_date..as_of）のSPYバイ&ホールドリターンを返す（P1-06,
+        backtest/engine.pyのbenchmarkと同じ考え方を実トレードへ適用）。
+        クローズ済み0件のときは全てのレート/比率フィールドがNone（例外は
+        発生させない）。SPY足が不足する場合はspy_return_pctがNone。
         """
 ```
 
 ```python
 @dataclass(frozen=True, slots=True)
+class PerformanceBreakdownRow:
+    key: str              # exit_reasonの値、strategy_key、または未連携行の"unknown"
+    trade_count: int
+    win_rate: float | None    # trade_count==0のときのみNone（実際には起こらない）
+    avg_pnl_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class PerformanceSummary:
     closed_trade_count: int
-    total_pnl_usd: float
-    win_rate: float          # クローズ済みトレードのうち含み益だった割合。0件ならOK 0.0
-    spy_return_pct: float | None  # SPY足が不足する場合はNone
+    total_pnl_usd: float      # 0件なら0.0（空集合の合計として well-defined）
+    win_rate: float | None    # 0件ならNone（未定義）。pnl>0=勝ち、pnl==0=中立
+                               # （分母には入るが勝ち数には数えない）、pnl<0=負け、
+                               # という固定の分類基準を採用（win_rateとprofit_factor
+                               # で共通）
+    spy_return_pct: float | None       # SPY足が不足する場合はNone
+    expectancy_usd: float | None       # 全クローズ済みトレードのpnl平均。0件ならNone
+    profit_factor: float | None        # 総益/総損の絶対値。損失トレードが0件ならNone
+    avg_r_multiple: float | None       # pnl/((entry-stop)*shares)の算出可能トレード平均
+    r_multiple_omitted_count: int      # R-multiple省略件数（stop未記録、または
+                                        # entry-stop<=0という防御的拡張）
+    r_multiple_omitted_warning: str | None  # 省略0件ならNone
+    by_exit_reason: tuple[PerformanceBreakdownRow, ...]  # exit_reason別内訳
+    by_strategy: tuple[PerformanceBreakdownRow, ...]     # 戦略別内訳
+                                        # （trades_journal.position_id経由。
+                                        # 未連携ポジションは"unknown"キー）
 ```
 
 ### 3.21 `pipeline/daily.py`（FR-12）
@@ -885,6 +985,28 @@ def main(argv: list[str] | None = None) -> None:
     """CLI引数をDailyRunOptionsへ変換し、実アダプタ一式をcomposeして実行、
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
+
+### 3.22 `report/history_cli.py` / `storage/history_queries.py`（P1-05）
+
+`copilot-decision`（`paper/cli.py`）が判断記録の書き込み専用CLIであるのに対し、`copilot-history`はその読み出し専用の対となるCLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
+
+```text
+uv run copilot-history runs [--limit N] [--db PATH]
+uv run copilot-history run --run-id <UUID> [--db PATH]
+uv run copilot-history symbol <SYMBOL> [--db PATH]
+uv run copilot-history rejections --run-id <UUID> [--db PATH]
+uv run copilot-history performance [--db PATH]
+```
+
+| サブコマンド | 表示内容 | 裏付けるクエリ |
+|---|---|---|
+| `runs` | 直近N件のrun一覧（run_id, run_date, 候補数, 落選数, 判断数） | `history_queries.list_runs()`（`candidates`/`screening_rejections`/`trades_journal`をLEFT JOINしCOALESCEで0埋め、0件のrunも消えない） |
+| `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
+| `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
+| `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
+| `performance` | P1-06で拡張された`PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/r_multiple_omitted警告/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
+
+DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
 ---
 
@@ -983,6 +1105,19 @@ CREATE TABLE IF NOT EXISTS candidates (
     UNIQUE (run_id, strategy_key, rank)
 );
 
+CREATE TABLE IF NOT EXISTS screening_rejections (
+    run_id       UUID NOT NULL,
+    symbol       VARCHAR NOT NULL,
+    stage        VARCHAR NOT NULL CHECK (stage IN ('data_quality','fundamental_filter','technical_signal')),
+    reason_code  VARCHAR NOT NULL CHECK (reason_code IN (
+        'FILTER_NEGATIVE_NET_INCOME','FILTER_NEGATIVE_FCF','FILTER_LOW_EQUITY_RATIO',
+        'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY'
+    )),
+    detail       JSON NOT NULL,
+    as_of        DATE NOT NULL,
+    PRIMARY KEY (run_id, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -992,9 +1127,21 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     stop_price      DOUBLE,
     reasons_json    JSON NOT NULL,
     warnings_json   JSON NOT NULL,
+    -- P1-03 (roadmap §5): サイジング内訳。
+    shares_by_risk          BIGINT,
+    shares_by_position_cap  BIGINT,
+    binding_constraint      VARCHAR
+        CHECK (binding_constraint IN (
+            'trade_risk','position_cap','sector','correlation','not_calculable'
+        )),
+    sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, symbol)
 );
+```
 
+P1-03より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かない（既存テーブル形状に対してno-op）ため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS ...`で追加列を後付けする。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK/NOT NULL制約付与を未サポートのため、この経路で追加された列はアプリケーション側でのみ整合性が保証される（既存DBをALTER経由でアップグレードした場合、`CREATE TABLE`側のCHECK制約はDB層では効かない）。
+
+```sql
 CREATE TABLE IF NOT EXISTS positions (
     position_id   UUID PRIMARY KEY,
     symbol        VARCHAR NOT NULL,
@@ -1006,9 +1153,16 @@ CREATE TABLE IF NOT EXISTS positions (
     status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
     close_date    DATE,
     close_price   DOUBLE,
+    exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
+        'stop_loss','target','time_stop','manual','other','unknown'
+    )),
     created_at    TIMESTAMPTZ NOT NULL
 );
+```
 
+`exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
+
+```sql
 CREATE TABLE IF NOT EXISTS trades_journal (
     journal_id          UUID PRIMARY KEY,
     run_id              UUID NOT NULL,
@@ -1056,6 +1210,12 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 
 同一プロセス内で`(model, prompt_hash, schema_version)`に一致する最新の`status='success'`を先に検索し、存在すればAPIを呼ばず再利用する。失敗・予算超過も監査イベントとして複数回記録できるよう、テーブルにはこの3列のUNIQUE制約を置かない。P1〜P2は単一プロセス実行のため、分散ロックは導入しない。
 
+`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——`ScreeningPipeline._ranking_metrics()`が生の日足からランキング指標を再計算するのと同じ設計判断（本節冒頭2.1 #4）で、各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は決定的な優先順位（データ不足 → ファンダフィルタ → 流動性 → `strategies.yaml`のシグナル順）で行われ、1銘柄1段階につき`reason_code`は必ず1つに定まる。`reason_code`列挙は現行の`profitable_positive_fcf_equity`・`volume_min`・`trend_sma`・`pullback_rsi`の4つのFilter/Signalに固定でひも付いており、将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
+
+**Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
+
+`report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
+
 DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しないようにする。空の型付きrelationを先に作る、または最初の書き込み後にビューを作成する実装とし、初期状態のテストを必須とする。
 
 ### 4.3 モデル一覧
@@ -1094,6 +1254,7 @@ risk:
   max_sector_pct: 0.30        # 同一セクター上限30%
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
+  wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:
   min_profitable_quarters: 4   # 直近4四半期黒字
@@ -1158,12 +1319,19 @@ strategies:
       - pullback_rsi
     candidate_limit: 10
     ranking:
-      - rsi14_asc
-      - avg_volume_desc
-      - symbol_asc
+      # 複合ランキングスコアの重み（roadmap §5 P1-01）。出典なしの初期値で
+      # 未検証（要検証）。P2-10の感応度グリッドが検証対象。合計は1.0必須。
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2
 ```
 
-新しいフィルタ/シグナルを追加する場合、対応モジュールに登録クラスを追加し、本ファイルの`filters_all`/`signals_all`へキーを追加する。P1〜P2ではOR・重み付きスコアを導入しない。順位規則を追加する場合は同値時の最終tie-breakを必ず`symbol_asc`にして再現性を保つ。
+新しいフィルタ/シグナルを追加する場合、対応モジュールに登録クラスを追加し、本ファイルの`filters_all`/`signals_all`へキーを追加する。ランキングは複合スコア
+`score = Σ(weight_i × component_i)`（P1-01, roadmap §5）で決まる。各componentは
+[0,1]に正規化される: `rsi_pullback = clamp((rsi_threshold − rsi14) / rsi_threshold, 0, 1)`、
+`trend_quality = clamp((sma50/sma200 − 1) / 0.10, 0, 1)`、`liquidity`は候補集合内の
+`avg_volume20`パーセンタイル。同点時の最終tie-breakは必ず`symbol_asc`にして再現性を保つ。
 
 ---
 
@@ -1283,6 +1451,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 同一セクター上限 | 30% | `risk.max_sector_pct=0.30` |
 | 保有銘柄との相関警告閾値 | ピアソン相関 0.7 超で警告（ブロックしない） | `risk.max_correlation=0.7` |
 | 相関計算の参照期間 | 直近60営業日の日次リターン | `risk.correlation_lookback_days=60` |
+| WIDE_STOP警告閾値 | 損切り幅がエントリー価格の10%超（P1-03、要検証） | `risk.wide_stop_threshold_pct=10.0` |
 
 ---
 
@@ -1325,7 +1494,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | snapshot/Parquet/report | replacementから消えたrowが削除される。temp write/replace失敗時は旧destinationが不変でtempが残らない |
 | 相関 | 日付がずれた系列、重複日、共通return不足、定数系列が誤相関ではなくdata_qualityになる |
 | バックテスト | 1株の買い/売りを手計算し、両側cost、stop優先、最終清算、benchmark残cashを厳密比較する |
-| 設定 | unknown field/key、空required signals、limit 0/11、非決定的rankingを外部call前に拒否する |
+| 設定 | unknown field/key、空required signals、limit 0/11、ranking.score_weights合計≠1.0・負の重みを外部call前に拒否する |
 | 外部adapter | retryable失敗→成功、非retryable即時失敗、総試行上限、各試行のthrottle/timeoutをfake timeで検証する |
 | LLM provenance | source_idsなし/空白/未知IDと、request IDが変わったcache hitを拒否する |
 | LLM safety | system/user分離、delimiter escape、全表示fieldのCON-03、full-prompt cache hash、prompt/response/exception redactionを検証する |
@@ -1344,7 +1513,7 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 | ステップ | 内容 | 受け入れ基準 |
 |---|---|---|
 | P1-1 | 既存リポジトリをbootstrapでrenameし、アプリ向けにpyproject/justfileを更新 | `my-package`/`my_package`の追跡対象残骸が0件で、commit済みtreeの`just verify`が終了コード0（固定テスト件数は条件にしない） |
-| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | 正常loadに加え、unknown field/key、空signals、limit 0/11、非決定的rankingを外部I/O前に拒否 |
+| P1-2 | `config.py` + `settings.yaml`/`strategies.yaml`雛形 | 正常loadに加え、unknown field/key、空signals、limit 0/11、ranking.score_weights合計≠1.0を外部I/O前に拒否 |
 | P1-3 | `universe.py`（FR-01） | `UniverseMember`の取得・snapshot fallback・manual override・履歴保存を検証。直前/同日/未来snapshotから`as_of`以前の最新だけを選び、同日再保存で削除も反映 |
 | P1-4 | `data/base.py`, `data/yfinance_provider.py`（FR-02） | 契約テストで調整済みOHLC、複数ティッカーMultiIndex正規化、end日排他、部分失敗を検証 |
 | P1-5 | `storage/database.py`, `market_store.py`, `state_store.py` | 訂正upsert、2件目失敗時の全件rollback、snapshot完全置換、Parquet temp/replace失敗時の旧file保持と再実行を検証 |

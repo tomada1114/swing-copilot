@@ -18,17 +18,29 @@ from swing_copilot.screening import (
 from swing_copilot.screening import (
     technical_signals as _technical_signals,  # noqa: F401 - registers built-ins
 )
-from swing_copilot.screening.base import FILTER_REGISTRY, SIGNAL_REGISTRY, Candidate
-from swing_copilot.screening.indicators import symbol_bars, wilder_atr, wilder_rsi
+from swing_copilot.screening.base import (
+    FILTER_REGISTRY,
+    SIGNAL_REGISTRY,
+    Candidate,
+    ScreeningResult,
+)
+from swing_copilot.screening.indicators import sma, symbol_bars, wilder_atr, wilder_rsi
+from swing_copilot.screening.rejection_classifier import classify_rejections
 
 if TYPE_CHECKING:
-    from swing_copilot.config import Settings
-    from swing_copilot.screening.base import ScreeningInput
+    from swing_copilot.config import ScoreWeights, Settings
+    from swing_copilot.screening.base import ScreeningInput, SignalHit
     from swing_copilot.storage.market_store import MarketStore
 
 _RSI_WINDOW = 14
 _ATR_WINDOW = 14
 _AVG_VOLUME_WINDOW = 20
+_SMA_SHORT_WINDOW = 50
+_SMA_LONG_WINDOW = 200
+
+# Composite ranking score (P1-01, roadmap §5): normalization width for the
+# trend_quality component's (sma50/sma200 - 1) ratio.
+_TREND_QUALITY_NORMALIZATION = 0.10
 
 
 class ScreeningPipeline:
@@ -67,6 +79,9 @@ class ScreeningPipeline:
         self._filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
         self._signals = [SIGNAL_REGISTRY[key](settings) for key in spec.signals_all]
         self._candidate_limit = spec.candidate_limit
+        self._rsi_threshold = settings.technical_signals.pullback.rsi_threshold
+        self._score_weights: ScoreWeights = spec.ranking.score_weights
+        self._settings = settings
 
     def run(self, data: ScreeningInput) -> list[Candidate]:
         """Run the two-stage screen and return a ranked, capped candidate list.
@@ -75,8 +90,46 @@ class ScreeningPipeline:
             data: Point-in-time screening input.
 
         Returns:
-            At most `candidate_limit` candidates, ranked by
-            `(rsi14 asc, avg_volume desc, symbol asc)`.
+            At most `candidate_limit` candidates, ranked by descending
+            composite score (`score = sum(weight_i * component_i)`, P1-01),
+            with symbol ascending as the deterministic tiebreak (REQ-010).
+        """
+        return self.run_with_rejections(data).candidates
+
+    def run_with_rejections(self, data: ScreeningInput) -> ScreeningResult:
+        """Run the two-stage screen and also classify every rejected symbol.
+
+        Args:
+            data: Point-in-time screening input.
+
+        Returns:
+            `candidates` identical to `run()`'s output; `rejections` covers
+            every universe symbol that did not pass every configured Filter
+            and every configured Signal (P1-02, roadmap §5). See
+            `rejection_classifier.classify_rejections` for the exact
+            priority order and its one intentional gap (candidate_limit
+            truncation is not itself a rejection reason).
+        """
+        candidates, candidate_symbols, hits_by_signal = self._build_candidates(data)
+        rejections = classify_rejections(
+            data,
+            self._settings,
+            candidate_symbols=candidate_symbols,
+            signal_order=[signal.name for signal in self._signals],
+            hits_by_signal=hits_by_signal,
+        )
+        return ScreeningResult(candidates=candidates, rejections=rejections)
+
+    def _build_candidates(
+        self, data: ScreeningInput
+    ) -> tuple[list[Candidate], set[str], list[list[SignalHit]]]:
+        """Shared filter->signal->rank body for `run()`/`run_with_rejections()`.
+
+        Returns:
+            The ranked, capped candidate list; the pre-limit set of symbols
+            that passed every Filter and every Signal (before ranking/
+            candidate_limit truncation, used by the rejection classifier);
+            and each signal's raw hits, in configured order.
         """
         filtered = {member.symbol for member in data.universe}
         for filter_ in self._filters:
@@ -112,9 +165,10 @@ class ScreeningPipeline:
             metrics.update(ranking_metrics)
             rows.append((symbol, signal_names, metrics))
 
-        rows.sort(key=lambda row: (row[2]["rsi14"], -row[2]["avg_volume"], row[0]))
+        self._score_rows(rows)
+        rows.sort(key=lambda row: (-row[2]["score"], row[0]))
         limited = rows[: self._candidate_limit]
-        return [
+        candidates = [
             Candidate(
                 symbol=symbol,
                 as_of=data.as_of,
@@ -124,14 +178,50 @@ class ScreeningPipeline:
             )
             for index, (symbol, signal_names, metrics) in enumerate(limited)
         ]
+        return candidates, candidate_symbols, hits_by_signal
+
+    def _score_rows(
+        self, rows: list[tuple[str, tuple[str, ...], dict[str, float]]]
+    ) -> None:
+        """Compute and store the composite score and its breakdown, in place.
+
+        `liquidity` is each row's `avg_volume` percentile within `rows` (the
+        current candidate set, not the full universe): ascending by
+        `avg_volume`, lowest gets 0.0 and highest gets 1.0. A single-row set
+        gets the fixed midpoint 0.5 (no population to rank against).
+        """
+        weights = self._score_weights
+        rsi_threshold = self._rsi_threshold
+        ordered = sorted(range(len(rows)), key=lambda i: rows[i][2]["avg_volume"])
+        row_count = len(ordered)
+        for percentile_rank, row_index in enumerate(ordered):
+            metrics = rows[row_index][2]
+            liquidity = 0.5 if row_count == 1 else percentile_rank / (row_count - 1)
+            rsi_pullback = _clamp01((rsi_threshold - metrics["rsi14"]) / rsi_threshold)
+            trend_quality = _clamp01(
+                (metrics["sma50"] / metrics["sma200"] - 1)
+                / _TREND_QUALITY_NORMALIZATION
+            )
+            score_rsi_pullback = weights.rsi_pullback * rsi_pullback
+            score_trend_quality = weights.trend_quality * trend_quality
+            score_liquidity = weights.liquidity * liquidity
+            metrics.update(
+                {
+                    "score": score_rsi_pullback + score_trend_quality + score_liquidity,
+                    "score_rsi_pullback": score_rsi_pullback,
+                    "score_trend_quality": score_trend_quality,
+                    "score_liquidity": score_liquidity,
+                }
+            )
 
     @staticmethod
     def _ranking_metrics(data: ScreeningInput, symbol: str) -> dict[str, float] | None:
-        """Compute rsi14/atr14/avg_volume directly from bars, or None if unavailable.
+        """Compute rsi14/atr14/avg_volume/sma50/sma200 from bars, or None if unavailable.
 
         Computed independently of whichever signals happen to be configured,
         so ranking and report metrics are always available and consistent
-        (docs/04_detailed_design.md 2.1 #4).
+        (docs/04_detailed_design.md 2.1 #4). A symbol with any NaN metric
+        (e.g. insufficient history) is dropped from the candidate set.
         """
         series = symbol_bars(data.bars, symbol, data.as_of)
         if series is None or len(series) < max(
@@ -145,11 +235,27 @@ class ScreeningPipeline:
         ).iloc[-1]
         avg_volume = series["volume"].tail(_AVG_VOLUME_WINDOW).mean()
         close = series["close"].iloc[-1]
-        if pd.isna(rsi14) or pd.isna(atr14) or pd.isna(avg_volume) or pd.isna(close):
+        sma50 = sma(series["close"], _SMA_SHORT_WINDOW).iloc[-1]
+        sma200 = sma(series["close"], _SMA_LONG_WINDOW).iloc[-1]
+        if (
+            pd.isna(rsi14)
+            or pd.isna(atr14)
+            or pd.isna(avg_volume)
+            or pd.isna(close)
+            or pd.isna(sma50)
+            or pd.isna(sma200)
+        ):
             return None
         return {
             "rsi14": float(rsi14),
             "atr14": float(atr14),
             "avg_volume": float(avg_volume),
             "close": float(close),
+            "sma50": float(sma50),
+            "sma200": float(sma200),
         }
+
+
+def _clamp01(value: float) -> float:
+    """Clamp `value` into `[0, 1]`."""
+    return max(0.0, min(1.0, value))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
@@ -14,6 +15,8 @@ from swing_copilot.report.daily_brief import (
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
+    BriefPastDecision,
+    BriefRejectionCount,
     BriefRisk,
     BriefSource,
     DailyBrief,
@@ -39,6 +42,10 @@ def _brief() -> DailyBrief:
                 pct_change=0.012,
                 rsi14=48.2,
                 atr14=4.1,
+                score=0.627,
+                score_rsi_pullback=0.167,
+                score_trend_quality=0.300,
+                score_liquidity=0.160,
                 signals=("RSI押し目",),
                 fundamentals=BriefFundamentals(
                     per="41.2x", fcf="$12,000", equity_ratio="52%", eps="$4.16"
@@ -61,6 +68,82 @@ def _brief() -> DailyBrief:
         ),
         notices=("FREDカレンダーを取得できませんでした",),
     )
+
+
+def _brief_with_sizing(risk: BriefRisk) -> DailyBrief:
+    base = _brief()
+    candidate = replace(base.candidates[0], risk=risk)
+    return replace(base, candidates=(candidate,))
+
+
+def test_terminal_shows_the_binding_constraint_sizing_string() -> None:
+    # REQ-006 worked example: trade_risk binds.
+    risk = BriefRisk(
+        status="approved",
+        max_shares=200,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=200,
+        shares_by_position_cap=500,
+        binding_constraint="trade_risk",
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.25,
+    )
+    # A wide console avoids Rich wrapping the cell across two lines, which
+    # would otherwise split this literal substring apart.
+    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    assert "200株（制約: リスク1.0%）" in output
+
+
+def test_markdown_shows_the_binding_constraint_sizing_string() -> None:
+    # REQ-006 worked example: position_cap binds.
+    risk = BriefRisk(
+        status="approved",
+        max_shares=40,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=200,
+        shares_by_position_cap=40,
+        binding_constraint="position_cap",
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.02,
+    )
+    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+    assert "40株（制約: ポジション上限2.0%）" in output
+
+
+def test_terminal_shows_zero_shares_without_exception() -> None:
+    # REQ-020 boundary: a floored-to-zero trade renders Example 4's wording,
+    # not an exception or a bare "0".
+    risk = BriefRisk(
+        status="approved",
+        max_shares=0,
+        stop_price=45.0,
+        reasons=(),
+        warnings=(),
+        shares_by_risk=1,
+        shares_by_position_cap=0,
+        binding_constraint="position_cap",
+        sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.001,
+    )
+    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    assert "0株（摩擦: 資金規模過小）" in output
+
+
+def test_markdown_still_shows_dash_for_not_calculable_max_shares() -> None:
+    risk = BriefRisk(
+        status="not_calculable",
+        max_shares=None,
+        stop_price=None,
+        reasons=("missing candidate price/ATR data",),
+        warnings=(),
+    )
+    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+    assert "| not_calculable | - |" in output
 
 
 def test_terminal_output_is_a_compact_decision_brief() -> None:
@@ -89,6 +172,147 @@ def test_markdown_contains_auditable_details_and_source_urls() -> None:
     assert "売上高は前年同期比で増加した" in output
     assert "[news:123](https://example.com/news/123)" in output
     assert "本レポートは情報提供のみを目的とし、投資助言ではありません" in output
+
+
+def test_terminal_shows_score_column_and_breakdown() -> None:
+    # REQ-007
+    output = render_terminal(_brief(), RunStatus.SUCCESS, width=200, color=False)
+
+    assert "0.627" in output
+    assert "rsi 0.17 / trend 0.30 / liq 0.16" in output
+
+
+def test_markdown_shows_score_column_and_breakdown_table() -> None:
+    # REQ-008
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "| 1 | NVDA |" in output
+    assert "0.627" in output
+    assert "### Score breakdown" in output
+    assert "| rsi_pullback | 0.167 |" in output
+    assert "| trend_quality | 0.300 |" in output
+    assert "| liquidity | 0.160 |" in output
+
+
+def _brief_with_past_decisions() -> DailyBrief:
+    base = _brief()
+    candidate = replace(
+        base.candidates[0],
+        past_decisions=(
+            BriefPastDecision(date(2026, 7, 19), "followed", "出来高増加", 0.05),
+            BriefPastDecision(date(2026, 7, 12), "ignored", None, None),
+        ),
+    )
+    return replace(base, candidates=(candidate,))
+
+
+def test_markdown_shows_past_decisions_section_newest_first() -> None:
+    # P1-05 REQ-008: 過去判断 subsection, rendered in the given order (the
+    # caller -- `get_decision_history` -- is responsible for newest-first).
+    output = render_markdown(_brief_with_past_decisions(), RunStatus.SUCCESS)
+
+    assert "### 過去判断" in output
+    assert output.index("2026-07-19") < output.index("2026-07-12")
+    assert "followed" in output
+    assert "出来高増加" in output
+    assert "+5.00%" in output
+    assert "ignored" in output
+
+
+def test_markdown_omits_past_decisions_section_when_empty() -> None:
+    # P1-05 boundary: zero past decisions omits the whole subsection, no
+    # stray heading -- matching Facts/LLM risk flags/Sources' own style.
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "### 過去判断" not in output
+
+
+def _brief_without_candidates() -> DailyBrief:
+    return replace(_brief(), candidates=())
+
+
+def test_terminal_renders_empty_candidate_set_without_error() -> None:
+    output = render_terminal(_brief_without_candidates(), RunStatus.SUCCESS, width=120)
+
+    assert "Candidates: 0" in output
+    assert "Score" in output  # header still renders
+
+
+def _brief_with_rejections() -> DailyBrief:
+    return replace(
+        _brief(),
+        rejection_counts=(
+            BriefRejectionCount("FILTER_LOW_LIQUIDITY", 3),
+            BriefRejectionCount("SIGNAL_RSI_NOT_MET", 1),
+        ),
+    )
+
+
+def test_terminal_shows_rejection_summary_counts() -> None:
+    # REQ-005: 落選サマリ, reason_code別件数.
+    output = render_terminal(_brief_with_rejections(), RunStatus.SUCCESS, width=120)
+
+    assert "落選サマリ" in output
+    assert "FILTER_LOW_LIQUIDITY" in output
+    assert "3" in output
+    assert "SIGNAL_RSI_NOT_MET" in output
+
+
+def test_markdown_shows_rejection_summary_table() -> None:
+    output = render_markdown(_brief_with_rejections(), RunStatus.SUCCESS)
+
+    assert "## 落選サマリ" in output
+    assert "FILTER_LOW_LIQUIDITY" in output
+    assert "| 3 |" in output
+    assert "SIGNAL_RSI_NOT_MET" in output
+
+
+def test_terminal_renders_empty_rejection_summary_without_error() -> None:
+    # REQ-010 boundary: zero rejections renders a "0件" style message, no
+    # exception.
+    output = render_terminal(_brief(), RunStatus.SUCCESS, width=120)
+
+    assert "落選サマリ" in output
+    assert "0件" in output
+
+
+def test_markdown_renders_empty_rejection_summary_without_error() -> None:
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "## 落選サマリ" in output
+    assert "0件" in output
+
+
+def test_markdown_renders_empty_candidate_set_without_error() -> None:
+    output = render_markdown(_brief_without_candidates(), RunStatus.SUCCESS)
+
+    assert "## Candidates" in output
+    assert "### Score breakdown" not in output
+
+
+def _brief_with_missing_score() -> DailyBrief:
+    brief = _brief()
+    candidate = replace(
+        brief.candidates[0],
+        score=None,
+        score_rsi_pullback=None,
+        score_trend_quality=None,
+        score_liquidity=None,
+    )
+    return replace(brief, candidates=(candidate,))
+
+
+def test_terminal_shows_na_when_score_is_missing() -> None:
+    output = render_terminal(_brief_with_missing_score(), RunStatus.SUCCESS, width=200)
+
+    assert "N/A" in output
+
+
+def test_markdown_omits_breakdown_section_when_score_is_missing() -> None:
+    output = render_markdown(_brief_with_missing_score(), RunStatus.SUCCESS)
+
+    assert "### Score breakdown" not in output
+    assert "N/A" in output
 
 
 def test_markdown_is_written_per_run_and_latest_is_replaced(tmp_path: Path) -> None:

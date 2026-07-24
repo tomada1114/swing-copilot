@@ -58,6 +58,7 @@ from swing_copilot.report.terminal_report import render_terminal
 from swing_copilot.risk.checks import RiskChecker
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
+from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
@@ -82,7 +83,7 @@ if TYPE_CHECKING:
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate
+    from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import FundamentalsRecord
     from swing_copilot.text.base import TextItem
     from swing_copilot.universe import UniverseMember
@@ -185,6 +186,7 @@ class _RunContext:
     run_id: UUID
     run_date: date
     candidates: list[Candidate]
+    rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     held_symbols: frozenset[str]
 
@@ -401,20 +403,35 @@ def _run_step_fundamentals(
 
 def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
-) -> tuple[_StepOutcome, list[Candidate]]:
+) -> tuple[_StepOutcome, list[Candidate], list[RejectionRecord]]:
     fundamentals = deps.market_store.read_fundamentals(as_of)
     start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
 
+    # Scope `ScreeningInput.universe` to this run's actual `symbols` (which
+    # `--limit` may have narrowed from `deps.universe`), not the full
+    # membership. `Filter`/`Signal.apply()`/`.evaluate()` already tolerate
+    # universe members with no fetched bars/fundamentals (they're simply
+    # never added to a passing set), so this was always harmless for
+    # `Candidate` output -- but P1-02's rejection classifier now iterates
+    # every `data.universe` member, so an unscoped universe would otherwise
+    # misclassify hundreds of never-fetched `--limit`-excluded symbols as
+    # genuine rejections (e.g. spurious DATA_INSUFFICIENT_HISTORY).
+    symbol_set = set(symbols)
+    universe = tuple(member for member in deps.universe if member.symbol in symbol_set)
     data = ScreeningInput(
-        as_of=as_of, universe=deps.universe, fundamentals=fundamentals, bars=bars
+        as_of=as_of, universe=universe, fundamentals=fundamentals, bars=bars
     )
     pipeline = ScreeningPipeline(
         deps.strategies_config, deps.market_store, deps.settings, deps.strategy_key
     )
-    candidates = pipeline.run(data)
-    deps.state_store.record_candidates(candidates, run_id, pipeline.strategy_key)
-    return _StepOutcome(True), candidates
+    result = pipeline.run_with_rejections(data)
+    deps.state_store.record_screening_results(
+        result.candidates,
+        result.rejections,
+        ScreeningRunMeta(run_id, pipeline.strategy_key, as_of),
+    )
+    return _StepOutcome(True), result.candidates, result.rejections
 
 
 def _run_step_risk(
@@ -697,7 +714,11 @@ def _run_step_output(
         risk_assessments=output.run.risk_assessments,
         news_summaries=output.news_summaries,
         filing_analyses=output.filing_analyses,
+        strategy_key=deps.strategy_key,
+        rejections=output.run.rejections,
         notices=output.notices,
+        max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
+        max_position_pct=deps.settings.risk.max_position_pct,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -755,6 +776,17 @@ def _record_step(
     deps.state_store.record_run_step(run_id, step, status, outcome.detail, duration)
 
 
+def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
+    """Log NFR-03 stuck-run detection results, if any were found and marked failed."""
+    if stale_run_ids:
+        logger.warning(
+            "run %s: marked %d stale running run(s) as failed: %s",
+            run_id,
+            len(stale_run_ids),
+            stale_run_ids,
+        )
+
+
 def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResult:
     """Run the full eight-step daily batch.
 
@@ -810,20 +842,17 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     # reaches `complete_run()` and would sit in `status='running'` forever.
     stale_cutoff = deps.clock.now() - timedelta(seconds=budget_s)
     stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
-    if stale_run_ids:
-        logger.warning(
-            "run %s: marked %d stale running run(s) as failed: %s",
-            run_id,
-            len(stale_run_ids),
-            stale_run_ids,
-        )
+    _warn_stale_runs(run_id, stale_run_ids)
 
     candidates: list[Candidate] = []
+    rejections: list[RejectionRecord] = []
     risk_assessments: list[RiskAssessment] = []
 
     def _step_screening() -> _StepOutcome:
-        nonlocal candidates
-        outcome, candidates = _run_step_screening(deps, symbols, run_date, run_id)
+        nonlocal candidates, rejections
+        outcome, candidates, rejections = _run_step_screening(
+            deps, symbols, run_date, run_id
+        )
         return outcome
 
     def _step_risk() -> _StepOutcome:
@@ -873,6 +902,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         run_id=run_id,
         run_date=run_date,
         candidates=candidates,
+        rejections=rejections,
         risk_assessments=risk_assessments,
         held_symbols=frozenset(held_symbols),
     )

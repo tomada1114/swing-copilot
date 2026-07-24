@@ -238,7 +238,7 @@ class BacktestEngine:
                     stop_price,
                     self._max_position_pct,
                     self._max_trade_risk_pct,
-                )
+                ).shares
             except ValueError:
                 continue
             if shares <= 0:

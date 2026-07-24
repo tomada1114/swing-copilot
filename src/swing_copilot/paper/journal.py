@@ -11,6 +11,7 @@ and `positions.position_id` is a `UUID`. This module follows the schema —
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,11 @@ if TYPE_CHECKING:
 
 _MIN_BARS_FOR_RETURN = 2
 _VALID_DECISIONS = frozenset({"followed", "ignored", "modified"})
+# P1-06/REQ-001/020: close_position() input values only. "unknown" is a
+# migration-only sentinel (schema.py's ALTER_SCHEMA_STATEMENTS backfill) and
+# is deliberately excluded here — never a valid close() argument.
+_VALID_EXIT_REASONS = frozenset({"stop_loss", "target", "time_stop", "manual", "other"})
+_UNKNOWN_BUCKET_KEY = "unknown"
 
 
 class PositionNotClosableError(SwingCopilotError):
@@ -38,13 +44,31 @@ class InvalidDecisionError(SwingCopilotError):
 
 
 @dataclass(frozen=True, slots=True)
+class PerformanceBreakdownRow:
+    """One group's aggregate stats within a `PerformanceSummary` breakdown."""
+
+    key: str  # an exit_reason value, a strategy_key, or "unknown" for unlinked rows
+    trade_count: int
+    win_rate: float | None  # None only if trade_count == 0 (never happens: a
+    # group exists only because >=1 trade produced it)
+    avg_pnl_usd: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class PerformanceSummary:
     """Closed paper trades' aggregate P&L vs. a SPY buy-and-hold benchmark."""
 
     closed_trade_count: int
-    total_pnl_usd: float
-    win_rate: float  # fraction of closed trades with positive P&L; 0.0 if none closed
+    total_pnl_usd: float  # 0.0 for zero trades (sum of empty is well-defined)
+    win_rate: float | None  # None (undefined) when closed_trade_count == 0
     spy_return_pct: float | None  # None if SPY bars are insufficient for the span
+    expectancy_usd: float | None  # mean pnl; None when closed_trade_count == 0
+    profit_factor: float | None  # gains / abs(losses); None when there are no losses
+    avg_r_multiple: float | None  # mean over trades where it was computable
+    r_multiple_omitted_count: int  # trades excluded from avg_r_multiple (REQ-022)
+    r_multiple_omitted_warning: str | None  # None if r_multiple_omitted_count == 0
+    by_exit_reason: tuple[PerformanceBreakdownRow, ...]
+    by_strategy: tuple[PerformanceBreakdownRow, ...]
 
 
 class PaperJournal:
@@ -127,7 +151,7 @@ class PaperJournal:
         )
 
     def close_position(
-        self, position_id: UUID, close_date: date, close_price: float
+        self, position_id: UUID, close_date: date, close_price: float, exit_reason: str
     ) -> None:
         """Close an open paper position.
 
@@ -135,13 +159,26 @@ class PaperJournal:
             position_id: The position to close.
             close_date: Date the virtual exit fill occurred.
             close_price: Virtual exit fill price.
+            exit_reason: Why the position was closed — required, one of
+                `"stop_loss"`, `"target"`, `"time_stop"`, `"manual"`,
+                `"other"` (P1-06/REQ-001/020). `"unknown"` is a
+                migration-only sentinel and is never accepted here.
 
         Raises:
-            PositionNotClosableError: `position_id` doesn't exist, is already
-                closed, `close_date` precedes `entry_date`, or `close_price`
-                is not positive — closing must be a real, valid state
-                transition, not a silent no-op or a garbage fill.
+            PositionNotClosableError: `exit_reason` isn't one of the 5 valid
+                values, `position_id` doesn't exist, is already closed,
+                `close_date` precedes `entry_date`, or `close_price` is not
+                positive — closing must be a real, valid state transition,
+                not a silent no-op or a garbage fill. `exit_reason` is
+                validated first, before any state is read or touched.
         """
+        if exit_reason not in _VALID_EXIT_REASONS:
+            msg = (
+                f"exit_reason must be one of {sorted(_VALID_EXIT_REASONS)}, "
+                f"got {exit_reason!r}"
+            )
+            raise PositionNotClosableError(msg)
+
         position = self._state_store.get_position(position_id)
         if position is None:
             msg = f"no position exists with position_id={position_id}"
@@ -165,6 +202,7 @@ class PaperJournal:
                 status="closed",
                 close_date=close_date,
                 close_price=close_price,
+                exit_reason=exit_reason,
             )
         )
 
@@ -178,39 +216,148 @@ class PaperJournal:
             as_of: Point-in-time cutoff for both the summary and the SPY span.
 
         Returns:
-            Aggregate P&L/win-rate over every closed paper position, and the
-            SPY buy-and-hold return over the same span (earliest closed
-            `entry_date` .. `as_of`), mirroring `backtest/engine.py`'s
-            benchmark idea but over real paper trades instead of a
-            simulation. `spy_return_pct` is `None` if SPY bars are
-            insufficient for the span.
+            Aggregate P&L/win-rate/expectancy/profit_factor/R-multiple over
+            every closed paper position (plus exit_reason and strategy
+            breakdowns), and the SPY buy-and-hold return over the same span
+            (earliest closed `entry_date` .. `as_of`), mirroring
+            `backtest/engine.py`'s benchmark idea but over real paper trades
+            instead of a simulation. All rate/ratio fields are `None` (not
+            an exception or a misleading 0.0) when they're mathematically
+            undefined for the current data (P1-06 boundary conditions).
         """
-        closed = self._state_store.get_closed_positions(is_paper=True, as_of=as_of)
-        if not closed:
+        rows = self._state_store.get_closed_positions_with_strategy(
+            is_paper=True, as_of=as_of
+        )
+        if not rows:
             return PerformanceSummary(
                 closed_trade_count=0,
                 total_pnl_usd=0.0,
-                win_rate=0.0,
+                win_rate=None,
                 spy_return_pct=None,
+                expectancy_usd=None,
+                profit_factor=None,
+                avg_r_multiple=None,
+                r_multiple_omitted_count=0,
+                r_multiple_omitted_warning=None,
+                by_exit_reason=(),
+                by_strategy=(),
             )
 
-        pnls = [self._position_pnl(position) for position in closed]
-        win_rate = sum(1 for pnl in pnls if pnl > 0) / len(pnls)
-        earliest_entry = min(position.entry_date for position in closed)
+        positions = [position for position, _ in rows]
+        pnls = [self._position_pnl(position) for position in positions]
+        trade_count = len(pnls)
+        earliest_entry = min(position.entry_date for position in positions)
+
+        avg_r_multiple, omitted_count, warning = self._r_multiple_stats(positions, pnls)
 
         return PerformanceSummary(
-            closed_trade_count=len(closed),
+            closed_trade_count=trade_count,
             total_pnl_usd=sum(pnls),
-            win_rate=win_rate,
+            win_rate=self._win_rate(pnls),
             spy_return_pct=self._spy_return_pct(market_store, earliest_entry, as_of),
+            expectancy_usd=sum(pnls) / trade_count,
+            profit_factor=self._profit_factor(pnls),
+            avg_r_multiple=avg_r_multiple,
+            r_multiple_omitted_count=omitted_count,
+            r_multiple_omitted_warning=warning,
+            by_exit_reason=self._breakdown_by_exit_reason(positions, pnls),
+            by_strategy=self._breakdown_by_strategy(rows, pnls),
         )
 
     @staticmethod
     def _position_pnl(position: Position) -> float:
-        # Only ever called on rows from get_closed_positions(): status="closed"
+        # Only ever called on rows from get_closed_positions*(): status="closed"
         # is set exclusively by close_position(), which always sets close_price too.
         assert position.close_price is not None  # noqa: S101
         return (position.close_price - position.entry_price) * position.shares
+
+    @staticmethod
+    def _win_rate(pnls: list[float]) -> float | None:
+        # P1-06 win/loss convention (documented once, applied everywhere
+        # win_rate is computed): pnl > 0 is a win; pnl == 0 is neutral
+        # (counted in the denominator, excluded from the win numerator);
+        # pnl < 0 is a loss. None only when there are zero trades to rate.
+        if not pnls:
+            return None
+        wins = sum(1 for pnl in pnls if pnl > 0)
+        return wins / len(pnls)
+
+    @staticmethod
+    def _profit_factor(pnls: list[float]) -> float | None:
+        # Same win/neutral/loss convention as _win_rate(): pnl == 0
+        # contributes to neither the gain nor the loss sum (REQ-021/022's
+        # boundary text leaves this choice to the implementation; fixed here).
+        gains = sum(pnl for pnl in pnls if pnl > 0)
+        losses = sum(-pnl for pnl in pnls if pnl < 0)  # positive magnitude
+        if losses == 0:
+            return None
+        return gains / losses
+
+    @staticmethod
+    def _r_multiple(position: Position, pnl: float) -> float | None:
+        # R-multiple = pnl / ((entry - stop) * shares). Omitted when stop
+        # isn't recorded, and also — a defensive extension beyond the
+        # issue's literal text — when entry - stop <= 0: that's a data
+        # anomaly (stop at or above entry), not a legitimate zero/negative
+        # risk-per-share, and would otherwise divide by zero or invert sign.
+        if position.stop_price is None:
+            return None
+        risk_per_share = position.entry_price - position.stop_price
+        if risk_per_share <= 0:
+            return None
+        return pnl / (risk_per_share * position.shares)
+
+    @classmethod
+    def _r_multiple_stats(
+        cls, positions: list[Position], pnls: list[float]
+    ) -> tuple[float | None, int, str | None]:
+        computed: list[float] = []
+        omitted_count = 0
+        for position, pnl in zip(positions, pnls, strict=True):
+            r_multiple = cls._r_multiple(position, pnl)
+            if r_multiple is None:
+                omitted_count += 1
+            else:
+                computed.append(r_multiple)
+        avg_r_multiple = sum(computed) / len(computed) if computed else None
+        warning = (
+            f"{omitted_count}件のトレードでstop未記録のためR-multiple省略"
+            if omitted_count > 0
+            else None
+        )
+        return avg_r_multiple, omitted_count, warning
+
+    @classmethod
+    def _breakdown_by_exit_reason(
+        cls, positions: list[Position], pnls: list[float]
+    ) -> tuple[PerformanceBreakdownRow, ...]:
+        groups: dict[str, list[float]] = defaultdict(list)
+        for position, pnl in zip(positions, pnls, strict=True):
+            groups[position.exit_reason or _UNKNOWN_BUCKET_KEY].append(pnl)
+        return cls._rows_from_groups(groups)
+
+    @classmethod
+    def _breakdown_by_strategy(
+        cls, rows: list[tuple[Position, str | None]], pnls: list[float]
+    ) -> tuple[PerformanceBreakdownRow, ...]:
+        groups: dict[str, list[float]] = defaultdict(list)
+        for (_, strategy_key), pnl in zip(rows, pnls, strict=True):
+            groups[strategy_key or _UNKNOWN_BUCKET_KEY].append(pnl)
+        return cls._rows_from_groups(groups)
+
+    @classmethod
+    def _rows_from_groups(
+        cls, groups: dict[str, list[float]]
+    ) -> tuple[PerformanceBreakdownRow, ...]:
+        return tuple(
+            PerformanceBreakdownRow(
+                key=key,
+                trade_count=len(group_pnls),
+                win_rate=cls._win_rate(group_pnls),
+                avg_pnl_usd=sum(group_pnls) / len(group_pnls) if group_pnls else None,
+            )
+            for key, group_pnls in sorted(groups.items())
+        )
 
     @staticmethod
     def _spy_return_pct(

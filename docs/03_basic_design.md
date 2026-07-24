@@ -98,7 +98,7 @@ flowchart TD
     PAPER -.-> DUCKDB
 ```
 
-実行環境はローカルマシンのみであり、利用者が1日1回`uv run copilot-daily`を手動実行する。`data/`（Parquet/DuckDB）と`reports/`（生成Markdown）はローカルへ永続化する。判断は`uv run copilot-decision`で明示的に記録する。
+実行環境はローカルマシンのみであり、利用者が1日1回`uv run copilot-daily`を手動実行する。`data/`（Parquet/DuckDB）と`reports/`（生成Markdown）はローカルへ永続化する。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
 
 ---
 
@@ -163,7 +163,8 @@ sequenceDiagram
     D->>ST: run_steps(step=2, status)
 
     D->>SCR: (3) スクリーニング（Filter→Signal）
-    SCR-->>ST: signals/candidates テーブルへ記録
+    SCR-->>ST: signals テーブルへ記録
+    SCR-->>ST: candidates/screening_rejections を同一トランザクションで記録（P1-02）
     D->>ST: run_steps(step=3, status)
 
     D->>RC: (4) リスクチェック
@@ -204,7 +205,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 層 | 実体 | 役割 | 主な利用者 |
 |---|---|---|---|
 | ① Parquet | `data/bars/`（`year=YYYY`パーティション） | 日足時系列の生データを列指向で永続化。追記・大量読み出しに強い。 | DataProvider（書き込み）、DuckDB（読み出し元） |
-| ② DuckDB | `data/copilot.duckdb` | Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、リスク評価、LLM入出力、判断/ポジションを保持する唯一の構造化ストア。 | screening/*, risk/*, llm/*, paper/*, report/*, pipeline/*, backtest/* |
+| ② DuckDB | `data/copilot.duckdb` | Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、落選理由、リスク評価、LLM入出力、判断/ポジションを保持する唯一の構造化ストア。 | screening/*, risk/*, llm/*, paper/*, report/*, pipeline/*, backtest/* |
 
 使い分けの原則:
 - **時系列の大量データ（株価）はParquet**に列指向で永続化し、DuckDBはその上の「クエリビュー」として振る舞う（DuckDB自体に生データを二重persistしない）。
@@ -315,7 +316,7 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | NFR-02 | 1人保守 | 全体アーキテクチャ（シンプルな単一バッチ構成、`config.py`による設定一元化） |
 | NFR-03 | 35分以内 | `pipeline/daily.py`（`run_steps`による所要時間計測） |
 | NFR-04 | 欠損検知・リトライ | `data/*_provider.py`, `llm/client.py`, `pipeline/daily.py`（フェイルソフト） |
-| NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `risk_assessments`, `llm_calls`, `trades_journal`） |
+| NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `screening_rejections`, `risk_assessments`, `llm_calls`, `trades_journal`） |
 | NFR-06 | キー管理 | `config.py`, `.env`（python-dotenv） |
 | NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier、オプション機能） |
 | NFR-08 | テスト品質（カバレッジ95%以上・E2Eスモーク） | テスト戦略全体（`docs/04_detailed_design.md` 8章）、`pyproject.toml`/justfileのカバレッジ設定 |

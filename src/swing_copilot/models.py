@@ -64,6 +64,12 @@ class Position:
     stop_price: float | None = None
     close_date: date | None = None
     close_price: float | None = None
+    # P1-06: why the position was closed. Input values accepted by
+    # `PaperJournal.close_position()` are exactly {stop_loss, target,
+    # time_stop, manual, other}; "unknown" is a migration-only sentinel
+    # backfilled onto closed rows that predate this column (never a valid
+    # close_position() input). `None` means the position is still open.
+    exit_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

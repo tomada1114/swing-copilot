@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pandas as pd
+import pytest
 
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
-from swing_copilot.report.daily_brief import DailyBriefContext, build_daily_brief
+from swing_copilot.models import RunMode
+from swing_copilot.report.daily_brief import (
+    BriefRejectionCount,
+    BriefRisk,
+    DailyBriefContext,
+    build_daily_brief,
+    format_sizing,
+)
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
-from swing_copilot.screening.base import Candidate
+from swing_copilot.screening.base import (
+    Candidate,
+    RejectionReasonCode,
+    RejectionRecord,
+    RejectionStage,
+)
 from swing_copilot.storage.market_store import FundamentalsRecord
+from swing_copilot.storage.paper_records import (
+    DecisionHistoryEntry,
+    TradeDecisionRecord,
+)
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
@@ -61,10 +79,18 @@ class FakeMarketStore:
 
 
 class FakeStateStore:
+    def __init__(self, *, decision_history=()):
+        self._decision_history = list(decision_history)
+        self.decision_history_calls: list[tuple[str, str, date, int]] = []
+
     def get_source_urls(self, source_ids):
         return {
             source_id: f"https://example.com/{source_id}" for source_id in source_ids
         }
+
+    def get_decision_history(self, symbol, strategy_key, before_date, limit):
+        self.decision_history_calls.append((symbol, strategy_key, before_date, limit))
+        return self._decision_history
 
 
 def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefContext:
@@ -72,7 +98,15 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
         symbol="AAPL",
         as_of=AS_OF,
         signal_names=("volume_min", "trend_sma", "custom"),
-        metrics={"close": 110.0, "rsi14": 45.0, "atr14": 3.0},
+        metrics={
+            "close": 110.0,
+            "rsi14": 45.0,
+            "atr14": 3.0,
+            "score": 0.627,
+            "score_rsi_pullback": 0.167,
+            "score_trend_quality": 0.300,
+            "score_liquidity": 0.160,
+        },
         rank=1,
     )
     risks = (
@@ -131,6 +165,7 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
         risk_assessments=risks,
         news_summaries=news,
         filing_analyses=filing,
+        strategy_key="default",
         notices=("calendar unavailable",),
     )
 
@@ -158,6 +193,34 @@ def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:
         "filing:1",
     }
     assert all(call[3] == AS_OF for call in market_store.read_calls)
+    assert candidate.score == pytest.approx(0.627)
+    assert candidate.score_rsi_pullback == pytest.approx(0.167)
+    assert candidate.score_trend_quality == pytest.approx(0.300)
+    assert candidate.score_liquidity == pytest.approx(0.160)
+
+
+def test_missing_score_fields_produce_none() -> None:
+    context = _context()
+    no_score_candidate = Candidate(
+        symbol="AAPL",
+        as_of=AS_OF,
+        signal_names=(),
+        metrics={"close": 110.0, "rsi14": 45.0, "atr14": 3.0},
+        rank=1,
+    )
+    context = replace(context, candidates=[no_score_candidate])
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    candidate = brief.candidates[0]
+    assert candidate.score is None
+    assert candidate.score_rsi_pullback is None
+    assert candidate.score_trend_quality is None
+    assert candidate.score_liquidity is None
 
 
 def test_missing_data_produces_explicit_fallbacks() -> None:
@@ -174,3 +237,238 @@ def test_missing_data_produces_explicit_fallbacks() -> None:
     assert candidate.risk.status == "not_calculable"
     assert candidate.llm.degraded is True
     assert "取得できませんでした" in candidate.llm.conclusion
+
+
+def test_rejection_counts_are_tallied_by_reason_code_alphabetically() -> None:
+    context = replace(
+        _context(),
+        rejections=[
+            RejectionRecord(
+                symbol="A",
+                stage=RejectionStage.TECHNICAL_SIGNAL,
+                reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                detail={},
+            ),
+            RejectionRecord(
+                symbol="B",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={},
+            ),
+            RejectionRecord(
+                symbol="C",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={},
+            ),
+        ],
+    )
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    assert brief.rejection_counts == (
+        BriefRejectionCount("FILTER_LOW_LIQUIDITY", 2),
+        BriefRejectionCount("SIGNAL_TREND_NOT_MET", 1),
+    )
+
+
+def test_zero_rejections_produces_empty_rejection_counts() -> None:
+    brief = build_daily_brief(
+        _context(),
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    assert brief.rejection_counts == ()
+
+
+def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
+    # REQ-005/REQ-006: RiskAssessment's sizing breakdown and the run's
+    # configured percentages both reach the rendered BriefRisk.
+    context = _context()
+    context = replace(
+        context,
+        risk_assessments=[
+            RiskAssessment(
+                symbol="AAPL",
+                status="approved",
+                max_shares=200,
+                entry_price=50.0,
+                stop_price=45.0,
+                reasons=(),
+                warnings=(),
+                shares_by_risk=200,
+                shares_by_position_cap=500,
+                binding_constraint="trade_risk",
+                sizing_warnings=("WIDE_STOP",),
+            )
+        ],
+        max_trade_risk_pct=0.01,
+        max_position_pct=0.25,
+    )
+
+    brief = build_daily_brief(
+        context,
+        cast("MarketStore", FakeMarketStore()),
+        cast("StateStore", FakeStateStore()),
+    )
+
+    risk = brief.candidates[0].risk
+    assert risk.shares_by_risk == 200
+    assert risk.shares_by_position_cap == 500
+    assert risk.binding_constraint == "trade_risk"
+    assert risk.sizing_warnings == ("WIDE_STOP",)
+    assert risk.max_trade_risk_pct == 0.01
+    assert risk.max_position_pct == 0.25
+
+
+class TestFormatSizing:
+    """P1-03 (REQ-006): the compact "128株（制約: リスク1.0%）"-style string."""
+
+    def test_not_calculable_renders_dash(self) -> None:
+        risk = BriefRisk("not_calculable", None, None, (), ())
+        assert format_sizing(risk) == "-"
+
+    def test_zero_shares_uses_example_4_friction_wording(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            0,
+            45.0,
+            (),
+            (),
+            binding_constraint="position_cap",
+            sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.001,
+        )
+        assert format_sizing(risk) == "0株（摩擦: 資金規模過小）"
+
+    def test_issue_example_1_trade_risk_string(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            128,
+            None,
+            (),
+            (),
+            binding_constraint="trade_risk",
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.25,
+        )
+        assert format_sizing(risk) == "128株（制約: リスク1.0%）"
+
+    def test_issue_example_2_position_cap_string(self) -> None:
+        risk = BriefRisk(
+            "approved",
+            40,
+            None,
+            (),
+            (),
+            binding_constraint="position_cap",
+            max_trade_risk_pct=0.01,
+            max_position_pct=0.02,
+        )
+        assert format_sizing(risk) == "40株（制約: ポジション上限2.0%）"
+
+    def test_sector_binding_uses_a_dedicated_label(self) -> None:
+        risk = BriefRisk("rejected", 12, None, (), (), binding_constraint="sector")
+        assert format_sizing(risk) == "12株（制約: セクター集中）"
+
+    def test_correlation_binding_uses_a_dedicated_label(self) -> None:
+        # Currently unreachable in production (correlation never blocks),
+        # but format_sizing must still render it correctly for
+        # completeness/future-proofing.
+        risk = BriefRisk("approved", 5, None, (), (), binding_constraint="correlation")
+        assert format_sizing(risk) == "5株（制約: 相関）"
+
+
+class TestPastDecisions:
+    """REQ-008: `past_decisions` mapping tests.
+
+    A thin, correctly-scoped mapping over `state_store.get_decision_history()`.
+    """
+
+    def test_populates_from_get_decision_history_scoped_to_symbol_strategy_and_run_date(
+        self,
+    ) -> None:
+        history = [
+            DecisionHistoryEntry(
+                run_id=uuid4(),
+                run_date=date(2026, 7, 15),
+                symbol="AAPL",
+                strategy_key="default",
+                decision="followed",
+                reason_memo="出来高増加",
+                virtual_fill_price=100.0,
+                realized_return_pct=0.05,
+            )
+        ]
+        state_store = FakeStateStore(decision_history=history)
+
+        brief = build_daily_brief(
+            _context(with_llm=False),
+            cast("MarketStore", FakeMarketStore()),
+            cast("StateStore", state_store),
+        )
+
+        # `strategy_key`/`run_date` come from `DailyBriefContext`, not
+        # hardcoded, and `limit=3` is REQ-008's "直近3件".
+        assert state_store.decision_history_calls == [("AAPL", "default", AS_OF, 3)]
+        past = brief.candidates[0].past_decisions
+        assert len(past) == 1
+        assert past[0].run_date == date(2026, 7, 15)
+        assert past[0].decision == "followed"
+        assert past[0].reason_memo == "出来高増加"
+        assert past[0].realized_return_pct == 0.05
+
+    def test_zero_past_decisions_produces_empty_tuple_without_error(self) -> None:
+        brief = build_daily_brief(
+            _context(with_llm=False),
+            cast("MarketStore", FakeMarketStore()),
+            cast("StateStore", FakeStateStore()),
+        )
+
+        assert brief.candidates[0].past_decisions == ()
+
+    def test_example_4_four_recorded_decisions_truncate_to_three_newest_first(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue's worked Example 4: 4 prior decisions recorded for AAPL ->
+        # only the 3 most recent appear, newest-first; the oldest is absent.
+        run_dates = [
+            date(2026, 7, 10),
+            date(2026, 7, 13),
+            date(2026, 7, 16),
+            date(2026, 7, 19),
+        ]
+        for i, run_date in enumerate(run_dates):
+            run_id = state_store.start_run(run_date, RunMode.LIVE, "cfg")
+            state_store.record_trade_decision(
+                TradeDecisionRecord(
+                    run_id=run_id,
+                    symbol="AAPL",
+                    strategy_key="default",
+                    position_id=None,
+                    decision="followed",
+                    reason_memo=f"memo-{i}",
+                    virtual_fill_price=100.0,
+                )
+            )
+
+        brief = build_daily_brief(
+            _context(with_llm=False),
+            cast("MarketStore", FakeMarketStore()),
+            state_store,
+        )
+
+        past = brief.candidates[0].past_decisions
+        assert len(past) == 3
+        assert [p.run_date for p in past] == [
+            date(2026, 7, 19),
+            date(2026, 7, 16),
+            date(2026, 7, 13),
+        ]
+        assert date(2026, 7, 10) not in {p.run_date for p in past}

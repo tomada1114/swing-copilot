@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import duckdb
 import pytest
@@ -12,7 +13,14 @@ from duckdb import ConstraintException
 
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
-from swing_copilot.screening.base import Candidate, SignalHit
+from swing_copilot.screening.base import (
+    Candidate,
+    RejectionReasonCode,
+    RejectionRecord,
+    RejectionStage,
+    SignalHit,
+)
+from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
@@ -26,6 +34,38 @@ def state_store(tmp_path):
     return store
 
 
+_PRE_P1_03_RISK_ASSESSMENTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS risk_assessments (
+        run_id          UUID NOT NULL,
+        symbol          VARCHAR NOT NULL,
+        status          VARCHAR NOT NULL
+            CHECK (status IN ('approved','rejected','not_calculable')),
+        max_shares      BIGINT,
+        entry_price     DOUBLE,
+        stop_price      DOUBLE,
+        reasons_json    JSON NOT NULL,
+        warnings_json   JSON NOT NULL,
+        PRIMARY KEY (run_id, symbol)
+    )
+"""
+
+_PRE_P1_06_POSITIONS_TABLE = """
+    CREATE TABLE IF NOT EXISTS positions (
+        position_id   UUID PRIMARY KEY,
+        symbol        VARCHAR NOT NULL,
+        is_paper      BOOLEAN NOT NULL DEFAULT 1,
+        entry_date    DATE NOT NULL,
+        entry_price   DOUBLE NOT NULL,
+        shares        BIGINT NOT NULL,
+        stop_price    DOUBLE,
+        status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
+        close_date    DATE,
+        close_price   DOUBLE,
+        created_at    TIMESTAMPTZ NOT NULL
+    )
+"""
+
+
 class TestInitSchema:
     def test_is_idempotent(self, state_store):
         state_store.init_schema()
@@ -33,6 +73,140 @@ class TestInitSchema:
 
     def test_empty_positions_on_first_run(self, state_store):
         assert state_store.get_open_positions() == []
+
+    def test_init_schema_upgrades_a_pre_p1_03_risk_assessments_table(self, tmp_path):
+        # Simulate a database created before P1-03: risk_assessments exists
+        # with the old 8-column shape (no sizing-breakdown columns).
+        database = Database(tmp_path / "pre_p1_03.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P1_03_RISK_ASSESSMENTS_TABLE)
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        run_id = uuid4()
+        with database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_assessments (
+                    run_id, symbol, status, max_shares, entry_price,
+                    stop_price, reasons_json, warnings_json,
+                    shares_by_risk, shares_by_position_cap,
+                    binding_constraint, sizing_warnings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(run_id),
+                    "AAPL",
+                    "approved",
+                    200,
+                    50.0,
+                    45.0,
+                    "[]",
+                    "[]",
+                    200,
+                    500,
+                    "trade_risk",
+                    "[]",
+                ],
+            )
+            row = conn.execute(
+                "SELECT binding_constraint, shares_by_risk, shares_by_position_cap "
+                "FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == ("trade_risk", 200, 500)
+
+    def test_init_schema_backfills_unknown_exit_reason_for_closed_rows_only(
+        self, tmp_path
+    ):
+        # P1-06/REQ-002: a database created before this change has no
+        # exit_reason column at all. Migration must backfill 'unknown' onto
+        # already-closed rows, while a still-open row (which has no exit
+        # reason at all) stays NULL rather than also getting stamped.
+        database = Database(tmp_path / "pre_p1_06.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P1_06_POSITIONS_TABLE)
+            closed_id = str(uuid4())
+            open_id = str(uuid4())
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, now())
+                """,
+                [
+                    closed_id,
+                    "AAPL",
+                    True,
+                    date(2026, 7, 1),
+                    100.0,
+                    10,
+                    95.0,
+                    date(2026, 7, 10),
+                    110.0,
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, now())
+                """,
+                [open_id, "MSFT", True, date(2026, 7, 1), 200.0, 5, 190.0],
+            )
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        closed = store.get_position(UUID(closed_id))
+        opened = store.get_position(UUID(open_id))
+        assert closed is not None
+        assert opened is not None
+        assert closed.exit_reason == "unknown"
+        assert opened.exit_reason is None
+
+        # Idempotent: re-running must not disturb either row.
+        store.init_schema()
+        closed_again = store.get_position(UUID(closed_id))
+        opened_again = store.get_position(UUID(open_id))
+        assert closed_again is not None
+        assert opened_again is not None
+        assert closed_again.exit_reason == "unknown"
+        assert opened_again.exit_reason is None
+
+    def test_positions_check_constraint_rejects_invalid_exit_reason(self, state_store):
+        # REQ-001/020: exit_reason is limited to the closed enum at the
+        # schema level (fresh DB), independent of application validation.
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    position_id, symbol, is_paper, entry_date, entry_price,
+                    shares, stop_price, status, close_date, close_price,
+                    exit_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, now())
+                """,
+                [
+                    str(uuid4()),
+                    "AAPL",
+                    True,
+                    date(2026, 7, 1),
+                    100.0,
+                    10,
+                    95.0,
+                    date(2026, 7, 10),
+                    110.0,
+                    "not_a_real_reason",
+                ],
+            )
 
 
 class TestRunLifecycle:
@@ -284,6 +458,157 @@ class TestOpenPositions:
         assert [position.symbol for position in result] == ["AAPL"]
 
 
+def _insert_trade_decision(  # noqa: PLR0913 - test helper, keyword-only for clarity
+    state_store: StateStore,
+    *,
+    run_id: UUID,
+    symbol: str,
+    strategy_key: str,
+    position_id: UUID,
+    created_at: datetime,
+) -> None:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            """
+            INSERT INTO trades_journal (
+                journal_id, run_id, symbol, strategy_key, position_id,
+                decision, reason_memo, virtual_fill_price, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'followed', NULL, NULL, ?)
+            """,
+            [
+                str(uuid4()),
+                str(run_id),
+                symbol,
+                strategy_key,
+                str(position_id),
+                created_at,
+            ],
+        )
+
+
+class TestClosedPositionsWithStrategy:
+    def test_pairs_a_closed_position_with_its_linked_strategy_key(self, state_store):
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="trend_follow",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+        )
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, "trend_follow")]
+
+    def test_strategy_key_is_none_when_no_trades_journal_row_links_the_position(
+        self, state_store
+    ):
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, None)]
+
+    def test_multiple_trades_journal_rows_for_one_position_pick_earliest_created_at(
+        self, state_store
+    ):
+        # trades_journal.position_id is not itself uniquely constrained
+        # (UNIQUE (run_id, symbol, strategy_key) is the real key), so more
+        # than one row can reference the same position_id. The tie-break is
+        # earliest created_at, tie-broken by strategy_key — deliberately
+        # NOT alphabetical-first, to prove created_at (not strategy_key) is
+        # the primary ordering.
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=date(2026, 7, 1),
+            entry_price=100.0,
+            shares=10,
+            status="closed",
+            close_date=date(2026, 7, 10),
+            close_price=110.0,
+            exit_reason="target",
+        )
+        state_store.upsert_position(position)
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="zzz_earlier",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 9, 0, tzinfo=UTC),
+        )
+        _insert_trade_decision(
+            state_store,
+            run_id=uuid4(),
+            symbol="AAPL",
+            strategy_key="aaa_later",
+            position_id=position.position_id,
+            created_at=datetime(2026, 7, 1, 11, 0, tzinfo=UTC),
+        )
+
+        result = state_store.get_closed_positions_with_strategy(is_paper=True)
+
+        assert result == [(position, "zzz_earlier")]
+
+    def test_as_of_boundary_immediately_before_at_and_after_cutoff(self, state_store):
+        as_of = date(2026, 7, 20)
+
+        def _closed(symbol: str, close_date: date) -> Position:
+            return Position(
+                position_id=uuid4(),
+                symbol=symbol,
+                is_paper=True,
+                entry_date=date(2026, 7, 1),
+                entry_price=100.0,
+                shares=10,
+                status="closed",
+                close_date=close_date,
+                close_price=110.0,
+                exit_reason="target",
+            )
+
+        before = _closed("BEFORE", date(2026, 7, 19))
+        at_cutoff = _closed("AT", as_of)
+        after = _closed("AFTER", date(2026, 7, 21))
+        for position in (before, at_cutoff, after):
+            state_store.upsert_position(position)
+
+        result = state_store.get_closed_positions_with_strategy(
+            is_paper=True, as_of=as_of
+        )
+
+        symbols = {position.symbol for position, _ in result}
+        assert symbols == {"BEFORE", "AT"}
+
+
 class TestUniverseMembership:
     def test_returns_none_when_nothing_recorded_yet(self, state_store):
         assert state_store.get_latest_universe_membership() is None
@@ -382,6 +707,36 @@ class TestRecordSignals:
         assert len(rows) == 1
         assert "999.0" in rows[0][0]
 
+    def test_rolls_back_entirely_when_a_later_hit_has_a_non_finite_metric(
+        self, state_store
+    ):
+        # P1-04 (Issue #13): dumps_safe raises before the guarded row's
+        # INSERT runs. That ValueError must still trigger the existing
+        # transaction's ROLLBACK -- an earlier, otherwise-valid hit in the
+        # same batch must not be left committed.
+        run_date = date(2026, 7, 20)
+        valid_hit = SignalHit(
+            symbol="AAPL",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": 100.0},
+        )
+        nan_hit = SignalHit(
+            symbol="MSFT",
+            signal_name="trend_sma",
+            direction="long",
+            strength=1.0,
+            metrics={"sma_long": float("nan")},
+        )
+
+        with pytest.raises(ValueError, match="non-finite"):
+            state_store.record_signals([valid_hit, nan_hit], run_date, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM signals").fetchone()
+        assert count == (0,)
+
 
 class TestRecordCandidates:
     def test_records_one_row_per_candidate(self, state_store):
@@ -418,6 +773,302 @@ class TestRecordCandidates:
         assert count == (2,)
 
 
+class _FlakyRejectionConnection:
+    """Wraps a real connection; raises on the Nth `INSERT INTO screening_rejections`.
+
+    Mirrors `_FlakyConnection` above but targets the rejections table so the
+    rollback test can inject a failure *after* at least one candidate row
+    and one rejection row have already been inserted in the same
+    transaction (REQ-004/REQ-020).
+    """
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO screening_rejections"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later rejection insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+class TestRecordScreeningResults:
+    """P1-02: `screening_rejections` table and its atomic write (REQ-001..REQ-040)."""
+
+    def test_records_one_row_per_candidate_and_rejection(self, state_store):
+        # REQ-001: each stage/reason_code combination reaches the DB.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=("trend_sma",),
+                metrics={"rsi14": 40.0},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="LOWQ",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 1, "required_quarters": 4},
+            ),
+            RejectionRecord(
+                symbol="NETINC",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME,
+                detail={"net_income": -500000.0, "threshold": 0},
+            ),
+            RejectionRecord(
+                symbol="LOWVOL",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_LOW_LIQUIDITY,
+                detail={"avg_volume": 100.0, "threshold": 1_000_000},
+            ),
+            RejectionRecord(
+                symbol="NOTREND",
+                stage=RejectionStage.TECHNICAL_SIGNAL,
+                reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                detail={"close": 99.0, "sma_long": 101.0},
+            ),
+        ]
+
+        state_store.record_screening_results(
+            candidates,
+            rejections,
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            candidate_rows = conn.execute(
+                "SELECT symbol, rank FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchall()
+            rejection_rows = conn.execute(
+                "SELECT symbol, stage, reason_code FROM screening_rejections "
+                "WHERE run_id = ? ORDER BY symbol",
+                [str(run_id)],
+            ).fetchall()
+        assert candidate_rows == [("AAPL", 1)]
+        assert rejection_rows == [
+            ("LOWQ", "data_quality", "DATA_INSUFFICIENT_HISTORY"),
+            ("LOWVOL", "fundamental_filter", "FILTER_LOW_LIQUIDITY"),
+            ("NETINC", "fundamental_filter", "FILTER_NEGATIVE_NET_INCOME"),
+            ("NOTREND", "technical_signal", "SIGNAL_TREND_NOT_MET"),
+        ]
+
+    def test_detail_json_round_trips_observed_value_and_threshold(self, state_store):
+        # REQ-003: detail JSON preserves the exact observed value/threshold.
+        run_id = uuid4()
+        rejection = RejectionRecord(
+            symbol="XYZ",
+            stage=RejectionStage.FUNDAMENTAL_FILTER,
+            reason_code=RejectionReasonCode.FILTER_LOW_EQUITY_RATIO,
+            detail={"equity_ratio": 0.24, "threshold": 0.30},
+        )
+
+        state_store.record_screening_results(
+            [], [rejection], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT detail FROM screening_rejections WHERE run_id = ? AND symbol = ?",
+                [str(run_id), "XYZ"],
+            ).fetchone()
+        assert json.loads(row[0]) == {"equity_ratio": 0.24, "threshold": 0.30}
+
+    def test_invalid_reason_code_violates_check_constraint(self, state_store):
+        # REQ-002: reason_code is limited to the closed enum at the schema
+        # level, independent of application-layer validation.
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO screening_rejections (
+                    run_id, symbol, stage, reason_code, detail, as_of
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(uuid4()),
+                    "XYZ",
+                    "fundamental_filter",
+                    "NOT_A_REAL_REASON_CODE",
+                    "{}",
+                    date(2026, 7, 20),
+                ],
+            )
+
+    def test_invalid_stage_violates_check_constraint(self, state_store):
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO screening_rejections (
+                    run_id, symbol, stage, reason_code, detail, as_of
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(uuid4()),
+                    "XYZ",
+                    "not_a_real_stage",
+                    "DATA_INSUFFICIENT_HISTORY",
+                    "{}",
+                    date(2026, 7, 20),
+                ],
+            )
+
+    def test_rolls_back_both_tables_when_a_later_rejection_insert_fails(
+        self, state_store, monkeypatch
+    ):
+        # REQ-004/REQ-020, Example 3: candidates=5 rejections=3, fails on the
+        # 3rd rejection insert (after >=1 candidate and >=1 rejection already
+        # succeeded in the same transaction) -> zero rows from this run.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol=f"C{i}",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=i,
+            )
+            for i in range(1, 6)
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol=f"R{i}",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            )
+            for i in range(1, 4)
+        ]
+
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=3),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                candidates,
+                rejections,
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            candidate_count = conn.execute(
+                "SELECT count(*) FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+            rejection_count = conn.execute(
+                "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert candidate_count == (0,)
+        assert rejection_count == (0,)
+
+    def test_rerun_after_failure_succeeds(self, state_store, monkeypatch):
+        # A rerun with a fresh run_id after a rolled-back failure must
+        # succeed cleanly (no partial state left behind to conflict with).
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="R1",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            ),
+            RejectionRecord(
+                symbol="R2",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            ),
+        ]
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=2),
+        )
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                candidates,
+                rejections,
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            )
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        retry_run_id = uuid4()
+        state_store.record_screening_results(
+            candidates,
+            rejections,
+            ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20)),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            counts = conn.execute(
+                "SELECT "
+                "(SELECT count(*) FROM candidates WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_rejections WHERE run_id = ?)",
+                [str(retry_run_id), str(retry_run_id)],
+            ).fetchone()
+        assert counts == (1, 2)
+
+    def test_all_pass_fixture_writes_zero_rejection_rows(self, state_store):
+        # REQ-010 boundary at the storage level: an empty rejections list is
+        # a legitimate, error-free write.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=1,
+            )
+        ]
+
+        state_store.record_screening_results(
+            candidates, [], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (0,)
+
+
 class TestRecordRiskAssessments:
     def test_records_status_and_warnings(self, state_store):
         run_id = uuid4()
@@ -440,6 +1091,115 @@ class TestRecordRiskAssessments:
             ).fetchall()
         assert rows[0][0] == "approved"
         assert "MSFT" in rows[0][1]
+
+    def test_data_quality_correlation_warnings_nan_sentinel_persists_as_json_null(
+        self, state_store
+    ):
+        # P1-04 (Issue #13): risk/checks.py::check_correlation intentionally
+        # uses NaN as CorrelationWarning.correlation's "not computable"
+        # sentinel for warning_type="data_quality". dumps_safe must not
+        # reject the whole row for this legitimate value -- it is persisted
+        # as JSON null (the spec-compliant representation) instead.
+        run_id = uuid4()
+        assessment = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+            warnings=(CorrelationWarning("MSFT", float("nan"), "data_quality"),),
+        )
+
+        state_store.record_risk_assessments([assessment], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT warnings_json FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        parsed = json.loads(row[0])
+        assert parsed == [
+            {
+                "warning_type": "data_quality",
+                "correlated_symbol": "MSFT",
+                "correlation": None,
+            }
+        ]
+
+    def test_records_sizing_breakdown(self, state_store):
+        # REQ-005: shares_by_risk/shares_by_position_cap/binding_constraint/
+        # sizing_warnings all persist alongside the existing columns.
+        run_id = uuid4()
+        assessment = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=200,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=500,
+            binding_constraint="trade_risk",
+            sizing_warnings=("WIDE_STOP",),
+        )
+
+        state_store.record_risk_assessments([assessment], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                """
+                SELECT shares_by_risk, shares_by_position_cap,
+                       binding_constraint, sizing_warnings_json
+                FROM risk_assessments WHERE run_id = ?
+                """,
+                [str(run_id)],
+            ).fetchone()
+        assert row[0] == 200
+        assert row[1] == 500
+        assert row[2] == "trade_risk"
+        assert "WIDE_STOP" in row[3]
+
+    def test_rerun_correction_upserts_sizing_breakdown(self, state_store):
+        # Natural-key rerun (same run_id, symbol) must overwrite the sizing
+        # breakdown, not silently keep the stale first-write values.
+        run_id = uuid4()
+        first = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=200,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=500,
+            binding_constraint="trade_risk",
+        )
+        second = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=40,
+            entry_price=50.0,
+            stop_price=45.0,
+            reasons=(),
+            warnings=(),
+            shares_by_risk=200,
+            shares_by_position_cap=40,
+            binding_constraint="position_cap",
+        )
+
+        state_store.record_risk_assessments([first], run_id)
+        state_store.record_risk_assessments([second], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT max_shares, shares_by_position_cap, binding_constraint "
+                "FROM risk_assessments WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == (40, 40, "position_cap")
 
 
 def _text_item(source_id: str, source_url: str) -> TextItem:

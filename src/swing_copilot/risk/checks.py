@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from swing_copilot.risk.position_sizing import calc_position_size
+from swing_copilot.risk.position_sizing import PositionSizeResult, calc_position_size
 
 if TYPE_CHECKING:
     from datetime import date
@@ -31,6 +31,22 @@ _MISSING_DATA_REASON = "missing candidate price/ATR data"
 _MISSING_EQUITY_REASON = "account_equity is not set"
 _INVALID_STOP_REASON = (
     "ATR-based stop distance is not usable (ATR is zero or unavailable)"
+)
+
+# P1-03 (REQ-020): below this risk budget (account_equity * max_trade_risk_pct,
+# in USD), commissions/slippage dominate the trade regardless of the share
+# count, so the risk-% calculation itself stops being meaningful. The issue
+# text gives no exact figure ("極小リスク額") for this half of REQ-020; $1 is
+# a deliberately conservative judgment call, documented here and pinned by a
+# dedicated test (要検証).
+_MIN_MEANINGFUL_RISK_BUDGET_USD = 1.0
+
+SIZING_WARNING_WIDE_STOP = "WIDE_STOP"
+SIZING_WARNING_SMALL_ACCOUNT_FRICTION = "SMALL_ACCOUNT_FRICTION"
+
+# REQ-004: the constraint that determined the final share count.
+BindingConstraint = (
+    str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "not_calculable"
 )
 
 
@@ -54,6 +70,11 @@ class RiskAssessment:
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[CorrelationWarning, ...] = ()
+    # P1-03 sizing breakdown.
+    shares_by_risk: int | None = None
+    shares_by_position_cap: int | None = None
+    binding_constraint: BindingConstraint = "not_calculable"
+    sizing_warnings: tuple[str, ...] = ()
 
 
 def _daily_returns(bars: pd.DataFrame, lookback_days: int) -> pd.Series | None:
@@ -137,6 +158,7 @@ class RiskChecker:
                 stop_price=None,
                 reasons=(_MISSING_DATA_REASON,),
                 warnings=warnings,
+                binding_constraint="not_calculable",
             )
         if account_equity is None:
             return RiskAssessment(
@@ -147,11 +169,12 @@ class RiskChecker:
                 stop_price=None,
                 reasons=(_MISSING_EQUITY_REASON,),
                 warnings=warnings,
+                binding_constraint="not_calculable",
             )
 
         stop_price = entry_price - self._stop_atr_multiple * atr14
         try:
-            max_shares = calc_position_size(
+            sizing = calc_position_size(
                 account_equity,
                 entry_price,
                 stop_price,
@@ -167,10 +190,21 @@ class RiskChecker:
                 stop_price=stop_price,
                 reasons=(_INVALID_STOP_REASON,),
                 warnings=warnings,
+                binding_constraint="not_calculable",
             )
+
+        sizing_warnings = self._sizing_warnings(
+            entry_price, stop_price, account_equity, sizing
+        )
 
         reasons: list[str] = []
         status = "approved"
+        # REQ-004 tie-break: equal intermediate values favor trade_risk.
+        binding_constraint: BindingConstraint = (
+            "trade_risk"
+            if sizing.shares_by_risk <= sizing.shares_by_position_cap
+            else "position_cap"
+        )
         sector = self._sector_by_symbol.get(candidate.symbol)
         if sector is not None and account_equity > 0:
             existing_exposure = sum(
@@ -178,11 +212,14 @@ class RiskChecker:
                 for position in portfolio
                 if self._sector_by_symbol.get(position.symbol) == sector
             )
-            new_exposure = max_shares * entry_price
+            new_exposure = sizing.shares * entry_price
             if (
                 existing_exposure + new_exposure
             ) / account_equity > self._risk_config.max_sector_pct:
                 status = "rejected"
+                # The sector cap is the actual reason the trade is blocked,
+                # regardless of which of trade_risk/position_cap was tighter.
+                binding_constraint = "sector"
                 reasons.append(
                     f"sector concentration limit exceeded for sector {sector!r}"
                 )
@@ -190,12 +227,34 @@ class RiskChecker:
         return RiskAssessment(
             symbol=candidate.symbol,
             status=status,
-            max_shares=max_shares,
+            max_shares=sizing.shares,
             entry_price=entry_price,
             stop_price=stop_price,
             reasons=tuple(reasons),
             warnings=warnings,
+            shares_by_risk=sizing.shares_by_risk,
+            shares_by_position_cap=sizing.shares_by_position_cap,
+            binding_constraint=binding_constraint,
+            sizing_warnings=sizing_warnings,
         )
+
+    def _sizing_warnings(
+        self,
+        entry_price: float,
+        stop_price: float,
+        account_equity: float,
+        sizing: PositionSizeResult,
+    ) -> tuple[str, ...]:
+        """REQ-030/REQ-020: friction warnings that never block approval."""
+        warnings: list[str] = []
+        stop_distance_pct = (entry_price - stop_price) / entry_price * 100
+        if stop_distance_pct > self._risk_config.wide_stop_threshold_pct:
+            warnings.append(SIZING_WARNING_WIDE_STOP)
+
+        risk_budget = account_equity * self._risk_config.max_trade_risk_pct
+        if sizing.shares < 1 or risk_budget < _MIN_MEANINGFUL_RISK_BUDGET_USD:
+            warnings.append(SIZING_WARNING_SMALL_ACCOUNT_FRICTION)
+        return tuple(warnings)
 
     def check_correlation(
         self,

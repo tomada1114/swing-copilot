@@ -7,8 +7,8 @@ needs a secret is actually enabled (`docs/04_detailed_design.md` 2.1 #6).
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import Literal
 
 import yaml
 from pydantic import (
@@ -92,6 +92,9 @@ class RiskConfig(_StrictModel):
     max_sector_pct: float = 0.30
     max_correlation: float = 0.7
     correlation_lookback_days: int = 60
+    # Stop distance as a % of entry price above which a WIDE_STOP sizing
+    # warning is raised (roadmap §5 P1-03, 要検証).
+    wide_stop_threshold_pct: float = 10.0
 
 
 class FundamentalFilterConfig(_StrictModel):
@@ -197,12 +200,25 @@ class Settings(_StrictModel):
     notification: NotificationConfig = NotificationConfig()
 
 
-RankingRule = Literal["rsi14_asc", "avg_volume_desc", "symbol_asc"]
-_DETERMINISTIC_RANKING: tuple[RankingRule, ...] = (
-    "rsi14_asc",
-    "avg_volume_desc",
-    "symbol_asc",
-)
+_SCORE_WEIGHT_SUM_TOLERANCE = 1e-9
+
+
+class ScoreWeights(_StrictModel):
+    """Component weights for the composite ranking score (P1-01, roadmap §5).
+
+    Defaults are unvalidated (要検証); P2-10's sensitivity grid is the
+    intended follow-up to ground them empirically.
+    """
+
+    rsi_pullback: float = Field(default=0.5, ge=0.0)
+    trend_quality: float = Field(default=0.3, ge=0.0)
+    liquidity: float = Field(default=0.2, ge=0.0)
+
+
+class RankingConfig(_StrictModel):
+    """`ranking.*` in one `strategies.yaml` strategy entry."""
+
+    score_weights: ScoreWeights = ScoreWeights()
 
 
 class StrategySpec(_StrictModel):
@@ -213,14 +229,7 @@ class StrategySpec(_StrictModel):
     filters_all: tuple[str, ...]
     signals_all: tuple[str, ...]
     candidate_limit: int = Field(gt=0, le=10)
-    ranking: tuple[RankingRule, ...] = _DETERMINISTIC_RANKING
-
-    @model_validator(mode="after")
-    def _require_deterministic_ranking(self) -> StrategySpec:
-        if self.signals_all and self.ranking != _DETERMINISTIC_RANKING:
-            msg = "enabled strategies must use the deterministic P1/P2 ranking"
-            raise ValueError(msg)
-        return self
+    ranking: RankingConfig = RankingConfig()
 
 
 class StrategiesConfig(_StrictModel):
@@ -229,6 +238,19 @@ class StrategiesConfig(_StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     strategies: dict[str, StrategySpec] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _require_score_weights_sum_to_one(self) -> StrategiesConfig:
+        for key, spec in self.strategies.items():
+            weights = spec.ranking.score_weights
+            total = weights.rsi_pullback + weights.trend_quality + weights.liquidity
+            if not math.isclose(total, 1.0, abs_tol=_SCORE_WEIGHT_SUM_TOLERANCE):
+                msg = (
+                    f"strategy '{key}': ranking.score_weights must sum to "
+                    f"1.0, got {total}"
+                )
+                raise ValueError(msg)
+        return self
 
 
 def load_settings(path: str = "config/settings.yaml") -> Settings:
@@ -269,8 +291,8 @@ def load_strategies(path: str = "config/strategies.yaml") -> StrategiesConfig:
         path: Path to the strategies YAML file.
 
     Returns:
-        Typed strategy specifications with bounded candidate counts and the
-        deterministic P1/P2 ranking contract.
+        Typed strategy specifications with bounded candidate counts and
+        composite-ranking score weights that sum to 1.0 (P1-01).
 
     Raises:
         ConfigError: The file is missing, malformed, or violates the schema.

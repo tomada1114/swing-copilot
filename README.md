@@ -48,6 +48,10 @@ Backtest a strategy over a historical window, with risk-adjusted metrics
 uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30
 ```
 
+Add `--pessimistic` to also run a higher-slippage scenario (1.75x) and print a
+normal-vs-pessimistic comparison, checking the strategy doesn't rely on
+unrealistically favorable fills.
+
 See `docs/00_human_preparation.md` for the full setup checklist and
 `docs/03_basic_design.md` / `docs/04_detailed_design.md` for the architecture.
 

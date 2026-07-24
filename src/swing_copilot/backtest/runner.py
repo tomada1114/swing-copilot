@@ -49,6 +49,7 @@ class BacktestCostOverrides:
     commission_pct: float | None = None
     slippage_pct: float | None = None
     benchmark_symbol: str | None = None
+    slippage_multiplier: float | None = None
 
 
 def _trading_days(
@@ -87,6 +88,11 @@ def run_backtest(
         if overrides.slippage_pct is not None
         else deps.settings.backtest.slippage_pct
     )
+    slippage_multiplier = (
+        overrides.slippage_multiplier
+        if overrides.slippage_multiplier is not None
+        else deps.settings.backtest.slippage_multiplier
+    )
 
     effective_settings = deps.settings.model_copy(
         update={
@@ -94,6 +100,7 @@ def run_backtest(
                 update={
                     "commission_pct": commission_pct,
                     "slippage_pct": slippage_pct,
+                    "slippage_multiplier": slippage_multiplier,
                     "benchmark": benchmark_symbol,
                 }
             )

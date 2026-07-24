@@ -816,9 +816,11 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
     [--limit N] [--output PATH] [--pessimistic] [--db PATH]
 ```
 
-`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--pessimistic`はP2-09（Issue #18）まではパーサー枠のみ。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
 
 **バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
+
+**P2-09実装時追記（roadmap §5 P2-09）**: `backtest.slippage_multiplier`（既定1.0）を追加し、`BacktestEngine`は`slippage_pct * slippage_multiplier`を単一の`self._slippage_pct`としてエントリー・エグジット（強制清算含む、`_settle_exit`が全exit経路の共通ハンドラのため自動的に両方へ効く）両方に適用する。悲観プリセットは`backtest.pessimistic_slippage_multiplier=1.75`（出典: backtest-expertの1.5〜2.0帯の中央値、要検証）。`BacktestCostOverrides`に`slippage_multiplier: float | None`を追加し、`copilot-backtest --pessimistic`は同一`BacktestRequest`を通常(×1.0)・悲観(×1.75)の2回`run_backtest`実行し、`render_terminal_comparison`/`render_markdown_comparison`（`ReportMeta`共有）で指標差分表を出力する。両レンダー関数は引数過多(PLR0913)回避のため`render_terminal`/`render_markdown`も含め`ReportMeta`（strategy/start/end/missing_data_symbols）dataclassへ統一した。乗数1.0は既存デフォルト計算と完全一致（`test_multiplier_one_matches_default_entry_and_exit_prices`で回帰確認）し、悲観側`final_equity`は通常側以下になることをテストで保証する。
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
@@ -1454,6 +1456,8 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 手数料 | 0.1% | `backtest.commission_pct=0.001` |
 | スリッページ | 0.1% | `backtest.slippage_pct=0.001` |
 | 比較対象 | SPYバイ&ホールド | `backtest.benchmark="SPY"` |
+| スリッページ乗数（既定） | 1.0倍 | `backtest.slippage_multiplier=1.0`（P2-09） |
+| 悲観プリセット乗数 | 1.75倍（要検証） | `backtest.pessimistic_slippage_multiplier=1.75`（P2-09、出典: backtest-expert） |
 
 ### 7.3a リスク調整後指標の信頼性閾値（P2-07、roadmap §5 P2-07）
 

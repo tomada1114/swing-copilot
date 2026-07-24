@@ -1,15 +1,17 @@
-"""CLI entry point `copilot-backtest` (P2-08, roadmap §5 P2-08).
+"""CLI entry point `copilot-backtest` (P2-08/P2-09, roadmap §5 P2-08/P2-09).
 
 Wires the real `MarketStore`/S&P 500 universe into `backtest.runner.run_backtest`
 and renders P2-07's risk-adjusted metrics to terminal (Rich) and an atomically
 written markdown report, promoting the backtester from tests-only to a daily
-tool (diagnosis D5's execution side).
+tool (diagnosis D5's execution side). `--pessimistic` (P2-09) additionally runs
+a higher-slippage scenario and renders a normal-vs-pessimistic comparison.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -19,6 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from swing_copilot.backtest.runner import (
+    BacktestCostOverrides,
     BacktestDependencies,
     BacktestRequest,
     run_backtest,
@@ -44,6 +47,16 @@ class BacktestCliError(SwingCopilotError):
     """Raised for fail-fast argument/strategy errors, before any backtest runs."""
 
 
+@dataclass(frozen=True, slots=True)
+class ReportMeta:
+    """Shared render context: what was backtested and any skipped symbols."""
+
+    strategy: str
+    start: date
+    end: date
+    missing_data_symbols: Sequence[str]
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="copilot-backtest")
     parser.add_argument("--strategy", required=True)
@@ -51,8 +64,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end", type=date.fromisoformat, required=True)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--output", type=Path, default=None)
-    # REQ-010: parser slot only -- the dual normal/pessimistic run itself is
-    # P2-09 (Issue #18).
     parser.add_argument("--pessimistic", action="store_true")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     return parser.parse_args(argv)
@@ -158,20 +169,13 @@ def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
     ]
 
 
-def render_terminal(
-    result: BacktestResult,
-    *,
-    strategy: str,
-    start: date,
-    end: date,
-    missing_data_symbols: Sequence[str],
-) -> str:
+def render_terminal(result: BacktestResult, meta: ReportMeta) -> str:
     """Render `result` as Rich terminal text (REQ-007/009)."""
     buffer = StringIO()
     console = Console(file=buffer, width=_CONSOLE_WIDTH)
     console.print(
-        f"[bold]copilot-backtest[/bold] strategy={strategy} "
-        f"{start.isoformat()}..{end.isoformat()}"
+        f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
+        f"{meta.start.isoformat()}..{meta.end.isoformat()}"
     )
 
     metrics_table = Table(title="Backtest metrics", header_style="bold")
@@ -183,9 +187,10 @@ def render_terminal(
 
     for warning in result.warnings:
         console.print(f"[yellow]{warning}[/yellow]")
-    if missing_data_symbols:
+    if meta.missing_data_symbols:
         console.print(
-            f"[yellow]データ不足のためスキップ: {', '.join(missing_data_symbols)}[/yellow]"
+            "[yellow]データ不足のためスキップ: "
+            f"{', '.join(meta.missing_data_symbols)}[/yellow]"
         )
 
     if result.trades:
@@ -223,17 +228,10 @@ def render_terminal(
     return buffer.getvalue()
 
 
-def render_markdown(
-    result: BacktestResult,
-    *,
-    strategy: str,
-    start: date,
-    end: date,
-    missing_data_symbols: Sequence[str],
-) -> str:
+def render_markdown(result: BacktestResult, meta: ReportMeta) -> str:
     """Render `result` as a markdown report (REQ-007/009)."""
     lines = [
-        f"# Backtest: {strategy} ({start.isoformat()} .. {end.isoformat()})",
+        f"# Backtest: {meta.strategy} ({meta.start.isoformat()} .. {meta.end.isoformat()})",
         "",
         "## Metrics",
         "",
@@ -250,11 +248,11 @@ def render_markdown(
         lines += [f"- {warning}" for warning in result.warnings]
         lines.append("")
 
-    if missing_data_symbols:
+    if meta.missing_data_symbols:
         lines += [
             "## Data quality",
             "",
-            f"データ不足のためスキップ: {', '.join(missing_data_symbols)}",
+            f"データ不足のためスキップ: {', '.join(meta.missing_data_symbols)}",
             "",
         ]
 
@@ -278,6 +276,79 @@ def render_markdown(
     lines.append("")
 
     lines += ["## Survivorship bias", "", result.survivorship_bias_note, ""]
+    return "\n".join(lines)
+
+
+def render_terminal_comparison(
+    normal: BacktestResult, pessimistic: BacktestResult, meta: ReportMeta
+) -> str:
+    """Render normal-vs-pessimistic metrics side by side (P2-09 REQ-004)."""
+    buffer = StringIO()
+    console = Console(file=buffer, width=_CONSOLE_WIDTH)
+    console.print(
+        f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
+        f"{meta.start.isoformat()}..{meta.end.isoformat()} (normal vs pessimistic)"
+    )
+
+    table = Table(title="Backtest metrics: normal vs pessimistic", header_style="bold")
+    table.add_column("Metric")
+    table.add_column("Normal (x1.0)", justify="right")
+    table.add_column("Pessimistic", justify="right")
+    for label, field in _METRIC_ROWS:
+        table.add_row(
+            label, _metric_value(normal, field), _metric_value(pessimistic, field)
+        )
+    console.print(table)
+
+    if meta.missing_data_symbols:
+        console.print(
+            "[yellow]データ不足のためスキップ: "
+            f"{', '.join(meta.missing_data_symbols)}[/yellow]"
+        )
+    for warning in normal.warnings:
+        console.print(f"[yellow]normal: {warning}[/yellow]")
+    for warning in pessimistic.warnings:
+        console.print(f"[yellow]pessimistic: {warning}[/yellow]")
+    console.print(f"[dim]{normal.survivorship_bias_note}[/dim]")
+
+    return buffer.getvalue()
+
+
+def render_markdown_comparison(
+    normal: BacktestResult, pessimistic: BacktestResult, meta: ReportMeta
+) -> str:
+    """Render normal-vs-pessimistic metrics as a markdown diff table (P2-09 REQ-004)."""
+    lines = [
+        f"# Backtest: {meta.strategy} ({meta.start.isoformat()} .. "
+        f"{meta.end.isoformat()}) -- normal vs pessimistic",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | Normal (x1.0) | Pessimistic |",
+        "|---|---:|---:|",
+    ]
+    lines += [
+        f"| {label} | {_metric_value(normal, field)} | "
+        f"{_metric_value(pessimistic, field)} |"
+        for label, field in _METRIC_ROWS
+    ]
+    lines.append("")
+
+    if meta.missing_data_symbols:
+        lines += [
+            "## Data quality",
+            "",
+            f"データ不足のためスキップ: {', '.join(meta.missing_data_symbols)}",
+            "",
+        ]
+
+    if normal.warnings or pessimistic.warnings:
+        lines += ["## Warnings", ""]
+        lines += [f"- normal: {warning}" for warning in normal.warnings]
+        lines += [f"- pessimistic: {warning}" for warning in pessimistic.warnings]
+        lines.append("")
+
+    lines += ["## Survivorship bias", "", normal.survivorship_bias_note, ""]
     return "\n".join(lines)
 
 
@@ -331,32 +402,44 @@ def main(argv: list[str] | None = None) -> None:
             initial_cash=settings.backtest.initial_cash_usd,
             strategy_key=args.strategy,
         )
-        result = run_backtest(request, deps)
+        if args.pessimistic:
+            normal_result = run_backtest(
+                request, deps, BacktestCostOverrides(slippage_multiplier=1.0)
+            )
+            pessimistic_result = run_backtest(
+                request,
+                deps,
+                BacktestCostOverrides(
+                    slippage_multiplier=settings.backtest.pessimistic_slippage_multiplier
+                ),
+            )
+        else:
+            result = run_backtest(request, deps)
     except BacktestCliError as exc:
         raise SystemExit(str(exc)) from exc
 
-    sys.stdout.write(
-        render_terminal(
-            result,
-            strategy=args.strategy,
-            start=args.start,
-            end=args.end,
-            missing_data_symbols=missing_data_symbols,
-        )
+    meta = ReportMeta(
+        strategy=args.strategy,
+        start=args.start,
+        end=args.end,
+        missing_data_symbols=missing_data_symbols,
     )
+    if args.pessimistic:
+        terminal_text = render_terminal_comparison(
+            normal_result, pessimistic_result, meta
+        )
+        markdown_text = render_markdown_comparison(
+            normal_result, pessimistic_result, meta
+        )
+    else:
+        terminal_text = render_terminal(result, meta)
+        markdown_text = render_markdown(result, meta)
+
+    sys.stdout.write(terminal_text)
 
     output_path = _output_path(args)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(
-        output_path,
-        render_markdown(
-            result,
-            strategy=args.strategy,
-            start=args.start,
-            end=args.end,
-            missing_data_symbols=missing_data_symbols,
-        ),
-    )
+    _atomic_write(output_path, markdown_text)
     sys.stdout.write(f"\nReport written to {output_path}\n")
 
 

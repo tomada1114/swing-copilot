@@ -96,6 +96,40 @@ def test_run_backtest_uses_default_overrides_when_none_given(settings, market_st
     assert result.final_equity == pytest.approx(50_000.0)
 
 
+def test_run_backtest_accepts_slippage_multiplier_override(settings, market_store):
+    """P2-09: the override threads through without raising.
+
+    Exact price effects are covered by the engine-level
+    TestPessimisticSlippageMultiplier suite.
+    """
+    universe = (
+        UniverseMember(
+            symbol="AAPL",
+            company_name="Apple",
+            gics_sector="Information Technology",
+            source_symbol="AAPL",
+        ),
+    )
+    deps = BacktestDependencies(
+        market_store=market_store,
+        universe=universe,
+        settings=settings,
+        strategies_config=STRATEGIES_CONFIG,
+    )
+    request = BacktestRequest(
+        symbols=["AAPL"],
+        start=date(2027, 1, 1),
+        end=date(2027, 1, 20),
+        initial_cash=100_000.0,
+    )
+
+    result = run_backtest(
+        request, deps, BacktestCostOverrides(slippage_multiplier=1.75)
+    )
+
+    assert result.final_equity > 0
+
+
 def test_run_backtest_uses_benchmark_from_settings_when_not_overridden(
     settings, tmp_path
 ):

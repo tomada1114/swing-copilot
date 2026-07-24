@@ -146,6 +146,13 @@ class BacktestConfig(_StrictModel):
     commission_pct: float = 0.001
     slippage_pct: float = 0.001
     benchmark: str = "SPY"
+    # Multiplier applied to slippage_pct on both entry and exit (incl. forced
+    # liquidation), roadmap §5 P2-09. 1.0 == no change from the base
+    # slippage_pct; --pessimistic overrides it with pessimistic_slippage_multiplier.
+    slippage_multiplier: float = 1.0
+    # Pessimistic-scenario preset (roadmap §5 P2-09, 要検証: median of
+    # backtest-expert's cited 1.5-2.0x range).
+    pessimistic_slippage_multiplier: float = 1.75
     # trade_count below this draws a "statistically insufficient" warning;
     # below preliminary_trade_count_threshold (but >= this) draws a
     # "preliminary" warning (roadmap §5 P2-07, out: backtest-expert).

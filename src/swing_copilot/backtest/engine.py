@@ -145,6 +145,11 @@ class BacktestEngine:
         self._max_concurrent_positions = max(1, int(1 / settings.risk.max_position_pct))
         self._max_position_pct = settings.risk.max_position_pct
         self._max_trade_risk_pct = settings.risk.max_trade_risk_pct
+        # P2-09: applied on both entry and exit (incl. forced liquidation) --
+        # a single computed rate so every call site stays in sync.
+        self._slippage_pct = (
+            settings.backtest.slippage_pct * settings.backtest.slippage_multiplier
+        )
 
     def run(
         self,
@@ -263,7 +268,7 @@ class BacktestEngine:
             if bar is None or atr14 is None:
                 continue
 
-            entry_price = bar["open"] * (1 + self._backtest_config.slippage_pct)
+            entry_price = bar["open"] * (1 + self._slippage_pct)
             stop_price = entry_price - self._backtest_config.exit_atr_multiple * atr14
             try:
                 shares = calc_position_size(
@@ -320,7 +325,7 @@ class BacktestEngine:
         exit_price: float,
         exit_reason: str,
     ) -> None:
-        execution_price = exit_price * (1 - self._backtest_config.slippage_pct)
+        execution_price = exit_price * (1 - self._slippage_pct)
         proceeds = (
             position.shares
             * execution_price

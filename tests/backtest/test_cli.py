@@ -12,6 +12,7 @@ import pytest
 from swing_copilot.backtest import cli as cli_module
 from swing_copilot.backtest.cli import (
     BacktestCliError,
+    ReportMeta,
     _atomic_write,
     _missing_data_symbols,
     _output_path,
@@ -20,7 +21,9 @@ from swing_copilot.backtest.cli import (
     _validate_args,
     main,
     render_markdown,
+    render_markdown_comparison,
     render_terminal,
+    render_terminal_comparison,
 )
 from swing_copilot.backtest.engine import BacktestResult, Trade
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
@@ -254,14 +257,11 @@ class TestRenderTerminal:
             initial_stop_price=90.0,
         )
         result = _result(trades=(trade,), warnings=("予備的（trade_count=5）",))
-
-        text = render_terminal(
-            result,
-            strategy="default",
-            start=_D0,
-            end=_D1,
-            missing_data_symbols=["ZZZ"],
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
         )
+
+        text = render_terminal(result, meta)
 
         assert "trade_count" in text
         assert "1" in text
@@ -272,19 +272,21 @@ class TestRenderTerminal:
 
     def test_no_trades_shows_placeholder(self):
         result = _result()
-
-        text = render_terminal(
-            result, strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
         )
+
+        text = render_terminal(result, meta)
 
         assert "Trades: (none)" in text
 
     def test_empty_equity_curve_shows_no_trading_days(self):
         result = dataclasses.replace(_result(), equity_curve=())
-
-        text = render_terminal(
-            result, strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
         )
+
+        text = render_terminal(result, meta)
 
         assert "Equity curve: (no trading days)" in text
 
@@ -302,14 +304,11 @@ class TestRenderMarkdown:
             initial_stop_price=90.0,
         )
         result = _result(trades=(trade,), warnings=("統計的に不十分",))
-
-        text = render_markdown(
-            result,
-            strategy="default",
-            start=_D0,
-            end=_D1,
-            missing_data_symbols=["ZZZ"],
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
         )
+
+        text = render_markdown(result, meta)
 
         assert "# Backtest: default" in text
         assert "## Metrics" in text
@@ -323,14 +322,75 @@ class TestRenderMarkdown:
 
     def test_no_trades_shows_placeholder(self):
         result = _result()
-
-        text = render_markdown(
-            result, strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
         )
+
+        text = render_markdown(result, meta)
 
         assert "(no trades)" in text
         assert "## Warnings" not in text
         assert "## Data quality" not in text
+
+
+class TestRenderComparison:
+    def test_terminal_comparison_shows_both_scenarios_and_labeled_warnings(self):
+        normal = _result(warnings=("normal warning",))
+        pessimistic = dataclasses.replace(
+            _result(warnings=("pessimistic warning",)), final_equity=90_000.0
+        )
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
+        )
+
+        text = render_terminal_comparison(normal, pessimistic, meta)
+
+        assert "normal vs pessimistic" in text
+        assert "normal: normal warning" in text
+        assert "pessimistic: pessimistic warning" in text
+        assert "データ不足のためスキップ: ZZZ" in text
+        assert "101,000.00" in text
+        assert "90,000.00" in text
+
+    def test_terminal_comparison_with_no_missing_data_omits_the_skip_line(self):
+        normal = _result()
+        pessimistic = _result()
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        )
+
+        text = render_terminal_comparison(normal, pessimistic, meta)
+
+        assert "データ不足のためスキップ" not in text
+
+    def test_markdown_comparison_shows_both_scenarios_as_a_diff_table(self):
+        normal = _result(warnings=("normal warning",))
+        pessimistic = dataclasses.replace(
+            _result(warnings=("pessimistic warning",)), final_equity=90_000.0
+        )
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        )
+
+        text = render_markdown_comparison(normal, pessimistic, meta)
+
+        assert "normal vs pessimistic" in text
+        assert "| Metric | Normal (x1.0) | Pessimistic |" in text
+        assert "- normal: normal warning" in text
+        assert "- pessimistic: pessimistic warning" in text
+        assert "101,000.00" in text
+        assert "90,000.00" in text
+
+    def test_no_warnings_omits_warnings_section(self):
+        normal = _result()
+        pessimistic = _result()
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        )
+
+        text = render_markdown_comparison(normal, pessimistic, meta)
+
+        assert "## Warnings" not in text
 
 
 @pytest.fixture
@@ -395,6 +455,36 @@ class TestMainEndToEnd:
         assert "データ不足のためスキップ: BBB" in captured.out
         assert output_path.exists()
         assert "# Backtest: default" in output_path.read_text(encoding="utf-8")
+
+    def test_pessimistic_runs_both_scenarios_and_writes_comparison_report(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "report.md"
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--pessimistic",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "normal vs pessimistic" in captured.out
+        assert "Normal (x1.0)" in captured.out
+        assert "Pessimistic" in captured.out
+        report_text = output_path.read_text(encoding="utf-8")
+        assert "normal vs pessimistic" in report_text
+        assert "| Metric | Normal (x1.0) | Pessimistic |" in report_text
 
     def test_start_after_end_exits_without_running(self, seeded_db, tmp_path):
         db_path, days = seeded_db

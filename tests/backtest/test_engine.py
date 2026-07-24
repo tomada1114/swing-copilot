@@ -371,6 +371,57 @@ class TestTradePnl:
         assert trade.pnl == pytest.approx(100.0)
 
 
+class TestRiskAdjustedMetricsWiring:
+    """P2-07: BacktestEngine.run() populates the new BacktestResult fields."""
+
+    def test_trade_count_matches_len_trades(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert result.trade_count == len(result.trades)
+
+    def test_filled_trade_records_initial_stop_price(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert len(result.trades) == 1
+        assert result.trades[0].initial_stop_price is not None
+        assert result.trades[0].initial_stop_price < result.trades[0].entry_price
+
+    def test_no_trades_reports_insufficient_sample_warning_and_none_metrics(
+        self, engine
+    ):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+
+        result = engine.run(days, bars_frame(rows), _no_candidates, INITIAL_CASH)
+
+        assert result.trade_count == 0
+        assert result.win_rate is None
+        assert result.profit_factor is None
+        assert result.expectancy_per_trade is None
+        assert result.avg_r_multiple is None
+        assert any("統計的に不十分" in w for w in result.warnings)
+
+    def test_empty_trading_calendar_still_populates_metric_fields(self, engine):
+        result = engine.run([], bars_frame([]), _no_candidates, INITIAL_CASH)
+
+        assert result.trade_count == 0
+        assert result.sharpe is None
+        assert result.max_drawdown_pct == pytest.approx(0.0)
+        assert any("統計的に不十分" in w for w in result.warnings)
+
+
 class TestEdgeCasesAndDefensiveBranches:
     def test_duplicate_candidate_for_an_already_open_symbol_is_ignored(self, engine):
         days = TRADING_DAYS[:4]

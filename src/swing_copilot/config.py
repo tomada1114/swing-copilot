@@ -146,6 +146,18 @@ class BacktestConfig(_StrictModel):
     commission_pct: float = 0.001
     slippage_pct: float = 0.001
     benchmark: str = "SPY"
+    # trade_count below this draws a "statistically insufficient" warning;
+    # below preliminary_trade_count_threshold (but >= this) draws a
+    # "preliminary" warning (roadmap §5 P2-07, out: backtest-expert).
+    insufficient_trade_count_threshold: int = 30
+    preliminary_trade_count_threshold: int = 100
+    # win_rate (fraction, e.g. 0.90 == 90%) strictly above this, or
+    # max_drawdown_pct strictly below lookahead_suspicion_max_drawdown, draws
+    # a look-ahead-bias suspicion warning (roadmap §5 P2-07). The win_rate
+    # bound is from the roadmap; the drawdown bound has no seed value and is
+    # fixed here as 要検証 per Issue #16's boundary note.
+    lookahead_suspicion_win_rate: float = 0.90
+    lookahead_suspicion_max_drawdown: float = 0.01
 
 
 class LLMModelSelection(_StrictModel):

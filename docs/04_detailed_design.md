@@ -807,6 +807,8 @@ def run_backtest(
 - 現在のS&P500構成銘柄しかない期間は、その事実と生存者バイアスを結果へ必ず表示する。
 - 最終日後に残るpositionは最終日価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。SPY benchmarkは整数株購入後の残cashをcurveへ含める。
 
+**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
+
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
 > **P2-5実装時の訂正（2026-07-22）**: 以下の`signal_id: int`/`position_id: int`
@@ -1441,6 +1443,15 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 手数料 | 0.1% | `backtest.commission_pct=0.001` |
 | スリッページ | 0.1% | `backtest.slippage_pct=0.001` |
 | 比較対象 | SPYバイ&ホールド | `backtest.benchmark="SPY"` |
+
+### 7.3a リスク調整後指標の信頼性閾値（P2-07、roadmap §5 P2-07）
+
+| 項目 | 値 | 設定キー |
+|---|---|---|
+| 「統計的に不十分」警告の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（出典: backtest-expert） |
+| 「予備的」警告の閾値 | 30 ≤ trade_count < 100 | `backtest.preliminary_trade_count_threshold=100`（出典: backtest-expert） |
+| ルックアヘッド疑い: 勝率 | 90%超 | `backtest.lookahead_suspicion_win_rate=0.90` |
+| ルックアヘッド疑い: 最大DD | 1%未満（要検証、シードに数値指定なし） | `backtest.lookahead_suspicion_max_drawdown=0.01` |
 
 ### 7.4 リスクパラメータ
 

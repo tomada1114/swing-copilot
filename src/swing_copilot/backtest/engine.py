@@ -23,6 +23,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from swing_copilot.backtest import metrics
 from swing_copilot.risk.position_sizing import calc_position_size
 from swing_copilot.screening.indicators import symbol_bars, wilder_atr
 
@@ -54,6 +55,10 @@ class Trade:
     exit_price: float
     shares: int
     exit_reason: str  # "stop" | "max_hold" | "end_of_backtest"
+    # Stop price at entry fill time, before any later trailing-stop update
+    # (P2-07's R-multiple is against the risk actually taken at entry, not
+    # today's trailed stop). None only if never recorded.
+    initial_stop_price: float | None = None
 
     @property
     def pnl(self) -> float:
@@ -70,6 +75,14 @@ class BacktestResult:
     benchmark_curve: tuple[tuple[date, float], ...]
     final_equity: float
     benchmark_final_equity: float
+    trade_count: int
+    sharpe: float | None
+    max_drawdown_pct: float
+    win_rate: float | None
+    profit_factor: float | None
+    expectancy_per_trade: float | None
+    avg_r_multiple: float | None
+    warnings: tuple[str, ...]
     survivorship_bias_note: str = SURVIVORSHIP_BIAS_NOTE
 
 
@@ -80,6 +93,7 @@ class _OpenPosition:
     entry_price: float
     shares: int
     stop_price: float
+    initial_stop_price: float
     days_held: int = 0
 
 
@@ -157,13 +171,7 @@ class BacktestEngine:
             The full trade log, equity curves, and survivorship bias note.
         """
         if not trading_days:
-            return BacktestResult(
-                trades=(),
-                equity_curve=(),
-                benchmark_curve=(),
-                final_equity=initial_cash,
-                benchmark_final_equity=initial_cash,
-            )
+            return self._build_result((), (), (), initial_cash, initial_cash)
 
         state = _SimState(cash=initial_cash, benchmark_cash=initial_cash)
         pending_entries: list[Candidate] = []
@@ -202,14 +210,40 @@ class BacktestEngine:
         self._liquidate_remaining(trading_days[-1], bars, state)
         equity_curve[-1] = (trading_days[-1], state.cash)
 
+        return self._build_result(
+            tuple(state.closed_trades),
+            tuple(equity_curve),
+            tuple(benchmark_curve),
+            equity_curve[-1][1] if equity_curve else initial_cash,
+            benchmark_curve[-1][1] if benchmark_curve else initial_cash,
+        )
+
+    def _build_result(
+        self,
+        trades: tuple[Trade, ...],
+        equity_curve: tuple[tuple[date, float], ...],
+        benchmark_curve: tuple[tuple[date, float], ...],
+        final_equity: float,
+        benchmark_final_equity: float,
+    ) -> BacktestResult:
+        win_rate = metrics.compute_win_rate(trades)
+        max_drawdown_pct = metrics.compute_max_drawdown_pct(equity_curve)
         return BacktestResult(
-            trades=tuple(state.closed_trades),
-            equity_curve=tuple(equity_curve),
-            benchmark_curve=tuple(benchmark_curve),
-            final_equity=equity_curve[-1][1] if equity_curve else initial_cash,
-            benchmark_final_equity=benchmark_curve[-1][1]
-            if benchmark_curve
-            else initial_cash,
+            trades=trades,
+            equity_curve=equity_curve,
+            benchmark_curve=benchmark_curve,
+            final_equity=final_equity,
+            benchmark_final_equity=benchmark_final_equity,
+            trade_count=len(trades),
+            sharpe=metrics.compute_sharpe(equity_curve),
+            max_drawdown_pct=max_drawdown_pct,
+            win_rate=win_rate,
+            profit_factor=metrics.compute_profit_factor(trades),
+            expectancy_per_trade=metrics.compute_expectancy_per_trade(trades),
+            avg_r_multiple=metrics.compute_avg_r_multiple(trades),
+            warnings=metrics.compute_reliability_warnings(
+                len(trades), win_rate, max_drawdown_pct, self._backtest_config
+            ),
         )
 
     def _fill_pending_entries(
@@ -255,6 +289,7 @@ class BacktestEngine:
                 entry_price=entry_price,
                 shares=shares,
                 stop_price=stop_price,
+                initial_stop_price=stop_price,
             )
 
     def _process_exits(self, day: date, bars: pd.DataFrame, state: _SimState) -> None:
@@ -301,6 +336,7 @@ class BacktestEngine:
                 exit_price=execution_price,
                 shares=position.shares,
                 exit_reason=exit_reason,
+                initial_stop_price=position.initial_stop_price,
             )
         )
         del state.open_positions[position.symbol]

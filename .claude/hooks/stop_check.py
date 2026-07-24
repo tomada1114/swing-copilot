@@ -22,9 +22,11 @@ import os
 import subprocess
 import sys
 
+# --no-cache: a stale .ruff_cache has returned false "All checks passed!"
+# verdicts locally that CI (cacheless) then rejected; correctness over speed here.
 CHECKS = (
-    ["uv", "run", "ruff", "check", "."],
-    ["uv", "run", "ruff", "format", "--check", "."],
+    ["uv", "run", "ruff", "check", "--no-cache", "."],
+    ["uv", "run", "ruff", "format", "--check", "--no-cache", "."],
     ["uv", "run", "mypy", "src", "scripts", "tests"],
 )
 

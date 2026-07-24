@@ -641,6 +641,8 @@ class NewsSummary(BaseModel):
     sentiment: int              # -1 | 0 | +1
     risk_flags: list[str]
     sources: list[str]          # URL
+    catalyst_quality: str        # "high" | "medium" | "low" | "none"（P2-12）
+    catalyst_quality_source_ids: list[str]  # SourcedFact.source_idsと同じprovenance制約（P2-12、必須）
 
 class FilingAnalysis(BaseModel):
     symbol: str
@@ -721,6 +723,14 @@ def analyze_filing(client: LLMClient, request: FilingAnalysisRequest) -> FilingA
 `<decision_history>`内へescapeする。通常live当日だけに注入し、dry-run、明示的な
 `--as-of`、バックテストでは空tupleとする。履歴は現在の事実でも命令でもなく、
 factsの`source_ids`へ追加しない。
+
+**P2-12実装時追記（roadmap §5 P2-12、改修原則4「判断はコード、叙述はLLM」）**: `llm/decision_context.py`に`format_score_breakdown(candidate)`（P1-01複合スコア内訳）/`format_risk_constraints(risk_assessment)`（P1-03 binding_constraint・サイジング内訳、`not_calculable`等でも空にせず常に描画——コードの拒否判定自体が保守的不一致ルールの前提情報のため）/`format_performance_summary(summary)`（P1-06実現損益サマリ、`closed_trade_count=0`または`None`なら空文字）を追加した。いずれも「これはコードの決定論的計算結果でありLLMが上書きできない」旨をプロンプト内に明記した純関数で、`pipeline/daily.py::_run_step_llm()`が`PaperJournal.summarize_performance()`をrun毎に1回計算し（既存のNFR-03時間予算ゲート内、新規ゲートは追加していない）、`_decision_context_blocks()`経由で`NewsSummaryRequest`/`FilingAnalysisRequest`の新規`decision_context_blocks: str = ""`フィールドへ候補ごとに注入する。`_SYSTEM_PROMPT`（両ファイル）に保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採択し、矛盾自体をinterpretation/red_flagsへ両論併記）を追加した——LLM出力は表示専用フィールドにしか流れず判断・リスクフィールドを書き換えない構造が既に成立しているため、これはプロンプト指示のみで実現される（新しいランタイム強制機構は不要）。
+
+`NewsSummary`に`catalyst_quality: Literal["high","medium","low","none"]`と`catalyst_quality_source_ids`（`SourcedFact.source_ids`と同じ非空・非空白のprovenance制約）を追加し、判定基準（high=ガイダンス上方修正/beat-and-raise/FDA承認/初回の決算加速/大型契約、medium=M&A/製品ローンチ/提携/ショートスクイーズ、low=アナリスト格上げのみ/テーマのみ）を`summarize.py`の`_SYSTEM_PROMPT`に明記した。`_validate_source_ids()`（`llm/client.py`）を拡張し`catalyst_quality_source_ids`も`facts`と同じ「未知のsource_idを引用したらSchemaValidationErrorでfail-closed」規約に従わせた（fresh/cache双方の呼び出し元は同一関数のため片方だけ直す必要はない）。`catalyst_quality`系フィールドが新規必須のため、既存キャッシュ済み`llm_calls`行が`model_validate_json`で未捕捉の`pydantic.ValidationError`に到達しないよう`llm.schema_version`を1→2へ引き上げた（旧キャッシュ行は単純にキャッシュミスになる、安全側）。
+
+`risk_flags`必須反映語（dilution/secondary offering/investigation/lawsuit/resignation/downgrade）と行動パターン言及規則（「〜の可能性」は実績値と計画値の具体的数値差分が同一文/隣接factに存在する場合のみ許可）も`_SYSTEM_PROMPT`へ追加した。後者はCON-03側でも`llm/safety.py::check_no_unevidenced_behavioral_claims()`として実装し、`check_structured_output()`へ`check_no_imperative_language()`と並べて配線した——固定の心理状態語彙（「動揺」「パニック」「狼狽」「投資家心理」等、非網羅的と明記）が本文に現れ、かつ同一テキスト内に「可能性」等のhedge語と数値差分の兆候（`\d+%`または「計画」「予想」「実績」等）が共起しない場合にfail-closed（`ForbiddenLanguageError`、fresh/cache双方で未キャッシュ・リトライなしの既存fail-soft規約に自動的に従う）。
+
+**near-stale警告（REQ-030/040）の乖離記録**: `docs/goal-prompts/swing-copilot-reliability-p2/decisions.md`のフォールバック条項に従い、実装をメカニズムのみに限定した。本リポジトリにはキャッシュTTL（有効期限）概念がそもそも存在しない（`llm/`・`config.py`全体を検索し`ttl`/`expir`/`stale`に一致なし）ため、`llm.near_stale_threshold_days`（既定2日）をconfig追加し、`llm/decision_context.py::is_cache_near_stale(cached_at, as_of, ttl_days, threshold_days)`を純関数として実装・テストしたが、`ttl_days`は呼び出し元が明示的に渡す引数のままとし、`pipeline/daily.py`やreport層への配線は行っていない（実TTL値が存在しないため配線自体が架空の値の捏造になる）。将来キャッシュTTLが導入された時点でこの関数をレポート層へ接続する。
 
 ### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
 

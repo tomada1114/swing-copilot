@@ -8,6 +8,7 @@ retry (`docs/04_detailed_design.md` 3.15).
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from swing_copilot.exceptions import SwingCopilotError
@@ -16,6 +17,30 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from pydantic import BaseModel
+
+# P2-12 REQ-009/021: a small, documented (not exhaustive) list of Japanese/
+# English keywords asserting an investor/management psychological or
+# behavioral state. Presence alone isn't forbidden -- only when it isn't
+# paired with concrete actual-vs-planned numeric evidence in the same text
+# (see `_HEDGE_PATTERN`/`_NUMERIC_EVIDENCE_PATTERN` below).
+_BEHAVIORAL_KEYWORDS: tuple[str, ...] = (
+    "動揺",
+    "パニック",
+    "狼狽",
+    "投資家心理",
+    "panic",
+    "investor sentiment",
+    "management is anxious",
+)
+# A hedge phrase ("〜の可能性" / "possible"/"possibly") permitted only when
+# co-occurring with concrete evidence in the same text (below).
+_HEDGE_PATTERN = re.compile(r"可能性|possibly|possible", re.IGNORECASE)
+# Concrete actual-vs-planned numeric discrepancy: a percentage, or an
+# actual/planned marker word (Japanese or English). Deliberately a simple
+# same-string co-occurrence regex, not NLP (roadmap CON-03 scope note).
+_NUMERIC_EVIDENCE_PATTERN = re.compile(
+    r"\d+(\.\d+)?\s*%|計画|予想|実績|actual|planned", re.IGNORECASE
+)
 
 FORBIDDEN_PHRASES: tuple[str, ...] = (
     "買うべき",
@@ -65,6 +90,37 @@ def check_no_imperative_language(texts: Iterable[str]) -> None:
                 raise ForbiddenLanguageError(msg)
 
 
+def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
+    """Raise if a bare psychological/behavioral diagnosis lacks paired evidence.
+
+    P2-12 (REQ-009/REQ-021): "〜の可能性(possible pattern)" language describing
+    investor/management behavior is only permitted when the same statement
+    carries a concrete actual-vs-planned numeric discrepancy (a hedge phrase
+    co-occurring with a percentage or an 実績/計画/予想/actual/planned marker
+    in the same text). A bare assertion of an emotional/behavioral state
+    without that co-occurring evidence is an unfalsifiable psychological
+    diagnosis and is forbidden.
+
+    Args:
+        texts: Free-text fields from a parsed `NewsSummary`/`FilingAnalysis`.
+
+    Raises:
+        ForbiddenLanguageError: A behavioral/psychological keyword appears
+            without the required hedge + numeric-evidence co-occurrence.
+    """
+    for text in texts:
+        lowered = text.lower()
+        has_keyword = any(
+            keyword.lower() in lowered for keyword in _BEHAVIORAL_KEYWORDS
+        )
+        if not has_keyword:
+            continue
+        if _HEDGE_PATTERN.search(text) and _NUMERIC_EVIDENCE_PATTERN.search(text):
+            continue
+        msg = f"Output contains an unevidenced behavioral/psychological claim: {text!r}"
+        raise ForbiddenLanguageError(msg)
+
+
 def check_structured_output(parsed: BaseModel) -> None:
     """Check every user-visible free-text field in a supported LLM schema.
 
@@ -72,7 +128,8 @@ def check_structured_output(parsed: BaseModel) -> None:
         parsed: Parsed `NewsSummary` or `FilingAnalysis` output.
 
     Raises:
-        ForbiddenLanguageError: A prohibited phrase appears in any checked field.
+        ForbiddenLanguageError: A prohibited phrase, or an unevidenced
+            behavioral/psychological claim, appears in any checked field.
     """
     texts: list[str] = []
     facts = getattr(parsed, "facts", ())
@@ -81,3 +138,4 @@ def check_structured_output(parsed: BaseModel) -> None:
         values = getattr(parsed, field_name, ())
         texts.extend(value for value in values if isinstance(value, str))
     check_no_imperative_language(texts)
+    check_no_unevidenced_behavioral_claims(texts)

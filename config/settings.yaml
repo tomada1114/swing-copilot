@@ -46,11 +46,19 @@ llm:
     news_summary: "claude-haiku-4-5-20251001"
     filing_analysis: "claude-haiku-4-5-20251001"
   max_tokens: 2048
-  schema_version: 1
+  # Bumped 1 -> 2 for P2-12: NewsSummary gained required catalyst_quality /
+  # catalyst_quality_source_ids fields; old cached rows must miss, not
+  # ValidationError, on model_validate_json (docs/06_reliability_roadmap.md §5 P2-12).
+  schema_version: 2
   max_news_items_per_symbol: 20
   max_news_chars_per_item: 4000
   filing_chunk_chars: 30000
   max_filing_chunks: 4
+  # roadmap §5 P2-12: cache "near-stale" warning threshold in days of TTL
+  # remaining (as_of basis). Mechanism-only for now -- no cache TTL concept
+  # exists yet, so this value is unused by any live code path (see
+  # llm/decision_context.py::is_cache_near_stale()).
+  near_stale_threshold_days: 2
 
 budget:
   monthly_cap_usd_prototype: 5

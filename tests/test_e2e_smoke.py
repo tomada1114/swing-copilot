@@ -151,6 +151,8 @@ class FakeLLMClient:
                 sentiment=1,
                 risk_flags=[],
                 sources=["https://example.com"],
+                catalyst_quality="none",
+                catalyst_quality_source_ids=list(request.source_ids),
             )
         return FilingAnalysis(
             symbol=symbol,

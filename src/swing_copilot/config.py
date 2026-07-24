@@ -188,11 +188,23 @@ class LLMConfig(_StrictModel):
 
     models: LLMModelSelection = LLMModelSelection()
     max_tokens: int = 2048
-    schema_version: int = 1
+    # Bumped 1 -> 2 for P2-12: `NewsSummary` gained two new REQUIRED fields
+    # (`catalyst_quality`/`catalyst_quality_source_ids`). A cache row written
+    # under the old schema would otherwise reach an uncaught
+    # `pydantic.ValidationError` on `model_validate_json` (missing required
+    # fields); bumping the version makes old rows a plain cache miss instead.
+    schema_version: int = 2
     max_news_items_per_symbol: int = 20
     max_news_chars_per_item: int = 4000
     filing_chunk_chars: int = 30_000
     max_filing_chunks: int = 4
+    # roadmap §5 P2-12: cache "near-stale" warning threshold, in days of TTL
+    # remaining (as_of basis, REQ-030/040). No cache-TTL concept exists yet
+    # anywhere in this repo; this config value and
+    # `llm/decision_context.py::is_cache_near_stale()` implement the warning
+    # *mechanism* only, per the documented scope decision -- neither is wired
+    # into a live code path until a real TTL is introduced.
+    near_stale_threshold_days: int = 2
 
 
 class BudgetConfig(_StrictModel):

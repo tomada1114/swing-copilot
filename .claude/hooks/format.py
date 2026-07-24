@@ -37,9 +37,11 @@ def main() -> int:
         return 0
 
     failed = False
+    # --no-cache: a stale .ruff_cache has returned false-clean verdicts locally
+    # that CI (cacheless) then rejected; single-file runs make the cost negligible.
     for args in (
-        ["uv", "run", "ruff", "check", "--fix", str(file_path)],
-        ["uv", "run", "ruff", "format", str(file_path)],
+        ["uv", "run", "ruff", "check", "--fix", "--no-cache", str(file_path)],
+        ["uv", "run", "ruff", "format", "--no-cache", str(file_path)],
     ):
         result = subprocess.run(  # noqa: S603
             args, capture_output=True, text=True, check=False, env=SUBPROCESS_ENV

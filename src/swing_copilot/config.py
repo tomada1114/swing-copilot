@@ -153,6 +153,15 @@ class BacktestConfig(_StrictModel):
     # Pessimistic-scenario preset (roadmap §5 P2-09, 要検証: median of
     # backtest-expert's cited 1.5-2.0x range).
     pessimistic_slippage_multiplier: float = 1.75
+    # P2-10 sensitivity grid: best cell's expectancy_per_trade strictly above
+    # this multiple of its (non-gray) neighbors' median triggers a "spike"
+    # (overfitting suspicion) verdict (roadmap §5 P2-10, 要検証).
+    sensitivity_spike_multiplier: float = 1.5
+    # P2-10 sensitivity grid: fraction (e.g. 0.20 == 20%) around the best
+    # cell's value within which every non-gray cell must fall for a
+    # "plateau" (robust) verdict (roadmap §5 P2-10, 要検証; basis point is the
+    # best cell's own value -- not specified in the seed, fixed here).
+    sensitivity_plateau_tolerance_pct: float = 0.20
     # trade_count below this draws a "statistically insufficient" warning;
     # below preliminary_trade_count_threshold (but >= this) draws a
     # "preliminary" warning (roadmap §5 P2-07, out: backtest-expert).

@@ -50,6 +50,8 @@ class BacktestCostOverrides:
     slippage_pct: float | None = None
     benchmark_symbol: str | None = None
     slippage_multiplier: float | None = None
+    exit_atr_multiple: float | None = None  # P2-10: sensitivity grid parameter
+    max_hold_days: int | None = None  # P2-10: sensitivity grid parameter
 
 
 def _trading_days(
@@ -93,6 +95,16 @@ def run_backtest(
         if overrides.slippage_multiplier is not None
         else deps.settings.backtest.slippage_multiplier
     )
+    exit_atr_multiple = (
+        overrides.exit_atr_multiple
+        if overrides.exit_atr_multiple is not None
+        else deps.settings.backtest.exit_atr_multiple
+    )
+    max_hold_days = (
+        overrides.max_hold_days
+        if overrides.max_hold_days is not None
+        else deps.settings.backtest.max_hold_days
+    )
 
     effective_settings = deps.settings.model_copy(
         update={
@@ -101,6 +113,8 @@ def run_backtest(
                     "commission_pct": commission_pct,
                     "slippage_pct": slippage_pct,
                     "slippage_multiplier": slippage_multiplier,
+                    "exit_atr_multiple": exit_atr_multiple,
+                    "max_hold_days": max_hold_days,
                     "benchmark": benchmark_symbol,
                 }
             )

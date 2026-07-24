@@ -1,10 +1,12 @@
-"""CLI entry point `copilot-backtest` (P2-08/P2-09, roadmap §5 P2-08/P2-09).
+"""CLI entry point `copilot-backtest` (P2-08/P2-09/P2-10, roadmap §5 P2-08-10).
 
 Wires the real `MarketStore`/S&P 500 universe into `backtest.runner.run_backtest`
 and renders P2-07's risk-adjusted metrics to terminal (Rich) and an atomically
 written markdown report, promoting the backtester from tests-only to a daily
 tool (diagnosis D5's execution side). `--pessimistic` (P2-09) additionally runs
-a higher-slippage scenario and renders a normal-vs-pessimistic comparison.
+a higher-slippage scenario and renders a normal-vs-pessimistic comparison. The
+`grid` subcommand (P2-10) runs a 25-cell ATR-stop x max-hold sensitivity grid
+and classifies it as spike/plateau/inconclusive.
 """
 
 from __future__ import annotations
@@ -26,6 +28,14 @@ from swing_copilot.backtest.runner import (
     BacktestRequest,
     run_backtest,
 )
+from swing_copilot.backtest.sensitivity import (
+    ATR_MULTIPLIER_PCT_GRID,
+    MAX_HOLD_PCT_GRID,
+    GridCell,
+    grid_param_values,
+    is_gray_cell,
+    judge_grid,
+)
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
@@ -36,6 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from swing_copilot.backtest.engine import BacktestResult
+    from swing_copilot.backtest.sensitivity import SensitivityGridResult
     from swing_copilot.config import Settings, StrategiesConfig
     from swing_copilot.universe import UniverseMember
 
@@ -57,20 +68,49 @@ class ReportMeta:
     missing_data_symbols: Sequence[str]
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="copilot-backtest")
-    parser.add_argument("--strategy", required=True)
-    parser.add_argument("--start", type=date.fromisoformat, required=True)
-    parser.add_argument("--end", type=date.fromisoformat, required=True)
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    # Not `required=True`: with subparsers, argparse enforces a *parent*
+    # parser's own required options even when a subcommand (e.g. `grid`)
+    # consumes the actual values, since they're set on the shared Namespace
+    # only after the parent's own requirements are checked. `_validate_args`
+    # enforces presence explicitly instead, uniformly for both commands.
+    parser.add_argument("--strategy", default=None)
+    parser.add_argument("--start", type=date.fromisoformat, default=None)
+    parser.add_argument("--end", type=date.fromisoformat, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--pessimistic", action="store_true")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="copilot-backtest")
+    _add_common_args(parser)
+    parser.add_argument("--pessimistic", action="store_true")
+
+    subparsers = parser.add_subparsers(dest="command")
+    grid_parser = subparsers.add_parser(
+        "grid", help="パラメータ感応度グリッド（ATRストップ倍率 x 最大保有日数）"
+    )
+    _add_common_args(grid_parser)
+    parser.set_defaults(command="run")
+
     return parser.parse_args(argv)
 
 
 def _validate_args(args: argparse.Namespace, strategies: StrategiesConfig) -> None:
     """Fail-fast checks that must run before any I/O (REQ-021/022)."""
+    missing = [
+        flag
+        for flag, value in (
+            ("--strategy", args.strategy),
+            ("--start", args.start),
+            ("--end", args.end),
+        )
+        if value is None
+    ]
+    if missing:
+        msg = f"必須引数が指定されていません: {', '.join(missing)}"
+        raise BacktestCliError(msg)
     if args.start > args.end:
         msg = f"--start ({args.start}) は --end ({args.end}) より後ろにできません。"
         raise BacktestCliError(msg)
@@ -90,6 +130,13 @@ def _output_path(args: argparse.Namespace) -> Path:
     if output is not None:
         return output
     return _DEFAULT_OUTPUT_DIR / f"{args.end.isoformat()}-{args.strategy}.md"
+
+
+def _grid_output_path(args: argparse.Namespace) -> Path:
+    output: Path | None = args.output
+    if output is not None:
+        return output
+    return _DEFAULT_OUTPUT_DIR / f"{args.end.isoformat()}-{args.strategy}-grid.md"
 
 
 def _missing_data_symbols(
@@ -352,6 +399,98 @@ def render_markdown_comparison(
     return "\n".join(lines)
 
 
+def _cell_text(cell: GridCell, gray_threshold: int) -> str:
+    value_text = (
+        "N/A"
+        if cell.expectancy_per_trade is None
+        else f"${cell.expectancy_per_trade:,.2f}"
+    )
+    marker = " *" if is_gray_cell(cell, gray_threshold) else ""
+    return f"{value_text} (n={cell.trade_count}){marker}"
+
+
+def render_grid_terminal(
+    grid: SensitivityGridResult, meta: ReportMeta, gray_threshold: int
+) -> str:
+    """Render the 5x5 sensitivity grid and its verdict as Rich terminal text (REQ-005)."""
+    buffer = StringIO()
+    console = Console(file=buffer, width=_CONSOLE_WIDTH)
+    console.print(
+        f"[bold]copilot-backtest grid[/bold] strategy={meta.strategy} "
+        f"{meta.start.isoformat()}..{meta.end.isoformat()}"
+    )
+    console.print(f"Verdict: {grid.verdict_label}")
+
+    table = Table(title="Sensitivity grid: expectancy_per_trade (n=trade_count)")
+    table.add_column("ATR% \\ MaxHold%")
+    for max_hold_pct in MAX_HOLD_PCT_GRID:
+        table.add_column(str(max_hold_pct), justify="right")
+    cells_by_position = {(c.atr_multiplier_pct, c.max_hold_pct): c for c in grid.cells}
+    for atr_pct in ATR_MULTIPLIER_PCT_GRID:
+        row = [str(atr_pct)]
+        row += [
+            _cell_text(cells_by_position[atr_pct, max_hold_pct], gray_threshold)
+            for max_hold_pct in MAX_HOLD_PCT_GRID
+        ]
+        table.add_row(*row)
+    console.print(table)
+    console.print(f"* trade_count < {gray_threshold}: 灰色扱い（結論に使わない）")
+
+    if meta.missing_data_symbols:
+        console.print(
+            "[yellow]データ不足のためスキップ: "
+            f"{', '.join(meta.missing_data_symbols)}[/yellow]"
+        )
+
+    return buffer.getvalue()
+
+
+def render_grid_markdown(
+    grid: SensitivityGridResult, meta: ReportMeta, gray_threshold: int
+) -> str:
+    """Render the 5x5 sensitivity grid and its verdict as markdown (REQ-005)."""
+    cells_by_position = {(c.atr_multiplier_pct, c.max_hold_pct): c for c in grid.cells}
+    header = (
+        "| ATR% \\ MaxHold% | "
+        + " | ".join(str(pct) for pct in MAX_HOLD_PCT_GRID)
+        + " |"
+    )
+    separator = "|---|" + "---:|" * len(MAX_HOLD_PCT_GRID)
+    rows = [
+        f"| {atr_pct} | "
+        + " | ".join(
+            _cell_text(cells_by_position[atr_pct, max_hold_pct], gray_threshold)
+            for max_hold_pct in MAX_HOLD_PCT_GRID
+        )
+        + " |"
+        for atr_pct in ATR_MULTIPLIER_PCT_GRID
+    ]
+
+    lines = [
+        f"# Backtest sensitivity grid: {meta.strategy} "
+        f"({meta.start.isoformat()} .. {meta.end.isoformat()})",
+        "",
+        f"Verdict: {grid.verdict_label}",
+        "",
+        header,
+        separator,
+        *rows,
+        "",
+        f"\\* trade_count < {gray_threshold}: 灰色扱い（結論に使わない）",
+        "",
+    ]
+
+    if meta.missing_data_symbols:
+        lines += [
+            "## Data quality",
+            "",
+            f"データ不足のためスキップ: {', '.join(meta.missing_data_symbols)}",
+            "",
+        ]
+
+    return "\n".join(lines)
+
+
 def _compose_dependencies(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
 ) -> tuple[BacktestDependencies, list[str], list[str]]:
@@ -384,12 +523,9 @@ def _compose_dependencies(
     return deps, symbols, missing_data_symbols
 
 
-def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: parse args, run the backtest, print + write the report."""
-    args = _parse_args(argv)
-    settings = load_settings()
-    strategies = load_strategies()
-
+def _run_backtest_command(
+    args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
+) -> None:
     try:
         _validate_args(args, strategies)
         deps, symbols, missing_data_symbols = _compose_dependencies(
@@ -441,6 +577,73 @@ def main(argv: list[str] | None = None) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(output_path, markdown_text)
     sys.stdout.write(f"\nReport written to {output_path}\n")
+
+
+def _run_grid_command(
+    args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
+) -> None:
+    try:
+        _validate_args(args, strategies)
+        deps, symbols, missing_data_symbols = _compose_dependencies(
+            args, settings, strategies
+        )
+    except BacktestCliError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    request = BacktestRequest(
+        symbols=symbols,
+        start=args.start,
+        end=args.end,
+        initial_cash=settings.backtest.initial_cash_usd,
+        strategy_key=args.strategy,
+    )
+    cells: list[GridCell] = []
+    for atr_pct, max_hold_pct, atr_value, max_hold_value in grid_param_values(
+        settings.backtest.exit_atr_multiple, settings.backtest.max_hold_days
+    ):
+        cell_result = run_backtest(
+            request,
+            deps,
+            BacktestCostOverrides(
+                exit_atr_multiple=atr_value, max_hold_days=max_hold_value
+            ),
+        )
+        cells.append(
+            GridCell(
+                atr_multiplier_pct=atr_pct,
+                max_hold_pct=max_hold_pct,
+                expectancy_per_trade=cell_result.expectancy_per_trade,
+                trade_count=cell_result.trade_count,
+            )
+        )
+    grid_result = judge_grid(cells, settings.backtest)
+
+    meta = ReportMeta(
+        strategy=args.strategy,
+        start=args.start,
+        end=args.end,
+        missing_data_symbols=missing_data_symbols,
+    )
+    gray_threshold = settings.backtest.insufficient_trade_count_threshold
+
+    sys.stdout.write(render_grid_terminal(grid_result, meta, gray_threshold))
+
+    output_path = _grid_output_path(args)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(output_path, render_grid_markdown(grid_result, meta, gray_threshold))
+    sys.stdout.write(f"\nReport written to {output_path}\n")
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point: parse args, run the backtest or grid, print + write the report."""
+    args = _parse_args(argv)
+    settings = load_settings()
+    strategies = load_strategies()
+
+    if args.command == "grid":
+        _run_grid_command(args, settings, strategies)
+    else:
+        _run_backtest_command(args, settings, strategies)
 
 
 if __name__ == "__main__":  # pragma: no cover

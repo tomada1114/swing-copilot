@@ -822,6 +822,8 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **P2-09実装時追記（roadmap §5 P2-09）**: `backtest.slippage_multiplier`（既定1.0）を追加し、`BacktestEngine`は`slippage_pct * slippage_multiplier`を単一の`self._slippage_pct`としてエントリー・エグジット（強制清算含む、`_settle_exit`が全exit経路の共通ハンドラのため自動的に両方へ効く）両方に適用する。悲観プリセットは`backtest.pessimistic_slippage_multiplier=1.75`（出典: backtest-expertの1.5〜2.0帯の中央値、要検証）。`BacktestCostOverrides`に`slippage_multiplier: float | None`を追加し、`copilot-backtest --pessimistic`は同一`BacktestRequest`を通常(×1.0)・悲観(×1.75)の2回`run_backtest`実行し、`render_terminal_comparison`/`render_markdown_comparison`（`ReportMeta`共有）で指標差分表を出力する。両レンダー関数は引数過多(PLR0913)回避のため`render_terminal`/`render_markdown`も含め`ReportMeta`（strategy/start/end/missing_data_symbols）dataclassへ統一した。乗数1.0は既存デフォルト計算と完全一致（`test_multiplier_one_matches_default_entry_and_exit_prices`で回帰確認）し、悲観側`final_equity`は通常側以下になることをテストで保証する。
 
+**P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{80,90,100,110,120}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
+
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
 > **P2-5実装時の訂正（2026-07-22）**: 以下の`signal_id: int`/`position_id: int`
@@ -1467,6 +1469,16 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 「予備的」警告の閾値 | 30 ≤ trade_count < 100 | `backtest.preliminary_trade_count_threshold=100`（出典: backtest-expert） |
 | ルックアヘッド疑い: 勝率 | 90%超 | `backtest.lookahead_suspicion_win_rate=0.90` |
 | ルックアヘッド疑い: 最大DD | 1%未満（要検証、シードに数値指定なし） | `backtest.lookahead_suspicion_max_drawdown=0.01` |
+
+### 7.3b パラメータ感応度グリッドの過学習判定閾値（P2-10、roadmap §5 P2-10）
+
+| 項目 | 値 | 設定キー |
+|---|---|---|
+| ATRストップ倍率グリッド | 基準値比{50,75,100,125,150}% | `backtest/sensitivity.py::ATR_MULTIPLIER_PCT_GRID`（固定、要検証ではない） |
+| 最大保有日数グリッド | 基準値比{80,90,100,110,120}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
+| 灰色扱い（結論に使わない）の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（P2-07の閾値を再利用） |
+| スパイク（過学習疑い）判定 | 最良セル > 非灰色4近傍の中央値 × 1.5 | `backtest.sensitivity_spike_multiplier=1.5`（要検証） |
+| プラトー（頑健）判定 | 全非灰色セルが最良値の±20%以内 | `backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点=最良セル値） |
 
 ### 7.4 リスクパラメータ
 

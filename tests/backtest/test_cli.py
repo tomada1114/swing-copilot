@@ -14,18 +14,29 @@ from swing_copilot.backtest.cli import (
     BacktestCliError,
     ReportMeta,
     _atomic_write,
+    _grid_output_path,
     _missing_data_symbols,
     _output_path,
     _parse_args,
     _select_symbols,
     _validate_args,
     main,
+    render_grid_markdown,
+    render_grid_terminal,
     render_markdown,
     render_markdown_comparison,
     render_terminal,
     render_terminal_comparison,
 )
 from swing_copilot.backtest.engine import BacktestResult, Trade
+from swing_copilot.backtest.sensitivity import (
+    ATR_MULTIPLIER_PCT_GRID,
+    MAX_HOLD_PCT_GRID,
+    PLATEAU,
+    SPIKE,
+    GridCell,
+    SensitivityGridResult,
+)
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
@@ -96,9 +107,32 @@ class TestParseArgs:
         assert args.output == Path("out.md")
         assert args.pessimistic is True
 
-    def test_missing_required_arg_exits(self):
-        with pytest.raises(SystemExit):
-            _parse_args(["--start", "2025-01-01", "--end", "2026-06-30"])
+    def test_missing_required_arg_parses_as_none(self):
+        # Not enforced by argparse `required=True` (conflicts with
+        # subparsers) -- `_validate_args` checks presence instead.
+        args = _parse_args(["--start", "2025-01-01", "--end", "2026-06-30"])
+        assert args.strategy is None
+
+    def test_grid_subcommand_sets_command(self):
+        args = _parse_args(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+        assert args.command == "grid"
+        assert args.strategy == "default"
+
+    def test_no_subcommand_defaults_to_run(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+        assert args.command == "run"
 
 
 class TestValidateArgs:
@@ -114,6 +148,11 @@ class TestValidateArgs:
                 }
             }
         )
+
+    def test_missing_strategy_raises(self):
+        args = _parse_args(["--start", "2025-01-01", "--end", "2026-06-30"])
+        with pytest.raises(BacktestCliError, match="--strategy"):
+            _validate_args(args, self._strategies())
 
     def test_start_after_end_raises(self):
         args = _parse_args(
@@ -186,6 +225,22 @@ class TestOutputPath:
             ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
         )
         assert _output_path(args) == Path("reports/backtests/2026-06-30-default.md")
+
+    def test_default_grid_output_uses_end_strategy_and_grid_suffix(self):
+        args = _parse_args(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+        assert _grid_output_path(args) == Path(
+            "reports/backtests/2026-06-30-default-grid.md"
+        )
 
 
 class TestMissingDataSymbols:
@@ -393,6 +448,72 @@ class TestRenderComparison:
         assert "## Warnings" not in text
 
 
+def _grid_result(
+    *,
+    verdict: str = SPIKE,
+    cell_overrides: dict[tuple[int, int], GridCell] | None = None,
+) -> SensitivityGridResult:
+    cell_overrides = cell_overrides or {}
+    cells = tuple(
+        cell_overrides.get(
+            (atr_pct, max_hold_pct),
+            GridCell(
+                atr_multiplier_pct=atr_pct,
+                max_hold_pct=max_hold_pct,
+                expectancy_per_trade=50.0,
+                trade_count=50,
+            ),
+        )
+        for atr_pct in ATR_MULTIPLIER_PCT_GRID
+        for max_hold_pct in MAX_HOLD_PCT_GRID
+    )
+    label = "スパイク（過学習疑い）" if verdict == SPIKE else "プラトー（頑健）"
+    return SensitivityGridResult(cells=cells, verdict=verdict, verdict_label=label)
+
+
+class TestRenderGrid:
+    def test_terminal_shows_verdict_matrix_and_gray_marker(self):
+        gray_cell = GridCell(
+            atr_multiplier_pct=50,
+            max_hold_pct=80,
+            expectancy_per_trade=1.0,
+            trade_count=5,
+        )
+        grid = _grid_result(cell_overrides={(50, 80): gray_cell})
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        )
+
+        text = render_grid_terminal(grid, meta, gray_threshold=30)
+
+        assert "スパイク（過学習疑い）" in text
+        assert "$50.00" in text
+        assert "*" in text
+        assert "灰色扱い" in text
+
+    def test_markdown_shows_matrix_as_a_table_with_verdict(self):
+        grid = _grid_result(verdict=PLATEAU)
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
+        )
+
+        text = render_grid_markdown(grid, meta, gray_threshold=30)
+
+        assert "Verdict: プラトー（頑健）" in text
+        assert "| ATR% \\ MaxHold% |" in text
+        assert "データ不足のためスキップ: ZZZ" in text
+
+    def test_markdown_with_no_missing_data_omits_data_quality_section(self):
+        grid = _grid_result(verdict=PLATEAU)
+        meta = ReportMeta(
+            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
+        )
+
+        text = render_grid_markdown(grid, meta, gray_threshold=30)
+
+        assert "## Data quality" not in text
+
+
 @pytest.fixture
 def two_symbol_universe(monkeypatch):
     members = [
@@ -455,6 +576,38 @@ class TestMainEndToEnd:
         assert "データ不足のためスキップ: BBB" in captured.out
         assert output_path.exists()
         assert "# Backtest: default" in output_path.read_text(encoding="utf-8")
+
+    def test_grid_subcommand_completes_and_writes_matrix_report(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "grid.md"
+
+        main(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Verdict:" in captured.out
+        # A 10-day window is far too short for any real trades: every one of
+        # the 25 cells is gray (trade_count < 30) -> inconclusive.
+        assert "判定不能（データ不足）" in captured.out
+        assert output_path.exists()
+        report_text = output_path.read_text(encoding="utf-8")
+        assert "# Backtest sensitivity grid: default" in report_text
+        assert "| ATR% \\ MaxHold% |" in report_text
 
     def test_pessimistic_runs_both_scenarios_and_writes_comparison_report(
         self, seeded_db, tmp_path, capsys
@@ -527,6 +680,50 @@ class TestMainEndToEnd:
             )
 
         assert not (tmp_path / "out.md").exists()
+
+    def test_grid_start_after_end_exits_without_running(self, seeded_db, tmp_path):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit, match="--start"):
+            main(
+                [
+                    "grid",
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[-1].isoformat(),
+                    "--end",
+                    days[0].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "grid.md"),
+                ]
+            )
+
+        assert not (tmp_path / "grid.md").exists()
+
+    def test_grid_unknown_strategy_exits_without_running(self, seeded_db, tmp_path):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit, match="default"):
+            main(
+                [
+                    "grid",
+                    "--strategy",
+                    "nonexistent",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "grid.md"),
+                ]
+            )
+
+        assert not (tmp_path / "grid.md").exists()
 
 
 def test_real_settings_and_strategies_load():

@@ -130,7 +130,7 @@ def list_runs(database: Database, limit: int) -> list[RunSummary]:
     Returns:
         Newest-`run_date`-first `RunSummary` rows. A run with zero
         candidates, rejections, or decisions still appears with `0` in that
-        column (LEFT JOINed subqueries), never silently dropped.
+        column (LEFT JOIN against subqueries), never silently dropped.
     """
     with database.connect() as conn:
         rows = conn.execute(

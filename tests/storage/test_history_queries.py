@@ -6,14 +6,6 @@ from datetime import date
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from swing_copilot.storage.history_queries import (
-    get_rejections,
-    get_run_detail,
-    get_symbol_timeline,
-    list_runs,
-    run_exists,
-)
-
 from swing_copilot.models import Position, RunMode
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
@@ -23,6 +15,13 @@ from swing_copilot.screening.base import (
     RejectionStage,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
+from swing_copilot.storage.history_queries import (
+    get_rejections,
+    get_run_detail,
+    get_symbol_timeline,
+    list_runs,
+    run_exists,
+)
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 if TYPE_CHECKING:

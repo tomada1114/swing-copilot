@@ -214,6 +214,19 @@ class NotificationConfig(_StrictModel):
     enabled: bool = False
 
 
+class PostmortemConfig(_StrictModel):
+    """`postmortem.*` in `settings.yaml` (P2-11, roadmap §5 P2-11)."""
+
+    horizon_5d_weight: float = 0.6
+    horizon_20d_weight: float = 0.4
+    neutral_threshold_pct: float = 0.5  # |return%| <= this -> NEUTRAL (要検証)
+    severe_threshold_pct: float = (
+        2.0  # return% < -this -> FALSE_POSITIVE_SEVERE (要検証)
+    )
+    preliminary_sample_threshold: int = 20  # raw n < this -> "暫定" label
+    lookback_window_days: int = 90  # trailing window for the markdown aggregation
+
+
 class Settings(_StrictModel):
     """Parsed, validated `config/settings.yaml`."""
 
@@ -226,6 +239,7 @@ class Settings(_StrictModel):
     budget: BudgetConfig = BudgetConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     notification: NotificationConfig = NotificationConfig()
+    postmortem: PostmortemConfig = PostmortemConfig()
 
 
 _SCORE_WEIGHT_SUM_TOLERANCE = 1e-9

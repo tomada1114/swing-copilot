@@ -1003,6 +1003,18 @@ def main(argv: list[str] | None = None) -> None:
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
 
+### 3.21a `pipeline/postmortem.py`（P2-11、roadmap §5 P2-11）
+
+`run_daily()`の`_run_soft_steps()`に、LLM(6)と通知(7)の間の新しいfail-softステップ`"postmortem"`として追加した（既存の番号付き`5_text`/`6_llm`/`7_notify`/`8_output`はリネームしていない——複数の既存テストが厳密な文字列一致でアサートしており、無関係なリネームはスコープ外）。時間予算超過時は他のfail-softステップと同じ`_TIME_BUDGET_STEP_OUTCOME`でスキップされる。
+
+**目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
+
+**分類境界**（`classify_forward_return()`）: Issue #20の文言（「`|return| < 0.5%`はNEUTRAL」「`>0.5%`はTRUE_POSITIVE」）は厳密に読むと`+0.5%`・`-0.5%`ちょうどの帰属先が未定義になる。両方ともNEUTRAL側（`<=`）に倒すことで新しい閾値を発明せずギャップを解消した。`-2%`ちょうどはFALSE_POSITIVE_MILD（`-2%超の下落`のみSEVERE、閉区間として読む）。閾値は`settings.postmortem`（`neutral_threshold_pct=0.5`, `severe_threshold_pct=2.0`、いずれも要検証）。
+
+**集計**（`compute_signal_performance()`）: `signal_outcomes`の各行は`signal_names`（複数同時ヒットありうる）の全シグナル名へ同じ実現結果を按分する（バグではなく意図的——その日その候補が複数シグナルに同時該当したという事実自体は全シグナルに帰属する）。`hit_rate`の分子分母は`horizon_5d_weight=0.6`/`horizon_20d_weight=0.4`で重み付けし、NEUTRALは分子分母どちらにも算入しない（ノイズ除外）ため重み付け後のTP+FPが0のシグナルは`hit_rate=None`。TP/FP/NEUTRALの表示件数`n`は生の（重み付けしない）出現回数で、`n < preliminary_sample_threshold`（既定20）のシグナルは「(暫定)」を付す。`lookback_window_days`（既定90）でscope。
+
+**Markdown**: `report/markdown_report.py`に「## シグナル成績（直近90日）」節を、落選サマリの直後・Warningsの手前へ追加（0件時は既存の「落選サマリ」と同じ「該当なし(0件)」規約）。`DailyBriefContext`/`DailyBrief`に`signal_performance: tuple[SignalPerformanceRow, ...] = ()`を追加し、`notices`と同じ経路で素通しする。
+
 ### 3.22 `report/history_cli.py` / `storage/history_queries.py`（P1-05）
 
 `copilot-decision`（`paper/cli.py`）が判断記録の書き込み専用CLIであるのに対し、`copilot-history`はその読み出し専用の対となるCLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
@@ -1135,6 +1147,19 @@ CREATE TABLE IF NOT EXISTS screening_rejections (
     PRIMARY KEY (run_id, symbol)
 );
 
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    run_id             UUID NOT NULL,
+    symbol             VARCHAR NOT NULL,
+    horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+    as_of              DATE NOT NULL,
+    signal_names       VARCHAR[] NOT NULL,
+    forward_return_pct DOUBLE NOT NULL,
+    classification     VARCHAR NOT NULL CHECK (classification IN (
+        'TRUE_POSITIVE','FALSE_POSITIVE_MILD','FALSE_POSITIVE_SEVERE','NEUTRAL'
+    )),
+    PRIMARY KEY (run_id, symbol, horizon_days)
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1232,6 +1257,8 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 **Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
 
 `report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
+
+`signal_outcomes`（P2-11、roadmap §5 P2-11）は詳細を3.21a節に譲る。主キー`(run_id, symbol, horizon_days)`の`run_id`は**評価対象の過去run**のIDであり、今日ポストモーテムを実行しているrunのIDではない。書き込みは`storage/audit_records.py::record_signal_outcomes()`が担い、`ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE`で再計算（価格データ訂正後の再実行等）を補正upsertとして扱う（`MarketStore.upsert_fundamentals()`と同じ`ON CONFLICT DO UPDATE`パターン、`ON CONFLICT DO NOTHING`は使わない）。
 
 DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しないようにする。空の型付きrelationを先に作る、または最初の書き込み後にビューを作成する実装とし、初期状態のテストを必須とする。
 

@@ -109,6 +109,22 @@ class ExplodingCalendarClient:
         raise RuntimeError(msg)
 
 
+class ExplodingPostmortemStateStore(StateStore):
+    """A real `StateStore`, except reading `.database` always raises.
+
+    `run_postmortem_step` reaches `state_store.database` before any of its
+    own history-query calls; overriding just that property simulates a
+    genuine unexpected connectivity failure at that seam, without disturbing
+    any other step's use of this same store (screening/risk/text/LLM all
+    keep working normally against the real underlying `Database`).
+    """
+
+    @property
+    def database(self):
+        msg = "state store connectivity failure"
+        raise RuntimeError(msg)
+
+
 class PartiallyFailingNewsClient:
     """Raises only for `failing_symbol`; returns real news for every other symbol."""
 
@@ -369,6 +385,40 @@ class TestLLMAnalysisFailureDegrades:
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "6_llm") == "failed"
         assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+
+class TestPostmortemFailureDegrades:
+    def test_postmortem_failure_degrades_but_still_completes_the_run(
+        self, base_deps, tmp_path
+    ):
+        exploding_state_store = ExplodingPostmortemStateStore(
+            Database(tmp_path / "copilot.duckdb")
+        )
+        deps = replace(base_deps, state_store=exploding_state_store)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert (
+            _step_status(exploding_state_store, result.run_id, "postmortem") == "failed"
+        )
+        assert (
+            _step_status(exploding_state_store, result.run_id, "8_output") == "success"
+        )
+
+    def test_postmortem_succeeds_when_no_prior_runs_exist_yet(
+        self, base_deps, state_store
+    ):
+        # Common case for a brand-new install: nothing to look back at yet.
+        # This must not degrade the run.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.exit_code == 0
+        assert _step_status(state_store, result.run_id, "postmortem") == "success"
 
 
 class TestMixedOutcomeTextStepPreservesSuccesses:

@@ -101,6 +101,19 @@ class SymbolDecisionRow:
 
 
 @dataclass(frozen=True, slots=True)
+class SignalOutcomeRow:
+    """One `signal_outcomes` row, read back for the P2-11 markdown aggregation."""
+
+    run_id: UUID
+    symbol: str
+    horizon_days: int
+    as_of: date
+    signal_names: tuple[str, ...]
+    forward_return_pct: float
+    classification: str
+
+
+@dataclass(frozen=True, slots=True)
 class SymbolTimeline:
     """One symbol's cross-run candidacy/decision timeline (REQ-004)."""
 
@@ -176,6 +189,67 @@ def run_exists(database: Database, run_id: UUID) -> bool:
             "SELECT 1 FROM runs WHERE run_id = ?", [str(run_id)]
         ).fetchone()
     return row is not None
+
+
+def get_run_by_date(database: Database, run_date: date) -> UUID | None:
+    """Return the most recently started run at `run_date`, or `None` (P2-11).
+
+    Backs `pipeline/postmortem.py`'s "find the run N trading days back" step.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_date: Calendar date to match against `runs.run_date`.
+
+    Returns:
+        The matching `run_id`, most-recent `started_at` first if somehow
+        more than one run shares a `run_date`, or `None` if no run exists on
+        that date -- the caller skips that horizon entirely rather than
+        raising (roadmap's NO_PRIOR_RUN fallback).
+    """
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE run_date = ? ORDER BY started_at DESC LIMIT 1",
+            [run_date],
+        ).fetchone()
+    return row[0] if row is not None else None
+
+
+def get_signal_outcomes(
+    database: Database, start: date, end: date
+) -> tuple[SignalOutcomeRow, ...]:
+    """Return `signal_outcomes` rows observed within `[start, end]` (P2-11).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        start: Inclusive window start, matched against each row's `as_of`
+            (the date the outcome was computed, not the historical run date).
+        end: Inclusive window end.
+
+    Returns:
+        Rows for the "シグナル成績" markdown aggregation, unordered.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, symbol, horizon_days, as_of, signal_names,
+                   forward_return_pct, classification
+            FROM signal_outcomes
+            WHERE as_of >= ? AND as_of <= ?
+            """,
+            [start, end],
+        ).fetchall()
+    return tuple(
+        SignalOutcomeRow(
+            run_id=row[0],
+            symbol=row[1],
+            horizon_days=row[2],
+            as_of=row[3],
+            signal_names=tuple(row[4]),
+            forward_return_pct=row[5],
+            classification=row[6],
+        )
+        for row in rows
+    )
 
 
 def get_run_detail(database: Database, run_id: UUID) -> RunDetail | None:

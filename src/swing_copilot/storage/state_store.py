@@ -33,7 +33,10 @@ if TYPE_CHECKING:
     from swing_copilot.models import RunMode
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
-    from swing_copilot.storage.audit_records import ScreeningRunMeta
+    from swing_copilot.storage.audit_records import (
+        ScreeningRunMeta,
+        SignalOutcomeRecord,
+    )
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.llm_records import LLMCallRecord
     from swing_copilot.storage.paper_records import TradeDecisionRecord
@@ -52,6 +55,19 @@ class StateStore:
             database: Shared DuckDB connection owner.
         """
         self._database = database
+
+    @property
+    def database(self) -> Database:
+        """Expose the shared `Database` for read-only cross-module reuse.
+
+        `pipeline/postmortem.py` needs direct `storage/history_queries.py`
+        reads (`get_run_by_date`/`get_run_detail`/`get_signal_outcomes`)
+        alongside this store's own write methods; those plain functions take
+        `Database` directly by convention (see that module's docstring), so
+        this is the intended seam rather than reaching into the private
+        `_database` attribute from outside the class.
+        """
+        return self._database
 
     def init_schema(self) -> None:
         """Create every table this store owns (idempotent, additive only).
@@ -547,6 +563,14 @@ class StateStore:
             run_id: The run these assessments belong to.
         """
         audit_records.record_risk_assessments(self._database, assessments, run_id)
+
+    def record_signal_outcomes(self, outcomes: Sequence[SignalOutcomeRecord]) -> None:
+        """Upsert one horizon's postmortem outcomes, keyed by `(run_id, symbol, horizon_days)`.
+
+        Args:
+            outcomes: Classified forward-return outcomes to persist (P2-11).
+        """
+        audit_records.record_signal_outcomes(self._database, outcomes)
 
     def record_llm_call(self, call: LLMCallRecord) -> None:
         """Append one LLM call's audit record.

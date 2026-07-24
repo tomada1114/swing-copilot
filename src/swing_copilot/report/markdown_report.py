@@ -9,6 +9,7 @@ from swing_copilot.report.daily_brief import format_sizing
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
+    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
     from swing_copilot.storage.paper_records import TradeDecisionRecord
 
@@ -73,6 +74,17 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         lines.extend(
             f"| {item.reason_code} | {item.count} |" for item in brief.rejection_counts
         )
+    else:
+        lines.append("該当なし(0件)")
+    lines.extend(["", "## シグナル成績（直近90日）", ""])
+    if brief.signal_performance:
+        lines.extend(
+            [
+                "| Signal | TP | FP | NEUTRAL | 的中率 | N |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        lines.extend(_signal_performance_row(row) for row in brief.signal_performance)
     else:
         lines.append("該当なし(0件)")
     if brief.notices:
@@ -218,6 +230,17 @@ def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
         f"| trend_quality | {candidate.score_trend_quality:.3f} |",
         f"| liquidity | {candidate.score_liquidity:.3f} |",
     ]
+
+
+def _signal_performance_row(row: SignalPerformanceRow) -> str:
+    """P2-11: one "シグナル成績" table row, with a `(暫定)` marker under REQ-030."""
+    hit_rate = _percent(row.hit_rate)
+    if row.is_preliminary:
+        hit_rate += " (暫定)"
+    return (
+        f"| {row.signal_name} | {row.true_positive_count} | "
+        f"{row.false_positive_count} | {row.neutral_count} | {hit_rate} | {row.n} |"
+    )
 
 
 def _atomic_write(path: Path, content: str) -> None:

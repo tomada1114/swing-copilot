@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 
 from swing_copilot.models import RunStatus
+from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefCandidate,
     BriefFundamentals,
@@ -281,6 +282,49 @@ def test_markdown_renders_empty_rejection_summary_without_error() -> None:
 
     assert "## 落選サマリ" in output
     assert "0件" in output
+
+
+def _brief_with_signal_performance() -> DailyBrief:
+    return replace(
+        _brief(),
+        signal_performance=(
+            SignalPerformanceRow(
+                signal_name="trend_sma",
+                true_positive_count=8,
+                false_positive_count=3,
+                neutral_count=2,
+                hit_rate=0.625,
+                n=13,
+                is_preliminary=False,
+            ),
+            SignalPerformanceRow(
+                signal_name="pullback_rsi",
+                true_positive_count=4,
+                false_positive_count=1,
+                neutral_count=0,
+                hit_rate=None,
+                n=5,
+                is_preliminary=True,
+            ),
+        ),
+    )
+
+
+def test_markdown_shows_signal_performance_table_with_preliminary_marker() -> None:
+    # REQ-008/REQ-030: 的中率 rows, with "(暫定)" appended only for the
+    # n < preliminary_sample_threshold row.
+    output = render_markdown(_brief_with_signal_performance(), RunStatus.SUCCESS)
+
+    assert "## シグナル成績（直近90日）" in output
+    assert "| trend_sma | 8 | 3 | 2 | +62.50% | 13 |" in output
+    assert "| pullback_rsi | 4 | 1 | 0 | N/A (暫定) | 5 |" in output
+
+
+def test_markdown_renders_empty_signal_performance_without_error() -> None:
+    output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "## シグナル成績（直近90日）" in output
+    assert "該当なし(0件)" in output
 
 
 def test_markdown_renders_empty_candidate_set_without_error() -> None:

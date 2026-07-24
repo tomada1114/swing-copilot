@@ -20,6 +20,9 @@ from tests.backtest.conftest import (
 if TYPE_CHECKING:
     from datetime import date
 
+    from swing_copilot.config import Settings
+
+
 INITIAL_CASH = 100_000.0
 
 
@@ -369,6 +372,151 @@ class TestTradePnl:
             exit_reason="stop",
         )
         assert trade.pnl == pytest.approx(100.0)
+
+
+class TestPessimisticSlippageMultiplier:
+    """P2-09: slippage_multiplier scales the same slippage_pct on both sides."""
+
+    def _engine_with_multiplier(
+        self, settings: Settings, multiplier: float
+    ) -> BacktestEngine:
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(
+                    update={"slippage_multiplier": multiplier}
+                )
+            }
+        )
+        return BacktestEngine(custom_settings)
+
+    def test_multiplier_one_matches_default_entry_and_exit_prices(self, settings):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        default_engine = BacktestEngine(settings)
+        explicit_one_engine = self._engine_with_multiplier(settings, 1.0)
+
+        default_result = default_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+        explicit_result = explicit_one_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert default_result == explicit_result
+
+    def test_higher_multiplier_worsens_entry_and_exit_execution_prices(self, settings):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        normal_engine = self._engine_with_multiplier(settings, 1.0)
+        pessimistic_engine = self._engine_with_multiplier(settings, 1.75)
+
+        normal_result = normal_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+        pessimistic_result = pessimistic_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        normal_trade = normal_result.trades[0]
+        pessimistic_trade = pessimistic_result.trades[0]
+        # Buy side: higher slippage means a higher (worse) entry price.
+        assert pessimistic_trade.entry_price > normal_trade.entry_price
+        # Sell side (end-of-backtest liquidation): higher slippage means a
+        # lower (worse) exit price.
+        assert pessimistic_trade.exit_price < normal_trade.exit_price
+        assert pessimistic_result.final_equity < normal_result.final_equity
+
+    def test_forced_liquidation_exit_also_scales_with_multiplier(self, settings):
+        max_hold = settings.backtest.max_hold_days
+        days = LONG_TRADING_DAYS[: max_hold + 3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        normal_engine = self._engine_with_multiplier(settings, 1.0)
+        pessimistic_engine = self._engine_with_multiplier(settings, 1.75)
+
+        normal_result = normal_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+        pessimistic_result = pessimistic_engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        normal_hold_trade = next(
+            t for t in normal_result.trades if t.exit_reason == "max_hold"
+        )
+        pessimistic_hold_trade = next(
+            t for t in pessimistic_result.trades if t.exit_reason == "max_hold"
+        )
+        assert pessimistic_hold_trade.exit_price < normal_hold_trade.exit_price
+        assert pessimistic_result.final_equity < normal_result.final_equity
+
+    def test_extreme_multiplier_completes_without_crashing(self, settings):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+        engine = self._engine_with_multiplier(settings, 10.0)
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert result.final_equity >= 0
+
+
+class TestRiskAdjustedMetricsWiring:
+    """P2-07: BacktestEngine.run() populates the new BacktestResult fields."""
+
+    def test_trade_count_matches_len_trades(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert result.trade_count == len(result.trades)
+
+    def test_filled_trade_records_initial_stop_price(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates.get(d, []), INITIAL_CASH
+        )
+
+        assert len(result.trades) == 1
+        assert result.trades[0].initial_stop_price is not None
+        assert result.trades[0].initial_stop_price < result.trades[0].entry_price
+
+    def test_no_trades_reports_insufficient_sample_warning_and_none_metrics(
+        self, engine
+    ):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+
+        result = engine.run(days, bars_frame(rows), _no_candidates, INITIAL_CASH)
+
+        assert result.trade_count == 0
+        assert result.win_rate is None
+        assert result.profit_factor is None
+        assert result.expectancy_per_trade is None
+        assert result.avg_r_multiple is None
+        assert any("統計的に不十分" in w for w in result.warnings)
+
+    def test_empty_trading_calendar_still_populates_metric_fields(self, engine):
+        result = engine.run([], bars_frame([]), _no_candidates, INITIAL_CASH)
+
+        assert result.trade_count == 0
+        assert result.sharpe is None
+        assert result.max_drawdown_pct == pytest.approx(0.0)
+        assert any("統計的に不十分" in w for w in result.warnings)
 
 
 class TestEdgeCasesAndDefensiveBranches:

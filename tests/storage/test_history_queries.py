@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -14,10 +14,12 @@ from swing_copilot.screening.base import (
     RejectionRecord,
     RejectionStage,
 )
-from swing_copilot.storage.audit_records import ScreeningRunMeta
+from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
 from swing_copilot.storage.history_queries import (
     get_rejections,
+    get_run_by_date,
     get_run_detail,
+    get_signal_outcomes,
     get_symbol_timeline,
     list_runs,
     run_exists,
@@ -236,3 +238,93 @@ class TestRunExists:
     def test_known_run_id_is_true(self, state_store: StateStore) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
         assert run_exists(state_store._database, run_id) is True  # noqa: SLF001
+
+
+class TestGetRunByDate:
+    """P2-11: locating "the run N trading days back" by its `run_date`."""
+
+    def test_unknown_date_returns_none(self, state_store: StateStore) -> None:
+        assert (
+            get_run_by_date(state_store._database, date(2026, 7, 20))  # noqa: SLF001
+            is None
+        )
+
+    def test_known_date_returns_the_run_id(self, state_store: StateStore) -> None:
+        run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
+
+        found = get_run_by_date(state_store._database, date(2026, 7, 20))  # noqa: SLF001
+
+        assert found == run_id
+
+    def test_multiple_runs_same_date_picks_the_most_recently_started(
+        self, state_store: StateStore
+    ) -> None:
+        run_date = date(2026, 7, 20)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [str(uuid4()), run_date, datetime(2026, 7, 20, 8, tzinfo=UTC)],
+            )
+            newer_run_id = uuid4()
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [str(newer_run_id), run_date, datetime(2026, 7, 20, 9, tzinfo=UTC)],
+            )
+
+        found = get_run_by_date(state_store._database, run_date)  # noqa: SLF001
+
+        assert found == newer_run_id
+
+
+class TestGetSignalOutcomes:
+    """P2-11: read-back of `signal_outcomes` rows for the markdown aggregation."""
+
+    def test_empty_table_returns_empty_tuple(self, state_store: StateStore) -> None:
+        rows = get_signal_outcomes(
+            state_store._database,  # noqa: SLF001
+            date(2026, 7, 1),
+            date(2026, 7, 24),
+        )
+        assert rows == ()
+
+    def test_returns_rows_within_the_inclusive_window(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.record_signal_outcomes(
+            [
+                SignalOutcomeRecord(
+                    run_id=run_id,
+                    symbol="AAPL",
+                    horizon_days=5,
+                    as_of=date(2026, 7, 20),
+                    signal_names=("trend_sma",),
+                    forward_return_pct=1.5,
+                    classification="TRUE_POSITIVE",
+                ),
+                SignalOutcomeRecord(
+                    run_id=run_id,
+                    symbol="MSFT",
+                    horizon_days=20,
+                    as_of=date(2026, 6, 1),  # outside the queried window
+                    signal_names=("trend_sma",),
+                    forward_return_pct=-3.0,
+                    classification="FALSE_POSITIVE_SEVERE",
+                ),
+            ]
+        )
+
+        rows = get_signal_outcomes(
+            state_store._database,  # noqa: SLF001
+            date(2026, 7, 1),
+            date(2026, 7, 24),
+        )
+
+        assert len(rows) == 1
+        assert rows[0].symbol == "AAPL"
+        assert rows[0].horizon_days == 5
+        assert rows[0].signal_names == ("trend_sma",)
+        assert rows[0].forward_return_pct == 1.5
+        assert rows[0].classification == "TRUE_POSITIVE"

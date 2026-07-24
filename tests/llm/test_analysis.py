@@ -65,6 +65,8 @@ def _news_summary(
         sentiment=1,
         risk_flags=risk_flags if risk_flags is not None else [],
         sources=["https://example.com/news"],
+        catalyst_quality="none",
+        catalyst_quality_source_ids=["finnhub:1"],
     )
 
 
@@ -73,6 +75,7 @@ def _news_request(
     max_items: int = 20,
     max_chars_per_item: int = 4000,
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
+    decision_context_blocks: str = "",
 ) -> NewsSummaryRequest:
     return NewsSummaryRequest(
         run_id=uuid4(),
@@ -85,6 +88,7 @@ def _news_request(
         max_items=max_items,
         max_chars_per_item=max_chars_per_item,
         decision_history=decision_history,
+        decision_context_blocks=decision_context_blocks,
     )
 
 
@@ -106,6 +110,7 @@ def _filing_request(
     chunk_chars: int = 30_000,
     max_chunks: int = 4,
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
+    decision_context_blocks: str = "",
 ) -> FilingAnalysisRequest:
     return FilingAnalysisRequest(
         run_id=uuid4(),
@@ -118,6 +123,7 @@ def _filing_request(
         chunk_chars=chunk_chars,
         max_chunks=max_chunks,
         decision_history=decision_history,
+        decision_context_blocks=decision_context_blocks,
     )
 
 
@@ -366,3 +372,143 @@ class TestMergeBehavior:
         assert result.red_flags == ["Rising debt."]
         assert result.yoy_changes == ["Revenue +10% YoY"]
         assert result.guidance_direction == "positive"
+
+
+class TestDecisionContextInjection:
+    """P2-12 (REQ-001/002/003): pre-rendered quantitative blocks reach the prompt."""
+
+    def test_decision_context_blocks_are_appended_to_the_news_user_prompt(self):
+        blocks = (
+            "<score_breakdown>\n合計スコア: 0.627\n</score_breakdown>\n\n"
+            "<risk_constraints>\nbinding_constraint: not_calculable\n"
+            "</risk_constraints>\n\n"
+        )
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request(decision_context_blocks=blocks))
+
+        prompt = client.requests[0].prompt
+        assert "<score_breakdown>" in prompt
+        assert "0.627" in prompt
+        assert "not_calculable" in prompt
+
+    def test_empty_decision_context_blocks_does_not_add_stray_markup(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request(decision_context_blocks=""))
+
+        assert "<score_breakdown>" not in client.requests[0].prompt
+
+    def test_decision_context_blocks_are_appended_to_the_filing_user_prompt(self):
+        filing = _filing_text_item("Some filing text.")
+        blocks = (
+            "<performance_summary>\nクローズ済み取引数: 10\n</performance_summary>\n\n"
+        )
+        client = FakeLLMClient([_filing_analysis()])
+
+        analyze_filing(client, _filing_request(filing, decision_context_blocks=blocks))
+
+        assert "<performance_summary>" in client.requests[0].prompt
+
+    def test_decision_context_blocks_are_repeated_on_every_filing_chunk(self):
+        filing = _filing_text_item("Paragraph one.\n\nParagraph two.")
+        blocks = "<score_breakdown>\n合計スコア: 0.5\n</score_breakdown>\n\n"
+        request = _filing_request(
+            filing, chunk_chars=20, max_chunks=4, decision_context_blocks=blocks
+        )
+        client = FakeLLMClient([_filing_analysis(), _filing_analysis()])
+
+        analyze_filing(client, request)
+
+        assert len(client.requests) == 2
+        assert all("<score_breakdown>" in req.prompt for req in client.requests)
+
+
+class TestConservativeConflictRule:
+    """P2-12 (REQ-004/005): system prompt instructs deference to code's quantitative judgment."""
+
+    def test_news_system_prompt_declares_the_conservative_conflict_rule(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request())
+
+        system_prompt = client.requests[0].system_prompt
+        assert "保守的不一致ルール" in system_prompt
+        assert "保守側（コードの定量判定）を" in system_prompt
+        assert "両論併記" in system_prompt
+
+    def test_filing_system_prompt_declares_the_conservative_conflict_rule(self):
+        filing = _filing_text_item("Some filing text.")
+        client = FakeLLMClient([_filing_analysis()])
+
+        analyze_filing(client, _filing_request(filing))
+
+        system_prompt = client.requests[0].system_prompt
+        assert "保守的不一致ルール" in system_prompt
+        assert "両論併記" in system_prompt
+
+    def test_conflicting_quantitative_context_and_conservative_rule_both_reach_the_prompt(
+        self,
+    ):
+        """Example 3 (roadmap §5 P2-12): a REJECT risk block + the rule text."""
+        blocks = (
+            "<risk_constraints>\nbinding_constraint: not_calculable\n"
+            "</risk_constraints>\n\n"
+        )
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request(decision_context_blocks=blocks))
+
+        request = client.requests[0]
+        assert "not_calculable" in request.prompt
+        assert "保守的不一致ルール" in request.system_prompt
+
+
+class TestCatalystQualityCriteria:
+    """P2-12 (REQ-007): judgment criteria are spelled out in the news system prompt."""
+
+    def test_news_system_prompt_lists_high_medium_low_criteria(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request())
+
+        system_prompt = client.requests[0].system_prompt
+        assert "catalyst_quality" in system_prompt
+        assert "FDA承認" in system_prompt
+        assert "beat-and-raise" in system_prompt
+        assert "ショートスクイーズ" in system_prompt
+        assert "アナリスト格上げ" in system_prompt
+
+
+class TestRiskFlagsMustReflectKeywords:
+    """P2-12 (REQ-020): the required-reflection rule is in the news system prompt."""
+
+    def test_news_system_prompt_lists_the_must_reflect_keywords(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request())
+
+        system_prompt = client.requests[0].system_prompt
+        for keyword in (
+            "dilution",
+            "secondary offering",
+            "investigation",
+            "lawsuit",
+            "resignation",
+            "downgrade",
+        ):
+            assert keyword in system_prompt
+
+
+class TestBehavioralPatternRestriction:
+    """P2-12 (REQ-009/021): the news system prompt restricts unevidenced behavioral claims."""
+
+    def test_news_system_prompt_declares_the_behavioral_pattern_restriction(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request())
+
+        system_prompt = client.requests[0].system_prompt
+        assert "行動パターン言及規則" in system_prompt
+        assert "可能性" in system_prompt
+        assert "断定的な心理診断" in system_prompt

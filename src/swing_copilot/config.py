@@ -146,6 +146,34 @@ class BacktestConfig(_StrictModel):
     commission_pct: float = 0.001
     slippage_pct: float = 0.001
     benchmark: str = "SPY"
+    # Multiplier applied to slippage_pct on both entry and exit (incl. forced
+    # liquidation), roadmap §5 P2-09. 1.0 == no change from the base
+    # slippage_pct; --pessimistic overrides it with pessimistic_slippage_multiplier.
+    slippage_multiplier: float = 1.0
+    # Pessimistic-scenario preset (roadmap §5 P2-09, 要検証: median of
+    # backtest-expert's cited 1.5-2.0x range).
+    pessimistic_slippage_multiplier: float = 1.75
+    # P2-10 sensitivity grid: best cell's expectancy_per_trade strictly above
+    # this multiple of its (non-gray) neighbors' median triggers a "spike"
+    # (overfitting suspicion) verdict (roadmap §5 P2-10, 要検証).
+    sensitivity_spike_multiplier: float = 1.5
+    # P2-10 sensitivity grid: fraction (e.g. 0.20 == 20%) around the best
+    # cell's value within which every non-gray cell must fall for a
+    # "plateau" (robust) verdict (roadmap §5 P2-10, 要検証; basis point is the
+    # best cell's own value -- not specified in the seed, fixed here).
+    sensitivity_plateau_tolerance_pct: float = 0.20
+    # trade_count below this draws a "statistically insufficient" warning;
+    # below preliminary_trade_count_threshold (but >= this) draws a
+    # "preliminary" warning (roadmap §5 P2-07, out: backtest-expert).
+    insufficient_trade_count_threshold: int = 30
+    preliminary_trade_count_threshold: int = 100
+    # win_rate (fraction, e.g. 0.90 == 90%) strictly above this, or
+    # max_drawdown_pct strictly below lookahead_suspicion_max_drawdown, draws
+    # a look-ahead-bias suspicion warning (roadmap §5 P2-07). The win_rate
+    # bound is from the roadmap; the drawdown bound has no seed value and is
+    # fixed here as 要検証 per Issue #16's boundary note.
+    lookahead_suspicion_win_rate: float = 0.90
+    lookahead_suspicion_max_drawdown: float = 0.01
 
 
 class LLMModelSelection(_StrictModel):
@@ -160,11 +188,23 @@ class LLMConfig(_StrictModel):
 
     models: LLMModelSelection = LLMModelSelection()
     max_tokens: int = 2048
-    schema_version: int = 1
+    # Bumped 1 -> 2 for P2-12: `NewsSummary` gained two new REQUIRED fields
+    # (`catalyst_quality`/`catalyst_quality_source_ids`). A cache row written
+    # under the old schema would otherwise reach an uncaught
+    # `pydantic.ValidationError` on `model_validate_json` (missing required
+    # fields); bumping the version makes old rows a plain cache miss instead.
+    schema_version: int = 2
     max_news_items_per_symbol: int = 20
     max_news_chars_per_item: int = 4000
     filing_chunk_chars: int = 30_000
     max_filing_chunks: int = 4
+    # roadmap §5 P2-12: cache "near-stale" warning threshold, in days of TTL
+    # remaining (as_of basis, REQ-030/040). No cache-TTL concept exists yet
+    # anywhere in this repo; this config value and
+    # `llm/decision_context.py::is_cache_near_stale()` implement the warning
+    # *mechanism* only, per the documented scope decision -- neither is wired
+    # into a live code path until a real TTL is introduced.
+    near_stale_threshold_days: int = 2
 
 
 class BudgetConfig(_StrictModel):
@@ -186,6 +226,19 @@ class NotificationConfig(_StrictModel):
     enabled: bool = False
 
 
+class PostmortemConfig(_StrictModel):
+    """`postmortem.*` in `settings.yaml` (P2-11, roadmap §5 P2-11)."""
+
+    horizon_5d_weight: float = 0.6
+    horizon_20d_weight: float = 0.4
+    neutral_threshold_pct: float = 0.5  # |return%| <= this -> NEUTRAL (要検証)
+    severe_threshold_pct: float = (
+        2.0  # return% < -this -> FALSE_POSITIVE_SEVERE (要検証)
+    )
+    preliminary_sample_threshold: int = 20  # raw n < this -> "暫定" label
+    lookback_window_days: int = 90  # trailing window for the markdown aggregation
+
+
 class Settings(_StrictModel):
     """Parsed, validated `config/settings.yaml`."""
 
@@ -198,6 +251,7 @@ class Settings(_StrictModel):
     budget: BudgetConfig = BudgetConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     notification: NotificationConfig = NotificationConfig()
+    postmortem: PostmortemConfig = PostmortemConfig()
 
 
 _SCORE_WEIGHT_SUM_TOLERANCE = 1e-9

@@ -6,6 +6,7 @@ Wires the real `MarketStore`/`ScreeningPipeline` into `BacktestEngine` (FR-10).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING, Any
 
 from swing_copilot.backtest.engine import BacktestEngine, BacktestResult
@@ -38,6 +39,7 @@ class BacktestRequest:
     start: date
     end: date
     initial_cash: float
+    strategy_key: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,9 @@ class BacktestCostOverrides:
     commission_pct: float | None = None
     slippage_pct: float | None = None
     benchmark_symbol: str | None = None
+    slippage_multiplier: float | None = None
+    exit_atr_multiple: float | None = None  # P2-10: sensitivity grid parameter
+    max_hold_days: int | None = None  # P2-10: sensitivity grid parameter
 
 
 def _trading_days(
@@ -85,6 +90,21 @@ def run_backtest(
         if overrides.slippage_pct is not None
         else deps.settings.backtest.slippage_pct
     )
+    slippage_multiplier = (
+        overrides.slippage_multiplier
+        if overrides.slippage_multiplier is not None
+        else deps.settings.backtest.slippage_multiplier
+    )
+    exit_atr_multiple = (
+        overrides.exit_atr_multiple
+        if overrides.exit_atr_multiple is not None
+        else deps.settings.backtest.exit_atr_multiple
+    )
+    max_hold_days = (
+        overrides.max_hold_days
+        if overrides.max_hold_days is not None
+        else deps.settings.backtest.max_hold_days
+    )
 
     effective_settings = deps.settings.model_copy(
         update={
@@ -92,6 +112,9 @@ def run_backtest(
                 update={
                     "commission_pct": commission_pct,
                     "slippage_pct": slippage_pct,
+                    "slippage_multiplier": slippage_multiplier,
+                    "exit_atr_multiple": exit_atr_multiple,
+                    "max_hold_days": max_hold_days,
                     "benchmark": benchmark_symbol,
                 }
             )
@@ -103,13 +126,21 @@ def run_backtest(
     bars = deps.market_store.read_bars(all_symbols, start, end, as_of=end)
     fundamentals = deps.market_store.read_fundamentals(end)
     pipeline = ScreeningPipeline(
-        deps.strategies_config, deps.market_store, effective_settings
+        deps.strategies_config,
+        deps.market_store,
+        effective_settings,
+        request.strategy_key,
     )
 
     def candidates_fn(day: date) -> list[Candidate]:
         point_in_time_bars = bars[bars["date"] <= day]
+        # `filed_at` is TIMESTAMPTZ; a bare `date` can't be compared against
+        # it directly (pandas raises TypeError). Match
+        # `screening/fundamental_filters.py`'s end-of-day-UTC cutoff idiom for
+        # an inclusive as-of boundary.
+        day_cutoff = datetime.combine(day, time.max, tzinfo=UTC)
         point_in_time_fundamentals = (
-            fundamentals[fundamentals["filed_at"] <= day]
+            fundamentals[fundamentals["filed_at"] <= day_cutoff]
             if not fundamentals.empty
             else fundamentals
         )

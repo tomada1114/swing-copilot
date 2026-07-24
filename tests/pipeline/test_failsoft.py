@@ -24,6 +24,7 @@ from swing_copilot.data.base import BarFetchResult
 from swing_copilot.llm.client import BudgetExceededError
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
+from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
@@ -109,6 +110,37 @@ class ExplodingCalendarClient:
         raise RuntimeError(msg)
 
 
+class ExplodingPostmortemStateStore(StateStore):
+    """A real `StateStore`, except reading `.database` always raises.
+
+    `run_postmortem_step` reaches `state_store.database` before any of its
+    own history-query calls; overriding just that property simulates a
+    genuine unexpected connectivity failure at that seam, without disturbing
+    any other step's use of this same store (screening/risk/text/LLM all
+    keep working normally against the real underlying `Database`).
+    """
+
+    @property
+    def database(self):
+        msg = "state store connectivity failure"
+        raise RuntimeError(msg)
+
+
+class ExplodingPerformanceSummaryStateStore(StateStore):
+    """A real `StateStore`, except `get_closed_positions_with_strategy()` always raises.
+
+    P2-12: `PaperJournal.summarize_performance()` reaches this method first;
+    overriding just it simulates an unexpected storage failure at that one
+    seam, proving `_compute_performance_summary()`'s defensive try/except
+    degrades gracefully (LLM step still succeeds) rather than crashing the run.
+    """
+
+    def get_closed_positions_with_strategy(self, is_paper=True, as_of=None):
+        del is_paper, as_of
+        msg = "closed-positions query failure"
+        raise RuntimeError(msg)
+
+
 class PartiallyFailingNewsClient:
     """Raises only for `failing_symbol`; returns real news for every other symbol."""
 
@@ -159,6 +191,8 @@ class PartiallyFailingLLMClient:
                 sentiment=1,
                 risk_flags=[],
                 sources=["https://example.com"],
+                catalyst_quality="none",
+                catalyst_quality_source_ids=list(request.source_ids),
             )
         return FilingAnalysis(
             symbol=symbol,
@@ -172,6 +206,35 @@ class PartiallyFailingLLMClient:
             red_flags=[],
             yoy_changes=[],
             guidance_direction="neutral",
+        )
+
+
+class CapturingLLMClient:
+    """A real fake that records every `AnalyzeRequest` it was called with.
+
+    P2-12: used to assert on prompt *content* (decision-context blocks),
+    mirroring `tests/test_e2e_smoke.py::FakeLLMClient`'s pattern.
+    """
+
+    def __init__(self):
+        self.requests = []
+
+    def analyze(self, request):
+        self.requests.append(request)
+        match = re.search(r"対象銘柄: (\S+)", request.prompt)
+        symbol = match.group(1) if match else "UNKNOWN"
+        return NewsSummary(
+            symbol=symbol,
+            period="test-period",
+            facts=[
+                SourcedFact(statement="Fake fact.", source_ids=list(request.source_ids))
+            ],
+            interpretation=["May indicate continued stability."],
+            sentiment=1,
+            risk_flags=[],
+            sources=["https://example.com"],
+            catalyst_quality="none",
+            catalyst_quality_source_ids=list(request.source_ids),
         )
 
 
@@ -371,6 +434,40 @@ class TestLLMAnalysisFailureDegrades:
         assert _step_status(state_store, result.run_id, "8_output") == "success"
 
 
+class TestPostmortemFailureDegrades:
+    def test_postmortem_failure_degrades_but_still_completes_the_run(
+        self, base_deps, tmp_path
+    ):
+        exploding_state_store = ExplodingPostmortemStateStore(
+            Database(tmp_path / "copilot.duckdb")
+        )
+        deps = replace(base_deps, state_store=exploding_state_store)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert (
+            _step_status(exploding_state_store, result.run_id, "postmortem") == "failed"
+        )
+        assert (
+            _step_status(exploding_state_store, result.run_id, "8_output") == "success"
+        )
+
+    def test_postmortem_succeeds_when_no_prior_runs_exist_yet(
+        self, base_deps, state_store
+    ):
+        # Common case for a brand-new install: nothing to look back at yet.
+        # This must not degrade the run.
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.exit_code == 0
+        assert _step_status(state_store, result.run_id, "postmortem") == "success"
+
+
 class TestMixedOutcomeTextStepPreservesSuccesses:
     def test_one_symbol_failing_keeps_the_other_symbols_news_and_degrades_the_run(
         self, base_deps, state_store
@@ -551,3 +648,81 @@ class TestScreeningFailureIsFatalAndRerunnable:
 
         assert retried.status == RunStatus.SUCCESS
         assert retried.run_id != failed.run_id
+
+
+class TestPerformanceSummaryReachesLLMPrompt:
+    """P2-12 (REQ-003): P1-06's PaperJournal.summarize_performance() wiring."""
+
+    def test_closed_paper_trade_performance_reaches_the_news_prompt(
+        self, base_deps, state_store
+    ):
+        position = Position(
+            position_id=uuid4(),
+            symbol="AAPL",
+            is_paper=True,
+            entry_date=AS_OF - timedelta(days=30),
+            entry_price=100.0,
+            shares=10,
+            status="open",
+            stop_price=95.0,
+        )
+        state_store.upsert_position(position)
+        PaperJournal(state_store).close_position(
+            position.position_id, AS_OF - timedelta(days=5), 110.0, "target"
+        )
+        llm_client = CapturingLLMClient()
+        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert llm_client.requests
+        assert any(
+            "<performance_summary>" in request.prompt for request in llm_client.requests
+        )
+        assert any(
+            "クローズ済み取引数: 1" in request.prompt for request in llm_client.requests
+        )
+
+    def test_no_closed_trades_yet_omits_the_performance_block_without_failing(
+        self, base_deps
+    ):
+        llm_client = CapturingLLMClient()
+        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert llm_client.requests
+        assert all(
+            "<performance_summary>" not in request.prompt
+            for request in llm_client.requests
+        )
+
+    def test_summarize_performance_failure_degrades_gracefully_not_fatally(
+        self, base_deps, tmp_path
+    ):
+        exploding_state_store = ExplodingPerformanceSummaryStateStore(
+            Database(tmp_path / "copilot.duckdb")
+        )
+        llm_client = CapturingLLMClient()
+        deps = replace(
+            base_deps,
+            state_store=exploding_state_store,
+            news_client=FakeNewsClient(),
+            llm_client=llm_client,
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        # The performance-summary lookup failure is swallowed by
+        # `_compute_performance_summary()`'s own try/except: it never
+        # reaches a per-candidate `summarize_news`/`analyze_filing` call, so
+        # the LLM step itself still succeeds (unlike a real per-candidate
+        # LLM failure, which would degrade the run).
+        assert result.status == RunStatus.SUCCESS
+        assert llm_client.requests
+        assert all(
+            "<performance_summary>" not in request.prompt
+            for request in llm_client.requests
+        )

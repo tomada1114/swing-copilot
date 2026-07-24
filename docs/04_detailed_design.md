@@ -641,6 +641,8 @@ class NewsSummary(BaseModel):
     sentiment: int              # -1 | 0 | +1
     risk_flags: list[str]
     sources: list[str]          # URL
+    catalyst_quality: str        # "high" | "medium" | "low" | "none"（P2-12）
+    catalyst_quality_source_ids: list[str]  # SourcedFact.source_idsと同じprovenance制約（P2-12、必須）
 
 class FilingAnalysis(BaseModel):
     symbol: str
@@ -721,6 +723,14 @@ def analyze_filing(client: LLMClient, request: FilingAnalysisRequest) -> FilingA
 `<decision_history>`内へescapeする。通常live当日だけに注入し、dry-run、明示的な
 `--as-of`、バックテストでは空tupleとする。履歴は現在の事実でも命令でもなく、
 factsの`source_ids`へ追加しない。
+
+**P2-12実装時追記（roadmap §5 P2-12、改修原則4「判断はコード、叙述はLLM」）**: `llm/decision_context.py`に`format_score_breakdown(candidate)`（P1-01複合スコア内訳）/`format_risk_constraints(risk_assessment)`（P1-03 binding_constraint・サイジング内訳、`not_calculable`等でも空にせず常に描画——コードの拒否判定自体が保守的不一致ルールの前提情報のため）/`format_performance_summary(summary)`（P1-06実現損益サマリ、`closed_trade_count=0`または`None`なら空文字）を追加した。いずれも「これはコードの決定論的計算結果でありLLMが上書きできない」旨をプロンプト内に明記した純関数で、`pipeline/daily.py::_run_step_llm()`が`PaperJournal.summarize_performance()`をrun毎に1回計算し（既存のNFR-03時間予算ゲート内、新規ゲートは追加していない）、`_decision_context_blocks()`経由で`NewsSummaryRequest`/`FilingAnalysisRequest`の新規`decision_context_blocks: str = ""`フィールドへ候補ごとに注入する。`_SYSTEM_PROMPT`（両ファイル）に保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採択し、矛盾自体をinterpretation/red_flagsへ両論併記）を追加した——LLM出力は表示専用フィールドにしか流れず判断・リスクフィールドを書き換えない構造が既に成立しているため、これはプロンプト指示のみで実現される（新しいランタイム強制機構は不要）。
+
+`NewsSummary`に`catalyst_quality: Literal["high","medium","low","none"]`と`catalyst_quality_source_ids`（`SourcedFact.source_ids`と同じ非空・非空白のprovenance制約）を追加し、判定基準（high=ガイダンス上方修正/beat-and-raise/FDA承認/初回の決算加速/大型契約、medium=M&A/製品ローンチ/提携/ショートスクイーズ、low=アナリスト格上げのみ/テーマのみ）を`summarize.py`の`_SYSTEM_PROMPT`に明記した。`_validate_source_ids()`（`llm/client.py`）を拡張し`catalyst_quality_source_ids`も`facts`と同じ「未知のsource_idを引用したらSchemaValidationErrorでfail-closed」規約に従わせた（fresh/cache双方の呼び出し元は同一関数のため片方だけ直す必要はない）。`catalyst_quality`系フィールドが新規必須のため、既存キャッシュ済み`llm_calls`行が`model_validate_json`で未捕捉の`pydantic.ValidationError`に到達しないよう`llm.schema_version`を1→2へ引き上げた（旧キャッシュ行は単純にキャッシュミスになる、安全側）。
+
+`risk_flags`必須反映語（dilution/secondary offering/investigation/lawsuit/resignation/downgrade）と行動パターン言及規則（「〜の可能性」は実績値と計画値の具体的数値差分が同一文/隣接factに存在する場合のみ許可）も`_SYSTEM_PROMPT`へ追加した。後者はCON-03側でも`llm/safety.py::check_no_unevidenced_behavioral_claims()`として実装し、`check_structured_output()`へ`check_no_imperative_language()`と並べて配線した——固定の心理状態語彙（「動揺」「パニック」「狼狽」「投資家心理」等、非網羅的と明記）が本文に現れ、かつ同一テキスト内に「可能性」等のhedge語と数値差分の兆候（`\d+%`または「計画」「予想」「実績」等）が共起しない場合にfail-closed（`ForbiddenLanguageError`、fresh/cache双方で未キャッシュ・リトライなしの既存fail-soft規約に自動的に従う）。
+
+**near-stale警告（REQ-030/040）の乖離記録**: `docs/goal-prompts/swing-copilot-reliability-p2/decisions.md`のフォールバック条項に従い、実装をメカニズムのみに限定した。本リポジトリにはキャッシュTTL（有効期限）概念がそもそも存在しない（`llm/`・`config.py`全体を検索し`ttl`/`expir`/`stale`に一致なし）ため、`llm.near_stale_threshold_days`（既定2日）をconfig追加し、`llm/decision_context.py::is_cache_near_stale(cached_at, as_of, ttl_days, threshold_days)`を純関数として実装・テストしたが、`ttl_days`は呼び出し元が明示的に渡す引数のままとし、`pipeline/daily.py`やreport層への配線は行っていない（実TTL値が存在しないため配線自体が架空の値の捏造になる）。将来キャッシュTTLが導入された時点でこの関数をレポート層へ接続する。
 
 ### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
 
@@ -806,6 +816,23 @@ def run_backtest(
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
 - 現在のS&P500構成銘柄しかない期間は、その事実と生存者バイアスを結果へ必ず表示する。
 - 最終日後に残るpositionは最終日価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。SPY benchmarkは整数株購入後の残cashをcurveへ含める。
+
+**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
+
+**P2-08実装時追記（roadmap §5 P2-08）**: バックテストを日常道具として実行するCLIエントリポイント`copilot-backtest`（`backtest/cli.py`、`pyproject.toml`の`[project.scripts]`で`copilot-backtest = "swing_copilot.backtest.cli:main"`として登録）を追加した。
+
+```text
+uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
+    [--limit N] [--output PATH] [--pessimistic] [--db PATH]
+```
+
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
+
+**バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
+
+**P2-09実装時追記（roadmap §5 P2-09）**: `backtest.slippage_multiplier`（既定1.0）を追加し、`BacktestEngine`は`slippage_pct * slippage_multiplier`を単一の`self._slippage_pct`としてエントリー・エグジット（強制清算含む、`_settle_exit`が全exit経路の共通ハンドラのため自動的に両方へ効く）両方に適用する。悲観プリセットは`backtest.pessimistic_slippage_multiplier=1.75`（出典: backtest-expertの1.5〜2.0帯の中央値、要検証）。`BacktestCostOverrides`に`slippage_multiplier: float | None`を追加し、`copilot-backtest --pessimistic`は同一`BacktestRequest`を通常(×1.0)・悲観(×1.75)の2回`run_backtest`実行し、`render_terminal_comparison`/`render_markdown_comparison`（`ReportMeta`共有）で指標差分表を出力する。両レンダー関数は引数過多(PLR0913)回避のため`render_terminal`/`render_markdown`も含め`ReportMeta`（strategy/start/end/missing_data_symbols）dataclassへ統一した。乗数1.0は既存デフォルト計算と完全一致（`test_multiplier_one_matches_default_entry_and_exit_prices`で回帰確認）し、悲観側`final_equity`は通常側以下になることをテストで保証する。
+
+**P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{80,90,100,110,120}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
@@ -986,6 +1013,18 @@ def main(argv: list[str] | None = None) -> None:
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
 
+### 3.21a `pipeline/postmortem.py`（P2-11、roadmap §5 P2-11）
+
+`run_daily()`の`_run_soft_steps()`に、LLM(6)と通知(7)の間の新しいfail-softステップ`"postmortem"`として追加した（既存の番号付き`5_text`/`6_llm`/`7_notify`/`8_output`はリネームしていない——複数の既存テストが厳密な文字列一致でアサートしており、無関係なリネームはスコープ外）。時間予算超過時は他のfail-softステップと同じ`_TIME_BUDGET_STEP_OUTCOME`でスキップされる。
+
+**目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
+
+**分類境界**（`classify_forward_return()`）: Issue #20の文言（「`|return| < 0.5%`はNEUTRAL」「`>0.5%`はTRUE_POSITIVE」）は厳密に読むと`+0.5%`・`-0.5%`ちょうどの帰属先が未定義になる。両方ともNEUTRAL側（`<=`）に倒すことで新しい閾値を発明せずギャップを解消した。`-2%`ちょうどはFALSE_POSITIVE_MILD（`-2%超の下落`のみSEVERE、閉区間として読む）。閾値は`settings.postmortem`（`neutral_threshold_pct=0.5`, `severe_threshold_pct=2.0`、いずれも要検証）。
+
+**集計**（`compute_signal_performance()`）: `signal_outcomes`の各行は`signal_names`（複数同時ヒットありうる）の全シグナル名へ同じ実現結果を按分する（バグではなく意図的——その日その候補が複数シグナルに同時該当したという事実自体は全シグナルに帰属する）。`hit_rate`の分子分母は`horizon_5d_weight=0.6`/`horizon_20d_weight=0.4`で重み付けし、NEUTRALは分子分母どちらにも算入しない（ノイズ除外）ため重み付け後のTP+FPが0のシグナルは`hit_rate=None`。TP/FP/NEUTRALの表示件数`n`は生の（重み付けしない）出現回数で、`n < preliminary_sample_threshold`（既定20）のシグナルは「(暫定)」を付す。`lookback_window_days`（既定90）でscope。
+
+**Markdown**: `report/markdown_report.py`に「## シグナル成績（直近90日）」節を、落選サマリの直後・Warningsの手前へ追加（0件時は既存の「落選サマリ」と同じ「該当なし(0件)」規約）。`DailyBriefContext`/`DailyBrief`に`signal_performance: tuple[SignalPerformanceRow, ...] = ()`を追加し、`notices`と同じ経路で素通しする。
+
 ### 3.22 `report/history_cli.py` / `storage/history_queries.py`（P1-05）
 
 `copilot-decision`（`paper/cli.py`）が判断記録の書き込み専用CLIであるのに対し、`copilot-history`はその読み出し専用の対となるCLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
@@ -1118,6 +1157,19 @@ CREATE TABLE IF NOT EXISTS screening_rejections (
     PRIMARY KEY (run_id, symbol)
 );
 
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    run_id             UUID NOT NULL,
+    symbol             VARCHAR NOT NULL,
+    horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+    as_of              DATE NOT NULL,
+    signal_names       VARCHAR[] NOT NULL,
+    forward_return_pct DOUBLE NOT NULL,
+    classification     VARCHAR NOT NULL CHECK (classification IN (
+        'TRUE_POSITIVE','FALSE_POSITIVE_MILD','FALSE_POSITIVE_SEVERE','NEUTRAL'
+    )),
+    PRIMARY KEY (run_id, symbol, horizon_days)
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1215,6 +1267,8 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 **Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
 
 `report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
+
+`signal_outcomes`（P2-11、roadmap §5 P2-11）は詳細を3.21a節に譲る。主キー`(run_id, symbol, horizon_days)`の`run_id`は**評価対象の過去run**のIDであり、今日ポストモーテムを実行しているrunのIDではない。書き込みは`storage/audit_records.py::record_signal_outcomes()`が担い、`ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE`で再計算（価格データ訂正後の再実行等）を補正upsertとして扱う（`MarketStore.upsert_fundamentals()`と同じ`ON CONFLICT DO UPDATE`パターン、`ON CONFLICT DO NOTHING`は使わない）。
 
 DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しないようにする。空の型付きrelationを先に作る、または最初の書き込み後にビューを作成する実装とし、初期状態のテストを必須とする。
 
@@ -1441,6 +1495,27 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 手数料 | 0.1% | `backtest.commission_pct=0.001` |
 | スリッページ | 0.1% | `backtest.slippage_pct=0.001` |
 | 比較対象 | SPYバイ&ホールド | `backtest.benchmark="SPY"` |
+| スリッページ乗数（既定） | 1.0倍 | `backtest.slippage_multiplier=1.0`（P2-09） |
+| 悲観プリセット乗数 | 1.75倍（要検証） | `backtest.pessimistic_slippage_multiplier=1.75`（P2-09、出典: backtest-expert） |
+
+### 7.3a リスク調整後指標の信頼性閾値（P2-07、roadmap §5 P2-07）
+
+| 項目 | 値 | 設定キー |
+|---|---|---|
+| 「統計的に不十分」警告の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（出典: backtest-expert） |
+| 「予備的」警告の閾値 | 30 ≤ trade_count < 100 | `backtest.preliminary_trade_count_threshold=100`（出典: backtest-expert） |
+| ルックアヘッド疑い: 勝率 | 90%超 | `backtest.lookahead_suspicion_win_rate=0.90` |
+| ルックアヘッド疑い: 最大DD | 1%未満（要検証、シードに数値指定なし） | `backtest.lookahead_suspicion_max_drawdown=0.01` |
+
+### 7.3b パラメータ感応度グリッドの過学習判定閾値（P2-10、roadmap §5 P2-10）
+
+| 項目 | 値 | 設定キー |
+|---|---|---|
+| ATRストップ倍率グリッド | 基準値比{50,75,100,125,150}% | `backtest/sensitivity.py::ATR_MULTIPLIER_PCT_GRID`（固定、要検証ではない） |
+| 最大保有日数グリッド | 基準値比{80,90,100,110,120}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
+| 灰色扱い（結論に使わない）の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（P2-07の閾値を再利用） |
+| スパイク（過学習疑い）判定 | 最良セル > 非灰色4近傍の中央値 × 1.5 | `backtest.sensitivity_spike_multiplier=1.5`（要検証） |
+| プラトー（頑健）判定 | 全非灰色セルが最良値の±20%以内 | `backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点=最良セル値） |
 
 ### 7.4 リスクパラメータ
 

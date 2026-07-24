@@ -21,7 +21,7 @@ import shutil
 import sys
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,6 +36,11 @@ from swing_copilot.config import (
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.llm.client import LLMClient
+from swing_copilot.llm.decision_context import (
+    format_performance_summary,
+    format_risk_constraints,
+    format_score_breakdown,
+)
 from swing_copilot.llm.filings_analysis import FilingAnalysisRequest, analyze_filing
 from swing_copilot.llm.pricing import ModelPricing
 from swing_copilot.llm.summarize import NewsSummaryRequest, summarize_news
@@ -46,6 +51,8 @@ from swing_copilot.models import (
     RunStatus,
     StepStatus,
 )
+from swing_copilot.paper.journal import PaperJournal
+from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.report.daily_brief import (
     MARKET_STRIP_SYMBOLS,
     DailyBrief,
@@ -81,6 +88,8 @@ if TYPE_CHECKING:
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.llm.client import AnalyzeRequest
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
+    from swing_copilot.paper.journal import PerformanceSummary
+    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
@@ -165,6 +174,35 @@ class DailyDependencies:
     output_dir: str = "reports"
 
 
+def _compute_performance_summary(
+    deps: DailyDependencies, as_of: date
+) -> PerformanceSummary | None:
+    """P2-12 (REQ-003): compute P1-06's portfolio-wide summary once per run.
+
+    Called from step 6 (LLM) itself, inside its existing NFR-03 time-budget
+    gate -- not a new gate. Defensive: `PaperJournal.summarize_performance()`
+    reads real store/market data and could raise on an unexpected storage
+    failure; a failure here must degrade the (already fail-soft) LLM step by
+    omitting the performance block, never crash the whole run.
+
+    Args:
+        deps: Run dependencies (`state_store`/`market_store`).
+        as_of: Point-in-time cutoff for the summary.
+
+    Returns:
+        The computed summary, or `None` if it could not be computed.
+    """
+    try:
+        return PaperJournal(deps.state_store).summarize_performance(
+            deps.market_store, as_of
+        )
+    except Exception:
+        logger.exception(
+            "summarize_performance failed; continuing without performance context"
+        )
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class _StepOutcome:
     success: bool
@@ -189,6 +227,12 @@ class _RunContext:
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     held_symbols: frozenset[str]
+    # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
+    # screening-derived like the other fields -- computed once inside step 6
+    # (LLM) itself via `_compute_performance_summary()` -- but reusing this
+    # dataclass (`dataclasses.replace()`) avoids adding a 6th parameter to
+    # `_summarize_news_per_candidate()`/`_analyze_filings_per_candidate()`.
+    performance_summary: PerformanceSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +242,7 @@ class _OutputContext:
     run: _RunContext
     news_summaries: list[NewsSummary] | None
     filing_analyses: list[FilingAnalysis] | None
+    signal_performance: tuple[SignalPerformanceRow, ...]
     notices: tuple[str, ...]
     status: RunStatus
 
@@ -586,6 +631,13 @@ def _run_step_llm(
             None,
         )
 
+    # P2-12 (REQ-003): computed once per run, inside this step's existing
+    # NFR-03 time-budget gate (reused, not a new gate) -- portfolio-wide, so
+    # it is not recomputed per candidate below.
+    ctx = replace(
+        ctx, performance_summary=_compute_performance_summary(deps, ctx.run_date)
+    )
+
     news_summaries, failed_news_symbols = _summarize_news_per_candidate(
         llm_client, deps, ctx, text_items, include_decision_history
     )
@@ -611,6 +663,28 @@ def _run_step_llm(
     )
 
 
+def _decision_context_blocks(
+    candidate: Candidate,
+    risk_by_symbol: dict[str, RiskAssessment],
+    performance_summary: PerformanceSummary | None,
+) -> str:
+    """P2-12 (REQ-001/002/003): one candidate's score/risk/performance blocks.
+
+    `risk_by_symbol[candidate.symbol]` is a plain (not `.get()`) lookup:
+    `RiskChecker.check()` guarantees one `RiskAssessment` per candidate, same
+    order as `candidates` (`risk/checks.py`), so `ctx.risk_assessments`
+    always covers every `ctx.candidates` entry -- the same invariant
+    `_run_step_risk()` relies on to zip them together.
+    """
+    return "".join(
+        (
+            format_score_breakdown(candidate),
+            format_risk_constraints(risk_by_symbol[candidate.symbol]),
+            format_performance_summary(performance_summary),
+        )
+    )
+
+
 def _summarize_news_per_candidate(
     llm_client: _LLMClientLike,
     deps: DailyDependencies,
@@ -620,6 +694,9 @@ def _summarize_news_per_candidate(
 ) -> tuple[list[NewsSummary], list[str]]:
     summaries = []
     failed_symbols = []
+    risk_by_symbol = {
+        assessment.symbol: assessment for assessment in ctx.risk_assessments
+    }
     for candidate in ctx.candidates:
         news_items = tuple(
             item
@@ -648,6 +725,9 @@ def _summarize_news_per_candidate(
             )
             if include_decision_history
             else (),
+            decision_context_blocks=_decision_context_blocks(
+                candidate, risk_by_symbol, ctx.performance_summary
+            ),
         )
         try:
             summaries.append(summarize_news(llm_client, request))
@@ -665,6 +745,9 @@ def _analyze_filings_per_candidate(
 ) -> tuple[list[FilingAnalysis], list[str]]:
     analyses = []
     failed_symbols = []
+    risk_by_symbol = {
+        assessment.symbol: assessment for assessment in ctx.risk_assessments
+    }
     for candidate in ctx.candidates:
         filing_items = [
             item
@@ -693,12 +776,41 @@ def _analyze_filings_per_candidate(
                 )
                 if include_decision_history
                 else (),
+                decision_context_blocks=_decision_context_blocks(
+                    candidate, risk_by_symbol, ctx.performance_summary
+                ),
             )
             try:
                 analyses.append(analyze_filing(llm_client, request))
             except Exception:
                 failed_symbols.append(candidate.symbol)
     return analyses, failed_symbols
+
+
+def _run_step_postmortem(
+    deps: DailyDependencies, run_date: date
+) -> tuple[_StepOutcome, tuple[SignalPerformanceRow, ...]]:
+    """P2-11: classify past candidates' forward returns, then aggregate (fail-soft).
+
+    `run_postmortem_step` itself never raises for expected conditions (no
+    prior run at a horizon, missing bars) -- only a genuinely unexpected
+    exception (e.g. a DB connectivity failure) would reach this wrapper,
+    which converts it into a degraded (not fatal) step outcome, mirroring
+    the fatal-steps loop's own `try/except Exception` conversion in
+    `run_daily`.
+    """
+    try:
+        note, performance = run_postmortem_step(
+            deps.market_store,
+            deps.state_store,
+            run_date,
+            deps.settings.postmortem,
+            deps.settings.backtest.benchmark,
+        )
+    except Exception as exc:
+        logger.exception("postmortem step raised unexpectedly")
+        return _StepOutcome(False, f"unexpected error: {exc}"), ()
+    return _StepOutcome(True, note), performance
 
 
 def _run_step_output(
@@ -717,6 +829,7 @@ def _run_step_output(
         strategy_key=deps.strategy_key,
         rejections=output.run.rejections,
         notices=output.notices,
+        signal_performance=output.signal_performance,
         max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
         max_position_pct=deps.settings.risk.max_position_pct,
     )
@@ -915,15 +1028,19 @@ def _run_soft_steps(
     ctx: _RunContext,
     deadline: float,
 ) -> DailyRunResult:
-    """Run steps 5-8: fail-soft text/LLM, notification, then local output.
+    """Run steps 5-8 (plus P2-11's postmortem step) after the fatal steps.
 
-    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), and 7 (Discord
-    notify) are network-bound and are skipped outright once
-    `deps.monotonic() >= deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME`
-    (`is_skipped=True` but `success=False`) -- a *degrading* skip, distinct
-    from the ordinary "not configured" skip, so the run still ends up
-    `RunStatus.DEGRADED` even though nothing here technically raised. Step 8
-    is cheap/local and always attempts to complete regardless of budget, so a
+    Fail-soft text/LLM/postmortem, notification, then local output.
+
+    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), postmortem, and 7
+    (Discord notify) are skipped outright once `deps.monotonic() >=
+    deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME` (`is_skipped=True`
+    but `success=False`) -- a *degrading* skip, distinct from the ordinary
+    "not configured" skip, so the run still ends up `RunStatus.DEGRADED`
+    even though nothing here technically raised. Postmortem itself is local
+    (DB/Parquet, not network), but is gated the same way for consistency and
+    so a run already over budget doesn't spend more time on it. Step 8 is
+    cheap/local and always attempts to complete regardless of budget, so a
     timed-out run still produces terminal output and a Markdown archive.
     """
     degraded = False
@@ -962,6 +1079,19 @@ def _run_soft_steps(
     degraded = degraded or not llm_outcome.success
 
     started_at = time.perf_counter()
+    signal_performance: tuple[SignalPerformanceRow, ...]
+    if deps.monotonic() >= deadline:
+        logger.warning("step postmortem skipped: time budget exceeded")
+        postmortem_outcome, signal_performance = _TIME_BUDGET_STEP_OUTCOME, ()
+    else:
+        logger.info("step postmortem starting")
+        postmortem_outcome, signal_performance = _run_step_postmortem(
+            deps, ctx.run_date
+        )
+    _record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
+    degraded = degraded or not postmortem_outcome.success
+
+    started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step 7_notify skipped: time budget exceeded")
         notify_outcome = _TIME_BUDGET_STEP_OUTCOME
@@ -982,6 +1112,7 @@ def _run_soft_steps(
         for label, outcome in (
             ("text", text_outcome),
             ("LLM", llm_outcome),
+            ("postmortem", postmortem_outcome),
             ("notification", notify_outcome),
         )
         if outcome.detail is not None
@@ -995,6 +1126,7 @@ def _run_soft_steps(
             run=ctx,
             news_summaries=news_summaries,
             filing_analyses=filing_analyses,
+            signal_performance=signal_performance,
             notices=notices,
             status=status_before_output,
         ),

@@ -134,6 +134,8 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
                 sentiment=1,
                 risk_flags=["Valuation risk"],
                 sources=["https://example.com/news:1"],
+                catalyst_quality="none",
+                catalyst_quality_source_ids=["news:1"],
             )
         ]
         if with_llm

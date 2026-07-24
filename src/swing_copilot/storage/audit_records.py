@@ -163,6 +163,77 @@ def record_screening_results(
             conn.execute("COMMIT")
 
 
+@dataclass(frozen=True, slots=True)
+class SignalOutcomeRecord:
+    """One classified forward-return outcome for a past run's candidate (P2-11).
+
+    `run_id` is the HISTORICAL run whose candidate is being evaluated, not
+    the run performing today's postmortem pass. `signal_names` is a
+    denormalized copy of that candidate's signal names, so the P2-11
+    markdown aggregation never needs to join back to `candidates`.
+    """
+
+    run_id: UUID
+    symbol: str
+    horizon_days: int
+    as_of: date
+    signal_names: tuple[str, ...]
+    forward_return_pct: float
+    classification: str
+
+
+_UPSERT_SIGNAL_OUTCOMES = """
+INSERT INTO signal_outcomes (
+    run_id, symbol, horizon_days, as_of, signal_names,
+    forward_return_pct, classification
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE SET
+    as_of = EXCLUDED.as_of,
+    signal_names = EXCLUDED.signal_names,
+    forward_return_pct = EXCLUDED.forward_return_pct,
+    classification = EXCLUDED.classification
+"""
+
+
+def record_signal_outcomes(
+    database: Database, outcomes: Sequence[SignalOutcomeRecord]
+) -> None:
+    """Upsert postmortem outcomes, keyed by `(run_id, symbol, horizon_days)`.
+
+    A rerun that recomputes a horizon with corrected price data must update
+    the existing row rather than duplicate it or silently no-op (AGENTS.md's
+    correction-upsert invariant); mirrors `MarketStore.upsert_fundamentals`'s
+    guard-then-transaction pattern.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        outcomes: Rows to upsert; a no-op if empty.
+    """
+    if not outcomes:
+        return
+    with database.connect() as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            for outcome in outcomes:
+                conn.execute(
+                    _UPSERT_SIGNAL_OUTCOMES,
+                    [
+                        str(outcome.run_id),
+                        outcome.symbol,
+                        outcome.horizon_days,
+                        outcome.as_of,
+                        list(outcome.signal_names),
+                        outcome.forward_return_pct,
+                        outcome.classification,
+                    ],
+                )
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+
+
 def record_risk_assessments(
     database: Database, assessments: Sequence[RiskAssessment], run_id: UUID
 ) -> None:

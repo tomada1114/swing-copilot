@@ -55,14 +55,26 @@ def _full_prompt(request: AnalyzeRequest) -> str:
 
 
 def _validate_source_ids(parsed: BaseModel, source_ids: tuple[str, ...]) -> None:
-    facts = getattr(parsed, "facts", None)
-    if not facts:
-        return
     allowed = set(source_ids)
-    for fact in facts:
-        unknown = set(fact.source_ids) - allowed
+    facts = getattr(parsed, "facts", None)
+    if facts:
+        for fact in facts:
+            unknown = set(fact.source_ids) - allowed
+            if unknown:
+                msg = f"Fact cites unknown source_ids not provided to the model: {unknown}"
+                raise SchemaValidationError(msg)
+
+    # P2-12 (REQ-008): catalyst_quality's own provenance mirrors facts' --
+    # same fail-closed unknown-source-id rejection, same call sites (cache-hit
+    # and fresh-call both funnel through this one function).
+    catalyst_quality_source_ids = getattr(parsed, "catalyst_quality_source_ids", None)
+    if catalyst_quality_source_ids:
+        unknown = set(catalyst_quality_source_ids) - allowed
         if unknown:
-            msg = f"Fact cites unknown source_ids not provided to the model: {unknown}"
+            msg = (
+                "catalyst_quality cites unknown source_ids not provided to "
+                f"the model: {unknown}"
+            )
             raise SchemaValidationError(msg)
 
 

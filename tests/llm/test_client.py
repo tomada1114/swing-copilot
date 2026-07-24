@@ -85,6 +85,8 @@ def _news_summary(symbol: str = "AAPL", source_id: str = "news:1") -> NewsSummar
         sentiment=1,
         risk_flags=[],
         sources=["https://example.com"],
+        catalyst_quality="none",
+        catalyst_quality_source_ids=[source_id],
     )
 
 
@@ -92,6 +94,7 @@ def _request(
     prompt: str = "Summarize this news.",
     source_ids: tuple[str, ...] = ("news:1",),
     model: str = MODEL,
+    schema_version: int = 1,
 ) -> AnalyzeRequest:
     return AnalyzeRequest(
         run_id=uuid4(),
@@ -99,7 +102,7 @@ def _request(
         prompt=prompt,
         source_ids=source_ids,
         schema=NewsSummary,
-        schema_version=1,
+        schema_version=schema_version,
         model=model,
         max_tokens=1024,
     )
@@ -226,6 +229,30 @@ class TestCaching:
         with pytest.raises(SchemaValidationError):
             client.analyze(_request(source_ids=("news:2",)))
 
+    def test_different_schema_version_is_not_cached(self, state_store):
+        """Different schema_version is not cached.
+
+        P2-12 item 6: a `schema_version` bump must not spuriously hit an
+        older cache row (e.g. after `NewsSummary` gained new required fields).
+        """
+        response = FakeResponse(_news_summary())
+        fake_client = FakeAnthropicClient(response)
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=fake_client, clock=FakeClock(date(2027, 1, 1))
+            ),
+        )
+        request = _request(schema_version=1)
+
+        client.analyze(request)
+        client.analyze(_request(schema_version=2))
+
+        assert len(fake_client.messages.calls) == 2
+
 
 class TestRefusalAndErrors:
     def test_refusal_stop_reason_raises_and_records_failure(self, state_store):
@@ -281,6 +308,27 @@ class TestRefusalAndErrors:
             monthly_budget_cap_usd=5.0,
             test_seams=LLMClientTestSeams(
                 anthropic_client=FakeAnthropicClient(response),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+        with pytest.raises(SchemaValidationError):
+            client.analyze(_request(source_ids=("news:1",)))
+
+    def test_catalyst_quality_citing_unknown_source_id_raises_schema_validation_error(
+        self, state_store
+    ):
+        """P2-12 (REQ-008): mirrors the facts-based unknown-source-id test above."""
+        unsafe = _news_summary().model_copy(
+            update={"catalyst_quality_source_ids": ["news:unknown"]}
+        )
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(unsafe)),
                 clock=FakeClock(date(2027, 1, 1)),
             ),
         )
@@ -352,3 +400,59 @@ class TestUnknownPricing:
             client.analyze(_request(model="claude-made-up-model"))
 
         assert fake_client.messages.calls == []
+
+
+class TestCon03BehavioralClaims:
+    """P2-12 (REQ-009/021): unevidenced behavioral/psychological claims fail-closed."""
+
+    def test_bare_psychological_diagnosis_raises_and_is_never_cached(self, state_store):
+        unsafe = _news_summary().model_copy(
+            update={"interpretation": ["経営陣は動揺している可能性が高い。"]}
+        )
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(unsafe)),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+        with pytest.raises(ForbiddenLanguageError):
+            client.analyze(_request())
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT status, response_json FROM llm_calls").fetchone()
+        assert row == ("failed", None)
+
+    def test_evidenced_behavioral_claim_is_accepted_and_cached(self, state_store):
+        evidenced = _news_summary().model_copy(
+            update={
+                "interpretation": [
+                    "実績が計画を10%下回ったことから、"
+                    "経営陣が動揺している可能性がある。"
+                ]
+            }
+        )
+        fake_client = FakeAnthropicClient(FakeResponse(evidenced))
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=fake_client, clock=FakeClock(date(2027, 1, 1))
+            ),
+        )
+        request = _request()
+
+        first = client.analyze(request)
+        second = client.analyze(request)
+
+        assert first == second == evidenced
+        assert len(fake_client.messages.calls) == 1
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            status = conn.execute("SELECT status FROM llm_calls").fetchone()
+        assert status == ("success",)

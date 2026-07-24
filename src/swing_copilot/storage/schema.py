@@ -179,6 +179,20 @@ INIT_SCHEMA_STATEMENTS = (
         created_at      TIMESTAMPTZ NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS signal_outcomes (
+        run_id             UUID NOT NULL,
+        symbol             VARCHAR NOT NULL,
+        horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+        as_of              DATE NOT NULL,
+        signal_names       VARCHAR[] NOT NULL,
+        forward_return_pct DOUBLE NOT NULL,
+        classification     VARCHAR NOT NULL CHECK (classification IN (
+            'TRUE_POSITIVE','FALSE_POSITIVE_MILD','FALSE_POSITIVE_SEVERE','NEUTRAL'
+        )),
+        PRIMARY KEY (run_id, symbol, horizon_days)
+    )
+    """,
 )
 
 # P1-03: additive columns for a database created before this change. See the

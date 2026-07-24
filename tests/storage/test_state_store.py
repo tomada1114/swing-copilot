@@ -20,7 +20,7 @@ from swing_copilot.screening.base import (
     RejectionStage,
     SignalHit,
 )
-from swing_copilot.storage.audit_records import ScreeningRunMeta
+from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
@@ -1200,6 +1200,104 @@ class TestRecordRiskAssessments:
                 [str(run_id)],
             ).fetchone()
         assert row == (40, 40, "position_cap")
+
+
+class TestRecordSignalOutcomes:
+    """P2-11: `signal_outcomes` writes, keyed by `(run_id, symbol, horizon_days)`."""
+
+    def test_records_one_row(self, state_store):
+        run_id = uuid4()
+        outcome = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+
+        state_store.record_signal_outcomes([outcome])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT symbol, horizon_days, forward_return_pct, classification "
+                "FROM signal_outcomes WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == ("AAPL", 5, 1.5, "TRUE_POSITIVE")
+
+    def test_empty_sequence_is_a_no_op(self, state_store):
+        state_store.record_signal_outcomes([])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM signal_outcomes").fetchone()
+        assert count == (0,)
+
+    def test_rerun_with_corrected_values_updates_the_existing_row(self, state_store):
+        run_id = uuid4()
+        first = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+        corrected = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=-5.0,
+            classification="FALSE_POSITIVE_SEVERE",
+        )
+
+        state_store.record_signal_outcomes([first])
+        state_store.record_signal_outcomes([corrected])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT forward_return_pct, classification FROM signal_outcomes "
+                "WHERE run_id = ? AND symbol = ? AND horizon_days = ?",
+                [str(run_id), "AAPL", 5],
+            ).fetchall()
+        assert rows == [(-5.0, "FALSE_POSITIVE_SEVERE")]
+
+    def test_rolls_back_entirely_when_a_later_row_violates_a_check_constraint(
+        self, state_store
+    ):
+        # An earlier, otherwise-valid row in the same batch must not be left
+        # committed when a later row in the same call fails (AGENTS.md: one
+        # logical multi-row write is one transaction).
+        run_id = uuid4()
+        valid = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+        invalid = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="MSFT",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="NOT_A_REAL_CLASSIFICATION",
+        )
+
+        with pytest.raises(duckdb.ConstraintException):
+            state_store.record_signal_outcomes([valid, invalid])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM signal_outcomes").fetchone()
+        assert count == (0,)
 
 
 def _text_item(source_id: str, source_url: str) -> TextItem:

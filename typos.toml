@@ -3,3 +3,5 @@ extend-exclude = ["uv.lock"]
 
 [default.extend-words]
 yoy = "yoy" # finance term (year-over-year), not a typo of "you"
+PnL = "PnL" # finance term (profit and loss), not a typo of "OnL"
+Pn = "Pn" # typos splits "PnL" into "Pn" + "L"; "Pn" alone is not a typo of "On"

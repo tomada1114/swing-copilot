@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
+    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
@@ -176,6 +177,8 @@ class DailyBrief:
     candidates: tuple[BriefCandidate, ...]
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
+    # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
+    signal_performance: tuple[SignalPerformanceRow, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +199,9 @@ class DailyBriefContext:
     strategy_key: str
     rejections: list[RejectionRecord] = field(default_factory=list)
     notices: tuple[str, ...] = ()
+    # P2-11: computed by `pipeline/postmortem.py`'s `run_postmortem_step()`,
+    # threaded straight through to `DailyBrief` (mirrors `notices` above).
+    signal_performance: tuple[SignalPerformanceRow, ...] = ()
     # REQ-006: baked into each candidate's `BriefRisk` for `format_sizing()`,
     # since `RiskAssessment` itself only carries computed outputs, not the
     # config percentages that produced them.
@@ -239,6 +245,7 @@ def build_daily_brief(
         candidates=candidates,
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
+        signal_performance=context.signal_performance,
     )
 
 

@@ -26,7 +26,15 @@ class SourcedFact(BaseModel):
 
 
 class NewsSummary(BaseModel):
-    """Structured news summary (`llm/summarize.py`)."""
+    """Structured news summary (`llm/summarize.py`).
+
+    `catalyst_quality` (P2-12, REQ-006/007) classifies the strength of any
+    news catalyst so LLM output carries a structured judgment instead of
+    only free-text sentiment; its own `catalyst_quality_source_ids` mirrors
+    `SourcedFact.source_ids`'s provenance shape (REQ-008) -- a required,
+    non-empty, non-blank list, never a default, so the model must always
+    cite what it based the classification on.
+    """
 
     symbol: str
     period: str
@@ -35,6 +43,8 @@ class NewsSummary(BaseModel):
     sentiment: Literal[-1, 0, 1]
     risk_flags: list[str]
     sources: list[str]
+    catalyst_quality: Literal["high", "medium", "low", "none"]
+    catalyst_quality_source_ids: Annotated[list[SourceId], Field(min_length=1)]
 
 
 class FilingAnalysis(BaseModel):

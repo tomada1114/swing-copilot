@@ -532,6 +532,20 @@ Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で
 terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
 roadmap §5 P3-13に従いすべて要検証値として扱う。
 
+### 3.12b `regime/exposure.py`（P3-14）
+
+`determine_exposure()`は`RegimeSnapshot`を`NEW_ENTRY_ALLOWED`、`REDUCE_ONLY`、
+`CASH_PRIORITY`の3段階へ決定論的に写像する。BEARまたはSEVEREを最優先、次に
+NEUTRALまたはHIGHを適用する。ゲート/DDの一方がUNKNOWNなら既知入力での基準値から
+1段階だけ厳格化し、両方UNKNOWNならCASH_PRIORITYに固定する。日次runではこの判定を
+一度だけ計算して`exposure_decisions`へ補正upsertし、同一run中にデータ回復で緩めない。
+
+`RiskChecker`はCASH_PRIORITYで通常サイジングを実行せず、`max_shares=0`、理由
+`REGIME_CASH_PRIORITY`、制約`regime`の拒否結果を返す。REDUCE_ONLYでは
+`regime.reduce_only_risk_multiplier`（既定0.5、roadmap §5 P3-14、要検証）を
+`max_trade_risk_pct`へ掛け、警告を追加する。Exposure Ceilingはterminal/Markdown/Discordで
+候補一覧より先に表示する。
+
 ### 3.13 `risk/position_sizing.py` / `risk/checks.py`（FR-06）
 
 ```python
@@ -1199,6 +1213,13 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
     detail_json     JSON NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS exposure_decisions (
+    run_id       UUID PRIMARY KEY,
+    verdict      VARCHAR NOT NULL,
+    data_quality VARCHAR NOT NULL,
+    detail_json  JSON NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1394,6 +1415,7 @@ regime:
   dd_decline_pct: -0.002           # DD下落率（要検証）
   stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
   recovery_pct: 0.05               # DD無効化上昇率（要検証）
+  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLYの取引リスク倍率（P3-14、要検証）
 
 notification:
   enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する

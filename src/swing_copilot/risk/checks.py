@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.config import Settings
     from swing_copilot.models import Position
+    from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
@@ -43,11 +44,11 @@ _MIN_MEANINGFUL_RISK_BUDGET_USD = 1.0
 
 SIZING_WARNING_WIDE_STOP = "WIDE_STOP"
 SIZING_WARNING_SMALL_ACCOUNT_FRICTION = "SMALL_ACCOUNT_FRICTION"
+SIZING_WARNING_REGIME_REDUCE_ONLY = "REGIME_REDUCE_ONLY_RISK_HALVED"
+REGIME_CASH_PRIORITY_REASON = "REGIME_CASH_PRIORITY"
 
 # REQ-004: the constraint that determined the final share count.
-BindingConstraint = (
-    str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "not_calculable"
-)
+BindingConstraint = str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "regime" | "not_calculable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,7 @@ class RiskAssessment:
     shares_by_position_cap: int | None = None
     binding_constraint: BindingConstraint = "not_calculable"
     sizing_warnings: tuple[str, ...] = ()
+    max_trade_risk_pct: float | None = None
 
 
 def _daily_returns(bars: pd.DataFrame, lookback_days: int) -> pd.Series | None:
@@ -119,6 +121,7 @@ class RiskChecker:
         candidates: list[Candidate],
         portfolio: list[Position],
         account_equity: float | None,
+        exposure: ExposureDecision | None = None,
     ) -> list[RiskAssessment]:
         """Assess every candidate: sizing, sector concentration, correlation.
 
@@ -126,12 +129,13 @@ class RiskChecker:
             candidates: Ranked screening candidates.
             portfolio: Currently open positions (paper or live).
             account_equity: Total account equity in USD, or `None` if unset.
+            exposure: Code-owned market exposure ceiling, if available.
 
         Returns:
             One `RiskAssessment` per candidate, same order as `candidates`.
         """
         return [
-            self._assess(candidate, portfolio, account_equity)
+            self._assess(candidate, portfolio, account_equity, exposure)
             for candidate in candidates
         ]
 
@@ -140,6 +144,7 @@ class RiskChecker:
         candidate: Candidate,
         portfolio: list[Position],
         account_equity: float | None,
+        exposure: ExposureDecision | None,
     ) -> RiskAssessment:
         entry_price = candidate.metrics.get("close")
         atr14 = candidate.metrics.get("atr14")
@@ -148,6 +153,19 @@ class RiskChecker:
                 candidate.symbol, portfolio, self._market_store, candidate.as_of
             )
         )
+
+        if exposure is not None and exposure.verdict.value == "CASH_PRIORITY":
+            return RiskAssessment(
+                symbol=candidate.symbol,
+                status="rejected",
+                max_shares=0,
+                entry_price=entry_price,
+                stop_price=None,
+                reasons=(REGIME_CASH_PRIORITY_REASON,),
+                warnings=warnings,
+                binding_constraint="regime",
+                max_trade_risk_pct=0.0,
+            )
 
         if entry_price is None or atr14 is None:
             return RiskAssessment(
@@ -172,6 +190,14 @@ class RiskChecker:
                 binding_constraint="not_calculable",
             )
 
+        effective_risk_pct = self._risk_config.max_trade_risk_pct
+        is_reduce_only = (
+            exposure is not None and exposure.verdict.value == "REDUCE_ONLY"
+        )
+        if is_reduce_only:
+            multiplier = exposure.reduce_only_risk_multiplier if exposure else 1.0
+            effective_risk_pct *= multiplier
+
         stop_price = entry_price - self._stop_atr_multiple * atr14
         try:
             sizing = calc_position_size(
@@ -179,7 +205,7 @@ class RiskChecker:
                 entry_price,
                 stop_price,
                 self._risk_config.max_position_pct,
-                self._risk_config.max_trade_risk_pct,
+                effective_risk_pct,
             )
         except ValueError:
             return RiskAssessment(
@@ -194,8 +220,10 @@ class RiskChecker:
             )
 
         sizing_warnings = self._sizing_warnings(
-            entry_price, stop_price, account_equity, sizing
+            entry_price, stop_price, account_equity, sizing, effective_risk_pct
         )
+        if is_reduce_only:
+            sizing_warnings += (SIZING_WARNING_REGIME_REDUCE_ONLY,)
 
         reasons: list[str] = []
         status = "approved"
@@ -236,6 +264,7 @@ class RiskChecker:
             shares_by_position_cap=sizing.shares_by_position_cap,
             binding_constraint=binding_constraint,
             sizing_warnings=sizing_warnings,
+            max_trade_risk_pct=effective_risk_pct,
         )
 
     def _sizing_warnings(
@@ -244,6 +273,7 @@ class RiskChecker:
         stop_price: float,
         account_equity: float,
         sizing: PositionSizeResult,
+        max_trade_risk_pct: float,
     ) -> tuple[str, ...]:
         """REQ-030/REQ-020: friction warnings that never block approval."""
         warnings: list[str] = []
@@ -251,7 +281,7 @@ class RiskChecker:
         if stop_distance_pct > self._risk_config.wide_stop_threshold_pct:
             warnings.append(SIZING_WARNING_WIDE_STOP)
 
-        risk_budget = account_equity * self._risk_config.max_trade_risk_pct
+        risk_budget = account_equity * max_trade_risk_pct
         if sizing.shares < 1 or risk_budget < _MIN_MEANINGFUL_RISK_BUDGET_USD:
             warnings.append(SIZING_WARNING_SMALL_ACCOUNT_FRICTION)
         return tuple(warnings)

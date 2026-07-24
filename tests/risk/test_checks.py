@@ -9,7 +9,18 @@ import pandas as pd
 import pytest
 
 from swing_copilot.models import Position
-from swing_copilot.risk.checks import RiskChecker
+from swing_copilot.regime.distribution import (
+    DataQuality,
+    DistributionLevel,
+    DistributionResult,
+)
+from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
+from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
+from swing_copilot.risk.checks import (
+    REGIME_CASH_PRIORITY_REASON,
+    SIZING_WARNING_REGIME_REDUCE_ONLY,
+    RiskChecker,
+)
 from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
@@ -49,6 +60,19 @@ def _position(symbol: str, *, shares: int = 100, entry_price: float = 90.0) -> P
         shares=shares,
         status="open",
     )
+
+
+def _exposure(gate: GateVerdict, level: DistributionLevel) -> ExposureDecision:
+    distribution = DistributionResult(0.0, 0.0, 0.0, level, DataQuality.OK)
+    snapshot = RegimeSnapshot(
+        AS_OF,
+        MarketGate(gate, 100.0, 90.0, 15.0),
+        distribution,
+        distribution,
+        level,
+        DataQuality.OK,
+    )
+    return determine_exposure(snapshot)
 
 
 def _write_price_series(
@@ -143,6 +167,49 @@ class TestCheckSizing:
         assert result[0].status == "not_calculable"
         assert result[0].binding_constraint == "not_calculable"
         assert result[0].reasons
+
+    def test_cash_priority_forces_zero_shares_with_regime_reason(self, checker):
+        result = checker.check(
+            [_candidate("AAPL")],
+            portfolio=[],
+            account_equity=100_000.0,
+            exposure=_exposure(GateVerdict.BEAR, DistributionLevel.NORMAL),
+        )[0]
+
+        assert result.status == "rejected"
+        assert result.max_shares == 0
+        assert result.reasons == (REGIME_CASH_PRIORITY_REASON,)
+        assert result.binding_constraint == "regime"
+
+    def test_reduce_only_halves_trade_risk_and_adds_warning(self, checker):
+        normal = checker.check(
+            [_candidate("AAPL", close=50.0)], portfolio=[], account_equity=100_000.0
+        )[0]
+        reduced = checker.check(
+            [_candidate("AAPL", close=50.0)],
+            portfolio=[],
+            account_equity=100_000.0,
+            exposure=_exposure(GateVerdict.NEUTRAL, DistributionLevel.NORMAL),
+        )[0]
+
+        assert normal.max_shares == 200
+        assert reduced.max_shares == 100
+        assert reduced.max_trade_risk_pct == pytest.approx(0.005)
+        assert SIZING_WARNING_REGIME_REDUCE_ONLY in reduced.sizing_warnings
+
+    def test_new_entry_allowed_preserves_existing_sizing(self, checker):
+        normal = checker.check(
+            [_candidate("AAPL")], portfolio=[], account_equity=100_000.0
+        )[0]
+        allowed = checker.check(
+            [_candidate("AAPL")],
+            portfolio=[],
+            account_equity=100_000.0,
+            exposure=_exposure(GateVerdict.BULL, DistributionLevel.NORMAL),
+        )[0]
+
+        assert allowed.max_shares == normal.max_shares
+        assert allowed.sizing_warnings == normal.sizing_warnings
 
 
 class TestSectorConcentration:

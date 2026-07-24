@@ -80,3 +80,4 @@ regime:
   dd_decline_pct: -0.002
   stall_abs_change_pct: 0.001
   recovery_pct: 0.05
+  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLY trade-risk multiplier (要検証)

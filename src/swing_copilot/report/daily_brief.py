@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
+    from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
@@ -54,6 +55,17 @@ class BriefRegime:
     spy_d25: float
     qqq_d25: float
     data_quality: str
+
+
+@dataclass(frozen=True, slots=True)
+class BriefExposure:
+    """Code-owned new-entry ceiling displayed before candidates."""
+
+    verdict: str
+    gate: str
+    dd_level: str
+    data_quality: str
+    is_conservatively_downgraded: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +200,7 @@ class DailyBrief:
     market: tuple[BriefMarketItem, ...]
     candidates: tuple[BriefCandidate, ...]
     regime: BriefRegime | None = None
+    exposure: BriefExposure | None = None
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
@@ -221,6 +234,7 @@ class DailyBriefContext:
     max_trade_risk_pct: float = 0.01
     max_position_pct: float = 0.10
     regime_snapshot: RegimeSnapshot | None = None
+    exposure_decision: ExposureDecision | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +272,7 @@ def build_daily_brief(
         market=_market_items(market_store, context.run_date),
         candidates=candidates,
         regime=_regime_brief(context.regime_snapshot),
+        exposure=_exposure_brief(context.exposure_decision),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
@@ -273,6 +288,18 @@ def _regime_brief(snapshot: RegimeSnapshot | None) -> BriefRegime | None:
         spy_d25=snapshot.spy_distribution.d25,
         qqq_d25=snapshot.qqq_distribution.d25,
         data_quality=snapshot.data_quality.value,
+    )
+
+
+def _exposure_brief(decision: ExposureDecision | None) -> BriefExposure | None:
+    if decision is None:
+        return None
+    return BriefExposure(
+        verdict=decision.verdict.value,
+        gate=decision.gate.value,
+        dd_level=decision.dd_level.value,
+        data_quality=decision.data_quality.value,
+        is_conservatively_downgraded=decision.is_conservatively_downgraded,
     )
 
 

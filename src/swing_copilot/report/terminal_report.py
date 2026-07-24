@@ -49,6 +49,18 @@ def render_terminal(
             f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
             f"Data quality: {brief.regime.data_quality}"
         )
+    if brief.exposure is not None:
+        downgraded = (
+            " (conservative downgrade)"
+            if brief.exposure.is_conservatively_downgraded
+            else ""
+        )
+        console.print(
+            "[bold]Exposure Ceiling[/bold] "
+            f"{brief.exposure.verdict}{downgraded} "
+            f"(Gate: {brief.exposure.gate}, DD: {brief.exposure.dd_level}, "
+            f"Data quality: {brief.exposure.data_quality})"
+        )
 
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("#", justify="right")

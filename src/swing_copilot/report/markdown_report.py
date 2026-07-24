@@ -50,6 +50,20 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Data quality: `{brief.regime.data_quality}`",
             ]
         )
+    if brief.exposure is not None:
+        downgrade = (
+            "（保守的降格）" if brief.exposure.is_conservatively_downgraded else ""
+        )
+        lines.extend(
+            [
+                "",
+                "## Exposure Ceiling",
+                "",
+                f"- Verdict: `{brief.exposure.verdict}` {downgrade}",
+                f"- Inputs: gate `{brief.exposure.gate}`, DD `{brief.exposure.dd_level}`",
+                f"- Data quality: `{brief.exposure.data_quality}`",
+            ]
+        )
     lines.extend(
         [
             "",

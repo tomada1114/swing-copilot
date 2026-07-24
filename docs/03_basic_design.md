@@ -121,7 +121,7 @@ flowchart TD
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目シグナル評価 | FR-05 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲートとDistribution Dayを決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13 |
-| RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関等のリスクチェック | FR-06 |
+| RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関等のリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する | FR-06, P3-14 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | LLMClient | `llm/client.py` | Claude API呼び出しの共通ラッパー（リトライ・コスト記録） | FR-08, NFR-05, NFR-06 |
 | LLM分析（要約） | `llm/summarize.py` | LLMによるニュース要約（事実/推測分離、使用モデルは`settings.yaml`の`llm.models.news_summary`で設定、デフォルトHaiku） | FR-08 |

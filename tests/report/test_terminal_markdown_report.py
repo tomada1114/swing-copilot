@@ -13,6 +13,7 @@ from swing_copilot.models import RunStatus
 from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefCandidate,
+    BriefExposure,
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
@@ -97,6 +98,27 @@ def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
     assert "Gate: BULL" in terminal
     assert markdown.index("## Market regime") < markdown.index("## Candidates")
     assert "Distribution Day level: `NORMAL`" in markdown
+
+
+def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        exposure=BriefExposure(
+            verdict="CASH_PRIORITY",
+            gate="BEAR",
+            dd_level="SEVERE",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Exposure Ceiling") < terminal.index("Symbol")
+    assert "CASH_PRIORITY" in terminal
+    assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
+    assert "Verdict: `CASH_PRIORITY`" in markdown
 
 
 def test_terminal_shows_the_binding_constraint_sizing_string() -> None:

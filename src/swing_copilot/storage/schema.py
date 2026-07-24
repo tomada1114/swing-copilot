@@ -108,7 +108,7 @@ INIT_SCHEMA_STATEMENTS = (
         shares_by_position_cap  BIGINT,
         binding_constraint      VARCHAR
             CHECK (binding_constraint IN (
-                'trade_risk','position_cap','sector','correlation','not_calculable'
+                'trade_risk','position_cap','sector','correlation','regime','not_calculable'
             )),
         sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
         PRIMARY KEY (run_id, symbol)
@@ -203,6 +203,14 @@ INIT_SCHEMA_STATEMENTS = (
         dd_level        VARCHAR NOT NULL,
         data_quality    VARCHAR NOT NULL,
         detail_json     JSON NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS exposure_decisions (
+        run_id       UUID PRIMARY KEY,
+        verdict      VARCHAR NOT NULL,
+        data_quality VARCHAR NOT NULL,
+        detail_json  JSON NOT NULL
     )
     """,
 )

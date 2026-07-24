@@ -1,0 +1,364 @@
+"""CLI entry point `copilot-backtest` (P2-08, roadmap §5 P2-08).
+
+Wires the real `MarketStore`/S&P 500 universe into `backtest.runner.run_backtest`
+and renders P2-07's risk-adjusted metrics to terminal (Rich) and an atomically
+written markdown report, promoting the backtester from tests-only to a daily
+tool (diagnosis D5's execution side).
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import date
+from io import StringIO
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from rich.console import Console
+from rich.table import Table
+
+from swing_copilot.backtest.runner import (
+    BacktestDependencies,
+    BacktestRequest,
+    run_backtest,
+)
+from swing_copilot.config import load_settings, load_strategies
+from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
+from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from swing_copilot.backtest.engine import BacktestResult
+    from swing_copilot.config import Settings, StrategiesConfig
+    from swing_copilot.universe import UniverseMember
+
+_DEFAULT_OUTPUT_DIR = Path("reports/backtests")
+_CONSOLE_WIDTH = 200
+
+
+class BacktestCliError(SwingCopilotError):
+    """Raised for fail-fast argument/strategy errors, before any backtest runs."""
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="copilot-backtest")
+    parser.add_argument("--strategy", required=True)
+    parser.add_argument("--start", type=date.fromisoformat, required=True)
+    parser.add_argument("--end", type=date.fromisoformat, required=True)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--output", type=Path, default=None)
+    # REQ-010: parser slot only -- the dual normal/pessimistic run itself is
+    # P2-09 (Issue #18).
+    parser.add_argument("--pessimistic", action="store_true")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    return parser.parse_args(argv)
+
+
+def _validate_args(args: argparse.Namespace, strategies: StrategiesConfig) -> None:
+    """Fail-fast checks that must run before any I/O (REQ-021/022)."""
+    if args.start > args.end:
+        msg = f"--start ({args.start}) は --end ({args.end}) より後ろにできません。"
+        raise BacktestCliError(msg)
+    if args.strategy not in strategies.strategies:
+        available = ", ".join(sorted(strategies.strategies))
+        msg = f"戦略 '{args.strategy}' は見つかりません。利用可能: {available}"
+        raise BacktestCliError(msg)
+
+
+def _select_symbols(universe: Sequence[UniverseMember], limit: int | None) -> list[str]:
+    symbols = [member.symbol for member in universe]
+    return symbols if limit is None else symbols[:limit]
+
+
+def _output_path(args: argparse.Namespace) -> Path:
+    output: Path | None = args.output
+    if output is not None:
+        return output
+    return _DEFAULT_OUTPUT_DIR / f"{args.end.isoformat()}-{args.strategy}.md"
+
+
+def _missing_data_symbols(
+    market_store: MarketStore, symbols: list[str], start: date, end: date
+) -> list[str]:
+    """Symbols with zero bars anywhere in [start, end] (REQ-020's fail-soft note)."""
+    if not symbols:
+        return []
+    bars = market_store.read_bars(symbols, start, end, as_of=end)
+    present = set(bars["symbol"].unique()) if not bars.empty else set()
+    return sorted(set(symbols) - present)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write `content` via a same-directory temp file + `os.replace` (REQ-008)."""
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _fmt_ratio(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.3f}"
+
+
+def _fmt_pct(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2%}"
+
+
+def _fmt_money(value: float | None) -> str:
+    return "N/A" if value is None else f"${value:,.2f}"
+
+
+_METRIC_ROWS: tuple[tuple[str, str], ...] = (
+    ("trade_count", "trade_count"),
+    ("sharpe", "sharpe"),
+    ("max_drawdown_pct", "max_drawdown_pct"),
+    ("win_rate", "win_rate"),
+    ("profit_factor", "profit_factor"),
+    ("expectancy_per_trade", "expectancy_per_trade"),
+    ("avg_r_multiple", "avg_r_multiple"),
+    ("final_equity", "final_equity"),
+    ("benchmark_final_equity", "benchmark_final_equity"),
+)
+_PCT_FIELDS = frozenset({"max_drawdown_pct", "win_rate"})
+_MONEY_FIELDS = frozenset(
+    {"expectancy_per_trade", "final_equity", "benchmark_final_equity"}
+)
+
+
+def _metric_value(result: BacktestResult, field: str) -> str:
+    value = getattr(result, field)
+    if field == "trade_count":
+        return str(value)
+    if field in _PCT_FIELDS:
+        return _fmt_pct(value)
+    if field in _MONEY_FIELDS:
+        return _fmt_money(value)
+    return _fmt_ratio(value)
+
+
+def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
+    if not result.equity_curve:
+        return ["Equity curve: (no trading days)"]
+    first_date, first_equity = result.equity_curve[0]
+    last_date, last_equity = result.equity_curve[-1]
+    peak_date, peak_equity = max(result.equity_curve, key=lambda point: point[1])
+    trough_date, trough_equity = min(result.equity_curve, key=lambda point: point[1])
+    return [
+        f"Equity curve: {first_date.isoformat()}={first_equity:,.2f} -> "
+        f"{last_date.isoformat()}={last_equity:,.2f}",
+        f"  Peak: {peak_date.isoformat()}={peak_equity:,.2f}",
+        f"  Trough: {trough_date.isoformat()}={trough_equity:,.2f}",
+    ]
+
+
+def render_terminal(
+    result: BacktestResult,
+    *,
+    strategy: str,
+    start: date,
+    end: date,
+    missing_data_symbols: Sequence[str],
+) -> str:
+    """Render `result` as Rich terminal text (REQ-007/009)."""
+    buffer = StringIO()
+    console = Console(file=buffer, width=_CONSOLE_WIDTH)
+    console.print(
+        f"[bold]copilot-backtest[/bold] strategy={strategy} "
+        f"{start.isoformat()}..{end.isoformat()}"
+    )
+
+    metrics_table = Table(title="Backtest metrics", header_style="bold")
+    metrics_table.add_column("Metric")
+    metrics_table.add_column("Value", justify="right")
+    for label, field in _METRIC_ROWS:
+        metrics_table.add_row(label, _metric_value(result, field))
+    console.print(metrics_table)
+
+    for warning in result.warnings:
+        console.print(f"[yellow]{warning}[/yellow]")
+    if missing_data_symbols:
+        console.print(
+            f"[yellow]データ不足のためスキップ: {', '.join(missing_data_symbols)}[/yellow]"
+        )
+
+    if result.trades:
+        trades_table = Table(title="Trades")
+        for column in (
+            "Symbol",
+            "Entry date",
+            "Entry",
+            "Exit date",
+            "Exit",
+            "Shares",
+            "PnL",
+            "Reason",
+        ):
+            trades_table.add_column(column)
+        for trade in result.trades:
+            trades_table.add_row(
+                trade.symbol,
+                trade.entry_date.isoformat(),
+                f"{trade.entry_price:.2f}",
+                trade.exit_date.isoformat(),
+                f"{trade.exit_price:.2f}",
+                str(trade.shares),
+                f"{trade.pnl:,.2f}",
+                trade.exit_reason,
+            )
+        console.print(trades_table)
+    else:
+        console.print("Trades: (none)")
+
+    for line in _equity_curve_summary_lines(result):
+        console.print(line)
+    console.print(f"[dim]{result.survivorship_bias_note}[/dim]")
+
+    return buffer.getvalue()
+
+
+def render_markdown(
+    result: BacktestResult,
+    *,
+    strategy: str,
+    start: date,
+    end: date,
+    missing_data_symbols: Sequence[str],
+) -> str:
+    """Render `result` as a markdown report (REQ-007/009)."""
+    lines = [
+        f"# Backtest: {strategy} ({start.isoformat()} .. {end.isoformat()})",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+    ]
+    lines += [
+        f"| {label} | {_metric_value(result, field)} |" for label, field in _METRIC_ROWS
+    ]
+    lines.append("")
+
+    if result.warnings:
+        lines += ["## Warnings", ""]
+        lines += [f"- {warning}" for warning in result.warnings]
+        lines.append("")
+
+    if missing_data_symbols:
+        lines += [
+            "## Data quality",
+            "",
+            f"データ不足のためスキップ: {', '.join(missing_data_symbols)}",
+            "",
+        ]
+
+    lines += ["## Equity curve summary", "", *_equity_curve_summary_lines(result), ""]
+
+    lines += ["## Trades", ""]
+    if result.trades:
+        lines += [
+            "| Symbol | Entry date | Entry | Exit date | Exit | Shares | PnL | Reason |",
+            "|---|---|---:|---|---:|---:|---:|---|",
+        ]
+        lines += [
+            f"| {trade.symbol} | {trade.entry_date.isoformat()} | "
+            f"{trade.entry_price:.2f} | {trade.exit_date.isoformat()} | "
+            f"{trade.exit_price:.2f} | {trade.shares} | {trade.pnl:,.2f} | "
+            f"{trade.exit_reason} |"
+            for trade in result.trades
+        ]
+    else:
+        lines.append("(no trades)")
+    lines.append("")
+
+    lines += ["## Survivorship bias", "", result.survivorship_bias_note, ""]
+    return "\n".join(lines)
+
+
+def _compose_dependencies(
+    args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
+) -> tuple[BacktestDependencies, list[str], list[str]]:
+    """Wire real collaborators (composition root); returns deps, symbols, missing data."""
+    database = Database(args.db)
+    # Parquet bars live alongside the DuckDB file, mirroring the
+    # DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing ("data/copilot.duckdb" +
+    # "data/bars") -- `--db` overrides both together, never just the DB.
+    market_store = MarketStore(database, parquet_root=Path(args.db).parent / "bars")
+    universe = tuple(
+        get_sp500_universe(
+            args.end,
+            options=UniverseFetchOptions(
+                snapshot_path=settings.universe.snapshot_path,
+                manual_include=settings.universe.manual_include,
+                manual_exclude=settings.universe.manual_exclude,
+            ),
+        )
+    )
+    symbols = _select_symbols(universe, args.limit)
+    missing_data_symbols = _missing_data_symbols(
+        market_store, symbols, args.start, args.end
+    )
+    deps = BacktestDependencies(
+        market_store=market_store,
+        universe=universe,
+        settings=settings,
+        strategies_config=strategies.model_dump(),
+    )
+    return deps, symbols, missing_data_symbols
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point: parse args, run the backtest, print + write the report."""
+    args = _parse_args(argv)
+    settings = load_settings()
+    strategies = load_strategies()
+
+    try:
+        _validate_args(args, strategies)
+        deps, symbols, missing_data_symbols = _compose_dependencies(
+            args, settings, strategies
+        )
+        request = BacktestRequest(
+            symbols=symbols,
+            start=args.start,
+            end=args.end,
+            initial_cash=settings.backtest.initial_cash_usd,
+            strategy_key=args.strategy,
+        )
+        result = run_backtest(request, deps)
+    except BacktestCliError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    sys.stdout.write(
+        render_terminal(
+            result,
+            strategy=args.strategy,
+            start=args.start,
+            end=args.end,
+            missing_data_symbols=missing_data_symbols,
+        )
+    )
+
+    output_path = _output_path(args)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(
+        output_path,
+        render_markdown(
+            result,
+            strategy=args.strategy,
+            start=args.start,
+            end=args.end,
+            missing_data_symbols=missing_data_symbols,
+        ),
+    )
+    sys.stdout.write(f"\nReport written to {output_path}\n")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

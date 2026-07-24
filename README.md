@@ -41,6 +41,13 @@ uv run copilot-history symbol AAPL
 uv run copilot-history performance
 ```
 
+Backtest a strategy over a historical window, with risk-adjusted metrics
+(Sharpe, max drawdown, win rate, profit factor, expectancy, R-multiple):
+
+```bash
+uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30
+```
+
 See `docs/00_human_preparation.md` for the full setup checklist and
 `docs/03_basic_design.md` / `docs/04_detailed_design.md` for the architecture.
 

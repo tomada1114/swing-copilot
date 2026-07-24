@@ -6,6 +6,7 @@ Wires the real `MarketStore`/`ScreeningPipeline` into `BacktestEngine` (FR-10).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING, Any
 
 from swing_copilot.backtest.engine import BacktestEngine, BacktestResult
@@ -38,6 +39,7 @@ class BacktestRequest:
     start: date
     end: date
     initial_cash: float
+    strategy_key: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +105,21 @@ def run_backtest(
     bars = deps.market_store.read_bars(all_symbols, start, end, as_of=end)
     fundamentals = deps.market_store.read_fundamentals(end)
     pipeline = ScreeningPipeline(
-        deps.strategies_config, deps.market_store, effective_settings
+        deps.strategies_config,
+        deps.market_store,
+        effective_settings,
+        request.strategy_key,
     )
 
     def candidates_fn(day: date) -> list[Candidate]:
         point_in_time_bars = bars[bars["date"] <= day]
+        # `filed_at` is TIMESTAMPTZ; a bare `date` can't be compared against
+        # it directly (pandas raises TypeError). Match
+        # `screening/fundamental_filters.py`'s end-of-day-UTC cutoff idiom for
+        # an inclusive as-of boundary.
+        day_cutoff = datetime.combine(day, time.max, tzinfo=UTC)
         point_in_time_fundamentals = (
-            fundamentals[fundamentals["filed_at"] <= day]
+            fundamentals[fundamentals["filed_at"] <= day_cutoff]
             if not fundamentals.empty
             else fundamentals
         )

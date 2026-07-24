@@ -809,6 +809,17 @@ def run_backtest(
 
 **P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
 
+**P2-08実装時追記（roadmap §5 P2-08）**: バックテストを日常道具として実行するCLIエントリポイント`copilot-backtest`（`backtest/cli.py`、`pyproject.toml`の`[project.scripts]`で`copilot-backtest = "swing_copilot.backtest.cli:main"`として登録）を追加した。
+
+```text
+uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
+    [--limit N] [--output PATH] [--pessimistic] [--db PATH]
+```
+
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--pessimistic`はP2-09（Issue #18）まではパーサー枠のみ。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。
+
+**バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
+
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
 > **P2-5実装時の訂正（2026-07-22）**: 以下の`signal_id: int`/`position_id: int`

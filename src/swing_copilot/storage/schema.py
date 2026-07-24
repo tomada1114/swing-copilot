@@ -193,6 +193,18 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS regime_snapshots (
+        run_id          UUID PRIMARY KEY,
+        as_of           DATE NOT NULL,
+        gate_verdict    VARCHAR NOT NULL,
+        dd_count_spy    DOUBLE NOT NULL,
+        dd_count_qqq    DOUBLE NOT NULL,
+        dd_level        VARCHAR NOT NULL,
+        data_quality    VARCHAR NOT NULL,
+        detail_json     JSON NOT NULL
+    )
+    """,
 )
 
 # P1-03: additive columns for a database created before this change. See the

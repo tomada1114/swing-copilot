@@ -42,6 +42,9 @@ swing-copilot/
 │   ├── risk/
 │   │   ├── position_sizing.py
 │   │   └── checks.py         # FR-06
+│   ├── regime/
+│   │   ├── gate.py           # SPY/EMA/VIX market gate and snapshot
+│   │   └── distribution.py   # IBD-style Distribution Day counters
 │   ├── text/
 │   │   ├── news_finnhub.py
 │   │   ├── edgar_filings.py  # 8-K/10-Q監視
@@ -513,6 +516,21 @@ class ScreeningPipeline:
 **Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidityの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
+
+### 3.12a `regime/gate.py` / `regime/distribution.py`（P3-13）
+
+`regime/`はI/Oを持たない決定論的なfunctional coreである。`calculate_regime_snapshot()`は、
+SPY終値とEMA50、^VIX終値から`BULL`/`BEAR`/`NEUTRAL`を判定し、SPY・QQQを別々に
+Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で集計する。値が閾値と
+等しいときの比較規則は実装・テストで固定し、EMAには2×periodの履歴、DDには比較用の
+前日を含む26本を要求する。いずれかの入力履歴が足りなければ例外ではなく
+`UNKNOWN`/`INSUFFICIENT`を返す。すべての入力は関数境界で`date <= as_of`に絞るため、
+将来行は計算へ混入しない。
+
+`pipeline/daily.py`だけが`MarketStore`からSPY/QQQ/^VIXの履歴を読み、run単位で
+`StateStore.record_regime_snapshot()`へ補正upsertする。`DailyBrief`は同じsnapshotを
+terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
+roadmap §5 P3-13に従いすべて要検証値として扱う。
 
 ### 3.13 `risk/position_sizing.py` / `risk/checks.py`（FR-06）
 
@@ -1170,6 +1188,17 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     PRIMARY KEY (run_id, symbol, horizon_days)
 );
 
+CREATE TABLE IF NOT EXISTS regime_snapshots (
+    run_id          UUID PRIMARY KEY,
+    as_of           DATE NOT NULL,
+    gate_verdict    VARCHAR NOT NULL,
+    dd_count_spy    DOUBLE NOT NULL,
+    dd_count_qqq    DOUBLE NOT NULL,
+    dd_level        VARCHAR NOT NULL,
+    data_quality    VARCHAR NOT NULL,
+    detail_json     JSON NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1280,6 +1309,7 @@ DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しな
 | `UniverseMember` / `BarFetchResult` / `Candidate` | `models.py` | 内部ドメイン値（frozen dataclass） |
 | `SignalHit` | `screening/base.py` | シグナル評価結果（frozen dataclass） |
 | `RiskAssessment` / `CorrelationWarning` | `risk/checks.py` | リスクチェック結果（frozen dataclass） |
+| `RegimeSnapshot` | `regime/gate.py` | run時点の市場ゲート、SPY/QQQ Distribution Day、データ品質 |
 | `NewsSummary` | `llm/schemas.py` | ニュース要約（FR-08） |
 | `FilingAnalysis` | `llm/schemas.py` | 決算書解釈（FR-08） |
 | `FundamentalsRecord` | `data/edgar.py` | ファンダメンタルズ1レコード |
@@ -1354,6 +1384,16 @@ budget:
 
 schedule:
   timeout_minutes: 35              # NFR-03（ローカル手動実行時の所要時間上限）
+
+regime:
+  ema_period: 50                   # SPY EMA。roadmap §5 P3-13（要検証）
+  bull_vix_max: 20.0               # BULL条件のVIX上限（要検証）
+  bear_spy_ema_ratio: 0.97         # BEAR条件のEMA比率（要検証）
+  bear_vix_min: 30.0               # BEAR条件のVIX下限（要検証）
+  distribution_window_days: 25     # DD失効窓（営業日、要検証）
+  dd_decline_pct: -0.002           # DD下落率（要検証）
+  stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
+  recovery_pct: 0.05               # DD無効化上昇率（要検証）
 
 notification:
   enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する

@@ -48,6 +48,7 @@ flowchart TD
         DP["data/*_provider.py<br/>DataProvider (FR-02)"]
         EDG["data/edgar.py<br/>FR-03"]
         SCR["screening/pipeline.py<br/>Filter+Signal (FR-04, FR-05)"]
+        REG["regime/*<br/>市場ゲート・DD（P3-13）"]
         RISK["risk/checks.py<br/>FR-06"]
         TXT["text/*<br/>FR-07"]
         LLM["llm/*<br/>FR-08"]
@@ -75,6 +76,9 @@ flowchart TD
     DUCKDB --> SCR
     SCR --> DUCKDB
     SCR --> RISK
+    DP --> REG
+    REG --> DUCKDB
+    REG --> BRIEF
     RISK --> DUCKDB
     FH --> TXT
     EDGARAPI --> TXT
@@ -116,6 +120,7 @@ flowchart TD
 | ファンダフィルタ | `screening/fundamental_filters.py` | 第1段: 黒字継続・FCF・自己資本比率によるユニバース絞り込み | FR-04 |
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目シグナル評価 | FR-05 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
+| 市場レジーム | `regime/gate.py`, `regime/distribution.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲートとDistribution Dayを決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13 |
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関等のリスクチェック | FR-06 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | LLMClient | `llm/client.py` | Claude API呼び出しの共通ラッパー（リトライ・コスト記録） | FR-08, NFR-05, NFR-06 |
@@ -170,6 +175,9 @@ sequenceDiagram
     D->>RC: (4) リスクチェック
     RC-->>ST: RiskAssessment 記録
     D->>ST: run_steps(step=4, status)
+
+    D->>MS: レジーム算出（SPY/QQQ/^VIX、date <= as_of）
+    D->>ST: regime_snapshotsへ補正upsert
 
     D->>TXT: (5) テキスト収集（news/filings/calendar）
     alt 失敗

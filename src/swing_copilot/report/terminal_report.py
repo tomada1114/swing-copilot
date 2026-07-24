@@ -42,6 +42,13 @@ def render_terminal(
     )
     if market:
         console.print(market)
+    if brief.regime is not None:
+        console.print(
+            "[bold]Market regime[/bold] "
+            f"Gate: {brief.regime.gate} / DD: {brief.regime.dd_level} "
+            f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
+            f"Data quality: {brief.regime.data_quality}"
+        )
 
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("#", justify="right")

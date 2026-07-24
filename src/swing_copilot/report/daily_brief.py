@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
+    from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
@@ -42,6 +43,17 @@ class BriefMarketItem:
     label: str
     value: float | None
     pct_change: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class BriefRegime:
+    """Code-owned market state shown before any individual candidates."""
+
+    gate: str
+    dd_level: str
+    spy_d25: float
+    qqq_d25: float
+    data_quality: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +187,7 @@ class DailyBrief:
     generated_at: datetime
     market: tuple[BriefMarketItem, ...]
     candidates: tuple[BriefCandidate, ...]
+    regime: BriefRegime | None = None
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
@@ -207,6 +220,7 @@ class DailyBriefContext:
     # config percentages that produced them.
     max_trade_risk_pct: float = 0.01
     max_position_pct: float = 0.10
+    regime_snapshot: RegimeSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,9 +257,22 @@ def build_daily_brief(
         generated_at=context.generated_at,
         market=_market_items(market_store, context.run_date),
         candidates=candidates,
+        regime=_regime_brief(context.regime_snapshot),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
+    )
+
+
+def _regime_brief(snapshot: RegimeSnapshot | None) -> BriefRegime | None:
+    if snapshot is None:
+        return None
+    return BriefRegime(
+        gate=snapshot.gate.verdict.value,
+        dd_level=snapshot.dd_level.value,
+        spy_d25=snapshot.spy_distribution.d25,
+        qqq_d25=snapshot.qqq_distribution.d25,
+        data_quality=snapshot.data_quality.value,
     )
 
 

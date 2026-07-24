@@ -38,6 +38,18 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         f"| {item.label} | {_number(item.value)} | {_percent(item.pct_change)} |"
         for item in brief.market
     )
+    if brief.regime is not None:
+        lines.extend(
+            [
+                "",
+                "## Market regime",
+                "",
+                f"- Gate: `{brief.regime.gate}`",
+                f"- Distribution Day level: `{brief.regime.dd_level}`",
+                f"- SPY d25: {brief.regime.spy_d25:g}; QQQ d25: {brief.regime.qqq_d25:g}",
+                f"- Data quality: `{brief.regime.data_quality}`",
+            ]
+        )
     lines.extend(
         [
             "",

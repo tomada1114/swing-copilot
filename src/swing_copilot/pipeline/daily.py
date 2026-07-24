@@ -53,6 +53,13 @@ from swing_copilot.models import (
 )
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.postmortem import run_postmortem_step
+from swing_copilot.regime.distribution import DistributionThresholds
+from swing_copilot.regime.gate import (
+    GateThresholds,
+    RegimeSnapshot,
+    RegimeThresholds,
+    calculate_regime_snapshot,
+)
 from swing_copilot.report.daily_brief import (
     MARKET_STRIP_SYMBOLS,
     DailyBrief,
@@ -227,6 +234,7 @@ class _RunContext:
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     held_symbols: frozenset[str]
+    regime_snapshot: RegimeSnapshot
     # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
     # screening-derived like the other fields -- computed once inside step 6
     # (LLM) itself via `_compute_performance_summary()` -- but reusing this
@@ -489,6 +497,45 @@ def _run_step_risk(
     )
     deps.state_store.record_risk_assessments(assessments, run_id)
     return _StepOutcome(True), assessments
+
+
+def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
+    """Calculate the code-owned market regime from point-in-time store reads."""
+    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    bars = deps.market_store.read_bars(
+        list(MARKET_STRIP_SYMBOLS), history_start, as_of, as_of
+    )
+    config = deps.settings.regime
+    thresholds = RegimeThresholds(
+        gate=GateThresholds(
+            ema_period=config.ema_period,
+            bull_vix_max=config.bull_vix_max,
+            bear_spy_ema_ratio=config.bear_spy_ema_ratio,
+            bear_vix_min=config.bear_vix_min,
+        ),
+        distribution=DistributionThresholds(
+            window_days=config.distribution_window_days,
+            dd_decline_pct=config.dd_decline_pct,
+            stall_abs_change_pct=config.stall_abs_change_pct,
+            recovery_pct=config.recovery_pct,
+        ),
+    )
+    return calculate_regime_snapshot(
+        bars.loc[bars["symbol"] == "SPY"],
+        bars.loc[bars["symbol"] == "QQQ"],
+        bars.loc[bars["symbol"] == "^VIX"],
+        as_of,
+        thresholds=thresholds,
+    )
+
+
+def _record_regime_snapshot(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> RegimeSnapshot:
+    """Compute and persist one run's deterministic market-regime state."""
+    snapshot = _calculate_regime_snapshot(deps, as_of)
+    deps.state_store.record_regime_snapshot(run_id, snapshot)
+    return snapshot
 
 
 def _fetch_symbol_text_items(
@@ -832,6 +879,7 @@ def _run_step_output(
         signal_performance=output.signal_performance,
         max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
         max_position_pct=deps.settings.risk.max_position_pct,
+        regime_snapshot=output.run.regime_snapshot,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -957,9 +1005,10 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
     _warn_stale_runs(run_id, stale_run_ids)
 
-    candidates: list[Candidate] = []
-    rejections: list[RejectionRecord] = []
-    risk_assessments: list[RiskAssessment] = []
+    empty_run_data: tuple[
+        list[Candidate], list[RejectionRecord], list[RiskAssessment]
+    ] = ([], [], [])
+    candidates, rejections, risk_assessments = empty_run_data
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -1011,6 +1060,8 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
             )
             return DailyRunResult(run_id, run_date, RunStatus.FAILED, exit_code=1)
 
+    regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
+
     ctx = _RunContext(
         run_id=run_id,
         run_date=run_date,
@@ -1018,6 +1069,7 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         rejections=rejections,
         risk_assessments=risk_assessments,
         held_symbols=frozenset(held_symbols),
+        regime_snapshot=regime_snapshot,
     )
     return _run_soft_steps(options, deps, ctx, deadline)
 

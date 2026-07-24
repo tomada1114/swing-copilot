@@ -45,6 +45,25 @@ def sma(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, min_periods=window).mean()
 
 
+def ema(series: pd.Series, period: int) -> pd.Series:
+    """EMA seeded by the first SMA, requiring twice the period of history.
+
+    The initial SMA seed avoids a first-observation bias. Returning ``NaN``
+    through ``2 * period - 1`` guarantees that a regime calculation never
+    silently treats a shallow history as an established EMA trend.
+    """
+    result = pd.Series(float("nan"), index=series.index, dtype=float)
+    if len(series) < 2 * period:
+        return result
+    alpha = 2.0 / (period + 1.0)
+    value = float(series.iloc[:period].mean())
+    for index in range(period, len(series)):
+        value = alpha * float(series.iloc[index]) + (1.0 - alpha) * value
+        if index >= 2 * period - 1:
+            result.iloc[index] = value
+    return result
+
+
 def wilder_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Wilder-smoothed RSI; `NaN` until `period` observations are available.
 

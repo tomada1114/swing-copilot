@@ -37,6 +37,7 @@ from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.llm.client import LLMClient
 from swing_copilot.llm.decision_context import (
+    format_market_regime,
     format_performance_summary,
     format_risk_constraints,
     format_score_breakdown,
@@ -792,6 +793,9 @@ def _summarize_news_per_candidate(
             decision_context_blocks=_decision_context_blocks(
                 candidate, risk_by_symbol, ctx.performance_summary
             ),
+            market_regime=format_market_regime(
+                ctx.regime_snapshot, ctx.exposure_decision
+            ),
         )
         try:
             summaries.append(summarize_news(llm_client, request))
@@ -842,6 +846,9 @@ def _analyze_filings_per_candidate(
                 else (),
                 decision_context_blocks=_decision_context_blocks(
                     candidate, risk_by_symbol, ctx.performance_summary
+                ),
+                market_regime=format_market_regime(
+                    ctx.regime_snapshot, ctx.exposure_decision
                 ),
             )
             try:

@@ -95,10 +95,11 @@ def _request(
     source_ids: tuple[str, ...] = ("news:1",),
     model: str = MODEL,
     schema_version: int = 1,
+    system_prompt: str = "System safety instructions.",
 ) -> AnalyzeRequest:
     return AnalyzeRequest(
         run_id=uuid4(),
-        system_prompt="System safety instructions.",
+        system_prompt=system_prompt,
         prompt=prompt,
         source_ids=source_ids,
         schema=NewsSummary,
@@ -208,6 +209,28 @@ class TestCaching:
 
         client.analyze(_request(prompt="prompt A"))
         client.analyze(_request(prompt="prompt B"))
+
+        assert len(fake_client.messages.calls) == 2
+
+    def test_different_market_regime_in_system_prompt_is_not_cached(self, state_store):
+        response = FakeResponse(_news_summary())
+        fake_client = FakeAnthropicClient(response)
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=fake_client, clock=FakeClock(date(2027, 1, 1))
+            ),
+        )
+
+        client.analyze(
+            _request(system_prompt="System\n<market_regime>Gate: BULL</market_regime>")
+        )
+        client.analyze(
+            _request(system_prompt="System\n<market_regime>Gate: BEAR</market_regime>")
+        )
 
         assert len(fake_client.messages.calls) == 2
 

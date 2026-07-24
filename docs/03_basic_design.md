@@ -124,7 +124,7 @@ flowchart TD
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関等のリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する | FR-06, P3-14 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | LLMClient | `llm/client.py` | Claude API呼び出しの共通ラッパー（リトライ・コスト記録） | FR-08, NFR-05, NFR-06 |
-| LLM分析（要約） | `llm/summarize.py` | LLMによるニュース要約（事実/推測分離、使用モデルは`settings.yaml`の`llm.models.news_summary`で設定、デフォルトHaiku） | FR-08 |
+| LLM分析（要約） | `llm/summarize.py` | LLMによるニュース要約（事実/推測分離、コード計算済みの市場レジームは信頼済みsystemフィールドへ分離して注入、使用モデルは`settings.yaml`の`llm.models.news_summary`で設定、デフォルトHaiku） | FR-08, P3-15 |
 | LLM分析（決算解釈） | `llm/filings_analysis.py` | LLMによる決算書解釈（事実/推測分離、使用モデルは`settings.yaml`の`llm.models.filing_analysis`で設定、デフォルトHaiku。精度重視の場合はSonnet等へ設定変更可） | FR-08 |
 | 日次ブリーフ構築 | `report/daily_brief.py` | 市場・候補・リスク・LLM結果を表示非依存の値へ集約 | FR-09 |
 | CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |

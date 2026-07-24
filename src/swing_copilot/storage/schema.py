@@ -213,6 +213,18 @@ INIT_SCHEMA_STATEMENTS = (
         detail_json  JSON NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ftd_state_history (
+        run_id        UUID NOT NULL,
+        symbol        VARCHAR NOT NULL CHECK (symbol IN ('SPY', 'QQQ')),
+        sequence      INTEGER NOT NULL,
+        as_of         DATE NOT NULL,
+        state         VARCHAR NOT NULL,
+        day_number    INTEGER,
+        quality_score INTEGER,
+        PRIMARY KEY (run_id, symbol, sequence)
+    )
+    """,
 )
 
 # P1-03: additive columns for a database created before this change. See the

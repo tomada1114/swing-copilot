@@ -42,13 +42,7 @@ def render_terminal(
     )
     if market:
         console.print(market)
-    if brief.regime is not None:
-        console.print(
-            "[bold]Market regime[/bold] "
-            f"Gate: {brief.regime.gate} / DD: {brief.regime.dd_level} "
-            f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
-            f"Data quality: {brief.regime.data_quality}"
-        )
+    _render_regime(console, brief)
     if brief.exposure is not None:
         downgraded = (
             " (conservative downgrade)"
@@ -114,6 +108,23 @@ def render_terminal(
     return buffer.getvalue().rstrip() + "\n"
 
 
+def _render_regime(console: Console, brief: DailyBrief) -> None:
+    if brief.regime is None:
+        return
+    console.print(
+        "[bold]Market regime[/bold] "
+        f"Gate: {brief.regime.gate} / DD: {brief.regime.dd_level} "
+        f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
+        f"Data quality: {brief.regime.data_quality}"
+    )
+    if brief.regime.spy_ftd_state is not None:
+        console.print(
+            "[bold]FTD[/bold] "
+            f"SPY {_ftd_description(brief.regime.spy_ftd_state, brief.regime.spy_ftd_day_number, brief.regime.spy_ftd_quality_score)} / "
+            f"QQQ {_ftd_description(brief.regime.qqq_ftd_state, brief.regime.qqq_ftd_day_number, brief.regime.qqq_ftd_quality_score)}"
+        )
+
+
 def _score_breakdown(candidate: BriefCandidate) -> str:
     if (
         candidate.score_rsi_pullback is None
@@ -138,3 +149,14 @@ def _money(value: float | None) -> str:
 
 def _percent(value: float | None) -> str:
     return "N/A" if value is None else f"{value:+.2%}"
+
+
+def _ftd_description(
+    state: str | None, day_number: int | None, score: int | None
+) -> str:
+    parts = [state or "UNKNOWN"]
+    if day_number is not None:
+        parts.append(f"Day{day_number}")
+    if score is not None:
+        parts.append(f"quality {score}")
+    return " (" + ", ".join(parts) + ")"

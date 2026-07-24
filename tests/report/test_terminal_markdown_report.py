@@ -88,6 +88,11 @@ def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
             spy_d25=1.0,
             qqq_d25=1.5,
             data_quality="OK",
+            spy_ftd_state="FTD_CONFIRMED",
+            spy_ftd_day_number=5,
+            spy_ftd_quality_score=70,
+            qqq_ftd_state="DAY2_3",
+            qqq_ftd_day_number=3,
         ),
     )
 
@@ -96,8 +101,12 @@ def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
 
     assert terminal.index("Market regime") < terminal.index("Symbol")
     assert "Gate: BULL" in terminal
+    assert "FTD" in terminal
+    assert "quality 70" in terminal
     assert markdown.index("## Market regime") < markdown.index("## Candidates")
     assert "Distribution Day level: `NORMAL`" in markdown
+    assert "FTD SPY: `FTD_CONFIRMED`（Day5、品質スコア 70）" in markdown
+    assert "成功率" not in markdown
 
 
 def test_terminal_and_markdown_show_exposure_before_candidates() -> None:

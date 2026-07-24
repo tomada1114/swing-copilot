@@ -50,6 +50,13 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Data quality: `{brief.regime.data_quality}`",
             ]
         )
+        if brief.regime.spy_ftd_state is not None:
+            lines.extend(
+                [
+                    f"- FTD SPY: `{brief.regime.spy_ftd_state}`{_ftd_suffix(brief.regime.spy_ftd_day_number, brief.regime.spy_ftd_quality_score)}",
+                    f"- FTD QQQ: `{brief.regime.qqq_ftd_state}`{_ftd_suffix(brief.regime.qqq_ftd_day_number, brief.regime.qqq_ftd_quality_score)}",
+                ]
+            )
     if brief.exposure is not None:
         downgrade = (
             "（保守的降格）" if brief.exposure.is_conservatively_downgraded else ""
@@ -289,3 +296,12 @@ def _money(value: float | None) -> str:
 
 def _percent(value: float | None) -> str:
     return "N/A" if value is None else f"{value:+.2%}"
+
+
+def _ftd_suffix(day_number: int | None, score: int | None) -> str:
+    values = []
+    if day_number is not None:
+        values.append(f"Day{day_number}")
+    if score is not None:
+        values.append(f"品質スコア {score}")
+    return f"（{'、'.join(values)}）" if values else ""

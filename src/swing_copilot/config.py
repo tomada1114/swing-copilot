@@ -252,6 +252,10 @@ class RegimeConfig(_StrictModel):
     recovery_pct: float = 0.05
     # Exposure Ceiling's REDUCE_ONLY multiplier (roadmap §5 P3-14, 要検証).
     reduce_only_risk_multiplier: float = 0.5
+    # roadmap §5 P3-16（要検証）: display-only Follow-Through Day thresholds.
+    ftd_correction_decline_pct: float = 0.03
+    ftd_correction_down_days: int = 3
+    ftd_gain_pct: float = 0.0125
 
 
 class Settings(_StrictModel):

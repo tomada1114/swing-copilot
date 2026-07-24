@@ -56,6 +56,7 @@ from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
+from swing_copilot.regime.ftd import FtdSnapshot, FtdThresholds, calculate_ftd_snapshot
 from swing_copilot.regime.gate import (
     GateThresholds,
     RegimeSnapshot,
@@ -238,6 +239,7 @@ class _RunContext:
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
+    ftd_snapshot: FtdSnapshot
     # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
     # screening-derived like the other fields -- computed once inside step 6
     # (LLM) itself via `_compute_performance_summary()` -- but reusing this
@@ -554,6 +556,27 @@ def _record_exposure_decision(
     )
     deps.state_store.record_exposure_decision(run_id, decision)
     return decision
+
+
+def _record_ftd_snapshot(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> FtdSnapshot:
+    """Calculate and persist display-only FTD transitions for both indices."""
+    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    bars = deps.market_store.read_bars(["SPY", "QQQ"], history_start, as_of, as_of)
+    config = deps.settings.regime
+    snapshot = calculate_ftd_snapshot(
+        bars.loc[bars["symbol"] == "SPY"],
+        bars.loc[bars["symbol"] == "QQQ"],
+        as_of,
+        thresholds=FtdThresholds(
+            correction_decline_pct=config.ftd_correction_decline_pct,
+            correction_down_days=config.ftd_correction_down_days,
+            ftd_gain_pct=config.ftd_gain_pct,
+        ),
+    )
+    deps.state_store.record_ftd_history(run_id, snapshot)
+    return snapshot
 
 
 def _fetch_symbol_text_items(
@@ -905,6 +928,7 @@ def _run_step_output(
         max_position_pct=deps.settings.risk.max_position_pct,
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
+        ftd_snapshot=output.run.ftd_snapshot,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -1047,6 +1071,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     candidates, rejections, risk_assessments = empty_run_data
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
+    ftd_snapshot: FtdSnapshot | None = None
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -1056,8 +1081,9 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal exposure_decision, regime_snapshot, risk_assessments
+        nonlocal exposure_decision, ftd_snapshot, regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
+        ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
         outcome, risk_assessments = _run_step_risk(
             deps, candidates, run_id, exposure_decision
@@ -1104,6 +1130,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     regime_snapshot = cast("RegimeSnapshot", regime_snapshot)
     exposure_decision = cast("ExposureDecision", exposure_decision)
+    ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
 
     ctx = _RunContext(
         run_id=run_id,
@@ -1114,6 +1141,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         held_symbols=frozenset(held_symbols),
         regime_snapshot=regime_snapshot,
         exposure_decision=exposure_decision,
+        ftd_snapshot=ftd_snapshot,
     )
     return _run_soft_steps(options, deps, ctx, deadline)
 

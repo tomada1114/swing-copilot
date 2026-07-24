@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.regime.exposure import ExposureDecision
+    from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
@@ -55,6 +56,12 @@ class BriefRegime:
     spy_d25: float
     qqq_d25: float
     data_quality: str
+    spy_ftd_state: str | None = None
+    spy_ftd_day_number: int | None = None
+    spy_ftd_quality_score: int | None = None
+    qqq_ftd_state: str | None = None
+    qqq_ftd_day_number: int | None = None
+    qqq_ftd_quality_score: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +242,7 @@ class DailyBriefContext:
     max_position_pct: float = 0.10
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
+    ftd_snapshot: FtdSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +279,7 @@ def build_daily_brief(
         generated_at=context.generated_at,
         market=_market_items(market_store, context.run_date),
         candidates=candidates,
-        regime=_regime_brief(context.regime_snapshot),
+        regime=_regime_brief(context.regime_snapshot, context.ftd_snapshot),
         exposure=_exposure_brief(context.exposure_decision),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
@@ -279,7 +287,9 @@ def build_daily_brief(
     )
 
 
-def _regime_brief(snapshot: RegimeSnapshot | None) -> BriefRegime | None:
+def _regime_brief(
+    snapshot: RegimeSnapshot | None, ftd_snapshot: FtdSnapshot | None
+) -> BriefRegime | None:
     if snapshot is None:
         return None
     return BriefRegime(
@@ -288,6 +298,12 @@ def _regime_brief(snapshot: RegimeSnapshot | None) -> BriefRegime | None:
         spy_d25=snapshot.spy_distribution.d25,
         qqq_d25=snapshot.qqq_distribution.d25,
         data_quality=snapshot.data_quality.value,
+        spy_ftd_state=ftd_snapshot.spy.state.value if ftd_snapshot else None,
+        spy_ftd_day_number=ftd_snapshot.spy.day_number if ftd_snapshot else None,
+        spy_ftd_quality_score=ftd_snapshot.spy.quality_score if ftd_snapshot else None,
+        qqq_ftd_state=ftd_snapshot.qqq.state.value if ftd_snapshot else None,
+        qqq_ftd_day_number=ftd_snapshot.qqq.day_number if ftd_snapshot else None,
+        qqq_ftd_quality_score=ftd_snapshot.qqq.quality_score if ftd_snapshot else None,
     )
 
 

@@ -1417,6 +1417,9 @@ regime:
   dd_decline_pct: -0.002           # DD下落率（要検証）
   stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
   recovery_pct: 0.05               # DD無効化上昇率（要検証）
+  ftd_correction_decline_pct: 0.03 # FTD調整確定の高値比下落率、roadmap §5 P3-16（要検証）
+  ftd_correction_down_days: 3      # FTD調整確定の連続下落日数、roadmap §5 P3-16（要検証）
+  ftd_gain_pct: 0.0125             # FTD確認の前日比上昇率、roadmap §5 P3-16（要検証）
   reduce_only_risk_multiplier: 0.5 # REDUCE_ONLYの取引リスク倍率（P3-14、要検証）
 
 notification:

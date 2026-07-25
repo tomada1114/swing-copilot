@@ -72,7 +72,11 @@ from swing_copilot.report.daily_brief import (
 from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.markdown_report import write_markdown_report
 from swing_copilot.report.terminal_report import render_terminal
-from swing_copilot.risk.checks import RiskChecker
+from swing_copilot.risk.checks import (
+    PortfolioHeatResult,
+    RiskChecker,
+    calculate_portfolio_heat,
+)
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.audit_records import ScreeningRunMeta
@@ -236,6 +240,7 @@ class _RunContext:
     candidates: list[Candidate]
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
+    portfolio_heat: PortfolioHeatResult
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
@@ -497,14 +502,22 @@ def _run_step_risk(
     candidates: list[Candidate],
     run_id: UUID,
     exposure: ExposureDecision,
-) -> tuple[_StepOutcome, list[RiskAssessment]]:
+) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
     checker = RiskChecker(deps.settings, deps.universe, deps.market_store)
     assessments = checker.check(
         candidates, portfolio, deps.settings.risk.account_equity_usd, exposure
     )
     deps.state_store.record_risk_assessments(assessments, run_id)
-    return _StepOutcome(True), assessments
+    base_heat = calculate_portfolio_heat(
+        portfolio, deps.settings.risk.account_equity_usd
+    )
+    final_heat = (
+        replace(base_heat, heat_pct=assessments[-1].portfolio_heat_pct)
+        if base_heat.status == "calculated" and assessments
+        else base_heat
+    )
+    return _StepOutcome(True), assessments, final_heat
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -929,6 +942,8 @@ def _run_step_output(
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
         ftd_snapshot=output.run.ftd_snapshot,
+        portfolio_heat=output.run.portfolio_heat,
+        max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -1072,6 +1087,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
+    portfolio_heat: PortfolioHeatResult | None = None
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -1081,11 +1097,12 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal exposure_decision, ftd_snapshot, regime_snapshot, risk_assessments
+        nonlocal exposure_decision, ftd_snapshot, portfolio_heat
+        nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
         ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
-        outcome, risk_assessments = _run_step_risk(
+        outcome, risk_assessments, portfolio_heat = _run_step_risk(
             deps, candidates, run_id, exposure_decision
         )
         return outcome
@@ -1131,6 +1148,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     regime_snapshot = cast("RegimeSnapshot", regime_snapshot)
     exposure_decision = cast("ExposureDecision", exposure_decision)
     ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
+    portfolio_heat = cast("PortfolioHeatResult", portfolio_heat)
 
     ctx = _RunContext(
         run_id=run_id,
@@ -1138,6 +1156,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         candidates=candidates,
         rejections=rejections,
         risk_assessments=risk_assessments,
+        portfolio_heat=portfolio_heat,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=regime_snapshot,
         exposure_decision=exposure_decision,

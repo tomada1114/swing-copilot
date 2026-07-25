@@ -108,7 +108,7 @@ INIT_SCHEMA_STATEMENTS = (
         shares_by_position_cap  BIGINT,
         binding_constraint      VARCHAR
             CHECK (binding_constraint IN (
-                'trade_risk','position_cap','sector','correlation','regime','not_calculable'
+                'trade_risk','position_cap','sector','correlation','regime','portfolio_heat','not_calculable'
             )),
         sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
         PRIMARY KEY (run_id, symbol)

@@ -92,6 +92,10 @@ class RiskConfig(_StrictModel):
     max_sector_pct: float = 0.30
     max_correlation: float = 0.7
     correlation_lookback_days: int = 60
+    # Account-level open stop-risk ceiling in percentage points
+    # (roadmap §5 P4-17; breakout-trade-planner / Minervini 6-8%帯の
+    # 保守側、要検証).
+    max_portfolio_heat_pct: float = Field(default=6.0, gt=0.0)
     # Stop distance as a % of entry price above which a WIDE_STOP sizing
     # warning is raised (roadmap §5 P1-03, 要検証).
     wide_stop_threshold_pct: float = 10.0

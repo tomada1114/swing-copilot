@@ -18,6 +18,7 @@ from swing_copilot.report.daily_brief import (
     BriefLlm,
     BriefMarketItem,
     BriefPastDecision,
+    BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
     BriefRisk,
@@ -128,6 +129,42 @@ def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     assert "CASH_PRIORITY" in terminal
     assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
     assert "Verdict: `CASH_PRIORITY`" in markdown
+
+
+def test_terminal_and_markdown_always_show_portfolio_heat_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        portfolio_heat=BriefPortfolioHeat(
+            status="calculated",
+            heat_pct=4.4,
+            max_heat_pct=6.0,
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Portfolio heat: 4.40% / 6.00%") < terminal.index("Symbol")
+    assert markdown.index("## Portfolio risk") < markdown.index("## Candidates")
+    assert "Portfolio heat: `4.40% / 6.00%`" in markdown
+
+
+def test_terminal_and_markdown_explain_missing_stop_heat_failure() -> None:
+    brief = replace(
+        _brief(),
+        portfolio_heat=BriefPortfolioHeat(
+            status="not_calculable",
+            heat_pct=None,
+            max_heat_pct=6.0,
+            missing_stop_symbols=("ABC",),
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert "Portfolio heat: not_calculable (missing stop: ABC)" in terminal
+    assert "Portfolio heat: `not_calculable` (missing stop: ABC)" in markdown
 
 
 def test_terminal_shows_the_binding_constraint_sizing_string() -> None:

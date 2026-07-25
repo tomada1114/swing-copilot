@@ -569,8 +569,10 @@ class RiskAssessment:
     shares_by_risk: int | None = None
     shares_by_position_cap: int | None = None
     binding_constraint: str = "not_calculable"
-    # {"trade_risk","position_cap","sector","correlation","not_calculable"}
+    # {"trade_risk","position_cap","sector","correlation","regime",
+    #  "portfolio_heat","not_calculable"}
     sizing_warnings: tuple[str, ...] = ()  # {"WIDE_STOP","SMALL_ACCOUNT_FRICTION"}
+    portfolio_heat_pct: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class PositionSizeResult:
@@ -608,6 +610,8 @@ class RiskChecker:
         - 1銘柄=資金のmax_position_pct上限
         - 1トレードのリスク=資金のmax_trade_risk_pct上限（ストップ幅基準）
         - 同一セクター上限max_sector_pct
+        - 保有中ポジションと、それまでに承認した候補のstopリスク合計が
+          max_portfolio_heat_pct（既定6.0%、単位はpercentage points）を超えないこと
         - 銘柄間相関チェック（FR-06、ブロックしない警告のみ）
         を満たすかを判定する。セクター判定に必要な銘柄→セクターのマッピングは、
         universe.pyが取得・保存するGICSセクター（config/universe_snapshot.csv、
@@ -642,6 +646,16 @@ class RiskChecker:
         レポートへ明示する。警告を黙って省略しない。
         """
 ```
+
+**P4-17（roadmap §5、Issue #26）**:
+`calculate_portfolio_heat()`は
+`Σ((entry_price - stop_price) × shares) / account_equity × 100`を返す。
+`RiskChecker.check()`は入力候補のランキング順を保ち、他のリスクチェックを通過した候補だけを
+累積する。追加後が上限と等しい場合は承認し、厳密に超える場合だけ
+`PORTFOLIO_HEAT_EXCEEDED`で拒否するため、拒否候補は後続候補のヒートを消費しない。
+保有中ポジションのstopが1件でも欠損する場合は0扱いせず、ヒートを
+`not_calculable`、本来承認可能だった候補も`PORTFOLIO_HEAT_NOT_CALCULABLE`とする。
+相関調整は本Issueの対象外である。
 
 ### 3.14 `text/news_finnhub.py` / `text/edgar_filings.py` / `text/calendar_fred.py`（FR-07）
 
@@ -783,6 +797,10 @@ binding_constraintに応じて`"128株（制約: リスク1.0%）"`
 `"40株（制約: ポジション上限2.0%）"`（position_cap、%は`max_position_pct`）、
 `"N株（制約: セクター集中）"`（sector）、`"N株（制約: 相関）"`（correlation、
 現状のcorrelationはブロックしない警告のみのため実運用では到達しない）を返す。
+
+P4-17では`DailyBrief.portfolio_heat`を追加し、terminal/Markdownの候補一覧より前に
+現在値と`max_portfolio_heat_pct`を常時表示する。stop欠損時は欠損銘柄を列挙して
+`not_calculable`を明示し、候補が0件でも保有中ポジションだけの値（または0.0%）を表示する。
 
 ```python
 def build_daily_brief(
@@ -1236,7 +1254,8 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     shares_by_position_cap  BIGINT,
     binding_constraint      VARCHAR
         CHECK (binding_constraint IN (
-            'trade_risk','position_cap','sector','correlation','not_calculable'
+            'trade_risk','position_cap','sector','correlation','regime',
+            'portfolio_heat','not_calculable'
         )),
     sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, symbol)
@@ -1361,6 +1380,7 @@ risk:
   max_sector_pct: 0.30        # 同一セクター上限30%
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
+  max_portfolio_heat_pct: 6.0        # 保有+承認候補のstopリスク上限%（roadmap §5 P4-17、要検証）
   wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:

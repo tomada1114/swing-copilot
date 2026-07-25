@@ -252,3 +252,8 @@ class TestSecretsModel:
 def test_settings_rejects_wrong_type_for_nested_field():
     with pytest.raises(ValidationError):
         Settings.model_validate({"technical_signals": {"trend": {"sma_short": "fast"}}})
+
+
+def test_portfolio_heat_limit_defaults_to_six_percent():
+    settings = load_settings("config/settings.yaml")
+    assert settings.risk.max_portfolio_heat_pct == 6.0

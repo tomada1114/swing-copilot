@@ -10,7 +10,11 @@ from swing_copilot.report.daily_brief import format_sizing
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
-    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
+    from swing_copilot.report.daily_brief import (
+        BriefCandidate,
+        BriefPortfolioHeat,
+        DailyBrief,
+    )
     from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 _DISCLAIMER = "本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください。"
@@ -69,6 +73,15 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Verdict: `{brief.exposure.verdict}` {downgrade}",
                 f"- Inputs: gate `{brief.exposure.gate}`, DD `{brief.exposure.dd_level}`",
                 f"- Data quality: `{brief.exposure.data_quality}`",
+            ]
+        )
+    if brief.portfolio_heat is not None:
+        lines.extend(
+            [
+                "",
+                "## Portfolio risk",
+                "",
+                f"- Portfolio heat: {_portfolio_heat_text(brief.portfolio_heat)}",
             ]
         )
     lines.extend(
@@ -149,6 +162,16 @@ def write_markdown_report(
     _atomic_write(report_path, content)
     _atomic_write(root / "latest.md", content)
     return report_path
+
+
+def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
+    """Render the portfolio-heat value without adding report-level branches."""
+    if heat.heat_pct is not None:
+        return f"`{heat.heat_pct:.2f}% / {heat.max_heat_pct:.2f}%`"
+    if heat.missing_stop_symbols:
+        symbols = ", ".join(heat.missing_stop_symbols)
+        return f"`not_calculable` (missing stop: {symbols})"
+    return f"`not_calculable` ({heat.reason or 'unknown reason'})"
 
 
 def update_markdown_decisions(

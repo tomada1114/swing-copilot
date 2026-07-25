@@ -26,7 +26,10 @@ from swing_copilot.screening.base import (
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.market_store import MarketStore
-from swing_copilot.storage.paper_records import TradeDecisionRecord
+from swing_copilot.storage.paper_records import (
+    PositionExcursionRecord,
+    TradeDecisionRecord,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -377,6 +380,16 @@ class TestPerformance:
         )
         journal.close_position(winner.position_id, date(2026, 7, 10), 110.0, "target")
         journal.close_position(loser.position_id, date(2026, 7, 10), 90.0, "stop_loss")
+        state_store.upsert_position_excursions(
+            [
+                PositionExcursionRecord(
+                    winner.position_id, date(2026, 7, 10), -2.0, 15.0, "OK"
+                ),
+                PositionExcursionRecord(
+                    loser.position_id, date(2026, 7, 10), -15.0, 2.0, "OK"
+                ),
+            ]
+        )
         days = pd.date_range(date(2026, 7, 1), date(2026, 7, 20), freq="D")
         rows = [
             {
@@ -406,6 +419,9 @@ class TestPerformance:
         assert "Expectancy: $0.00" in output
         assert "Profit factor: 1.000" in output
         assert "Avg R-multiple: 0.000" in output
+        assert "Avg MAE: $-85.00" in output
+        assert "Avg MFE: $85.00" in output
+        assert "可能性" in output
         assert "r_multiple_omitted" not in output.lower()
         assert "SPY buy-and-hold: +10.00%" in output
         assert "By exit reason" in output

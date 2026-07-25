@@ -12,7 +12,11 @@ from swing_copilot.report.daily_brief import format_sizing
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
-    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
+    from swing_copilot.report.daily_brief import (
+        BriefCandidate,
+        BriefPortfolioHeat,
+        DailyBrief,
+    )
 
 
 def render_terminal(
@@ -55,6 +59,18 @@ def render_terminal(
             f"(Gate: {brief.exposure.gate}, DD: {brief.exposure.dd_level}, "
             f"Data quality: {brief.exposure.data_quality})"
         )
+    if brief.circuit_breaker is not None:
+        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
+        console.print(
+            "[bold]Circuit Breaker[/bold] "
+            f"{brief.circuit_breaker.state} "
+            f"(Data quality: {brief.circuit_breaker.data_quality}; "
+            f"Triggered rules: {rules})"
+        )
+    if brief.portfolio_heat is not None:
+        console.print(
+            f"[bold]Portfolio heat[/bold]: {_portfolio_heat_text(brief.portfolio_heat)}"
+        )
 
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("#", justify="right")
@@ -85,15 +101,7 @@ def render_terminal(
     console.print(table)
 
     for candidate in brief.candidates:
-        console.print(f"\n[bold]{candidate.symbol}[/bold]")
-        console.print(f"  LLM: {candidate.llm.conclusion}")
-        for warning in candidate.risk.warnings:
-            console.print(f"  Risk: {warning}")
-        if candidate.llm.sources:
-            console.print(
-                "  Sources: "
-                + ", ".join(source.source_id for source in candidate.llm.sources)
-            )
+        _render_candidate_details(console, candidate)
     console.print("\n[bold]落選サマリ[/bold]")
     if brief.rejection_counts:
         for item in brief.rejection_counts:
@@ -106,6 +114,18 @@ def render_terminal(
         for notice in brief.notices:
             console.print(f"  - {notice}")
     return buffer.getvalue().rstrip() + "\n"
+
+
+def _render_candidate_details(console: Console, candidate: BriefCandidate) -> None:
+    console.print(f"\n[bold]{candidate.symbol}[/bold]")
+    console.print(f"  LLM: {candidate.llm.conclusion}")
+    for warning in (*candidate.risk.warnings, *candidate.risk.sizing_warnings):
+        console.print(f"  Risk: {warning}")
+    if candidate.llm.sources:
+        console.print(
+            "  Sources: "
+            + ", ".join(source.source_id for source in candidate.llm.sources)
+        )
 
 
 def _render_regime(console: Console, brief: DailyBrief) -> None:
@@ -123,6 +143,16 @@ def _render_regime(console: Console, brief: DailyBrief) -> None:
             f"SPY {_ftd_description(brief.regime.spy_ftd_state, brief.regime.spy_ftd_day_number, brief.regime.spy_ftd_quality_score)} / "
             f"QQQ {_ftd_description(brief.regime.qqq_ftd_state, brief.regime.qqq_ftd_day_number, brief.regime.qqq_ftd_quality_score)}"
         )
+
+
+def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
+    """Render the portfolio-heat value without adding report-level branches."""
+    if heat.heat_pct is not None:
+        return f"{heat.heat_pct:.2f}% / {heat.max_heat_pct:.2f}%"
+    if heat.missing_stop_symbols:
+        symbols = ", ".join(heat.missing_stop_symbols)
+        return f"not_calculable (missing stop: {symbols})"
+    return f"not_calculable ({heat.reason or 'unknown reason'})"
 
 
 def _score_breakdown(candidate: BriefCandidate) -> str:

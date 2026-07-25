@@ -108,7 +108,7 @@ INIT_SCHEMA_STATEMENTS = (
         shares_by_position_cap  BIGINT,
         binding_constraint      VARCHAR
             CHECK (binding_constraint IN (
-                'trade_risk','position_cap','sector','correlation','regime','not_calculable'
+                'trade_risk','position_cap','sector','correlation','regime','portfolio_heat','earnings','not_calculable'
             )),
         sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
         PRIMARY KEY (run_id, symbol)
@@ -125,11 +125,32 @@ INIT_SCHEMA_STATEMENTS = (
         stop_price    DOUBLE,
         status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
         close_date    DATE,
+        close_at      TIMESTAMPTZ,
         close_price   DOUBLE,
         exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
             'stop_loss','target','time_stop','manual','other','unknown'
         )),
         created_at    TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS position_excursions (
+        position_id    UUID NOT NULL,
+        as_of_date     DATE NOT NULL,
+        mae_per_share  DOUBLE,
+        mfe_per_share  DOUBLE,
+        data_quality   VARCHAR NOT NULL
+            CHECK(data_quality IN ('OK','MISSING_BAR')),
+        created_at     TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (position_id, as_of_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS earnings_calendar (
+        symbol          VARCHAR PRIMARY KEY,
+        earnings_date   DATE NOT NULL,
+        session         VARCHAR NOT NULL,
+        fetched_at      TIMESTAMPTZ NOT NULL
     )
     """,
     """
@@ -247,6 +268,7 @@ ALTER_SCHEMA_STATEMENTS = (
     # safe to re-run on every startup against a fresh or already-upgraded
     # database.
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_at TIMESTAMPTZ",
     "UPDATE positions SET exit_reason = 'unknown' "
     "WHERE status = 'closed' AND exit_reason IS NULL",
 )

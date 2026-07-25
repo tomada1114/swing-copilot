@@ -33,6 +33,7 @@ from swing_copilot.config import (
     load_strategies,
     require_secrets,
 )
+from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.llm.client import LLMClient
@@ -52,7 +53,9 @@ from swing_copilot.models import (
     RunStatus,
     StepStatus,
 )
+from swing_copilot.paper.excursions import update_position_excursions
 from swing_copilot.paper.journal import PaperJournal
+from swing_copilot.pipeline.earnings import collect_earnings_calendar
 from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
@@ -72,7 +75,20 @@ from swing_copilot.report.daily_brief import (
 from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.markdown_report import write_markdown_report
 from swing_copilot.report.terminal_report import render_terminal
-from swing_copilot.risk.checks import RiskChecker
+from swing_copilot.risk.checks import (
+    EarningsGuardInput,
+    PortfolioHeatResult,
+    RiskChecker,
+    RiskRunContext,
+    calculate_portfolio_heat,
+)
+from swing_copilot.risk.circuit_breaker import (
+    CircuitBreakerResult,
+    CircuitThresholds,
+    RealizedTrade,
+    evaluate_circuit_breaker,
+    evaluation_time_for_as_of,
+)
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.audit_records import ScreeningRunMeta
@@ -96,6 +112,7 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
     from swing_copilot.data.base import BarFetchResult, DataProvider
+    from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.llm.client import AnalyzeRequest
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
     from swing_copilot.paper.journal import PerformanceSummary
@@ -175,6 +192,7 @@ class DailyDependencies:
     # wall-clock elapsed-time measurement, never a substitute for `as_of`.
     monotonic: Callable[[], float] = time.perf_counter
     edgar_client: _EdgarClientLike | None = None
+    earnings_client: EarningsCalendarClient | None = None
     news_client: _NewsClientLike | None = None
     calendar_client: _CalendarClientLike | None = None
     llm_client: _LLMClientLike | None = None
@@ -236,6 +254,9 @@ class _RunContext:
     candidates: list[Candidate]
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
+    portfolio_heat: PortfolioHeatResult
+    circuit_breaker: CircuitBreakerResult
+    earnings_guard_notice: str | None
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
@@ -496,15 +517,85 @@ def _run_step_risk(
     deps: DailyDependencies,
     candidates: list[Candidate],
     run_id: UUID,
+    as_of: date,
     exposure: ExposureDecision,
-) -> tuple[_StepOutcome, list[RiskAssessment]]:
+) -> tuple[
+    _StepOutcome,
+    list[RiskAssessment],
+    PortfolioHeatResult,
+    CircuitBreakerResult,
+    str | None,
+]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
-    checker = RiskChecker(deps.settings, deps.universe, deps.market_store)
+    closed = deps.state_store.get_closed_positions(is_paper=True, as_of=as_of)
+    circuit_config = deps.settings.risk
+    circuit_breaker = evaluate_circuit_breaker(
+        [
+            RealizedTrade(
+                position.close_at,
+                (
+                    (position.close_price - position.entry_price) * position.shares
+                    if position.close_price is not None
+                    else None
+                ),
+            )
+            for position in closed
+        ],
+        circuit_config.account_equity_usd,
+        as_of,
+        evaluation_time_for_as_of(as_of),
+        CircuitThresholds(
+            circuit_config.circuit_daily_loss_pct,
+            circuit_config.circuit_weekly_loss_pct,
+            circuit_config.circuit_monthly_loss_pct,
+            circuit_config.circuit_consecutive_losses,
+            circuit_config.circuit_cooldown_hours,
+        ),
+    )
+    earnings = collect_earnings_calendar(
+        deps.earnings_client,
+        sorted(
+            {
+                *(position.symbol for position in portfolio),
+                *(candidate.symbol for candidate in candidates),
+            }
+        ),
+        as_of,
+        deps.state_store,
+    )
+    checker = RiskChecker(
+        deps.settings,
+        deps.universe,
+        deps.market_store,
+        RiskRunContext(
+            earnings_guard=EarningsGuardInput(
+                earnings.is_enabled, earnings.events_by_symbol
+            ),
+            circuit_breaker=circuit_breaker,
+        ),
+    )
     assessments = checker.check(
-        candidates, portfolio, deps.settings.risk.account_equity_usd, exposure
+        candidates,
+        portfolio,
+        deps.settings.risk.account_equity_usd,
+        exposure,
     )
     deps.state_store.record_risk_assessments(assessments, run_id)
-    return _StepOutcome(True), assessments
+    base_heat = calculate_portfolio_heat(
+        portfolio, deps.settings.risk.account_equity_usd
+    )
+    final_heat = (
+        replace(base_heat, heat_pct=assessments[-1].portfolio_heat_pct)
+        if base_heat.status == "calculated" and assessments
+        else base_heat
+    )
+    return (
+        _StepOutcome(True),
+        assessments,
+        final_heat,
+        circuit_breaker,
+        earnings.notice,
+    )
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -907,6 +998,53 @@ def _run_step_postmortem(
     return _StepOutcome(True, note), performance
 
 
+def _run_step_excursions(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+    """Update daily MAE/MFE snapshots without making the run fatal."""
+    summary = update_position_excursions(deps.state_store, deps.market_store, as_of)
+    if not summary.missing_symbols:
+        return _StepOutcome(True)
+    return _StepOutcome(
+        True,
+        "MAE_MFE_MISSING_BAR: " + ", ".join(summary.missing_symbols),
+    )
+
+
+def _run_mae_mfe_soft_step(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> _StepOutcome:
+    """Execute and audit MAE/MFE without crossing the fatal boundary."""
+    started_at = time.perf_counter()
+    logger.info("step mae_mfe starting")
+    try:
+        outcome = _run_step_excursions(deps, as_of)
+    except Exception as exc:
+        logger.exception("MAE/MFE step raised unexpectedly")
+        outcome = _StepOutcome(False, f"unexpected error: {exc}")
+    _record_step(deps, run_id, "mae_mfe", outcome, started_at)
+    return outcome
+
+
+def _run_text_soft_step(
+    options: DailyRunOptions,
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
+    text_symbols: list[str],
+) -> tuple[_StepOutcome, list[TextItem] | None]:
+    """Execute and audit the time-budgeted text step."""
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step 5_text skipped: time budget exceeded")
+        outcome, items = _TIME_BUDGET_STEP_OUTCOME, None
+    else:
+        logger.info("step 5_text starting")
+        outcome, items = _run_step_text(
+            deps, text_symbols, ctx.run_date, skip=options.skip_text
+        )
+    _record_step(deps, ctx.run_id, "5_text", outcome, started_at)
+    return outcome, items
+
+
 def _run_step_output(
     deps: DailyDependencies,
     output: _OutputContext,
@@ -928,7 +1066,10 @@ def _run_step_output(
         max_position_pct=deps.settings.risk.max_position_pct,
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
+        circuit_breaker=output.run.circuit_breaker,
         ftd_snapshot=output.run.ftd_snapshot,
+        portfolio_heat=output.run.portfolio_heat,
+        max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -1072,6 +1213,9 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
+    portfolio_heat: PortfolioHeatResult | None = None
+    circuit_breaker: CircuitBreakerResult | None = None
+    earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -1081,13 +1225,19 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal exposure_decision, ftd_snapshot, regime_snapshot, risk_assessments
+        nonlocal circuit_breaker, earnings_guard_notice, exposure_decision
+        nonlocal ftd_snapshot, portfolio_heat
+        nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
         ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
-        outcome, risk_assessments = _run_step_risk(
-            deps, candidates, run_id, exposure_decision
-        )
+        (
+            outcome,
+            risk_assessments,
+            portfolio_heat,
+            circuit_breaker,
+            earnings_guard_notice,
+        ) = _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
         return outcome
 
     def _step_prices() -> _StepOutcome:
@@ -1131,6 +1281,8 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     regime_snapshot = cast("RegimeSnapshot", regime_snapshot)
     exposure_decision = cast("ExposureDecision", exposure_decision)
     ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
+    portfolio_heat = cast("PortfolioHeatResult", portfolio_heat)
+    circuit_breaker = cast("CircuitBreakerResult", circuit_breaker)
 
     ctx = _RunContext(
         run_id=run_id,
@@ -1138,6 +1290,9 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         candidates=candidates,
         rejections=rejections,
         risk_assessments=risk_assessments,
+        portfolio_heat=portfolio_heat,
+        circuit_breaker=circuit_breaker,
+        earnings_guard_notice=earnings_guard_notice,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=regime_snapshot,
         exposure_decision=exposure_decision,
@@ -1152,9 +1307,9 @@ def _run_soft_steps(
     ctx: _RunContext,
     deadline: float,
 ) -> DailyRunResult:
-    """Run steps 5-8 (plus P2-11's postmortem step) after the fatal steps.
+    """Run fail-soft local/optional steps after the fatal steps.
 
-    Fail-soft text/LLM/postmortem, notification, then local output.
+    Fail-soft MAE/MFE, text/LLM/postmortem, notification, then local output.
 
     NFR-03 time-budget policy: steps 5 (text), 6 (LLM), postmortem, and 7
     (Discord notify) are skipped outright once `deps.monotonic() >=
@@ -1170,16 +1325,12 @@ def _run_soft_steps(
     degraded = False
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step 5_text skipped: time budget exceeded")
-        text_outcome, text_items = _TIME_BUDGET_STEP_OUTCOME, None
-    else:
-        logger.info("step 5_text starting")
-        text_outcome, text_items = _run_step_text(
-            deps, text_symbols, ctx.run_date, skip=options.skip_text
-        )
-    _record_step(deps, ctx.run_id, "5_text", text_outcome, started_at)
+    excursion_outcome = _run_mae_mfe_soft_step(deps, ctx.run_id, ctx.run_date)
+    degraded = degraded or not excursion_outcome.success
+
+    text_outcome, text_items = _run_text_soft_step(
+        options, deps, ctx, deadline, text_symbols
+    )
     degraded = degraded or not text_outcome.success
 
     started_at = time.perf_counter()
@@ -1232,9 +1383,12 @@ def _run_soft_steps(
     degraded = degraded or not notify_outcome.success
 
     status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
-    notices = tuple(
+    notices = (
+        (ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ()
+    ) + tuple(
         f"{label}: {outcome.detail}"
         for label, outcome in (
+            ("MAE/MFE", excursion_outcome),
             ("text", text_outcome),
             ("LLM", llm_outcome),
             ("postmortem", postmortem_outcome),
@@ -1334,6 +1488,11 @@ def _compose_dependencies(
         if secrets.finnhub_api_key and not options.skip_text
         else None
     )
+    earnings_client = (
+        FinnhubEarningsClient(secrets.finnhub_api_key)
+        if secrets.finnhub_api_key
+        else None
+    )
     calendar_client = (
         FredCalendarClient(secrets.fred_api_key)
         if secrets.fred_api_key and not options.skip_text
@@ -1364,6 +1523,7 @@ def _compose_dependencies(
         strategies_config=strategies.model_dump(),
         clock=clock,
         edgar_client=edgar_client,
+        earnings_client=earnings_client,
         news_client=news_client,
         calendar_client=calendar_client,
         llm_client=llm_client,

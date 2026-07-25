@@ -25,6 +25,7 @@ from swing_copilot.llm.client import BudgetExceededError
 from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.paper.journal import PaperJournal
+from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
@@ -466,6 +467,36 @@ class TestPostmortemFailureDegrades:
         assert result.status == RunStatus.SUCCESS
         assert result.exit_code == 0
         assert _step_status(state_store, result.run_id, "postmortem") == "success"
+
+
+class TestMaeMfeFailureDegrades:
+    def test_excursion_storage_failure_does_not_abort_output(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise(
+            _state_store: StateStore,
+            _market_store: MarketStore,
+            _as_of: date,
+        ) -> None:
+            msg = "excursion storage unavailable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "update_position_excursions", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "mae_mfe") == "failed"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
+        assert "MAE/MFE: unexpected error" in result.report_path.read_text(
+            encoding="utf-8"
+        )
 
 
 class TestMixedOutcomeTextStepPreservesSuccesses:

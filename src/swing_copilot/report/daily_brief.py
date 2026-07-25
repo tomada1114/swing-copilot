@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
-    from swing_copilot.risk.checks import RiskAssessment
+    from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
+    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
@@ -73,6 +74,29 @@ class BriefExposure:
     dd_level: str
     data_quality: str
     is_conservatively_downgraded: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BriefCircuitBreaker:
+    """Realized-loss circuit state displayed beside the exposure ceiling."""
+
+    state: str
+    data_quality: str
+    triggered_rules: tuple[str, ...] = ()
+    daily_loss_pct: float | None = None
+    weekly_loss_pct: float | None = None
+    monthly_loss_pct: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BriefPortfolioHeat:
+    """Account-level stop risk displayed before individual candidates."""
+
+    status: str
+    heat_pct: float | None
+    max_heat_pct: float
+    missing_stop_symbols: tuple[str, ...] = ()
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +232,8 @@ class DailyBrief:
     candidates: tuple[BriefCandidate, ...]
     regime: BriefRegime | None = None
     exposure: BriefExposure | None = None
+    circuit_breaker: BriefCircuitBreaker | None = None
+    portfolio_heat: BriefPortfolioHeat | None = None
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
@@ -242,7 +268,10 @@ class DailyBriefContext:
     max_position_pct: float = 0.10
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
+    circuit_breaker: CircuitBreakerResult | None = None
     ftd_snapshot: FtdSnapshot | None = None
+    portfolio_heat: PortfolioHeatResult | None = None
+    max_portfolio_heat_pct: float = 6.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +310,10 @@ def build_daily_brief(
         candidates=candidates,
         regime=_regime_brief(context.regime_snapshot, context.ftd_snapshot),
         exposure=_exposure_brief(context.exposure_decision),
+        circuit_breaker=_circuit_breaker_brief(context.circuit_breaker),
+        portfolio_heat=_portfolio_heat_brief(
+            context.portfolio_heat, context.max_portfolio_heat_pct
+        ),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
@@ -316,6 +349,35 @@ def _exposure_brief(decision: ExposureDecision | None) -> BriefExposure | None:
         dd_level=decision.dd_level.value,
         data_quality=decision.data_quality.value,
         is_conservatively_downgraded=decision.is_conservatively_downgraded,
+    )
+
+
+def _circuit_breaker_brief(
+    result: CircuitBreakerResult | None,
+) -> BriefCircuitBreaker | None:
+    if result is None:
+        return None
+    return BriefCircuitBreaker(
+        state=result.state.value,
+        data_quality=result.data_quality,
+        triggered_rules=result.triggered_rules,
+        daily_loss_pct=result.daily_loss_pct,
+        weekly_loss_pct=result.weekly_loss_pct,
+        monthly_loss_pct=result.monthly_loss_pct,
+    )
+
+
+def _portfolio_heat_brief(
+    result: PortfolioHeatResult | None, max_heat_pct: float
+) -> BriefPortfolioHeat | None:
+    if result is None:
+        return None
+    return BriefPortfolioHeat(
+        status=result.status,
+        heat_pct=result.heat_pct,
+        max_heat_pct=max_heat_pct,
+        missing_stop_symbols=result.missing_stop_symbols,
+        reason=result.reason,
     )
 
 

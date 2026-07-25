@@ -10,7 +10,11 @@ from swing_copilot.report.daily_brief import format_sizing
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
-    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
+    from swing_copilot.report.daily_brief import (
+        BriefCandidate,
+        BriefPortfolioHeat,
+        DailyBrief,
+    )
     from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 _DISCLAIMER = "本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください。"
@@ -69,6 +73,27 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Verdict: `{brief.exposure.verdict}` {downgrade}",
                 f"- Inputs: gate `{brief.exposure.gate}`, DD `{brief.exposure.dd_level}`",
                 f"- Data quality: `{brief.exposure.data_quality}`",
+            ]
+        )
+    if brief.circuit_breaker is not None:
+        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
+        lines.extend(
+            [
+                "",
+                "## Circuit Breaker",
+                "",
+                f"- State: `{brief.circuit_breaker.state}`",
+                f"- Data quality: `{brief.circuit_breaker.data_quality}`",
+                f"- Triggered rules: `{rules}`",
+            ]
+        )
+    if brief.portfolio_heat is not None:
+        lines.extend(
+            [
+                "",
+                "## Portfolio risk",
+                "",
+                f"- Portfolio heat: {_portfolio_heat_text(brief.portfolio_heat)}",
             ]
         )
     lines.extend(
@@ -151,6 +176,16 @@ def write_markdown_report(
     return report_path
 
 
+def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
+    """Render the portfolio-heat value without adding report-level branches."""
+    if heat.heat_pct is not None:
+        return f"`{heat.heat_pct:.2f}% / {heat.max_heat_pct:.2f}%`"
+    if heat.missing_stop_symbols:
+        symbols = ", ".join(heat.missing_stop_symbols)
+        return f"`not_calculable` (missing stop: {symbols})"
+    return f"`not_calculable` ({heat.reason or 'unknown reason'})"
+
+
 def update_markdown_decisions(
     report_path: Path, decisions: list[TradeDecisionRecord]
 ) -> None:
@@ -201,6 +236,7 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     ]
     lines.extend(f"- Risk: {reason}" for reason in candidate.risk.reasons)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
+    lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
     lines.extend(_score_breakdown_section(candidate))
     if candidate.llm.facts:
         lines.extend(["", "### Facts", ""])

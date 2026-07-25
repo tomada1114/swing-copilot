@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pandas as pd
 import pytest
 
+from swing_copilot.data.earnings import EarningsEvent
 from swing_copilot.models import Position
 from swing_copilot.regime.distribution import (
     DataQuality,
@@ -17,10 +18,20 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import (
+    CIRCUIT_BREAKER_REASON_PREFIX,
+    EARNINGS_DATE_UNKNOWN_WARNING,
+    EARNINGS_PROXIMITY_BLOCK_REASON,
+    EARNINGS_PROXIMITY_WARN_WARNING,
+    PORTFOLIO_HEAT_EXCEEDED_REASON,
+    PORTFOLIO_HEAT_NOT_CALCULABLE_REASON,
     REGIME_CASH_PRIORITY_REASON,
     SIZING_WARNING_REGIME_REDUCE_ONLY,
+    EarningsGuardInput,
     RiskChecker,
+    RiskRunContext,
+    calculate_portfolio_heat,
 )
+from swing_copilot.risk.circuit_breaker import CircuitBreakerResult, CircuitState
 from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
@@ -50,7 +61,13 @@ def _candidate(symbol: str, *, close: float = 100.0, atr14: float = 2.0) -> Cand
     )
 
 
-def _position(symbol: str, *, shares: int = 100, entry_price: float = 90.0) -> Position:
+def _position(
+    symbol: str,
+    *,
+    shares: int = 100,
+    entry_price: float = 90.0,
+    stop_price: float | None = 85.0,
+) -> Position:
     return Position(
         position_id=uuid4(),
         symbol=symbol,
@@ -59,6 +76,7 @@ def _position(symbol: str, *, shares: int = 100, entry_price: float = 90.0) -> P
         entry_price=entry_price,
         shares=shares,
         status="open",
+        stop_price=stop_price,
     )
 
 
@@ -234,6 +252,210 @@ class TestSectorConcentration:
             [_candidate("AAPL")], portfolio=[], account_equity=1_000_000.0
         )
         assert result[0].status == "approved"
+
+
+class TestPortfolioHeat:
+    """P4-17: account-level stop risk is accumulated in ranking order."""
+
+    def test_two_holdings_and_three_candidates_match_hand_calculation(self):
+        positions = [
+            _position("AAPL", entry_price=150.0, stop_price=145.0, shares=100),
+            _position("MSFT", entry_price=300.0, stop_price=290.0, shares=50),
+            _position("NVDA", entry_price=800.0, stop_price=760.0, shares=10),
+            _position("GOOG", entry_price=140.0, stop_price=130.0, shares=100),
+            _position("AMZN", entry_price=180.0, stop_price=170.0, shares=200),
+        ]
+
+        result = calculate_portfolio_heat(positions, account_equity=100_000.0)
+
+        assert result.status == "calculated"
+        assert result.heat_pct == pytest.approx(4.4)
+
+    @pytest.mark.parametrize(
+        ("max_heat_pct", "expected_status"),
+        [
+            pytest.param(6.0, "approved", id="exactly-at-limit"),
+            pytest.param(5.99, "rejected", id="strictly-over-limit"),
+        ],
+    )
+    def test_limit_boundary_is_strictly_greater_than(
+        self, settings, market_store, max_heat_pct, expected_status
+    ):
+        checker = _checker_with_risk_overrides(
+            settings,
+            market_store,
+            max_position_pct=1.0,
+            max_trade_risk_pct=0.01,
+            max_sector_pct=1.0,
+            max_portfolio_heat_pct=max_heat_pct,
+        )
+        portfolio = [_position("HELD", entry_price=100.0, stop_price=50.0, shares=100)]
+        candidate = _candidate("AAPL", close=100.0, atr14=4.0)
+
+        result = checker.check([candidate], portfolio, account_equity=100_000.0)[0]
+
+        assert result.status == expected_status
+        assert result.portfolio_heat_pct == pytest.approx(
+            6.0 if expected_status == "approved" else 5.0
+        )
+        assert (PORTFOLIO_HEAT_EXCEEDED_REASON in result.reasons) is (
+            expected_status == "rejected"
+        )
+
+    def test_rejected_candidate_does_not_consume_heat_for_later_candidate(
+        self, settings, market_store
+    ):
+        checker = _checker_with_risk_overrides(
+            settings,
+            market_store,
+            max_position_pct=0.005,
+            max_trade_risk_pct=1.0,
+            max_sector_pct=1.0,
+            max_portfolio_heat_pct=5.075,
+        )
+        portfolio = [_position("HELD", entry_price=100.0, stop_price=50.0, shares=100)]
+
+        results = checker.check(
+            [
+                _candidate("FIRST", close=100.0, atr14=8.0),
+                _candidate("SECOND", close=100.0, atr14=4.0),
+            ],
+            portfolio,
+            account_equity=100_000.0,
+        )
+
+        assert [result.status for result in results] == ["rejected", "approved"]
+        assert [result.portfolio_heat_pct for result in results] == pytest.approx(
+            [5.0, 5.05]
+        )
+
+    def test_missing_stop_is_not_calculable_and_not_silently_approved(self, checker):
+        portfolio = [_position("AAPL", stop_price=None)]
+
+        heat = calculate_portfolio_heat(portfolio, account_equity=100_000.0)
+        result = checker.check(
+            [_candidate("MSFT")], portfolio, account_equity=100_000.0
+        )[0]
+
+        assert heat.status == "not_calculable"
+        assert heat.missing_stop_symbols == ("AAPL",)
+        assert result.status == "not_calculable"
+        assert PORTFOLIO_HEAT_NOT_CALCULABLE_REASON in result.reasons
+        assert result.portfolio_heat_pct is None
+
+    def test_empty_portfolio_has_zero_heat(self):
+        result = calculate_portfolio_heat([], account_equity=100_000.0)
+        assert result.status == "calculated"
+        assert result.heat_pct == 0.0
+
+
+class TestCircuitBreaker:
+    @pytest.mark.parametrize("state", [CircuitState.HALTED, CircuitState.COOLDOWN])
+    def test_blocks_every_candidate_with_stable_reason(
+        self, settings, market_store, state
+    ):
+        circuit = CircuitBreakerResult(
+            state,
+            2.0,
+            2.0,
+            2.0,
+            2,
+            ("DAILY_LOSS",),
+            "OK",
+        )
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(circuit_breaker=circuit),
+        )
+
+        result = checker.check([_candidate("AAPL")], [], 100_000.0)[0]
+
+        assert result.status == "rejected"
+        assert f"{CIRCUIT_BREAKER_REASON_PREFIX}{state.value}" in result.reasons
+        assert result.binding_constraint == "regime"
+
+
+class TestEarningsGuard:
+    def test_two_business_days_blocks_candidate(self, settings, market_store):
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 5),
+                "amc",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "rejected"
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
+        assert result.binding_constraint == "earnings"
+
+    def test_five_business_days_warns_without_rejecting(self, settings, market_store):
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 8),
+                "bmo",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert any(
+            warning.startswith(EARNINGS_PROXIMITY_WARN_WARNING)
+            for warning in result.sizing_warnings
+        )
+
+    def test_missing_event_is_explicit_warning(self, settings, market_store):
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, {"AAPL": None})),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert EARNINGS_DATE_UNKNOWN_WARNING in result.sizing_warnings
+
+    def test_disabled_guard_adds_no_per_symbol_unknown_warning(self, checker):
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert EARNINGS_DATE_UNKNOWN_WARNING not in result.sizing_warnings
 
 
 class TestCorrelationWarnings:

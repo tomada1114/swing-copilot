@@ -263,6 +263,7 @@ class TestFiveSymbolEndToEnd:
             "6_llm",
             "7_notify",
             "8_output",
+            "mae_mfe",
             "postmortem",
         ]
         assert all(status == "success" for _step, status in steps)

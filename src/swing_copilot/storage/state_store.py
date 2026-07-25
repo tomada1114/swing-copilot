@@ -17,6 +17,7 @@ from uuid import uuid4
 from swing_copilot.models import Position, RunStatus, StepStatus
 from swing_copilot.storage import (
     audit_records,
+    earnings_records,
     exposure_records,
     ftd_records,
     llm_records,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
+    from swing_copilot.data.earnings import EarningsEvent
     from swing_copilot.models import RunMode
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
@@ -246,8 +248,8 @@ class StateStore:
                 INSERT INTO positions (
                     position_id, symbol, is_paper, entry_date, entry_price,
                     shares, stop_price, status, close_date, close_price,
-                    exit_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                    exit_reason, close_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (position_id) DO UPDATE SET
                     symbol = EXCLUDED.symbol,
                     is_paper = EXCLUDED.is_paper,
@@ -258,7 +260,8 @@ class StateStore:
                     status = EXCLUDED.status,
                     close_date = EXCLUDED.close_date,
                     close_price = EXCLUDED.close_price,
-                    exit_reason = EXCLUDED.exit_reason
+                    exit_reason = EXCLUDED.exit_reason,
+                    close_at = EXCLUDED.close_at
                 """,
                 [
                     str(position.position_id),
@@ -272,12 +275,13 @@ class StateStore:
                     position.close_date,
                     position.close_price,
                     position.exit_reason,
+                    position.close_at,
                 ],
             )
 
     _POSITION_COLUMNS = (
         "position_id, symbol, is_paper, entry_date, entry_price, "
-        "shares, stop_price, status, close_date, close_price, exit_reason"
+        "shares, stop_price, status, close_date, close_price, exit_reason, close_at"
     )
 
     @staticmethod
@@ -294,6 +298,7 @@ class StateStore:
             close_date=row[8],
             close_price=row[9],
             exit_reason=row[10],
+            close_at=row[11],
         )
 
     def get_open_positions(self, is_paper: bool = True) -> list[Position]:
@@ -312,6 +317,14 @@ class StateStore:
                 [is_paper],
             ).fetchall()
         return [self._position_from_row(row) for row in rows]
+
+    def upsert_earnings_calendar(self, events: Sequence[EarningsEvent]) -> None:
+        """Correction-upsert earnings events as one transaction."""
+        earnings_records.upsert_earnings_calendar(self._database, events)
+
+    def get_earnings_event(self, symbol: str) -> EarningsEvent | None:
+        """Return the latest corrected earnings event for one symbol."""
+        return earnings_records.get_earnings_event(self._database, symbol)
 
     def get_position(self, position_id: UUID) -> Position | None:
         """Return one position by ID, regardless of status.
@@ -415,6 +428,20 @@ class StateStore:
             record: The decision to persist.
         """
         paper_records.record_trade_decision(self._database, record)
+
+    def upsert_position_excursions(
+        self, records: list[paper_records.PositionExcursionRecord]
+    ) -> None:
+        """Atomically correction-upsert daily position excursion snapshots."""
+        paper_records.upsert_position_excursions(self._database, records)
+
+    def get_position_excursions(
+        self, position_ids: list[UUID], as_of: date
+    ) -> dict[UUID, paper_records.PositionExcursionRecord]:
+        """Return latest point-in-time excursion snapshots for positions."""
+        return paper_records.get_position_excursions(
+            self._database, position_ids, as_of
+        )
 
     def get_decision_history(
         self, symbol: str, strategy_key: str, before_date: date, limit: int

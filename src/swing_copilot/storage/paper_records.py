@@ -50,6 +50,80 @@ class DecisionHistoryEntry:
     realized_return_pct: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class PositionExcursionRecord:
+    """Cumulative per-share MAE/MFE snapshot for one position and day."""
+
+    position_id: UUID
+    as_of_date: date
+    mae_per_share: float | None
+    mfe_per_share: float | None
+    data_quality: str
+
+
+def upsert_position_excursions(
+    database: Database, records: list[PositionExcursionRecord]
+) -> None:
+    """Correction-upsert a logical day's snapshots in one transaction."""
+    if not records:
+        return
+    conn = database.connect()
+    try:
+        conn.execute("BEGIN TRANSACTION")
+        for record in records:
+            conn.execute(
+                """
+                INSERT INTO position_excursions (
+                    position_id, as_of_date, mae_per_share, mfe_per_share,
+                    data_quality, created_at
+                ) VALUES (?, ?, ?, ?, ?, now())
+                ON CONFLICT (position_id, as_of_date) DO UPDATE SET
+                    mae_per_share = EXCLUDED.mae_per_share,
+                    mfe_per_share = EXCLUDED.mfe_per_share,
+                    data_quality = EXCLUDED.data_quality,
+                    created_at = EXCLUDED.created_at
+                """,
+                [
+                    str(record.position_id),
+                    record.as_of_date,
+                    record.mae_per_share,
+                    record.mfe_per_share,
+                    record.data_quality,
+                ],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def get_position_excursions(
+    database: Database, position_ids: list[UUID], as_of: date
+) -> dict[UUID, PositionExcursionRecord]:
+    """Return each requested position's latest snapshot at or before `as_of`."""
+    if not position_ids:
+        return {}
+    placeholders = ",".join("?" for _ in position_ids)
+    query = f"""
+        SELECT position_id, as_of_date, mae_per_share, mfe_per_share, data_quality
+        FROM position_excursions
+        WHERE position_id IN ({placeholders}) AND as_of_date <= ?
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY position_id ORDER BY as_of_date DESC
+        ) = 1
+    """  # noqa: S608 - placeholders only
+    with database.connect() as conn:
+        rows = conn.execute(
+            query, [*(str(position_id) for position_id in position_ids), as_of]
+        ).fetchall()
+    return {
+        row[0]: PositionExcursionRecord(row[0], row[1], row[2], row[3], row[4])
+        for row in rows
+    }
+
+
 def record_trade_decision(database: Database, record: TradeDecisionRecord) -> None:
     """Upsert a trade decision, keyed by `(run_id, symbol, strategy_key)`."""
     with database.connect() as conn:

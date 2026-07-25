@@ -569,8 +569,10 @@ class RiskAssessment:
     shares_by_risk: int | None = None
     shares_by_position_cap: int | None = None
     binding_constraint: str = "not_calculable"
-    # {"trade_risk","position_cap","sector","correlation","not_calculable"}
+    # {"trade_risk","position_cap","sector","correlation","regime",
+    #  "portfolio_heat","earnings","not_calculable"}
     sizing_warnings: tuple[str, ...] = ()  # {"WIDE_STOP","SMALL_ACCOUNT_FRICTION"}
+    portfolio_heat_pct: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class PositionSizeResult:
@@ -608,6 +610,8 @@ class RiskChecker:
         - 1銘柄=資金のmax_position_pct上限
         - 1トレードのリスク=資金のmax_trade_risk_pct上限（ストップ幅基準）
         - 同一セクター上限max_sector_pct
+        - 保有中ポジションと、それまでに承認した候補のstopリスク合計が
+          max_portfolio_heat_pct（既定6.0%、単位はpercentage points）を超えないこと
         - 銘柄間相関チェック（FR-06、ブロックしない警告のみ）
         を満たすかを判定する。セクター判定に必要な銘柄→セクターのマッピングは、
         universe.pyが取得・保存するGICSセクター（config/universe_snapshot.csv、
@@ -642,6 +646,44 @@ class RiskChecker:
         レポートへ明示する。警告を黙って省略しない。
         """
 ```
+
+**P4-17（roadmap §5、Issue #26）**:
+`calculate_portfolio_heat()`は
+`Σ((entry_price - stop_price) × shares) / account_equity × 100`を返す。
+`RiskChecker.check()`は入力候補のランキング順を保ち、他のリスクチェックを通過した候補だけを
+累積する。追加後が上限と等しい場合は承認し、厳密に超える場合だけ
+`PORTFOLIO_HEAT_EXCEEDED`で拒否するため、拒否候補は後続候補のヒートを消費しない。
+保有中ポジションのstopが1件でも欠損する場合は0扱いせず、ヒートを
+`not_calculable`、本来承認可能だった候補も`PORTFOLIO_HEAT_NOT_CALCULABLE`とする。
+相関調整は本Issueの対象外である。
+
+**P4-18（roadmap §5、Issue #27）**:
+`data/earnings.py`の`EarningsCalendarClient` Protocolを外部境界とし、
+`FinnhubEarningsClient`が`/calendar/earnings`を10秒タイムアウト、最大3試行、
+1秒間隔の全試行レート制限、1秒・2秒の決定論的指数バックオフで呼ぶ。
+429/5xxとtransport/timeoutだけを再試行し、4xx・応答型不正は再試行しない。
+各銘柄の失敗は`pipeline/earnings.py`で`None`へ変換し、他銘柄を継続する。
+APIキー未設定時はガード全体を無効化し、
+`NO_EARNINGS_DATA: FINNHUB_API_KEY is not configured`をレポート警告へ渡す。
+
+`risk/earnings.py`は`as_of`翌日から決算日までの平日数（土日だけを除外）を数え、
+2営業日以内を`EARNINGS_PROXIMITY_BLOCK`、3〜5営業日を
+`EARNINGS_PROXIMITY_WARN`、予定不明を`EARNINGS_DATE_UNKNOWN`とする。
+米国市場祝日を考慮しない簡易カレンダーは、休日を営業日として多めに数える既知の乖離である。
+閾値は`risk.earnings_block_business_days`/`earnings_warn_business_days`で管理し、
+前者が後者を超える設定は起動前に拒否する。
+
+**P4-19（roadmap §5、Issue #28）**:
+`risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、
+含み損益は参照しない。`as_of`の米東部時間（`America/New_York`）における日次、
+月曜開始の週次、月次境界で再集計し、損失率が2%/5%/8%に達すると`HALTED`とする。
+直近2件が連続して負けなら、最後の負けの`close_at`から厳密に24時間未満を
+`COOLDOWN`とし、損益0は連敗をリセットする。優先順位は
+`HALTED > COOLDOWN > TRADING_ALLOWED`だが、該当した全ルールを記録する。
+停止状態でも収集・レポートは継続し、新規候補だけを
+`CIRCUIT_BREAKER_HALTED`または`CIRCUIT_BREAKER_COOLDOWN`で拒否する。
+履歴なしは`TRADING_ALLOWED / EMPTY_STATE`、決済時刻または損益の欠損は
+安全側の`HALTED / PARTIAL`とする。閾値は初期値であり、すべて要検証。
 
 ### 3.14 `text/news_finnhub.py` / `text/edgar_filings.py` / `text/calendar_fred.py`（FR-07）
 
@@ -784,6 +826,10 @@ binding_constraintに応じて`"128株（制約: リスク1.0%）"`
 `"N株（制約: セクター集中）"`（sector）、`"N株（制約: 相関）"`（correlation、
 現状のcorrelationはブロックしない警告のみのため実運用では到達しない）を返す。
 
+P4-17では`DailyBrief.portfolio_heat`を追加し、terminal/Markdownの候補一覧より前に
+現在値と`max_portfolio_heat_pct`を常時表示する。stop欠損時は欠損銘柄を列挙して
+`not_calculable`を明示し、候補が0件でも保有中ポジションだけの値（または0.0%）を表示する。
+
 ```python
 def build_daily_brief(
     context: DailyBriefContext,
@@ -918,7 +964,7 @@ class PaperJournal:
     ) -> "PerformanceSummary":
         """
         クローズ済みペーパートレードの集計P&L・勝率・期待値・profit_factor・
-        R-multiple・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
+        R-multiple・平均MAE/MFE・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
         entry_date..as_of）のSPYバイ&ホールドリターンを返す（P1-06,
         backtest/engine.pyのbenchmarkと同じ考え方を実トレードへ適用）。
         クローズ済み0件のときは全てのレート/比率フィールドがNone（例外は
@@ -1077,7 +1123,7 @@ uv run copilot-history performance [--db PATH]
 | `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
 | `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
 | `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
-| `performance` | P1-06で拡張された`PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/r_multiple_omitted警告/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
+| `performance` | `PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/平均MAE・MFE/可能性注記/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
@@ -1236,7 +1282,8 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     shares_by_position_cap  BIGINT,
     binding_constraint      VARCHAR
         CHECK (binding_constraint IN (
-            'trade_risk','position_cap','sector','correlation','not_calculable'
+            'trade_risk','position_cap','sector','correlation','regime',
+            'portfolio_heat','earnings','not_calculable'
         )),
     sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, symbol)
@@ -1256,15 +1303,48 @@ CREATE TABLE IF NOT EXISTS positions (
     stop_price    DOUBLE,
     status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
     close_date    DATE,
+    close_at      TIMESTAMPTZ,
     close_price   DOUBLE,
     exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
         'stop_loss','target','time_stop','manual','other','unknown'
     )),
     created_at    TIMESTAMPTZ NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS position_excursions (
+    position_id    UUID NOT NULL,
+    as_of_date     DATE NOT NULL,
+    mae_per_share  DOUBLE,
+    mfe_per_share  DOUBLE,
+    data_quality   VARCHAR NOT NULL CHECK(data_quality IN ('OK','MISSING_BAR')),
+    created_at     TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (position_id, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    symbol          VARCHAR PRIMARY KEY,
+    earnings_date   DATE NOT NULL,
+    session         VARCHAR NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL
+);
 ```
 
 `exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
+
+P4-19の`close_at`も冪等な`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追加する。
+新規決済は指定されたtimezone-aware時刻を保存し、省略時は後方互換のため
+`close_date`当日16:00 ETを保存する。移行前の既存決済は時刻を推測して埋めず
+NULLのまま残し、サーキットブレーカーが`PARTIAL`として安全側に扱う。
+
+P4-20の`position_excursions`は日次パイプラインのfail-softな`mae_mfe` stepで更新する。
+各runは`date <= as_of`のバーだけを読み、MAEを`min(0, low-entry)`、MFEを
+`max(0, high-entry)`へclampした1株あたりドル幅として保存する。同日再実行は
+correction-upsert、複数ポジションの書き込みは1トランザクションである。
+当日バー欠損は既存の累積極値を維持して`MISSING_BAR`を記録し、他銘柄を継続する。
+予期しない保存障害もrun全体を停止せず`DEGRADED`として記録し、後続の出力まで継続する。
+クローズ当日は集計対象に含める。performanceではクローズ済みだけを株数換算して
+平均USD値を求め、平均excursionの絶対額が平均実現損益の絶対額を上回る場合に限り、
+利確時期またはストップ/エントリーに関する「可能性」注記を表示する。
 
 ```sql
 CREATE TABLE IF NOT EXISTS trades_journal (
@@ -1361,6 +1441,14 @@ risk:
   max_sector_pct: 0.30        # 同一セクター上限30%
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
+  max_portfolio_heat_pct: 6.0        # 保有+承認候補のstopリスク上限%（roadmap §5 P4-17、要検証）
+  earnings_block_business_days: 2    # 決算までこの営業日数以内はblock（roadmap §5 P4-18、要検証）
+  earnings_warn_business_days: 5     # block超〜この営業日数以内はwarn（roadmap §5 P4-18、要検証）
+  circuit_daily_loss_pct: 2.0        # 日次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_weekly_loss_pct: 5.0       # 週次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_monthly_loss_pct: 8.0      # 月次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_consecutive_losses: 2      # 連敗数（roadmap §5 P4-19、要検証）
+  circuit_cooldown_hours: 24         # 最後の負け決済からの停止時間（roadmap §5 P4-19、要検証）
   wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:
@@ -1593,6 +1681,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 同一セクター上限 | 30% | `risk.max_sector_pct=0.30` |
 | 保有銘柄との相関警告閾値 | ピアソン相関 0.7 超で警告（ブロックしない） | `risk.max_correlation=0.7` |
 | 相関計算の参照期間 | 直近60営業日の日次リターン | `risk.correlation_lookback_days=60` |
+| サーキットブレーカー | 日次2%・週次5%・月次8%、2連敗後24時間（P4-19、要検証） | `risk.circuit_*` |
 | WIDE_STOP警告閾値 | 損切り幅がエントリー価格の10%超（P1-03、要検証） | `risk.wide_stop_threshold_pct=10.0` |
 
 ---

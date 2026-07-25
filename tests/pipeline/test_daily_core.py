@@ -224,6 +224,7 @@ class TestHappyPath:
             "6_llm",
             "7_notify",
             "8_output",
+            "mae_mfe",
             "postmortem",
         ]
         # 1/3/4/8 succeed outright; 2/5/6/7 are deliberate skips (no
@@ -290,9 +291,9 @@ class TestIdempotency:
             second_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(second.run_id)]
             ).fetchone()
-        # 8 pre-existing steps + P2-11's "postmortem" step.
-        assert first_steps == (9,)
-        assert second_steps == (9,)
+        # 8 pre-existing steps + local postmortem and MAE/MFE steps.
+        assert first_steps == (10,)
+        assert second_steps == (10,)
 
 
 class TestFatalStepFailure:

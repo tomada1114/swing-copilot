@@ -14,7 +14,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
     from typing import Literal
     from uuid import UUID
@@ -63,6 +63,7 @@ class Position:
     status: PositionStatus
     stop_price: float | None = None
     close_date: date | None = None
+    close_at: datetime | None = None
     close_price: float | None = None
     # P1-06: why the position was closed. Input values accepted by
     # `PaperJournal.close_position()` are exactly {stop_loss, target,

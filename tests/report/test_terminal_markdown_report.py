@@ -13,11 +13,13 @@ from swing_copilot.models import RunStatus
 from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefCandidate,
+    BriefCircuitBreaker,
     BriefExposure,
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
     BriefPastDecision,
+    BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
     BriefRisk,
@@ -128,6 +130,87 @@ def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     assert "CASH_PRIORITY" in terminal
     assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
     assert "Verdict: `CASH_PRIORITY`" in markdown
+
+
+def test_circuit_breaker_banner_is_alongside_exposure_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        exposure=BriefExposure(
+            verdict="NEW_ENTRY_ALLOWED",
+            gate="BULL",
+            dd_level="NORMAL",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
+        circuit_breaker=BriefCircuitBreaker(
+            state="HALTED",
+            data_quality="OK",
+            triggered_rules=("DAILY_LOSS",),
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Exposure Ceiling") < terminal.index("Circuit Breaker")
+    assert terminal.index("Circuit Breaker") < terminal.index("Symbol")
+    assert markdown.index("## Exposure Ceiling") < markdown.index("## Circuit Breaker")
+    assert markdown.index("## Circuit Breaker") < markdown.index("## Candidates")
+    assert "HALTED" in terminal
+    assert "Triggered rules: `DAILY_LOSS`" in markdown
+
+
+def test_terminal_and_markdown_always_show_portfolio_heat_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        portfolio_heat=BriefPortfolioHeat(
+            status="calculated",
+            heat_pct=4.4,
+            max_heat_pct=6.0,
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Portfolio heat: 4.40% / 6.00%") < terminal.index("Symbol")
+    assert markdown.index("## Portfolio risk") < markdown.index("## Candidates")
+    assert "Portfolio heat: `4.40% / 6.00%`" in markdown
+
+
+def test_terminal_and_markdown_explain_missing_stop_heat_failure() -> None:
+    brief = replace(
+        _brief(),
+        portfolio_heat=BriefPortfolioHeat(
+            status="not_calculable",
+            heat_pct=None,
+            max_heat_pct=6.0,
+            missing_stop_symbols=("ABC",),
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert "Portfolio heat: not_calculable (missing stop: ABC)" in terminal
+    assert "Portfolio heat: `not_calculable` (missing stop: ABC)" in markdown
+
+
+def test_terminal_and_markdown_show_earnings_warning_for_candidate() -> None:
+    risk = BriefRisk(
+        status="approved",
+        max_shares=10,
+        stop_price=95.0,
+        reasons=(),
+        warnings=(),
+        sizing_warnings=("EARNINGS_PROXIMITY_WARN: 5 business days until 2026-07-28",),
+    )
+
+    terminal = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+
+    assert "EARNINGS_PROXIMITY_WARN" in terminal
+    assert "EARNINGS_PROXIMITY_WARN" in markdown
 
 
 def test_terminal_shows_the_binding_constraint_sizing_string() -> None:

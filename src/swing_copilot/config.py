@@ -92,9 +92,31 @@ class RiskConfig(_StrictModel):
     max_sector_pct: float = 0.30
     max_correlation: float = 0.7
     correlation_lookback_days: int = 60
+    # Account-level open stop-risk ceiling in percentage points
+    # (roadmap §5 P4-17; breakout-trade-planner / Minervini 6-8%帯の
+    # 保守側、要検証).
+    max_portfolio_heat_pct: float = Field(default=6.0, gt=0.0)
+    # Weekday-only earnings proximity thresholds (roadmap §5 P4-18;
+    # parabolic-short-trade-planner, 要検証).
+    earnings_block_business_days: int = Field(default=2, ge=0)
+    earnings_warn_business_days: int = Field(default=5, ge=0)
+    # Realized-P&L circuit breaker thresholds in percentage points
+    # (roadmap §5 P4-19; all initial values are 要検証).
+    circuit_daily_loss_pct: float = Field(default=2.0, gt=0.0)
+    circuit_weekly_loss_pct: float = Field(default=5.0, gt=0.0)
+    circuit_monthly_loss_pct: float = Field(default=8.0, gt=0.0)
+    circuit_consecutive_losses: int = Field(default=2, ge=1)
+    circuit_cooldown_hours: int = Field(default=24, ge=1)
     # Stop distance as a % of entry price above which a WIDE_STOP sizing
     # warning is raised (roadmap §5 P1-03, 要検証).
     wide_stop_threshold_pct: float = 10.0
+
+    @model_validator(mode="after")
+    def _validate_earnings_threshold_order(self) -> RiskConfig:
+        if self.earnings_warn_business_days < self.earnings_block_business_days:
+            msg = "earnings_warn_business_days must be >= earnings_block_business_days"
+            raise ValueError(msg)
+        return self
 
 
 class FundamentalFilterConfig(_StrictModel):

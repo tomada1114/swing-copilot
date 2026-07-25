@@ -236,6 +236,31 @@ class TestHappyPath:
         )
         assert set(bars["fetched_at"]) == {pd.Timestamp("2027-03-01T12:00:00Z")}
 
+    def test_persists_insufficient_regime_snapshot_without_stopping_run(
+        self, deps, state_store
+    ):
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        with state_store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT gate_verdict, dd_level, data_quality FROM regime_snapshots WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchone()
+        assert result.status is RunStatus.SUCCESS
+        assert row == ("UNKNOWN", "UNKNOWN", "INSUFFICIENT")
+
+    def test_persists_conservative_exposure_for_insufficient_regime(
+        self, deps, state_store
+    ):
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        with state_store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT verdict, data_quality FROM exposure_decisions WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchone()
+        assert row == ("CASH_PRIORITY", "INSUFFICIENT")
+
 
 class TestIdempotency:
     def test_two_runs_get_distinct_run_ids_and_no_duplicate_bars(

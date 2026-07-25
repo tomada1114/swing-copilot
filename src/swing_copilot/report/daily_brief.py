@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
+    from swing_copilot.regime.exposure import ExposureDecision
+    from swing_copilot.regime.ftd import FtdSnapshot
+    from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
@@ -42,6 +45,34 @@ class BriefMarketItem:
     label: str
     value: float | None
     pct_change: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class BriefRegime:
+    """Code-owned market state shown before any individual candidates."""
+
+    gate: str
+    dd_level: str
+    spy_d25: float
+    qqq_d25: float
+    data_quality: str
+    spy_ftd_state: str | None = None
+    spy_ftd_day_number: int | None = None
+    spy_ftd_quality_score: int | None = None
+    qqq_ftd_state: str | None = None
+    qqq_ftd_day_number: int | None = None
+    qqq_ftd_quality_score: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BriefExposure:
+    """Code-owned new-entry ceiling displayed before candidates."""
+
+    verdict: str
+    gate: str
+    dd_level: str
+    data_quality: str
+    is_conservatively_downgraded: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +206,8 @@ class DailyBrief:
     generated_at: datetime
     market: tuple[BriefMarketItem, ...]
     candidates: tuple[BriefCandidate, ...]
+    regime: BriefRegime | None = None
+    exposure: BriefExposure | None = None
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
@@ -207,6 +240,9 @@ class DailyBriefContext:
     # config percentages that produced them.
     max_trade_risk_pct: float = 0.01
     max_position_pct: float = 0.10
+    regime_snapshot: RegimeSnapshot | None = None
+    exposure_decision: ExposureDecision | None = None
+    ftd_snapshot: FtdSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,9 +279,43 @@ def build_daily_brief(
         generated_at=context.generated_at,
         market=_market_items(market_store, context.run_date),
         candidates=candidates,
+        regime=_regime_brief(context.regime_snapshot, context.ftd_snapshot),
+        exposure=_exposure_brief(context.exposure_decision),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
+    )
+
+
+def _regime_brief(
+    snapshot: RegimeSnapshot | None, ftd_snapshot: FtdSnapshot | None
+) -> BriefRegime | None:
+    if snapshot is None:
+        return None
+    return BriefRegime(
+        gate=snapshot.gate.verdict.value,
+        dd_level=snapshot.dd_level.value,
+        spy_d25=snapshot.spy_distribution.d25,
+        qqq_d25=snapshot.qqq_distribution.d25,
+        data_quality=snapshot.data_quality.value,
+        spy_ftd_state=ftd_snapshot.spy.state.value if ftd_snapshot else None,
+        spy_ftd_day_number=ftd_snapshot.spy.day_number if ftd_snapshot else None,
+        spy_ftd_quality_score=ftd_snapshot.spy.quality_score if ftd_snapshot else None,
+        qqq_ftd_state=ftd_snapshot.qqq.state.value if ftd_snapshot else None,
+        qqq_ftd_day_number=ftd_snapshot.qqq.day_number if ftd_snapshot else None,
+        qqq_ftd_quality_score=ftd_snapshot.qqq.quality_score if ftd_snapshot else None,
+    )
+
+
+def _exposure_brief(decision: ExposureDecision | None) -> BriefExposure | None:
+    if decision is None:
+        return None
+    return BriefExposure(
+        verdict=decision.verdict.value,
+        gate=decision.gate.value,
+        dd_level=decision.dd_level.value,
+        data_quality=decision.data_quality.value,
+        is_conservatively_downgraded=decision.is_conservatively_downgraded,
     )
 
 

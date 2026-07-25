@@ -51,8 +51,21 @@ _SYSTEM_PROMPT = """あなたは米国株の個人投資家向け意思決定支
    解釈がその定量シグナルと矛盾するときは、必ず保守側（コードの定量判定）を
    採択してください。あなた自身の判断でコードの判定（REJECT等）を
    上書きしてはいけません。矛盾が生じた場合は、その矛盾自体を
-   interpretationまたはred_flagsに両論併記（定量側の判定とあなたの定性的な
-   見立ての両方）として明記してください。"""
+    interpretationまたはred_flagsに両論併記（定量側の判定とあなたの定性的な
+    見立ての両方）として明記してください。"""
+
+_MARKET_REGIME_INSTRUCTIONS = """\
+
+以下の<market_regime>は、提出書類本文とは独立してコードが計算した信頼できる
+市場レジームです。LLMはこの値を再計算・上書きしてはいけません。
+10. 各銘柄のinterpretationには、この市場レジームと解釈が整合するかを説明する
+    1文を必ず含めてください。個別材料がレジームと矛盾する強気/弱気の示唆を持つ
+    場合は、根拠を明示し、コード側の保守的なレジーム判定とあなたの見立てを
+    両論併記してください。最終的にはコード側の保守判断を優先します。
+11. Exposure CeilingがCASH_PRIORITYの場合は、新規エントリーを後押しする表現を
+    避け、保守的な語調で不確実性・待機理由を説明してください。Data qualityが
+    INSUFFICIENTの場合は、UNKNOWNであることとデータ不足の警告を明示してください。
+"""
 
 _TRUNCATION_DISCLOSURE = "全文未分析(書類本文が長いため、一部チャンクのみ分析しました)"
 
@@ -86,6 +99,8 @@ class FilingAnalysisRequest:
     # per-candidate and repeated on every chunk request, mirroring how
     # `decision_history` is already threaded per chunk below.
     decision_context_blocks: str = ""
+    # P3-15: code-owned market context belongs to the trusted system field.
+    market_regime: str = ""
 
 
 def analyze_filing(
@@ -151,7 +166,7 @@ def _analyze_chunk(
     )
     analyze_request = AnalyzeRequest(
         run_id=request.run_id,
-        system_prompt=_SYSTEM_PROMPT,
+        system_prompt=_system_prompt(request.market_regime),
         prompt=user_prompt,
         source_ids=(chunk_source_id,),
         schema=FilingAnalysis,
@@ -160,6 +175,11 @@ def _analyze_chunk(
         max_tokens=request.max_tokens,
     )
     return cast("FilingAnalysis", client.analyze(analyze_request))
+
+
+def _system_prompt(market_regime: str) -> str:
+    """Build the trusted system prompt for each filing chunk."""
+    return f"{_SYSTEM_PROMPT}{_MARKET_REGIME_INSTRUCTIONS}{market_regime}"
 
 
 def _chunk_filing_text(text: str, chunk_chars: int) -> list[str]:

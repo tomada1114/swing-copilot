@@ -38,6 +38,39 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         f"| {item.label} | {_number(item.value)} | {_percent(item.pct_change)} |"
         for item in brief.market
     )
+    if brief.regime is not None:
+        lines.extend(
+            [
+                "",
+                "## Market regime",
+                "",
+                f"- Gate: `{brief.regime.gate}`",
+                f"- Distribution Day level: `{brief.regime.dd_level}`",
+                f"- SPY d25: {brief.regime.spy_d25:g}; QQQ d25: {brief.regime.qqq_d25:g}",
+                f"- Data quality: `{brief.regime.data_quality}`",
+            ]
+        )
+        if brief.regime.spy_ftd_state is not None:
+            lines.extend(
+                [
+                    f"- FTD SPY: `{brief.regime.spy_ftd_state}`{_ftd_suffix(brief.regime.spy_ftd_day_number, brief.regime.spy_ftd_quality_score)}",
+                    f"- FTD QQQ: `{brief.regime.qqq_ftd_state}`{_ftd_suffix(brief.regime.qqq_ftd_day_number, brief.regime.qqq_ftd_quality_score)}",
+                ]
+            )
+    if brief.exposure is not None:
+        downgrade = (
+            "（保守的降格）" if brief.exposure.is_conservatively_downgraded else ""
+        )
+        lines.extend(
+            [
+                "",
+                "## Exposure Ceiling",
+                "",
+                f"- Verdict: `{brief.exposure.verdict}` {downgrade}",
+                f"- Inputs: gate `{brief.exposure.gate}`, DD `{brief.exposure.dd_level}`",
+                f"- Data quality: `{brief.exposure.data_quality}`",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -263,3 +296,12 @@ def _money(value: float | None) -> str:
 
 def _percent(value: float | None) -> str:
     return "N/A" if value is None else f"{value:+.2%}"
+
+
+def _ftd_suffix(day_number: int | None, score: int | None) -> str:
+    values = []
+    if day_number is not None:
+        values.append(f"Day{day_number}")
+    if score is not None:
+        values.append(f"品質スコア {score}")
+    return f"（{'、'.join(values)}）" if values else ""

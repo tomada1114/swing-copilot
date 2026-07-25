@@ -69,3 +69,19 @@ schedule:
 
 notification:
   enabled: false # Discord notification is opt-in; set DISCORD_WEBHOOK_URL to use it
+
+regime:
+  # roadmap §5 P3-13（要検証）: code-owned market gate and DD thresholds.
+  ema_period: 50
+  bull_vix_max: 20.0
+  bear_spy_ema_ratio: 0.97
+  bear_vix_min: 30.0
+  distribution_window_days: 25
+  dd_decline_pct: -0.002
+  stall_abs_change_pct: 0.001
+  recovery_pct: 0.05
+  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLY trade-risk multiplier (要検証)
+  # roadmap §5 P3-16（要検証）: FTD is display-only, never an exposure input.
+  ftd_correction_decline_pct: 0.03
+  ftd_correction_down_days: 3
+  ftd_gain_pct: 0.0125

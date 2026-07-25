@@ -13,10 +13,12 @@ from swing_copilot.models import RunStatus
 from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefCandidate,
+    BriefExposure,
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
     BriefPastDecision,
+    BriefRegime,
     BriefRejectionCount,
     BriefRisk,
     BriefSource,
@@ -75,6 +77,57 @@ def _brief_with_sizing(risk: BriefRisk) -> DailyBrief:
     base = _brief()
     candidate = replace(base.candidates[0], risk=risk)
     return replace(base, candidates=(candidate,))
+
+
+def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        regime=BriefRegime(
+            gate="BULL",
+            dd_level="NORMAL",
+            spy_d25=1.0,
+            qqq_d25=1.5,
+            data_quality="OK",
+            spy_ftd_state="FTD_CONFIRMED",
+            spy_ftd_day_number=5,
+            spy_ftd_quality_score=70,
+            qqq_ftd_state="DAY2_3",
+            qqq_ftd_day_number=3,
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Market regime") < terminal.index("Symbol")
+    assert "Gate: BULL" in terminal
+    assert "FTD" in terminal
+    assert "quality 70" in terminal
+    assert markdown.index("## Market regime") < markdown.index("## Candidates")
+    assert "Distribution Day level: `NORMAL`" in markdown
+    assert "FTD SPY: `FTD_CONFIRMED`（Day5、品質スコア 70）" in markdown
+    assert "成功率" not in markdown
+
+
+def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        exposure=BriefExposure(
+            verdict="CASH_PRIORITY",
+            gate="BEAR",
+            dd_level="SEVERE",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Exposure Ceiling") < terminal.index("Symbol")
+    assert "CASH_PRIORITY" in terminal
+    assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
+    assert "Verdict: `CASH_PRIORITY`" in markdown
 
 
 def test_terminal_shows_the_binding_constraint_sizing_string() -> None:

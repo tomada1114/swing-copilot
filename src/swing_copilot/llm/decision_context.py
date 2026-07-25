@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from datetime import date
 
     from swing_copilot.paper.journal import PerformanceSummary
+    from swing_copilot.regime.exposure import ExposureDecision
+    from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.paper_records import DecisionHistoryEntry
@@ -32,6 +34,29 @@ _SCORE_METRIC_KEYS = (
     "score_trend_quality",
     "score_liquidity",
 )
+
+
+def format_market_regime(snapshot: RegimeSnapshot, exposure: ExposureDecision) -> str:
+    """Render code-owned market state for the trusted LLM system prompt.
+
+    This intentionally contains only values calculated by the deterministic
+    regime and exposure modules. It is kept separate from the user prompt,
+    which contains untrusted news, filing excerpts, and historical notes.
+    """
+    warning = (
+        "\nWarning: Market regime is UNKNOWN because data is insufficient."
+        if snapshot.data_quality.value == "INSUFFICIENT"
+        else ""
+    )
+    return (
+        "<market_regime>\n"
+        f"Gate: {snapshot.gate.verdict.value}\n"
+        f"Distribution Day level: {snapshot.dd_level.value}\n"
+        f"Exposure Ceiling: {exposure.verdict.value}\n"
+        f"Data quality: {snapshot.data_quality.value}"
+        f"{warning}\n"
+        "</market_regime>\n"
+    )
 
 
 def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str:

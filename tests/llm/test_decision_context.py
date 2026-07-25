@@ -7,12 +7,20 @@ from datetime import date
 from typing import Any
 
 from swing_copilot.llm.decision_context import (
+    format_market_regime,
     format_performance_summary,
     format_risk_constraints,
     format_score_breakdown,
     is_cache_near_stale,
 )
 from swing_copilot.paper.journal import PerformanceSummary
+from swing_copilot.regime.distribution import (
+    DataQuality,
+    DistributionLevel,
+    DistributionResult,
+)
+from swing_copilot.regime.exposure import ExposureDecision, ExposureVerdict
+from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import Candidate
 
@@ -158,6 +166,67 @@ class TestFormatPerformanceSummary:
         )
 
         assert format_performance_summary(summary) == ""
+
+
+class TestFormatMarketRegime:
+    def test_renders_code_owned_regime_values_in_a_deterministic_block(self):
+        snapshot = RegimeSnapshot(
+            as_of=date(2027, 3, 1),
+            gate=MarketGate(GateVerdict.BULL, 520.0, 500.0, 15.0),
+            spy_distribution=DistributionResult(
+                3.0, 0.0, 0.0, DistributionLevel.CAUTION, DataQuality.OK
+            ),
+            qqq_distribution=DistributionResult(
+                1.0, 0.0, 0.0, DistributionLevel.NORMAL, DataQuality.OK
+            ),
+            dd_level=DistributionLevel.CAUTION,
+            data_quality=DataQuality.OK,
+        )
+        exposure = ExposureDecision(
+            verdict=ExposureVerdict.NEW_ENTRY_ALLOWED,
+            gate=GateVerdict.BULL,
+            dd_level=DistributionLevel.CAUTION,
+            data_quality=DataQuality.OK,
+            is_conservatively_downgraded=False,
+        )
+
+        text = format_market_regime(snapshot, exposure)
+
+        assert text == (
+            "<market_regime>\n"
+            "Gate: BULL\n"
+            "Distribution Day level: CAUTION\n"
+            "Exposure Ceiling: NEW_ENTRY_ALLOWED\n"
+            "Data quality: OK\n"
+            "</market_regime>\n"
+        )
+
+    def test_insufficient_data_is_explicitly_marked_unknown_with_a_warning(self):
+        snapshot = RegimeSnapshot(
+            as_of=date(2027, 3, 1),
+            gate=MarketGate(GateVerdict.UNKNOWN, None, None, None),
+            spy_distribution=DistributionResult(
+                0.0, 0.0, 0.0, DistributionLevel.UNKNOWN, DataQuality.INSUFFICIENT
+            ),
+            qqq_distribution=DistributionResult(
+                0.0, 0.0, 0.0, DistributionLevel.UNKNOWN, DataQuality.INSUFFICIENT
+            ),
+            dd_level=DistributionLevel.UNKNOWN,
+            data_quality=DataQuality.INSUFFICIENT,
+        )
+        exposure = ExposureDecision(
+            verdict=ExposureVerdict.CASH_PRIORITY,
+            gate=GateVerdict.UNKNOWN,
+            dd_level=DistributionLevel.UNKNOWN,
+            data_quality=DataQuality.INSUFFICIENT,
+            is_conservatively_downgraded=True,
+        )
+
+        text = format_market_regime(snapshot, exposure)
+
+        assert "Gate: UNKNOWN" in text
+        assert "Data quality: INSUFFICIENT" in text
+        assert "Warning: Market regime is UNKNOWN because data is insufficient." in text
 
 
 class TestIsCacheNearStale:

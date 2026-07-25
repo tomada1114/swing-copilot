@@ -239,6 +239,25 @@ class PostmortemConfig(_StrictModel):
     lookback_window_days: int = 90  # trailing window for the markdown aggregation
 
 
+class RegimeConfig(_StrictModel):
+    """`regime.*` thresholds (roadmap §5 P3-13; all are 要検証)."""
+
+    ema_period: int = 50
+    bull_vix_max: float = 20.0
+    bear_spy_ema_ratio: float = 0.97
+    bear_vix_min: float = 30.0
+    distribution_window_days: int = 25
+    dd_decline_pct: float = -0.002
+    stall_abs_change_pct: float = 0.001
+    recovery_pct: float = 0.05
+    # Exposure Ceiling's REDUCE_ONLY multiplier (roadmap §5 P3-14, 要検証).
+    reduce_only_risk_multiplier: float = 0.5
+    # roadmap §5 P3-16（要検証）: display-only Follow-Through Day thresholds.
+    ftd_correction_decline_pct: float = 0.03
+    ftd_correction_down_days: int = 3
+    ftd_gain_pct: float = 0.0125
+
+
 class Settings(_StrictModel):
     """Parsed, validated `config/settings.yaml`."""
 
@@ -252,6 +271,7 @@ class Settings(_StrictModel):
     schedule: ScheduleConfig = ScheduleConfig()
     notification: NotificationConfig = NotificationConfig()
     postmortem: PostmortemConfig = PostmortemConfig()
+    regime: RegimeConfig = RegimeConfig()
 
 
 _SCORE_WEIGHT_SUM_TOLERANCE = 1e-9

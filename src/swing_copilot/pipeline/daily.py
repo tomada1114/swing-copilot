@@ -24,7 +24,7 @@ import traceback
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
@@ -37,6 +37,7 @@ from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.llm.client import LLMClient
 from swing_copilot.llm.decision_context import (
+    format_market_regime,
     format_performance_summary,
     format_risk_constraints,
     format_score_breakdown,
@@ -53,6 +54,15 @@ from swing_copilot.models import (
 )
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.postmortem import run_postmortem_step
+from swing_copilot.regime.distribution import DistributionThresholds
+from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
+from swing_copilot.regime.ftd import FtdSnapshot, FtdThresholds, calculate_ftd_snapshot
+from swing_copilot.regime.gate import (
+    GateThresholds,
+    RegimeSnapshot,
+    RegimeThresholds,
+    calculate_regime_snapshot,
+)
 from swing_copilot.report.daily_brief import (
     MARKET_STRIP_SYMBOLS,
     DailyBrief,
@@ -227,6 +237,9 @@ class _RunContext:
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     held_symbols: frozenset[str]
+    regime_snapshot: RegimeSnapshot
+    exposure_decision: ExposureDecision
+    ftd_snapshot: FtdSnapshot
     # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
     # screening-derived like the other fields -- computed once inside step 6
     # (LLM) itself via `_compute_performance_summary()` -- but reusing this
@@ -480,15 +493,90 @@ def _run_step_screening(
 
 
 def _run_step_risk(
-    deps: DailyDependencies, candidates: list[Candidate], run_id: UUID
+    deps: DailyDependencies,
+    candidates: list[Candidate],
+    run_id: UUID,
+    exposure: ExposureDecision,
 ) -> tuple[_StepOutcome, list[RiskAssessment]]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
     checker = RiskChecker(deps.settings, deps.universe, deps.market_store)
     assessments = checker.check(
-        candidates, portfolio, deps.settings.risk.account_equity_usd
+        candidates, portfolio, deps.settings.risk.account_equity_usd, exposure
     )
     deps.state_store.record_risk_assessments(assessments, run_id)
     return _StepOutcome(True), assessments
+
+
+def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
+    """Calculate the code-owned market regime from point-in-time store reads."""
+    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    bars = deps.market_store.read_bars(
+        list(MARKET_STRIP_SYMBOLS), history_start, as_of, as_of
+    )
+    config = deps.settings.regime
+    thresholds = RegimeThresholds(
+        gate=GateThresholds(
+            ema_period=config.ema_period,
+            bull_vix_max=config.bull_vix_max,
+            bear_spy_ema_ratio=config.bear_spy_ema_ratio,
+            bear_vix_min=config.bear_vix_min,
+        ),
+        distribution=DistributionThresholds(
+            window_days=config.distribution_window_days,
+            dd_decline_pct=config.dd_decline_pct,
+            stall_abs_change_pct=config.stall_abs_change_pct,
+            recovery_pct=config.recovery_pct,
+        ),
+    )
+    return calculate_regime_snapshot(
+        bars.loc[bars["symbol"] == "SPY"],
+        bars.loc[bars["symbol"] == "QQQ"],
+        bars.loc[bars["symbol"] == "^VIX"],
+        as_of,
+        thresholds=thresholds,
+    )
+
+
+def _record_regime_snapshot(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> RegimeSnapshot:
+    """Compute and persist one run's deterministic market-regime state."""
+    snapshot = _calculate_regime_snapshot(deps, as_of)
+    deps.state_store.record_regime_snapshot(run_id, snapshot)
+    return snapshot
+
+
+def _record_exposure_decision(
+    deps: DailyDependencies, run_id: UUID, snapshot: RegimeSnapshot
+) -> ExposureDecision:
+    """Derive and persist one immutable-in-run Exposure Ceiling decision."""
+    decision = determine_exposure(
+        snapshot,
+        reduce_only_risk_multiplier=deps.settings.regime.reduce_only_risk_multiplier,
+    )
+    deps.state_store.record_exposure_decision(run_id, decision)
+    return decision
+
+
+def _record_ftd_snapshot(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> FtdSnapshot:
+    """Calculate and persist display-only FTD transitions for both indices."""
+    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    bars = deps.market_store.read_bars(["SPY", "QQQ"], history_start, as_of, as_of)
+    config = deps.settings.regime
+    snapshot = calculate_ftd_snapshot(
+        bars.loc[bars["symbol"] == "SPY"],
+        bars.loc[bars["symbol"] == "QQQ"],
+        as_of,
+        thresholds=FtdThresholds(
+            correction_decline_pct=config.ftd_correction_decline_pct,
+            correction_down_days=config.ftd_correction_down_days,
+            ftd_gain_pct=config.ftd_gain_pct,
+        ),
+    )
+    deps.state_store.record_ftd_history(run_id, snapshot)
+    return snapshot
 
 
 def _fetch_symbol_text_items(
@@ -728,6 +816,9 @@ def _summarize_news_per_candidate(
             decision_context_blocks=_decision_context_blocks(
                 candidate, risk_by_symbol, ctx.performance_summary
             ),
+            market_regime=format_market_regime(
+                ctx.regime_snapshot, ctx.exposure_decision
+            ),
         )
         try:
             summaries.append(summarize_news(llm_client, request))
@@ -778,6 +869,9 @@ def _analyze_filings_per_candidate(
                 else (),
                 decision_context_blocks=_decision_context_blocks(
                     candidate, risk_by_symbol, ctx.performance_summary
+                ),
+                market_regime=format_market_regime(
+                    ctx.regime_snapshot, ctx.exposure_decision
                 ),
             )
             try:
@@ -832,6 +926,9 @@ def _run_step_output(
         signal_performance=output.signal_performance,
         max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
         max_position_pct=deps.settings.risk.max_position_pct,
+        regime_snapshot=output.run.regime_snapshot,
+        exposure_decision=output.run.exposure_decision,
+        ftd_snapshot=output.run.ftd_snapshot,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -844,9 +941,15 @@ def _run_step_output(
     return _StepOutcome(True), report_path, brief
 
 
-def _notification_summary(candidates: list[Candidate], run_date: date) -> str:
+def _notification_summary(
+    candidates: list[Candidate], run_date: date, exposure: ExposureDecision
+) -> str:
+    """One-line Discord summary, led by the exposure decision."""
     return (
-        f"[swing-copilot] {run_date.isoformat()}: {len(candidates)} candidate(s) today"
+        f"[swing-copilot] Exposure Ceiling: {exposure.verdict.value} "
+        f"(Gate: {exposure.gate.value}, DD: {exposure.dd_level.value}, "
+        f"Data quality: {exposure.data_quality.value})\n"
+        f"{run_date.isoformat()}: {len(candidates)} candidate(s) today"
     )
 
 
@@ -854,6 +957,7 @@ def _run_step_notify(
     deps: DailyDependencies,
     candidates: list[Candidate],
     run_date: date,
+    exposure: ExposureDecision,
     *,
     is_dry_run: bool,
 ) -> _StepOutcome:
@@ -861,7 +965,9 @@ def _run_step_notify(
         return _StepOutcome(True, "skipped: dry-run mode", is_skipped=True)
     if not deps.settings.notification.enabled or deps.notifier is None:
         return _StepOutcome(True, "skipped: notification disabled", is_skipped=True)
-    sent = deps.notifier.notify(_notification_summary(candidates, run_date), None)
+    sent = deps.notifier.notify(
+        _notification_summary(candidates, run_date, exposure), None
+    )
     if not sent:
         return _StepOutcome(False, "Discord webhook notification failed")
     return _StepOutcome(True)
@@ -900,7 +1006,9 @@ def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
         )
 
 
-def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResult:
+def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionally linear
+    options: DailyRunOptions, deps: DailyDependencies
+) -> DailyRunResult:
     """Run the full eight-step daily batch.
 
     Args:
@@ -957,9 +1065,13 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
     stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
     _warn_stale_runs(run_id, stale_run_ids)
 
-    candidates: list[Candidate] = []
-    rejections: list[RejectionRecord] = []
-    risk_assessments: list[RiskAssessment] = []
+    empty_run_data: tuple[
+        list[Candidate], list[RejectionRecord], list[RiskAssessment]
+    ] = ([], [], [])
+    candidates, rejections, risk_assessments = empty_run_data
+    regime_snapshot: RegimeSnapshot | None = None
+    exposure_decision: ExposureDecision | None = None
+    ftd_snapshot: FtdSnapshot | None = None
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -969,8 +1081,13 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal risk_assessments
-        outcome, risk_assessments = _run_step_risk(deps, candidates, run_id)
+        nonlocal exposure_decision, ftd_snapshot, regime_snapshot, risk_assessments
+        regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
+        ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
+        exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
+        outcome, risk_assessments = _run_step_risk(
+            deps, candidates, run_id, exposure_decision
+        )
         return outcome
 
     def _step_prices() -> _StepOutcome:
@@ -1011,6 +1128,10 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
             )
             return DailyRunResult(run_id, run_date, RunStatus.FAILED, exit_code=1)
 
+    regime_snapshot = cast("RegimeSnapshot", regime_snapshot)
+    exposure_decision = cast("ExposureDecision", exposure_decision)
+    ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
+
     ctx = _RunContext(
         run_id=run_id,
         run_date=run_date,
@@ -1018,6 +1139,9 @@ def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResu
         rejections=rejections,
         risk_assessments=risk_assessments,
         held_symbols=frozenset(held_symbols),
+        regime_snapshot=regime_snapshot,
+        exposure_decision=exposure_decision,
+        ftd_snapshot=ftd_snapshot,
     )
     return _run_soft_steps(options, deps, ctx, deadline)
 
@@ -1101,6 +1225,7 @@ def _run_soft_steps(
             deps,
             ctx.candidates,
             ctx.run_date,
+            ctx.exposure_decision,
             is_dry_run=options.is_dry_run,
         )
     _record_step(deps, ctx.run_id, "7_notify", notify_outcome, started_at)

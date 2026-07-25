@@ -62,6 +62,19 @@ _SYSTEM_PROMPT = """あなたは米国株の個人投資家向け意思決定支
     限ります。根拠となる数値差分がないまま「動揺している」「パニックに
     陥っている」等の断定的な心理診断を行うことは禁止します。"""
 
+_MARKET_REGIME_INSTRUCTIONS = """\
+
+以下の<market_regime>は、ニュース本文とは独立してコードが計算した信頼できる
+市場レジームです。LLMはこの値を再計算・上書きしてはいけません。
+12. 各銘柄のinterpretationには、この市場レジームと解釈が整合するかを説明する
+   1文を必ず含めてください。個別材料がレジームと矛盾する強気/弱気の示唆を持つ
+   場合は、根拠を明示し、コード側の保守的なレジーム判定とあなたの見立てを
+   両論併記してください。最終的にはコード側の保守判断を優先します。
+13. Exposure CeilingがCASH_PRIORITYの場合は、新規エントリーを後押しする表現を
+   避け、保守的な語調で不確実性・待機理由を説明してください。Data qualityが
+   INSUFFICIENTの場合は、UNKNOWNであることとデータ不足の警告を明示してください。
+"""
+
 
 class _LLMClientLike(Protocol):
     """Structural stand-in for `llm.client.LLMClient`, for fake injection."""
@@ -89,6 +102,9 @@ class NewsSummaryRequest:
     # from `llm/decision_context.py`, built by the caller (`pipeline/daily.py`)
     # per-candidate. Empty string when no such data is available.
     decision_context_blocks: str = ""
+    # P3-15: trusted, code-computed regime block. It is deliberately appended
+    # to the system field, never to the user field containing untrusted text.
+    market_regime: str = ""
 
 
 def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsSummary:
@@ -107,7 +123,7 @@ def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsS
     items = _newest_first(request.news_items)[: request.max_items]
     analyze_request = AnalyzeRequest(
         run_id=request.run_id,
-        system_prompt=_SYSTEM_PROMPT,
+        system_prompt=_system_prompt(request.market_regime),
         prompt=_build_user_prompt(request, items),
         source_ids=tuple(item.source_id for item in items),
         schema=NewsSummary,
@@ -124,6 +140,11 @@ def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsS
         ]
     )
     return summary
+
+
+def _system_prompt(market_regime: str) -> str:
+    """Build the trusted system prompt without moving regime data into user input."""
+    return f"{_SYSTEM_PROMPT}{_MARKET_REGIME_INSTRUCTIONS}{market_regime}"
 
 
 def _newest_first(items: tuple[TextItem, ...]) -> list[TextItem]:

@@ -42,6 +42,9 @@ swing-copilot/
 │   ├── risk/
 │   │   ├── position_sizing.py
 │   │   └── checks.py         # FR-06
+│   ├── regime/
+│   │   ├── gate.py           # SPY/EMA/VIX market gate and snapshot
+│   │   └── distribution.py   # IBD-style Distribution Day counters
 │   ├── text/
 │   │   ├── news_finnhub.py
 │   │   ├── edgar_filings.py  # 8-K/10-Q監視
@@ -514,6 +517,35 @@ class ScreeningPipeline:
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
+### 3.12a `regime/gate.py` / `regime/distribution.py`（P3-13）
+
+`regime/`はI/Oを持たない決定論的なfunctional coreである。`calculate_regime_snapshot()`は、
+SPY終値とEMA50、^VIX終値から`BULL`/`BEAR`/`NEUTRAL`を判定し、SPY・QQQを別々に
+Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で集計する。値が閾値と
+等しいときの比較規則は実装・テストで固定し、EMAには2×periodの履歴、DDには比較用の
+前日を含む26本を要求する。いずれかの入力履歴が足りなければ例外ではなく
+`UNKNOWN`/`INSUFFICIENT`を返す。すべての入力は関数境界で`date <= as_of`に絞るため、
+将来行は計算へ混入しない。
+
+`pipeline/daily.py`だけが`MarketStore`からSPY/QQQ/^VIXの履歴を読み、run単位で
+`StateStore.record_regime_snapshot()`へ補正upsertする。`DailyBrief`は同じsnapshotを
+terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
+roadmap §5 P3-13に従いすべて要検証値として扱う。
+
+### 3.12b `regime/exposure.py`（P3-14）
+
+`determine_exposure()`は`RegimeSnapshot`を`NEW_ENTRY_ALLOWED`、`REDUCE_ONLY`、
+`CASH_PRIORITY`の3段階へ決定論的に写像する。BEARまたはSEVEREを最優先、次に
+NEUTRALまたはHIGHを適用する。ゲート/DDの一方がUNKNOWNなら既知入力での基準値から
+1段階だけ厳格化し、両方UNKNOWNならCASH_PRIORITYに固定する。日次runではこの判定を
+一度だけ計算して`exposure_decisions`へ補正upsertし、同一run中にデータ回復で緩めない。
+
+`RiskChecker`はCASH_PRIORITYで通常サイジングを実行せず、`max_shares=0`、理由
+`REGIME_CASH_PRIORITY`、制約`regime`の拒否結果を返す。REDUCE_ONLYでは
+`regime.reduce_only_risk_multiplier`（既定0.5、roadmap §5 P3-14、要検証）を
+`max_trade_risk_pct`へ掛け、警告を追加する。Exposure Ceilingはterminal/Markdown/Discordで
+候補一覧より先に表示する。
+
 ### 3.13 `risk/position_sizing.py` / `risk/checks.py`（FR-06）
 
 ```python
@@ -725,6 +757,8 @@ def analyze_filing(client: LLMClient, request: FilingAnalysisRequest) -> FilingA
 factsの`source_ids`へ追加しない。
 
 **P2-12実装時追記（roadmap §5 P2-12、改修原則4「判断はコード、叙述はLLM」）**: `llm/decision_context.py`に`format_score_breakdown(candidate)`（P1-01複合スコア内訳）/`format_risk_constraints(risk_assessment)`（P1-03 binding_constraint・サイジング内訳、`not_calculable`等でも空にせず常に描画——コードの拒否判定自体が保守的不一致ルールの前提情報のため）/`format_performance_summary(summary)`（P1-06実現損益サマリ、`closed_trade_count=0`または`None`なら空文字）を追加した。いずれも「これはコードの決定論的計算結果でありLLMが上書きできない」旨をプロンプト内に明記した純関数で、`pipeline/daily.py::_run_step_llm()`が`PaperJournal.summarize_performance()`をrun毎に1回計算し（既存のNFR-03時間予算ゲート内、新規ゲートは追加していない）、`_decision_context_blocks()`経由で`NewsSummaryRequest`/`FilingAnalysisRequest`の新規`decision_context_blocks: str = ""`フィールドへ候補ごとに注入する。`_SYSTEM_PROMPT`（両ファイル）に保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採択し、矛盾自体をinterpretation/red_flagsへ両論併記）を追加した——LLM出力は表示専用フィールドにしか流れず判断・リスクフィールドを書き換えない構造が既に成立しているため、これはプロンプト指示のみで実現される（新しいランタイム強制機構は不要）。
+
+**P3-15実装時追記（roadmap §5 P3-15）**: `format_market_regime(snapshot, exposure)`がGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形する。`pipeline/daily.py`はこのブロックを候補ごとの`NewsSummaryRequest`/`FilingAnalysisRequest`へ渡し、各分析モジュールは**systemフィールドにのみ**連結する。ニュース本文、提出書類、判断履歴はすべてuserフィールドに残るため、未信頼テキストがコード計算済みレジームを装うことはできない。system+user全体をハッシュ化する既存キャッシュキーにsystem側ブロックも含まれるため、レジームが変わればキャッシュを再利用しない。system指示は各interpretationでのレジーム整合性の1文、矛盾時の根拠と両論併記、CASH_PRIORITY時の保守的な表現、INSUFFICIENT時のUNKNOWN/データ不足警告を必須とする。レジーム判定そのものはLLMに委ねない。
 
 `NewsSummary`に`catalyst_quality: Literal["high","medium","low","none"]`と`catalyst_quality_source_ids`（`SourcedFact.source_ids`と同じ非空・非空白のprovenance制約）を追加し、判定基準（high=ガイダンス上方修正/beat-and-raise/FDA承認/初回の決算加速/大型契約、medium=M&A/製品ローンチ/提携/ショートスクイーズ、low=アナリスト格上げのみ/テーマのみ）を`summarize.py`の`_SYSTEM_PROMPT`に明記した。`_validate_source_ids()`（`llm/client.py`）を拡張し`catalyst_quality_source_ids`も`facts`と同じ「未知のsource_idを引用したらSchemaValidationErrorでfail-closed」規約に従わせた（fresh/cache双方の呼び出し元は同一関数のため片方だけ直す必要はない）。`catalyst_quality`系フィールドが新規必須のため、既存キャッシュ済み`llm_calls`行が`model_validate_json`で未捕捉の`pydantic.ValidationError`に到達しないよう`llm.schema_version`を1→2へ引き上げた（旧キャッシュ行は単純にキャッシュミスになる、安全側）。
 
@@ -1170,6 +1204,24 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     PRIMARY KEY (run_id, symbol, horizon_days)
 );
 
+CREATE TABLE IF NOT EXISTS regime_snapshots (
+    run_id          UUID PRIMARY KEY,
+    as_of           DATE NOT NULL,
+    gate_verdict    VARCHAR NOT NULL,
+    dd_count_spy    DOUBLE NOT NULL,
+    dd_count_qqq    DOUBLE NOT NULL,
+    dd_level        VARCHAR NOT NULL,
+    data_quality    VARCHAR NOT NULL,
+    detail_json     JSON NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exposure_decisions (
+    run_id       UUID PRIMARY KEY,
+    verdict      VARCHAR NOT NULL,
+    data_quality VARCHAR NOT NULL,
+    detail_json  JSON NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
@@ -1280,6 +1332,7 @@ DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しな
 | `UniverseMember` / `BarFetchResult` / `Candidate` | `models.py` | 内部ドメイン値（frozen dataclass） |
 | `SignalHit` | `screening/base.py` | シグナル評価結果（frozen dataclass） |
 | `RiskAssessment` / `CorrelationWarning` | `risk/checks.py` | リスクチェック結果（frozen dataclass） |
+| `RegimeSnapshot` | `regime/gate.py` | run時点の市場ゲート、SPY/QQQ Distribution Day、データ品質 |
 | `NewsSummary` | `llm/schemas.py` | ニュース要約（FR-08） |
 | `FilingAnalysis` | `llm/schemas.py` | 決算書解釈（FR-08） |
 | `FundamentalsRecord` | `data/edgar.py` | ファンダメンタルズ1レコード |
@@ -1354,6 +1407,20 @@ budget:
 
 schedule:
   timeout_minutes: 35              # NFR-03（ローカル手動実行時の所要時間上限）
+
+regime:
+  ema_period: 50                   # SPY EMA。roadmap §5 P3-13（要検証）
+  bull_vix_max: 20.0               # BULL条件のVIX上限（要検証）
+  bear_spy_ema_ratio: 0.97         # BEAR条件のEMA比率（要検証）
+  bear_vix_min: 30.0               # BEAR条件のVIX下限（要検証）
+  distribution_window_days: 25     # DD失効窓（営業日、要検証）
+  dd_decline_pct: -0.002           # DD下落率（要検証）
+  stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
+  recovery_pct: 0.05               # DD無効化上昇率（要検証）
+  ftd_correction_decline_pct: 0.03 # FTD調整確定の高値比下落率、roadmap §5 P3-16（要検証）
+  ftd_correction_down_days: 3      # FTD調整確定の連続下落日数、roadmap §5 P3-16（要検証）
+  ftd_gain_pct: 0.0125             # FTD確認の前日比上昇率、roadmap §5 P3-16（要検証）
+  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLYの取引リスク倍率（P3-14、要検証）
 
 notification:
   enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する

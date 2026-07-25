@@ -70,12 +70,13 @@ def _news_summary(
     )
 
 
-def _news_request(
+def _news_request(  # noqa: PLR0913 - focused fixture knobs mirror request fields
     news_items: tuple[TextItem, ...] | None = None,
     max_items: int = 20,
     max_chars_per_item: int = 4000,
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
     decision_context_blocks: str = "",
+    market_regime: str = "",
 ) -> NewsSummaryRequest:
     return NewsSummaryRequest(
         run_id=uuid4(),
@@ -89,6 +90,7 @@ def _news_request(
         max_chars_per_item=max_chars_per_item,
         decision_history=decision_history,
         decision_context_blocks=decision_context_blocks,
+        market_regime=market_regime,
     )
 
 
@@ -105,12 +107,13 @@ def _filing_text_item(content: str, source_id: str = "edgar:acc-1") -> TextItem:
     )
 
 
-def _filing_request(
+def _filing_request(  # noqa: PLR0913 - focused fixture knobs mirror request fields
     filing_text: TextItem,
     chunk_chars: int = 30_000,
     max_chunks: int = 4,
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
     decision_context_blocks: str = "",
+    market_regime: str = "",
 ) -> FilingAnalysisRequest:
     return FilingAnalysisRequest(
         run_id=uuid4(),
@@ -124,6 +127,7 @@ def _filing_request(
         max_chunks=max_chunks,
         decision_history=decision_history,
         decision_context_blocks=decision_context_blocks,
+        market_regime=market_regime,
     )
 
 
@@ -422,6 +426,37 @@ class TestDecisionContextInjection:
 
         assert len(client.requests) == 2
         assert all("<score_breakdown>" in req.prompt for req in client.requests)
+
+    def test_market_regime_is_in_the_news_system_prompt_not_the_user_prompt(self):
+        regime = "<market_regime>\nGate: BEAR\nExposure Ceiling: CASH_PRIORITY\n</market_regime>\n"
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request(market_regime=regime))
+
+        request = client.requests[0]
+        assert regime in request.system_prompt
+        assert "<market_regime>" not in request.prompt
+        assert "保守的不一致ルール" in request.system_prompt
+        assert "各銘柄のinterpretation" in request.system_prompt
+        assert "CASH_PRIORITY" in request.system_prompt
+
+    def test_market_regime_is_repeated_in_the_system_prompt_for_every_filing_chunk(
+        self,
+    ):
+        filing = _filing_text_item("Paragraph one.\n\nParagraph two.")
+        regime = "<market_regime>\nGate: UNKNOWN\nData quality: INSUFFICIENT\n</market_regime>\n"
+        client = FakeLLMClient([_filing_analysis(), _filing_analysis()])
+
+        analyze_filing(
+            client,
+            _filing_request(filing, chunk_chars=20, max_chunks=4, market_regime=regime),
+        )
+
+        assert len(client.requests) == 2
+        assert all(regime in request.system_prompt for request in client.requests)
+        assert all(
+            "<market_regime>" not in request.prompt for request in client.requests
+        )
 
 
 class TestConservativeConflictRule:

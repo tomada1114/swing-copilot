@@ -17,8 +17,11 @@ from uuid import uuid4
 from swing_copilot.models import Position, RunStatus, StepStatus
 from swing_copilot.storage import (
     audit_records,
+    exposure_records,
+    ftd_records,
     llm_records,
     paper_records,
+    regime_records,
     text_records,
 )
 from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_STATEMENTS
@@ -31,6 +34,9 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.models import RunMode
+    from swing_copilot.regime.exposure import ExposureDecision
+    from swing_copilot.regime.ftd import FtdSnapshot
+    from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
     from swing_copilot.storage.audit_records import (
@@ -81,6 +87,20 @@ class StateStore:
                 conn.execute(statement)
             for statement in ALTER_SCHEMA_STATEMENTS:
                 conn.execute(statement)
+
+    def record_regime_snapshot(self, run_id: UUID, snapshot: RegimeSnapshot) -> None:
+        """Persist the deterministic regime state for one run."""
+        regime_records.record_regime_snapshot(self._database, run_id, snapshot)
+
+    def record_exposure_decision(
+        self, run_id: UUID, decision: ExposureDecision
+    ) -> None:
+        """Persist the Exposure Ceiling decision derived for one run."""
+        exposure_records.record_exposure_decision(self._database, run_id, decision)
+
+    def record_ftd_history(self, run_id: UUID, snapshot: FtdSnapshot) -> None:
+        """Persist this run's deterministic SPY/QQQ FTD state changes."""
+        ftd_records.record_ftd_history(self._database, run_id, snapshot)
 
     def start_run(self, run_date: date, mode: RunMode, config_hash: str) -> UUID:
         """Start a new run and record it as `running`.

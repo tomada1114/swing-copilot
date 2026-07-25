@@ -1336,11 +1336,12 @@ P4-19の`close_at`も冪等な`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追�
 `close_date`当日16:00 ETを保存する。移行前の既存決済は時刻を推測して埋めず
 NULLのまま残し、サーキットブレーカーが`PARTIAL`として安全側に扱う。
 
-P4-20の`position_excursions`は日次パイプラインのrisk stepで更新する。
+P4-20の`position_excursions`は日次パイプラインのfail-softな`mae_mfe` stepで更新する。
 各runは`date <= as_of`のバーだけを読み、MAEを`min(0, low-entry)`、MFEを
 `max(0, high-entry)`へclampした1株あたりドル幅として保存する。同日再実行は
 correction-upsert、複数ポジションの書き込みは1トランザクションである。
 当日バー欠損は既存の累積極値を維持して`MISSING_BAR`を記録し、他銘柄を継続する。
+予期しない保存障害もrun全体を停止せず`DEGRADED`として記録し、後続の出力まで継続する。
 クローズ当日は集計対象に含める。performanceではクローズ済みだけを株数換算して
 平均USD値を求め、平均excursionの絶対額が平均実現損益の絶対額を上回る場合に限り、
 利確時期またはストップ/エントリーに関する「可能性」注記を表示する。

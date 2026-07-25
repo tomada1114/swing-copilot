@@ -527,7 +527,6 @@ def _run_step_risk(
     str | None,
 ]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
-    excursions = update_position_excursions(deps.state_store, deps.market_store, as_of)
     closed = deps.state_store.get_closed_positions(is_paper=True, as_of=as_of)
     circuit_config = deps.settings.risk
     circuit_breaker = evaluate_circuit_breaker(
@@ -590,15 +589,12 @@ def _run_step_risk(
         if base_heat.status == "calculated" and assessments
         else base_heat
     )
-    notices = [earnings.notice] if earnings.notice else []
-    if excursions.missing_symbols:
-        notices.append("MAE_MFE_MISSING_BAR: " + ", ".join(excursions.missing_symbols))
     return (
         _StepOutcome(True),
         assessments,
         final_heat,
         circuit_breaker,
-        "; ".join(notices) if notices else None,
+        earnings.notice,
     )
 
 
@@ -1002,6 +998,53 @@ def _run_step_postmortem(
     return _StepOutcome(True, note), performance
 
 
+def _run_step_excursions(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+    """Update daily MAE/MFE snapshots without making the run fatal."""
+    summary = update_position_excursions(deps.state_store, deps.market_store, as_of)
+    if not summary.missing_symbols:
+        return _StepOutcome(True)
+    return _StepOutcome(
+        True,
+        "MAE_MFE_MISSING_BAR: " + ", ".join(summary.missing_symbols),
+    )
+
+
+def _run_mae_mfe_soft_step(
+    deps: DailyDependencies, run_id: UUID, as_of: date
+) -> _StepOutcome:
+    """Execute and audit MAE/MFE without crossing the fatal boundary."""
+    started_at = time.perf_counter()
+    logger.info("step mae_mfe starting")
+    try:
+        outcome = _run_step_excursions(deps, as_of)
+    except Exception as exc:
+        logger.exception("MAE/MFE step raised unexpectedly")
+        outcome = _StepOutcome(False, f"unexpected error: {exc}")
+    _record_step(deps, run_id, "mae_mfe", outcome, started_at)
+    return outcome
+
+
+def _run_text_soft_step(
+    options: DailyRunOptions,
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
+    text_symbols: list[str],
+) -> tuple[_StepOutcome, list[TextItem] | None]:
+    """Execute and audit the time-budgeted text step."""
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step 5_text skipped: time budget exceeded")
+        outcome, items = _TIME_BUDGET_STEP_OUTCOME, None
+    else:
+        logger.info("step 5_text starting")
+        outcome, items = _run_step_text(
+            deps, text_symbols, ctx.run_date, skip=options.skip_text
+        )
+    _record_step(deps, ctx.run_id, "5_text", outcome, started_at)
+    return outcome, items
+
+
 def _run_step_output(
     deps: DailyDependencies,
     output: _OutputContext,
@@ -1264,9 +1307,9 @@ def _run_soft_steps(
     ctx: _RunContext,
     deadline: float,
 ) -> DailyRunResult:
-    """Run steps 5-8 (plus P2-11's postmortem step) after the fatal steps.
+    """Run fail-soft local/optional steps after the fatal steps.
 
-    Fail-soft text/LLM/postmortem, notification, then local output.
+    Fail-soft MAE/MFE, text/LLM/postmortem, notification, then local output.
 
     NFR-03 time-budget policy: steps 5 (text), 6 (LLM), postmortem, and 7
     (Discord notify) are skipped outright once `deps.monotonic() >=
@@ -1282,16 +1325,12 @@ def _run_soft_steps(
     degraded = False
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step 5_text skipped: time budget exceeded")
-        text_outcome, text_items = _TIME_BUDGET_STEP_OUTCOME, None
-    else:
-        logger.info("step 5_text starting")
-        text_outcome, text_items = _run_step_text(
-            deps, text_symbols, ctx.run_date, skip=options.skip_text
-        )
-    _record_step(deps, ctx.run_id, "5_text", text_outcome, started_at)
+    excursion_outcome = _run_mae_mfe_soft_step(deps, ctx.run_id, ctx.run_date)
+    degraded = degraded or not excursion_outcome.success
+
+    text_outcome, text_items = _run_text_soft_step(
+        options, deps, ctx, deadline, text_symbols
+    )
     degraded = degraded or not text_outcome.success
 
     started_at = time.perf_counter()
@@ -1349,6 +1388,7 @@ def _run_soft_steps(
     ) + tuple(
         f"{label}: {outcome.detail}"
         for label, outcome in (
+            ("MAE/MFE", excursion_outcome),
             ("text", text_outcome),
             ("LLM", llm_outcome),
             ("postmortem", postmortem_outcome),

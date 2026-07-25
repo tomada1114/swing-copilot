@@ -124,7 +124,7 @@ flowchart TD
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
 | 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する | P4-18 |
 | サーキットブレーカー | `risk/circuit_breaker.py` | ペーパージャーナルの実現損益だけをETの日次・週次・月次境界で再集計する。損失上限または連敗後24時間に該当する間は新規候補を拒否するが、収集・レポート生成は継続する | P4-19 |
-| MAE/MFEトラッキング | `paper/excursions.py`, `storage/paper_records.py` | 保有期間中の日足高安から1株あたりの累積MAE/MFEを日次保存し、欠損日は品質フラグ付きで既存極値を維持する。クローズ済みだけをUSD換算してperformanceへ集計する | P4-20 |
+| MAE/MFEトラッキング | `paper/excursions.py`, `storage/paper_records.py` | fail-softな`mae_mfe` stepで、保有期間中の日足高安から1株あたりの累積MAE/MFEを日次保存する。欠損日は品質フラグ付きで既存極値を維持し、クローズ済みだけをUSD換算してperformanceへ集計する | P4-20 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | LLMClient | `llm/client.py` | Claude API呼び出しの共通ラッパー（リトライ・コスト記録） | FR-08, NFR-05, NFR-06 |
 | LLM分析（要約） | `llm/summarize.py` | LLMによるニュース要約（事実/推測分離、コード計算済みの市場レジームは信頼済みsystemフィールドへ分離して注入、使用モデルは`settings.yaml`の`llm.models.news_summary`で設定、デフォルトHaiku） | FR-08, P3-15 |

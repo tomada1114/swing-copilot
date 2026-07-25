@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pandas as pd
 import pytest
 
+from swing_copilot.data.earnings import EarningsEvent
 from swing_copilot.models import Position
 from swing_copilot.regime.distribution import (
     DataQuality,
@@ -17,10 +18,14 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import (
+    EARNINGS_DATE_UNKNOWN_WARNING,
+    EARNINGS_PROXIMITY_BLOCK_REASON,
+    EARNINGS_PROXIMITY_WARN_WARNING,
     PORTFOLIO_HEAT_EXCEEDED_REASON,
     PORTFOLIO_HEAT_NOT_CALCULABLE_REASON,
     REGIME_CASH_PRIORITY_REASON,
     SIZING_WARNING_REGIME_REDUCE_ONLY,
+    EarningsGuardInput,
     RiskChecker,
     calculate_portfolio_heat,
 )
@@ -339,6 +344,81 @@ class TestPortfolioHeat:
         result = calculate_portfolio_heat([], account_equity=100_000.0)
         assert result.status == "calculated"
         assert result.heat_pct == 0.0
+
+
+class TestEarningsGuard:
+    def test_two_business_days_blocks_candidate(self, settings, market_store):
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 5),
+                "amc",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+
+        checker = RiskChecker(
+            settings, (), market_store, EarningsGuardInput(True, events)
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "rejected"
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
+        assert result.binding_constraint == "earnings"
+
+    def test_five_business_days_warns_without_rejecting(self, settings, market_store):
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 8),
+                "bmo",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+
+        checker = RiskChecker(
+            settings, (), market_store, EarningsGuardInput(True, events)
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert any(
+            warning.startswith(EARNINGS_PROXIMITY_WARN_WARNING)
+            for warning in result.sizing_warnings
+        )
+
+    def test_missing_event_is_explicit_warning(self, settings, market_store):
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            EarningsGuardInput(True, {"AAPL": None}),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert EARNINGS_DATE_UNKNOWN_WARNING in result.sizing_warnings
+
+    def test_disabled_guard_adds_no_per_symbol_unknown_warning(self, checker):
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert EARNINGS_DATE_UNKNOWN_WARNING not in result.sizing_warnings
 
 
 class TestCorrelationWarnings:

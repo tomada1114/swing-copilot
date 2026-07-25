@@ -152,6 +152,7 @@ class TestComposeDependencies:
         assert isinstance(deps, DailyDependencies)
         assert deps.edgar_client is not None
         assert deps.news_client is None
+        assert deps.earnings_client is None
         assert deps.calendar_client is None
         assert deps.llm_client is None
         assert deps.notifier is None
@@ -173,6 +174,7 @@ class TestComposeDependencies:
         deps = _compose_dependencies(DailyRunOptions(), settings, strategies)
 
         assert deps.news_client is not None
+        assert deps.earnings_client is not None
         assert deps.calendar_client is not None
         assert deps.llm_client is not None
 

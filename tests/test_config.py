@@ -257,3 +257,21 @@ def test_settings_rejects_wrong_type_for_nested_field():
 def test_portfolio_heat_limit_defaults_to_six_percent():
     settings = load_settings("config/settings.yaml")
     assert settings.risk.max_portfolio_heat_pct == 6.0
+
+
+def test_earnings_guard_thresholds_default_to_two_and_five_business_days():
+    settings = load_settings("config/settings.yaml")
+    assert settings.risk.earnings_block_business_days == 2
+    assert settings.risk.earnings_warn_business_days == 5
+
+
+def test_earnings_warn_threshold_cannot_be_below_block_threshold():
+    with pytest.raises(ValidationError, match="earnings_warn_business_days"):
+        Settings.model_validate(
+            {
+                "risk": {
+                    "earnings_block_business_days": 5,
+                    "earnings_warn_business_days": 2,
+                }
+            }
+        )

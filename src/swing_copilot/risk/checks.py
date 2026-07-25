@@ -16,12 +16,15 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from swing_copilot.risk.earnings import evaluate_earnings_proximity
 from swing_copilot.risk.position_sizing import PositionSizeResult, calc_position_size
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import date
 
     from swing_copilot.config import Settings
+    from swing_copilot.data.earnings import EarningsEvent
     from swing_copilot.models import Position
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.screening.base import Candidate
@@ -48,9 +51,12 @@ SIZING_WARNING_REGIME_REDUCE_ONLY = "REGIME_REDUCE_ONLY_RISK_HALVED"
 REGIME_CASH_PRIORITY_REASON = "REGIME_CASH_PRIORITY"
 PORTFOLIO_HEAT_EXCEEDED_REASON = "PORTFOLIO_HEAT_EXCEEDED"
 PORTFOLIO_HEAT_NOT_CALCULABLE_REASON = "PORTFOLIO_HEAT_NOT_CALCULABLE"
+EARNINGS_PROXIMITY_BLOCK_REASON = "EARNINGS_PROXIMITY_BLOCK"
+EARNINGS_PROXIMITY_WARN_WARNING = "EARNINGS_PROXIMITY_WARN"
+EARNINGS_DATE_UNKNOWN_WARNING = "EARNINGS_DATE_UNKNOWN"
 
 # REQ-004: the constraint that determined the final share count.
-BindingConstraint = str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "regime" | "portfolio_heat" | "not_calculable"
+BindingConstraint = str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "regime" | "portfolio_heat" | "earnings" | "not_calculable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,14 @@ class PortfolioHeatResult:
     heat_pct: float | None
     missing_stop_symbols: tuple[str, ...] = ()
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EarningsGuardInput:
+    """Pre-fetched event data supplied to the deterministic risk core."""
+
+    is_enabled: bool
+    events_by_symbol: Mapping[str, EarningsEvent | None]
 
 
 def calculate_portfolio_heat(
@@ -149,6 +163,7 @@ class RiskChecker:
         settings: Settings,
         universe: tuple[UniverseMember, ...],
         market_store: MarketStore,
+        earnings_guard: EarningsGuardInput | None = None,
     ) -> None:
         """Create the checker.
 
@@ -156,6 +171,7 @@ class RiskChecker:
             settings: Loaded application settings.
             universe: Current universe, for the symbol -> GICS sector map.
             market_store: Store used for correlation lookups.
+            earnings_guard: Pre-fetched event data; disabled when omitted.
         """
         self._risk_config = settings.risk
         self._stop_atr_multiple = settings.backtest.exit_atr_multiple
@@ -163,6 +179,7 @@ class RiskChecker:
             member.symbol: member.gics_sector for member in universe
         }
         self._market_store = market_store
+        self._earnings_guard = earnings_guard or EarningsGuardInput(False, {})
 
     def check(
         self,
@@ -187,6 +204,12 @@ class RiskChecker:
         assessments: list[RiskAssessment] = []
         for candidate in candidates:
             assessment = self._assess(candidate, portfolio, account_equity, exposure)
+            assessment = self._apply_earnings_guard(
+                assessment,
+                candidate.as_of,
+                self._earnings_guard.events_by_symbol.get(candidate.symbol),
+                self._earnings_guard.is_enabled,
+            )
             if base_heat.status == "not_calculable":
                 if assessment.status == "approved":
                     assessment = replace(
@@ -235,6 +258,47 @@ class RiskChecker:
                 assessment = replace(assessment, portfolio_heat_pct=current_heat_pct)
             assessments.append(assessment)
         return assessments
+
+    def _apply_earnings_guard(
+        self,
+        assessment: RiskAssessment,
+        as_of: date,
+        event: EarningsEvent | None,
+        is_enabled: bool,
+    ) -> RiskAssessment:
+        if not is_enabled:
+            return assessment
+        proximity = evaluate_earnings_proximity(
+            as_of,
+            event.earnings_date if event is not None else None,
+            block_business_days=self._risk_config.earnings_block_business_days,
+            warn_business_days=self._risk_config.earnings_warn_business_days,
+        )
+        if proximity.status == "block":
+            return replace(
+                assessment,
+                status="rejected",
+                reasons=(*assessment.reasons, EARNINGS_PROXIMITY_BLOCK_REASON),
+                binding_constraint="earnings",
+            )
+        if proximity.status == "warn" and event is not None:
+            warning = (
+                f"{EARNINGS_PROXIMITY_WARN_WARNING}: {proximity.business_days} "
+                f"business days until {event.earnings_date.isoformat()}"
+            )
+            return replace(
+                assessment,
+                sizing_warnings=(*assessment.sizing_warnings, warning),
+            )
+        if proximity.status == "unknown":
+            return replace(
+                assessment,
+                sizing_warnings=(
+                    *assessment.sizing_warnings,
+                    EARNINGS_DATE_UNKNOWN_WARNING,
+                ),
+            )
+        return assessment
 
     @staticmethod
     def _assessment_heat_pct(

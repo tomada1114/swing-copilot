@@ -17,6 +17,7 @@ from uuid import uuid4
 from swing_copilot.models import Position, RunStatus, StepStatus
 from swing_copilot.storage import (
     audit_records,
+    earnings_records,
     exposure_records,
     ftd_records,
     llm_records,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
+    from swing_copilot.data.earnings import EarningsEvent
     from swing_copilot.models import RunMode
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
@@ -312,6 +314,14 @@ class StateStore:
                 [is_paper],
             ).fetchall()
         return [self._position_from_row(row) for row in rows]
+
+    def upsert_earnings_calendar(self, events: Sequence[EarningsEvent]) -> None:
+        """Correction-upsert earnings events as one transaction."""
+        earnings_records.upsert_earnings_calendar(self._database, events)
+
+    def get_earnings_event(self, symbol: str) -> EarningsEvent | None:
+        """Return the latest corrected earnings event for one symbol."""
+        return earnings_records.get_earnings_event(self._database, symbol)
 
     def get_position(self, position_id: UUID) -> Position | None:
         """Return one position by ID, regardless of status.

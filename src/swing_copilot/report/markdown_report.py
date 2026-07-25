@@ -224,6 +224,7 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     ]
     lines.extend(f"- Risk: {reason}" for reason in candidate.risk.reasons)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
+    lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
     lines.extend(_score_breakdown_section(candidate))
     if candidate.llm.facts:
         lines.extend(["", "### Facts", ""])

@@ -167,6 +167,23 @@ def test_terminal_and_markdown_explain_missing_stop_heat_failure() -> None:
     assert "Portfolio heat: `not_calculable` (missing stop: ABC)" in markdown
 
 
+def test_terminal_and_markdown_show_earnings_warning_for_candidate() -> None:
+    risk = BriefRisk(
+        status="approved",
+        max_shares=10,
+        stop_price=95.0,
+        reasons=(),
+        warnings=(),
+        sizing_warnings=("EARNINGS_PROXIMITY_WARN: 5 business days until 2026-07-28",),
+    )
+
+    terminal = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+
+    assert "EARNINGS_PROXIMITY_WARN" in terminal
+    assert "EARNINGS_PROXIMITY_WARN" in markdown
+
+
 def test_terminal_shows_the_binding_constraint_sizing_string() -> None:
     # REQ-006 worked example: trade_risk binds.
     risk = BriefRisk(

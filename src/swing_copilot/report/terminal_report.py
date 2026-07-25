@@ -93,15 +93,7 @@ def render_terminal(
     console.print(table)
 
     for candidate in brief.candidates:
-        console.print(f"\n[bold]{candidate.symbol}[/bold]")
-        console.print(f"  LLM: {candidate.llm.conclusion}")
-        for warning in candidate.risk.warnings:
-            console.print(f"  Risk: {warning}")
-        if candidate.llm.sources:
-            console.print(
-                "  Sources: "
-                + ", ".join(source.source_id for source in candidate.llm.sources)
-            )
+        _render_candidate_details(console, candidate)
     console.print("\n[bold]落選サマリ[/bold]")
     if brief.rejection_counts:
         for item in brief.rejection_counts:
@@ -114,6 +106,18 @@ def render_terminal(
         for notice in brief.notices:
             console.print(f"  - {notice}")
     return buffer.getvalue().rstrip() + "\n"
+
+
+def _render_candidate_details(console: Console, candidate: BriefCandidate) -> None:
+    console.print(f"\n[bold]{candidate.symbol}[/bold]")
+    console.print(f"  LLM: {candidate.llm.conclusion}")
+    for warning in (*candidate.risk.warnings, *candidate.risk.sizing_warnings):
+        console.print(f"  Risk: {warning}")
+    if candidate.llm.sources:
+        console.print(
+            "  Sources: "
+            + ", ".join(source.source_id for source in candidate.llm.sources)
+        )
 
 
 def _render_regime(console: Console, brief: DailyBrief) -> None:

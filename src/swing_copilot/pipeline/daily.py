@@ -33,6 +33,7 @@ from swing_copilot.config import (
     load_strategies,
     require_secrets,
 )
+from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.llm.client import LLMClient
@@ -53,6 +54,7 @@ from swing_copilot.models import (
     StepStatus,
 )
 from swing_copilot.paper.journal import PaperJournal
+from swing_copilot.pipeline.earnings import collect_earnings_calendar
 from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
@@ -73,6 +75,7 @@ from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.markdown_report import write_markdown_report
 from swing_copilot.report.terminal_report import render_terminal
 from swing_copilot.risk.checks import (
+    EarningsGuardInput,
     PortfolioHeatResult,
     RiskChecker,
     calculate_portfolio_heat,
@@ -100,6 +103,7 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
     from swing_copilot.data.base import BarFetchResult, DataProvider
+    from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.llm.client import AnalyzeRequest
     from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
     from swing_copilot.paper.journal import PerformanceSummary
@@ -179,6 +183,7 @@ class DailyDependencies:
     # wall-clock elapsed-time measurement, never a substitute for `as_of`.
     monotonic: Callable[[], float] = time.perf_counter
     edgar_client: _EdgarClientLike | None = None
+    earnings_client: EarningsCalendarClient | None = None
     news_client: _NewsClientLike | None = None
     calendar_client: _CalendarClientLike | None = None
     llm_client: _LLMClientLike | None = None
@@ -241,6 +246,7 @@ class _RunContext:
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     portfolio_heat: PortfolioHeatResult
+    earnings_guard_notice: str | None
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
@@ -501,12 +507,32 @@ def _run_step_risk(
     deps: DailyDependencies,
     candidates: list[Candidate],
     run_id: UUID,
+    as_of: date,
     exposure: ExposureDecision,
-) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult]:
+) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult, str | None]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
-    checker = RiskChecker(deps.settings, deps.universe, deps.market_store)
+    earnings = collect_earnings_calendar(
+        deps.earnings_client,
+        sorted(
+            {
+                *(position.symbol for position in portfolio),
+                *(candidate.symbol for candidate in candidates),
+            }
+        ),
+        as_of,
+        deps.state_store,
+    )
+    checker = RiskChecker(
+        deps.settings,
+        deps.universe,
+        deps.market_store,
+        EarningsGuardInput(earnings.is_enabled, earnings.events_by_symbol),
+    )
     assessments = checker.check(
-        candidates, portfolio, deps.settings.risk.account_equity_usd, exposure
+        candidates,
+        portfolio,
+        deps.settings.risk.account_equity_usd,
+        exposure,
     )
     deps.state_store.record_risk_assessments(assessments, run_id)
     base_heat = calculate_portfolio_heat(
@@ -517,7 +543,7 @@ def _run_step_risk(
         if base_heat.status == "calculated" and assessments
         else base_heat
     )
-    return _StepOutcome(True), assessments, final_heat
+    return _StepOutcome(True), assessments, final_heat, earnings.notice
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -1088,6 +1114,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
     portfolio_heat: PortfolioHeatResult | None = None
+    earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
         nonlocal candidates, rejections
@@ -1097,13 +1124,13 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal exposure_decision, ftd_snapshot, portfolio_heat
+        nonlocal earnings_guard_notice, exposure_decision, ftd_snapshot, portfolio_heat
         nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
         ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
-        outcome, risk_assessments, portfolio_heat = _run_step_risk(
-            deps, candidates, run_id, exposure_decision
+        outcome, risk_assessments, portfolio_heat, earnings_guard_notice = (
+            _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
         )
         return outcome
 
@@ -1157,6 +1184,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         rejections=rejections,
         risk_assessments=risk_assessments,
         portfolio_heat=portfolio_heat,
+        earnings_guard_notice=earnings_guard_notice,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=regime_snapshot,
         exposure_decision=exposure_decision,
@@ -1251,7 +1279,9 @@ def _run_soft_steps(
     degraded = degraded or not notify_outcome.success
 
     status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
-    notices = tuple(
+    notices = (
+        (ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ()
+    ) + tuple(
         f"{label}: {outcome.detail}"
         for label, outcome in (
             ("text", text_outcome),
@@ -1353,6 +1383,11 @@ def _compose_dependencies(
         if secrets.finnhub_api_key and not options.skip_text
         else None
     )
+    earnings_client = (
+        FinnhubEarningsClient(secrets.finnhub_api_key)
+        if secrets.finnhub_api_key
+        else None
+    )
     calendar_client = (
         FredCalendarClient(secrets.fred_api_key)
         if secrets.fred_api_key and not options.skip_text
@@ -1383,6 +1418,7 @@ def _compose_dependencies(
         strategies_config=strategies.model_dump(),
         clock=clock,
         edgar_client=edgar_client,
+        earnings_client=earnings_client,
         news_client=news_client,
         calendar_client=calendar_client,
         llm_client=llm_client,

@@ -108,7 +108,7 @@ INIT_SCHEMA_STATEMENTS = (
         shares_by_position_cap  BIGINT,
         binding_constraint      VARCHAR
             CHECK (binding_constraint IN (
-                'trade_risk','position_cap','sector','correlation','regime','portfolio_heat','not_calculable'
+                'trade_risk','position_cap','sector','correlation','regime','portfolio_heat','earnings','not_calculable'
             )),
         sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
         PRIMARY KEY (run_id, symbol)
@@ -130,6 +130,14 @@ INIT_SCHEMA_STATEMENTS = (
             'stop_loss','target','time_stop','manual','other','unknown'
         )),
         created_at    TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS earnings_calendar (
+        symbol          VARCHAR PRIMARY KEY,
+        earnings_date   DATE NOT NULL,
+        session         VARCHAR NOT NULL,
+        fetched_at      TIMESTAMPTZ NOT NULL
     )
     """,
     """

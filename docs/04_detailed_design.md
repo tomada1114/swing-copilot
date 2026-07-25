@@ -570,7 +570,7 @@ class RiskAssessment:
     shares_by_position_cap: int | None = None
     binding_constraint: str = "not_calculable"
     # {"trade_risk","position_cap","sector","correlation","regime",
-    #  "portfolio_heat","not_calculable"}
+    #  "portfolio_heat","earnings","not_calculable"}
     sizing_warnings: tuple[str, ...] = ()  # {"WIDE_STOP","SMALL_ACCOUNT_FRICTION"}
     portfolio_heat_pct: float | None = None
 
@@ -656,6 +656,22 @@ class RiskChecker:
 保有中ポジションのstopが1件でも欠損する場合は0扱いせず、ヒートを
 `not_calculable`、本来承認可能だった候補も`PORTFOLIO_HEAT_NOT_CALCULABLE`とする。
 相関調整は本Issueの対象外である。
+
+**P4-18（roadmap §5、Issue #27）**:
+`data/earnings.py`の`EarningsCalendarClient` Protocolを外部境界とし、
+`FinnhubEarningsClient`が`/calendar/earnings`を10秒タイムアウト、最大3試行、
+1秒間隔の全試行レート制限、1秒・2秒の決定論的指数バックオフで呼ぶ。
+429/5xxとtransport/timeoutだけを再試行し、4xx・応答型不正は再試行しない。
+各銘柄の失敗は`pipeline/earnings.py`で`None`へ変換し、他銘柄を継続する。
+APIキー未設定時はガード全体を無効化し、
+`NO_EARNINGS_DATA: FINNHUB_API_KEY is not configured`をレポート警告へ渡す。
+
+`risk/earnings.py`は`as_of`翌日から決算日までの平日数（土日だけを除外）を数え、
+2営業日以内を`EARNINGS_PROXIMITY_BLOCK`、3〜5営業日を
+`EARNINGS_PROXIMITY_WARN`、予定不明を`EARNINGS_DATE_UNKNOWN`とする。
+米国市場祝日を考慮しない簡易カレンダーは、休日を営業日として多めに数える既知の乖離である。
+閾値は`risk.earnings_block_business_days`/`earnings_warn_business_days`で管理し、
+前者が後者を超える設定は起動前に拒否する。
 
 ### 3.14 `text/news_finnhub.py` / `text/edgar_filings.py` / `text/calendar_fred.py`（FR-07）
 
@@ -1255,7 +1271,7 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     binding_constraint      VARCHAR
         CHECK (binding_constraint IN (
             'trade_risk','position_cap','sector','correlation','regime',
-            'portfolio_heat','not_calculable'
+            'portfolio_heat','earnings','not_calculable'
         )),
     sizing_warnings_json    JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, symbol)
@@ -1280,6 +1296,13 @@ CREATE TABLE IF NOT EXISTS positions (
         'stop_loss','target','time_stop','manual','other','unknown'
     )),
     created_at    TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    symbol          VARCHAR PRIMARY KEY,
+    earnings_date   DATE NOT NULL,
+    session         VARCHAR NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL
 );
 ```
 
@@ -1381,6 +1404,8 @@ risk:
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
   max_portfolio_heat_pct: 6.0        # 保有+承認候補のstopリスク上限%（roadmap §5 P4-17、要検証）
+  earnings_block_business_days: 2    # 決算までこの営業日数以内はblock（roadmap §5 P4-18、要検証）
+  earnings_warn_business_days: 5     # block超〜この営業日数以内はwarn（roadmap §5 P4-18、要検証）
   wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:

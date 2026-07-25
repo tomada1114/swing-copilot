@@ -248,8 +248,8 @@ class StateStore:
                 INSERT INTO positions (
                     position_id, symbol, is_paper, entry_date, entry_price,
                     shares, stop_price, status, close_date, close_price,
-                    exit_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                    exit_reason, close_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
                 ON CONFLICT (position_id) DO UPDATE SET
                     symbol = EXCLUDED.symbol,
                     is_paper = EXCLUDED.is_paper,
@@ -260,7 +260,8 @@ class StateStore:
                     status = EXCLUDED.status,
                     close_date = EXCLUDED.close_date,
                     close_price = EXCLUDED.close_price,
-                    exit_reason = EXCLUDED.exit_reason
+                    exit_reason = EXCLUDED.exit_reason,
+                    close_at = EXCLUDED.close_at
                 """,
                 [
                     str(position.position_id),
@@ -274,12 +275,13 @@ class StateStore:
                     position.close_date,
                     position.close_price,
                     position.exit_reason,
+                    position.close_at,
                 ],
             )
 
     _POSITION_COLUMNS = (
         "position_id, symbol, is_paper, entry_date, entry_price, "
-        "shares, stop_price, status, close_date, close_price, exit_reason"
+        "shares, stop_price, status, close_date, close_price, exit_reason, close_at"
     )
 
     @staticmethod
@@ -296,6 +298,7 @@ class StateStore:
             close_date=row[8],
             close_price=row[9],
             exit_reason=row[10],
+            close_at=row[11],
         )
 
     def get_open_positions(self, is_paper: bool = True) -> list[Position]:

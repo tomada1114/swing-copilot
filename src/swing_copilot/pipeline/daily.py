@@ -78,7 +78,15 @@ from swing_copilot.risk.checks import (
     EarningsGuardInput,
     PortfolioHeatResult,
     RiskChecker,
+    RiskRunContext,
     calculate_portfolio_heat,
+)
+from swing_copilot.risk.circuit_breaker import (
+    CircuitBreakerResult,
+    CircuitThresholds,
+    RealizedTrade,
+    evaluate_circuit_breaker,
+    evaluation_time_for_as_of,
 )
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
@@ -246,6 +254,7 @@ class _RunContext:
     rejections: list[RejectionRecord]
     risk_assessments: list[RiskAssessment]
     portfolio_heat: PortfolioHeatResult
+    circuit_breaker: CircuitBreakerResult
     earnings_guard_notice: str | None
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
@@ -509,8 +518,39 @@ def _run_step_risk(
     run_id: UUID,
     as_of: date,
     exposure: ExposureDecision,
-) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult, str | None]:
+) -> tuple[
+    _StepOutcome,
+    list[RiskAssessment],
+    PortfolioHeatResult,
+    CircuitBreakerResult,
+    str | None,
+]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
+    closed = deps.state_store.get_closed_positions(is_paper=True, as_of=as_of)
+    circuit_config = deps.settings.risk
+    circuit_breaker = evaluate_circuit_breaker(
+        [
+            RealizedTrade(
+                position.close_at,
+                (
+                    (position.close_price - position.entry_price) * position.shares
+                    if position.close_price is not None
+                    else None
+                ),
+            )
+            for position in closed
+        ],
+        circuit_config.account_equity_usd,
+        as_of,
+        evaluation_time_for_as_of(as_of),
+        CircuitThresholds(
+            circuit_config.circuit_daily_loss_pct,
+            circuit_config.circuit_weekly_loss_pct,
+            circuit_config.circuit_monthly_loss_pct,
+            circuit_config.circuit_consecutive_losses,
+            circuit_config.circuit_cooldown_hours,
+        ),
+    )
     earnings = collect_earnings_calendar(
         deps.earnings_client,
         sorted(
@@ -526,7 +566,12 @@ def _run_step_risk(
         deps.settings,
         deps.universe,
         deps.market_store,
-        EarningsGuardInput(earnings.is_enabled, earnings.events_by_symbol),
+        RiskRunContext(
+            earnings_guard=EarningsGuardInput(
+                earnings.is_enabled, earnings.events_by_symbol
+            ),
+            circuit_breaker=circuit_breaker,
+        ),
     )
     assessments = checker.check(
         candidates,
@@ -543,7 +588,13 @@ def _run_step_risk(
         if base_heat.status == "calculated" and assessments
         else base_heat
     )
-    return _StepOutcome(True), assessments, final_heat, earnings.notice
+    return (
+        _StepOutcome(True),
+        assessments,
+        final_heat,
+        circuit_breaker,
+        earnings.notice,
+    )
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -967,6 +1018,7 @@ def _run_step_output(
         max_position_pct=deps.settings.risk.max_position_pct,
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
+        circuit_breaker=output.run.circuit_breaker,
         ftd_snapshot=output.run.ftd_snapshot,
         portfolio_heat=output.run.portfolio_heat,
         max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
@@ -1114,6 +1166,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
     portfolio_heat: PortfolioHeatResult | None = None
+    circuit_breaker: CircuitBreakerResult | None = None
     earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
@@ -1124,14 +1177,19 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal earnings_guard_notice, exposure_decision, ftd_snapshot, portfolio_heat
+        nonlocal circuit_breaker, earnings_guard_notice, exposure_decision
+        nonlocal ftd_snapshot, portfolio_heat
         nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
         ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
-        outcome, risk_assessments, portfolio_heat, earnings_guard_notice = (
-            _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
-        )
+        (
+            outcome,
+            risk_assessments,
+            portfolio_heat,
+            circuit_breaker,
+            earnings_guard_notice,
+        ) = _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
         return outcome
 
     def _step_prices() -> _StepOutcome:
@@ -1176,6 +1234,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     exposure_decision = cast("ExposureDecision", exposure_decision)
     ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
     portfolio_heat = cast("PortfolioHeatResult", portfolio_heat)
+    circuit_breaker = cast("CircuitBreakerResult", circuit_breaker)
 
     ctx = _RunContext(
         run_id=run_id,
@@ -1184,6 +1243,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         rejections=rejections,
         risk_assessments=risk_assessments,
         portfolio_heat=portfolio_heat,
+        circuit_breaker=circuit_breaker,
         earnings_guard_notice=earnings_guard_notice,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=regime_snapshot,

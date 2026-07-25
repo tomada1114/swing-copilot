@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from datetime import datetime, time
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.paper_records import TradeDecisionRecord
@@ -33,6 +35,7 @@ _VALID_DECISIONS = frozenset({"followed", "ignored", "modified"})
 # is deliberately excluded here — never a valid close() argument.
 _VALID_EXIT_REASONS = frozenset({"stop_loss", "target", "time_stop", "manual", "other"})
 _UNKNOWN_BUCKET_KEY = "unknown"
+_ET = ZoneInfo("America/New_York")
 
 
 class PositionNotClosableError(SwingCopilotError):
@@ -151,7 +154,13 @@ class PaperJournal:
         )
 
     def close_position(
-        self, position_id: UUID, close_date: date, close_price: float, exit_reason: str
+        self,
+        position_id: UUID,
+        close_date: date,
+        close_price: float,
+        exit_reason: str,
+        *,
+        closed_at: datetime | None = None,
     ) -> None:
         """Close an open paper position.
 
@@ -163,6 +172,8 @@ class PaperJournal:
                 `"stop_loss"`, `"target"`, `"time_stop"`, `"manual"`,
                 `"other"` (P1-06/REQ-001/020). `"unknown"` is a
                 migration-only sentinel and is never accepted here.
+            closed_at: Precise timezone-aware close time. When omitted, the
+                fill is deterministically recorded as 16:00 ET on `close_date`.
 
         Raises:
             PositionNotClosableError: `exit_reason` isn't one of the 5 valid
@@ -195,12 +206,21 @@ class PaperJournal:
         if close_price <= 0:
             msg = f"close_price must be positive, got {close_price}"
             raise PositionNotClosableError(msg)
+        if closed_at is None:
+            closed_at = datetime.combine(close_date, time(16), tzinfo=_ET)
+        elif closed_at.tzinfo is None:
+            msg = "closed_at must be timezone-aware"
+            raise PositionNotClosableError(msg)
+        elif closed_at.astimezone(_ET).date() != close_date:
+            msg = "closed_at Eastern date must match close_date"
+            raise PositionNotClosableError(msg)
 
         self._state_store.upsert_position(
             replace(
                 position,
                 status="closed",
                 close_date=close_date,
+                close_at=closed_at,
                 close_price=close_price,
                 exit_reason=exit_reason,
             )

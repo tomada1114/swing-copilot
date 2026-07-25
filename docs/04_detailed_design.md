@@ -673,6 +673,18 @@ APIキー未設定時はガード全体を無効化し、
 閾値は`risk.earnings_block_business_days`/`earnings_warn_business_days`で管理し、
 前者が後者を超える設定は起動前に拒否する。
 
+**P4-19（roadmap §5、Issue #28）**:
+`risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、
+含み損益は参照しない。`as_of`の米東部時間（`America/New_York`）における日次、
+月曜開始の週次、月次境界で再集計し、損失率が2%/5%/8%に達すると`HALTED`とする。
+直近2件が連続して負けなら、最後の負けの`close_at`から厳密に24時間未満を
+`COOLDOWN`とし、損益0は連敗をリセットする。優先順位は
+`HALTED > COOLDOWN > TRADING_ALLOWED`だが、該当した全ルールを記録する。
+停止状態でも収集・レポートは継続し、新規候補だけを
+`CIRCUIT_BREAKER_HALTED`または`CIRCUIT_BREAKER_COOLDOWN`で拒否する。
+履歴なしは`TRADING_ALLOWED / EMPTY_STATE`、決済時刻または損益の欠損は
+安全側の`HALTED / PARTIAL`とする。閾値は初期値であり、すべて要検証。
+
 ### 3.14 `text/news_finnhub.py` / `text/edgar_filings.py` / `text/calendar_fred.py`（FR-07）
 
 ニュース取得・EDGAR新着開示取得（およびこれらに続くFR-08のLLM分析）の対象銘柄は、保有銘柄＋当日のスクリーニング候補銘柄の合計最大30銘柄に限定する（NFR-03: 35分以内の実現方針）。経済指標カレンダー取得（FRED）は銘柄に依存しないため対象外。
@@ -1291,6 +1303,7 @@ CREATE TABLE IF NOT EXISTS positions (
     stop_price    DOUBLE,
     status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
     close_date    DATE,
+    close_at      TIMESTAMPTZ,
     close_price   DOUBLE,
     exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
         'stop_loss','target','time_stop','manual','other','unknown'
@@ -1307,6 +1320,11 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
 ```
 
 `exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
+
+P4-19の`close_at`も冪等な`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追加する。
+新規決済は指定されたtimezone-aware時刻を保存し、省略時は後方互換のため
+`close_date`当日16:00 ETを保存する。移行前の既存決済は時刻を推測して埋めず
+NULLのまま残し、サーキットブレーカーが`PARTIAL`として安全側に扱う。
 
 ```sql
 CREATE TABLE IF NOT EXISTS trades_journal (
@@ -1406,6 +1424,11 @@ risk:
   max_portfolio_heat_pct: 6.0        # 保有+承認候補のstopリスク上限%（roadmap §5 P4-17、要検証）
   earnings_block_business_days: 2    # 決算までこの営業日数以内はblock（roadmap §5 P4-18、要検証）
   earnings_warn_business_days: 5     # block超〜この営業日数以内はwarn（roadmap §5 P4-18、要検証）
+  circuit_daily_loss_pct: 2.0        # 日次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_weekly_loss_pct: 5.0       # 週次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_monthly_loss_pct: 8.0      # 月次実現損失上限%（roadmap §5 P4-19、要検証）
+  circuit_consecutive_losses: 2      # 連敗数（roadmap §5 P4-19、要検証）
+  circuit_cooldown_hours: 24         # 最後の負け決済からの停止時間（roadmap §5 P4-19、要検証）
   wide_stop_threshold_pct: 10.0      # 損切り幅がエントリー価格のこの%を超えるとWIDE_STOP警告（roadmap §5 P1-03、要検証）
 
 fundamental_filters:
@@ -1638,6 +1661,7 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 | 同一セクター上限 | 30% | `risk.max_sector_pct=0.30` |
 | 保有銘柄との相関警告閾値 | ピアソン相関 0.7 超で警告（ブロックしない） | `risk.max_correlation=0.7` |
 | 相関計算の参照期間 | 直近60営業日の日次リターン | `risk.correlation_lookback_days=60` |
+| サーキットブレーカー | 日次2%・週次5%・月次8%、2連敗後24時間（P4-19、要検証） | `risk.circuit_*` |
 | WIDE_STOP警告閾値 | 損切り幅がエントリー価格の10%超（P1-03、要検証） | `risk.wide_stop_threshold_pct=10.0` |
 
 ---

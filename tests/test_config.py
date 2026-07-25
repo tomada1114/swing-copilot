@@ -265,6 +265,15 @@ def test_earnings_guard_thresholds_default_to_two_and_five_business_days():
     assert settings.risk.earnings_warn_business_days == 5
 
 
+def test_circuit_breaker_thresholds_have_documented_defaults():
+    settings = load_settings("config/settings.yaml")
+    assert settings.risk.circuit_daily_loss_pct == 2.0
+    assert settings.risk.circuit_weekly_loss_pct == 5.0
+    assert settings.risk.circuit_monthly_loss_pct == 8.0
+    assert settings.risk.circuit_consecutive_losses == 2
+    assert settings.risk.circuit_cooldown_hours == 24
+
+
 def test_earnings_warn_threshold_cannot_be_below_block_threshold():
     with pytest.raises(ValidationError, match="earnings_warn_business_days"):
         Settings.model_validate(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -177,8 +178,39 @@ class TestClosePositionLifecycle:
         result = state_store.get_position(position.position_id)
         assert result.status == "closed"
         assert result.close_date == date(2026, 7, 15)
+        assert result.close_at == datetime(
+            2026, 7, 15, 16, tzinfo=ZoneInfo("America/New_York")
+        )
         assert result.close_price == 110.0
         assert result.exit_reason == "target"
+
+    def test_preserves_precise_timezone_aware_close_time(self, journal, state_store):
+        position = _open_position()
+        state_store.upsert_position(position)
+        closed_at = datetime(2026, 7, 15, 19, 30, tzinfo=UTC)
+
+        journal.close_position(
+            position.position_id,
+            date(2026, 7, 15),
+            110.0,
+            "target",
+            closed_at=closed_at,
+        )
+
+        assert state_store.get_position(position.position_id).close_at == closed_at
+
+    def test_rejects_naive_close_time(self, journal, state_store):
+        position = _open_position()
+        state_store.upsert_position(position)
+
+        with pytest.raises(PositionNotClosableError, match="timezone-aware"):
+            journal.close_position(
+                position.position_id,
+                date(2026, 7, 15),
+                110.0,
+                "target",
+                closed_at=datetime(2026, 7, 15, 16),  # noqa: DTZ001
+            )
 
     def test_raises_for_nonexistent_position(self, journal):
         with pytest.raises(PositionNotClosableError, match="no position exists"):

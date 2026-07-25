@@ -125,6 +125,7 @@ INIT_SCHEMA_STATEMENTS = (
         stop_price    DOUBLE,
         status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
         close_date    DATE,
+        close_at      TIMESTAMPTZ,
         close_price   DOUBLE,
         exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
             'stop_loss','target','time_stop','manual','other','unknown'
@@ -255,6 +256,7 @@ ALTER_SCHEMA_STATEMENTS = (
     # safe to re-run on every startup against a fresh or already-upgraded
     # database.
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_at TIMESTAMPTZ",
     "UPDATE positions SET exit_reason = 'unknown' "
     "WHERE status = 'closed' AND exit_reason IS NULL",
 )

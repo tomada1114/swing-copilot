@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from swing_copilot.data.earnings import EarningsEvent
     from swing_copilot.models import Position
     from swing_copilot.regime.exposure import ExposureDecision
+    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
@@ -54,6 +55,7 @@ PORTFOLIO_HEAT_NOT_CALCULABLE_REASON = "PORTFOLIO_HEAT_NOT_CALCULABLE"
 EARNINGS_PROXIMITY_BLOCK_REASON = "EARNINGS_PROXIMITY_BLOCK"
 EARNINGS_PROXIMITY_WARN_WARNING = "EARNINGS_PROXIMITY_WARN"
 EARNINGS_DATE_UNKNOWN_WARNING = "EARNINGS_DATE_UNKNOWN"
+CIRCUIT_BREAKER_REASON_PREFIX = "CIRCUIT_BREAKER_"
 
 # REQ-004: the constraint that determined the final share count.
 BindingConstraint = str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "regime" | "portfolio_heat" | "earnings" | "not_calculable"
@@ -75,6 +77,14 @@ class EarningsGuardInput:
 
     is_enabled: bool
     events_by_symbol: Mapping[str, EarningsEvent | None]
+
+
+@dataclass(frozen=True, slots=True)
+class RiskRunContext:
+    """Run-wide precomputed controls supplied to the deterministic checker."""
+
+    earnings_guard: EarningsGuardInput | None = None
+    circuit_breaker: CircuitBreakerResult | None = None
 
 
 def calculate_portfolio_heat(
@@ -163,7 +173,7 @@ class RiskChecker:
         settings: Settings,
         universe: tuple[UniverseMember, ...],
         market_store: MarketStore,
-        earnings_guard: EarningsGuardInput | None = None,
+        run_context: RiskRunContext | None = None,
     ) -> None:
         """Create the checker.
 
@@ -171,7 +181,7 @@ class RiskChecker:
             settings: Loaded application settings.
             universe: Current universe, for the symbol -> GICS sector map.
             market_store: Store used for correlation lookups.
-            earnings_guard: Pre-fetched event data; disabled when omitted.
+            run_context: Precomputed run-wide risk controls.
         """
         self._risk_config = settings.risk
         self._stop_atr_multiple = settings.backtest.exit_atr_multiple
@@ -179,7 +189,9 @@ class RiskChecker:
             member.symbol: member.gics_sector for member in universe
         }
         self._market_store = market_store
-        self._earnings_guard = earnings_guard or EarningsGuardInput(False, {})
+        context = run_context or RiskRunContext()
+        self._earnings_guard = context.earnings_guard or EarningsGuardInput(False, {})
+        self._circuit_breaker = context.circuit_breaker
 
     def check(
         self,
@@ -210,6 +222,7 @@ class RiskChecker:
                 self._earnings_guard.events_by_symbol.get(candidate.symbol),
                 self._earnings_guard.is_enabled,
             )
+            assessment = self._apply_circuit_breaker(assessment)
             if base_heat.status == "not_calculable":
                 if assessment.status == "approved":
                     assessment = replace(
@@ -258,6 +271,20 @@ class RiskChecker:
                 assessment = replace(assessment, portfolio_heat_pct=current_heat_pct)
             assessments.append(assessment)
         return assessments
+
+    def _apply_circuit_breaker(self, assessment: RiskAssessment) -> RiskAssessment:
+        result = self._circuit_breaker
+        if result is None or result.state.value == "TRADING_ALLOWED":
+            return assessment
+        return replace(
+            assessment,
+            status="rejected",
+            reasons=(
+                *assessment.reasons,
+                f"{CIRCUIT_BREAKER_REASON_PREFIX}{result.state.value}",
+            ),
+            binding_constraint="regime",
+        )
 
     def _apply_earnings_guard(
         self,

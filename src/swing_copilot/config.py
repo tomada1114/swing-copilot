@@ -100,6 +100,13 @@ class RiskConfig(_StrictModel):
     # parabolic-short-trade-planner, 要検証).
     earnings_block_business_days: int = Field(default=2, ge=0)
     earnings_warn_business_days: int = Field(default=5, ge=0)
+    # Realized-P&L circuit breaker thresholds in percentage points
+    # (roadmap §5 P4-19; all initial values are 要検証).
+    circuit_daily_loss_pct: float = Field(default=2.0, gt=0.0)
+    circuit_weekly_loss_pct: float = Field(default=5.0, gt=0.0)
+    circuit_monthly_loss_pct: float = Field(default=8.0, gt=0.0)
+    circuit_consecutive_losses: int = Field(default=2, ge=1)
+    circuit_cooldown_hours: int = Field(default=24, ge=1)
     # Stop distance as a % of entry price above which a WIDE_STOP sizing
     # warning is raised (roadmap §5 P1-03, 要検証).
     wide_stop_threshold_pct: float = 10.0

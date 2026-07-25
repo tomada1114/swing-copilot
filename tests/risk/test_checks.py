@@ -18,6 +18,7 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import (
+    CIRCUIT_BREAKER_REASON_PREFIX,
     EARNINGS_DATE_UNKNOWN_WARNING,
     EARNINGS_PROXIMITY_BLOCK_REASON,
     EARNINGS_PROXIMITY_WARN_WARNING,
@@ -27,8 +28,10 @@ from swing_copilot.risk.checks import (
     SIZING_WARNING_REGIME_REDUCE_ONLY,
     EarningsGuardInput,
     RiskChecker,
+    RiskRunContext,
     calculate_portfolio_heat,
 )
+from swing_copilot.risk.circuit_breaker import CircuitBreakerResult, CircuitState
 from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
@@ -346,6 +349,34 @@ class TestPortfolioHeat:
         assert result.heat_pct == 0.0
 
 
+class TestCircuitBreaker:
+    @pytest.mark.parametrize("state", [CircuitState.HALTED, CircuitState.COOLDOWN])
+    def test_blocks_every_candidate_with_stable_reason(
+        self, settings, market_store, state
+    ):
+        circuit = CircuitBreakerResult(
+            state,
+            2.0,
+            2.0,
+            2.0,
+            2,
+            ("DAILY_LOSS",),
+            "OK",
+        )
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(circuit_breaker=circuit),
+        )
+
+        result = checker.check([_candidate("AAPL")], [], 100_000.0)[0]
+
+        assert result.status == "rejected"
+        assert f"{CIRCUIT_BREAKER_REASON_PREFIX}{state.value}" in result.reasons
+        assert result.binding_constraint == "regime"
+
+
 class TestEarningsGuard:
     def test_two_business_days_blocks_candidate(self, settings, market_store):
         events = {
@@ -358,7 +389,10 @@ class TestEarningsGuard:
         }
 
         checker = RiskChecker(
-            settings, (), market_store, EarningsGuardInput(True, events)
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
         )
         result = checker.check(
             [_candidate("AAPL")],
@@ -381,7 +415,10 @@ class TestEarningsGuard:
         }
 
         checker = RiskChecker(
-            settings, (), market_store, EarningsGuardInput(True, events)
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
         )
         result = checker.check(
             [_candidate("AAPL")],
@@ -400,7 +437,7 @@ class TestEarningsGuard:
             settings,
             (),
             market_store,
-            EarningsGuardInput(True, {"AAPL": None}),
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, {"AAPL": None})),
         )
         result = checker.check(
             [_candidate("AAPL")],

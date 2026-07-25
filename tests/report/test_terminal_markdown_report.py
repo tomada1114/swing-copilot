@@ -13,6 +13,7 @@ from swing_copilot.models import RunStatus
 from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefCandidate,
+    BriefCircuitBreaker,
     BriefExposure,
     BriefFundamentals,
     BriefLlm,
@@ -129,6 +130,34 @@ def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     assert "CASH_PRIORITY" in terminal
     assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
     assert "Verdict: `CASH_PRIORITY`" in markdown
+
+
+def test_circuit_breaker_banner_is_alongside_exposure_before_candidates() -> None:
+    brief = replace(
+        _brief(),
+        exposure=BriefExposure(
+            verdict="NEW_ENTRY_ALLOWED",
+            gate="BULL",
+            dd_level="NORMAL",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
+        circuit_breaker=BriefCircuitBreaker(
+            state="HALTED",
+            data_quality="OK",
+            triggered_rules=("DAILY_LOSS",),
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert terminal.index("Exposure Ceiling") < terminal.index("Circuit Breaker")
+    assert terminal.index("Circuit Breaker") < terminal.index("Symbol")
+    assert markdown.index("## Exposure Ceiling") < markdown.index("## Circuit Breaker")
+    assert markdown.index("## Circuit Breaker") < markdown.index("## Candidates")
+    assert "HALTED" in terminal
+    assert "Triggered rules: `DAILY_LOSS`" in markdown
 
 
 def test_terminal_and_markdown_always_show_portfolio_heat_before_candidates() -> None:

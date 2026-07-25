@@ -59,6 +59,14 @@ def render_terminal(
             f"(Gate: {brief.exposure.gate}, DD: {brief.exposure.dd_level}, "
             f"Data quality: {brief.exposure.data_quality})"
         )
+    if brief.circuit_breaker is not None:
+        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
+        console.print(
+            "[bold]Circuit Breaker[/bold] "
+            f"{brief.circuit_breaker.state} "
+            f"(Data quality: {brief.circuit_breaker.data_quality}; "
+            f"Triggered rules: {rules})"
+        )
     if brief.portfolio_heat is not None:
         console.print(
             f"[bold]Portfolio heat[/bold]: {_portfolio_heat_text(brief.portfolio_heat)}"

@@ -75,6 +75,18 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Data quality: `{brief.exposure.data_quality}`",
             ]
         )
+    if brief.circuit_breaker is not None:
+        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
+        lines.extend(
+            [
+                "",
+                "## Circuit Breaker",
+                "",
+                f"- State: `{brief.circuit_breaker.state}`",
+                f"- Data quality: `{brief.circuit_breaker.data_quality}`",
+                f"- Triggered rules: `{rules}`",
+            ]
+        )
     if brief.portfolio_heat is not None:
         lines.extend(
             [

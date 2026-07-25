@@ -35,12 +35,11 @@ _BEHAVIORAL_KEYWORDS: tuple[str, ...] = (
 # A hedge phrase ("〜の可能性" / "possible"/"possibly") permitted only when
 # co-occurring with concrete evidence in the same text (below).
 _HEDGE_PATTERN = re.compile(r"可能性|possibly|possible", re.IGNORECASE)
-# Concrete actual-vs-planned numeric discrepancy: a percentage, or an
-# actual/planned marker word (Japanese or English). Deliberately a simple
-# same-string co-occurrence regex, not NLP (roadmap CON-03 scope note).
-_NUMERIC_EVIDENCE_PATTERN = re.compile(
-    r"\d+(\.\d+)?\s*%|計画|予想|実績|actual|planned", re.IGNORECASE
-)
+# Concrete actual-vs-planned numeric discrepancy requires all three signals
+# in the same text: a percentage, an actual marker, and a plan marker.
+_PERCENTAGE_PATTERN = re.compile(r"\d+(\.\d+)?\s*%")
+_ACTUAL_PATTERN = re.compile(r"実績|actual", re.IGNORECASE)
+_PLAN_PATTERN = re.compile(r"計画|予想|planned|forecast", re.IGNORECASE)
 
 FORBIDDEN_PHRASES: tuple[str, ...] = (
     "買うべき",
@@ -115,7 +114,12 @@ def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
         )
         if not has_keyword:
             continue
-        if _HEDGE_PATTERN.search(text) and _NUMERIC_EVIDENCE_PATTERN.search(text):
+        has_evidence = (
+            _PERCENTAGE_PATTERN.search(text)
+            and _ACTUAL_PATTERN.search(text)
+            and _PLAN_PATTERN.search(text)
+        )
+        if _HEDGE_PATTERN.search(text) and has_evidence:
             continue
         msg = f"Output contains an unevidenced behavioral/psychological claim: {text!r}"
         raise ForbiddenLanguageError(msg)

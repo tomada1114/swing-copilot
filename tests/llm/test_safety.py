@@ -75,18 +75,16 @@ class TestCheckNoUnevidencedBehavioralClaims:
         text = "実績が計画を10%下回ったことから、経営陣が動揺している可能性がある。"
         check_no_unevidenced_behavioral_claims([text])
 
-    def test_hedge_with_percent_but_no_actual_planned_marker_still_requires_marker(
-        self,
-    ):
-        # Hedge + a bare percentage alone (no 計画/予想/実績/actual/planned
-        # marker) is NOT sufficient evidence -- deliberately strict per the
-        # co-occurrence heuristic (regex requires the numeric-evidence
-        # pattern, which itself already accepts a bare percentage; this test
-        # pins the case where only the hedge exists without any numeric or
-        # marker evidence at all).
+    def test_hedge_with_percent_but_no_actual_planned_marker_raises(self):
         with pytest.raises(ForbiddenLanguageError):
             check_no_unevidenced_behavioral_claims(
-                ["経営陣は動揺している可能性がある。"]
+                ["売上が10%増え、経営陣は動揺している可能性がある。"]
+            )
+
+    def test_hedge_with_actual_and_plan_markers_but_no_number_raises(self):
+        with pytest.raises(ForbiddenLanguageError):
+            check_no_unevidenced_behavioral_claims(
+                ["実績が計画を下回り、経営陣は動揺している可能性がある。"]
             )
 
     def test_text_without_any_behavioral_keyword_never_raises(self):

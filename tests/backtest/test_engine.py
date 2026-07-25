@@ -357,6 +357,10 @@ class TestBenchmarkAndReproducibility:
             INITIAL_CASH - entry_cost + exit_proceeds
         )
         assert result.equity_curve[-1][1] == pytest.approx(result.final_equity)
+        assert sum(trade.pnl for trade in result.trades) == pytest.approx(
+            result.final_equity - INITIAL_CASH
+        )
+        assert result.expectancy_per_trade == pytest.approx(result.trades[0].pnl)
 
 
 class TestTradePnl:
@@ -372,6 +376,20 @@ class TestTradePnl:
             exit_reason="stop",
         )
         assert trade.pnl == pytest.approx(100.0)
+
+    def test_pnl_subtracts_round_trip_commission(self):
+        trade = Trade(
+            symbol="AAA",
+            entry_date=TRADING_DAYS[0],
+            entry_price=100.0,
+            exit_date=TRADING_DAYS[1],
+            exit_price=110.0,
+            shares=10,
+            exit_reason="stop",
+            commission_usd=2.1,
+        )
+
+        assert trade.pnl == pytest.approx(97.9)
 
 
 class TestPessimisticSlippageMultiplier:
@@ -561,7 +579,9 @@ class TestEdgeCasesAndDefensiveBranches:
 
         assert result.trades == ()
 
-    def test_missing_bar_on_a_held_symbol_is_skipped_gracefully(self, engine):
+    def test_missing_final_bar_uses_latest_close_and_forces_liquidation(
+        self, settings, engine
+    ):
         days = TRADING_DAYS[:4]
         rows = [
             *_spy_bars(days),
@@ -577,6 +597,26 @@ class TestEdgeCasesAndDefensiveBranches:
             days, bars, lambda d: candidates_by_day.get(d, []), INITIAL_CASH
         )
 
-        # No crash; the position simply isn't marked-to-market or liquidated
-        # on the day its bar is missing.
-        assert result.final_equity > 0
+        [trade] = result.trades
+        assert trade.exit_reason == "end_of_backtest"
+        assert trade.exit_date == days[-1]
+        assert trade.exit_price == pytest.approx(
+            100.0 * (1 - settings.backtest.slippage_pct)
+        )
+        assert result.final_equity == pytest.approx(INITIAL_CASH + trade.pnl)
+
+    def test_missing_benchmark_bar_carries_forward_latest_close(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [
+            *_spy_bars(days[:2]),
+            *flat_bars("AAA", days, 100.0),
+        ]
+
+        result = engine.run(days, bars_frame(rows), _no_candidates, INITIAL_CASH)
+
+        assert result.benchmark_curve[-1][1] == pytest.approx(
+            result.benchmark_curve[-2][1]
+        )
+        assert result.benchmark_final_equity == pytest.approx(
+            result.benchmark_curve[-1][1]
+        )

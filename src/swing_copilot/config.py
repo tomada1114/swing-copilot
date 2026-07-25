@@ -86,12 +86,12 @@ class UniverseConfig(_StrictModel):
 class RiskConfig(_StrictModel):
     """`risk.*` in `settings.yaml`."""
 
-    account_equity_usd: float | None = None
-    max_position_pct: float = 0.10
-    max_trade_risk_pct: float = 0.01
-    max_sector_pct: float = 0.30
-    max_correlation: float = 0.7
-    correlation_lookback_days: int = 60
+    account_equity_usd: float | None = Field(default=None, gt=0.0)
+    max_position_pct: float = Field(default=0.10, gt=0.0, le=1.0)
+    max_trade_risk_pct: float = Field(default=0.01, gt=0.0, le=1.0)
+    max_sector_pct: float = Field(default=0.30, gt=0.0, le=1.0)
+    max_correlation: float = Field(default=0.7, ge=-1.0, le=1.0)
+    correlation_lookback_days: int = Field(default=60, ge=2)
     # Account-level open stop-risk ceiling in percentage points
     # (roadmap §5 P4-17; breakout-trade-planner / Minervini 6-8%帯の
     # 保守側、要検証).
@@ -109,7 +109,7 @@ class RiskConfig(_StrictModel):
     circuit_cooldown_hours: int = Field(default=24, ge=1)
     # Stop distance as a % of entry price above which a WIDE_STOP sizing
     # warning is raised (roadmap §5 P1-03, 要検証).
-    wide_stop_threshold_pct: float = 10.0
+    wide_stop_threshold_pct: float = Field(default=10.0, gt=0.0)
 
     @model_validator(mode="after")
     def _validate_earnings_threshold_order(self) -> RiskConfig:
@@ -155,8 +155,8 @@ class MinerviniSignalConfig(_StrictModel):
     # All defaults below are roadmap §5 P5-21 values. The RS threshold and
     # weighting are explicitly 要検証 in that source, so remain configuration.
     sma200_rising_days: int = Field(default=22, ge=1)
-    min_low_multiple: float = Field(default=1.25, gt=0.0)
-    min_high_multiple: float = Field(default=0.75, gt=0.0)
+    min_low_multiple: float = Field(default=1.25, ge=1.0)
+    min_high_multiple: float = Field(default=0.75, gt=0.0, le=1.0)
     min_rs_percentile: float = Field(default=70.0, ge=0.0, le=100.0)
     rs_weight_63d: float = Field(default=0.40, ge=0.0)
     rs_weight_126d: float = Field(default=0.20, ge=0.0)
@@ -196,16 +196,16 @@ class VcpSignalConfig(_StrictModel):
     """P5-24 VCP thresholds (roadmap §5; every value is 要検証)."""
 
     zigzag_atr_multiplier: float = Field(default=2.0, gt=0.0)
-    first_depth_min: float = Field(default=0.08, gt=0.0)
-    first_depth_max: float = Field(default=0.35, gt=0.0)
-    small_cap_first_depth_max: float = Field(default=0.50, gt=0.0)
-    contraction_ratio_max: float = Field(default=0.75, gt=0.0)
+    first_depth_min: float = Field(default=0.08, gt=0.0, le=1.0)
+    first_depth_max: float = Field(default=0.35, gt=0.0, le=1.0)
+    small_cap_first_depth_max: float = Field(default=0.50, gt=0.0, le=1.0)
+    contraction_ratio_max: float = Field(default=0.75, gt=0.0, le=1.0)
     min_contractions: int = Field(default=2, ge=2)
     pattern_days_min: int = Field(default=15, ge=1)
     pattern_days_max: int = Field(default=325, ge=1)
-    dry_up_ideal_max: float = Field(default=0.30, gt=0.0)
-    dry_up_weak_min: float = Field(default=0.70, gt=0.0)
-    chase_pivot_pct: float = Field(default=0.05, ge=0.0)
+    dry_up_ideal_max: float = Field(default=0.30, gt=0.0, le=1.0)
+    dry_up_weak_min: float = Field(default=0.70, gt=0.0, le=1.0)
+    chase_pivot_pct: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate_ranges(self) -> VcpSignalConfig:
@@ -239,42 +239,55 @@ class TechnicalSignalConfig(_StrictModel):
 class BacktestConfig(_StrictModel):
     """`backtest.*` in `settings.yaml`."""
 
-    initial_cash_usd: float = 100_000
+    initial_cash_usd: float = Field(default=100_000, gt=0.0)
     entry: str = "next_open"
-    exit_atr_multiple: float = 2.5
-    exit_atr_period: int = 14
-    max_hold_days: int = 60
-    commission_pct: float = 0.001
-    slippage_pct: float = 0.001
+    exit_atr_multiple: float = Field(default=2.5, gt=0.0)
+    exit_atr_period: int = Field(default=14, ge=1)
+    max_hold_days: int = Field(default=60, ge=1)
+    commission_pct: float = Field(default=0.001, ge=0.0, lt=1.0)
+    slippage_pct: float = Field(default=0.001, ge=0.0, lt=1.0)
     benchmark: str = "SPY"
     # Multiplier applied to slippage_pct on both entry and exit (incl. forced
     # liquidation), roadmap §5 P2-09. 1.0 == no change from the base
     # slippage_pct; --pessimistic overrides it with pessimistic_slippage_multiplier.
-    slippage_multiplier: float = 1.0
+    slippage_multiplier: float = Field(default=1.0, gt=0.0)
     # Pessimistic-scenario preset (roadmap §5 P2-09, 要検証: median of
     # backtest-expert's cited 1.5-2.0x range).
-    pessimistic_slippage_multiplier: float = 1.75
+    pessimistic_slippage_multiplier: float = Field(default=1.75, gt=1.0)
     # P2-10 sensitivity grid: best cell's expectancy_per_trade strictly above
     # this multiple of its (non-gray) neighbors' median triggers a "spike"
     # (overfitting suspicion) verdict (roadmap §5 P2-10, 要検証).
-    sensitivity_spike_multiplier: float = 1.5
+    sensitivity_spike_multiplier: float = Field(default=1.5, gt=1.0)
     # P2-10 sensitivity grid: fraction (e.g. 0.20 == 20%) around the best
     # cell's value within which every non-gray cell must fall for a
     # "plateau" (robust) verdict (roadmap §5 P2-10, 要検証; basis point is the
     # best cell's own value -- not specified in the seed, fixed here).
-    sensitivity_plateau_tolerance_pct: float = 0.20
+    sensitivity_plateau_tolerance_pct: float = Field(default=0.20, ge=0.0)
     # trade_count below this draws a "statistically insufficient" warning;
     # below preliminary_trade_count_threshold (but >= this) draws a
     # "preliminary" warning (roadmap §5 P2-07, out: backtest-expert).
-    insufficient_trade_count_threshold: int = 30
-    preliminary_trade_count_threshold: int = 100
+    insufficient_trade_count_threshold: int = Field(default=30, ge=1)
+    preliminary_trade_count_threshold: int = Field(default=100, ge=1)
     # win_rate (fraction, e.g. 0.90 == 90%) strictly above this, or
     # max_drawdown_pct strictly below lookahead_suspicion_max_drawdown, draws
     # a look-ahead-bias suspicion warning (roadmap §5 P2-07). The win_rate
     # bound is from the roadmap; the drawdown bound has no seed value and is
     # fixed here as 要検証 per Issue #16's boundary note.
-    lookahead_suspicion_win_rate: float = 0.90
-    lookahead_suspicion_max_drawdown: float = 0.01
+    lookahead_suspicion_win_rate: float = Field(default=0.90, ge=0.0, le=1.0)
+    lookahead_suspicion_max_drawdown: float = Field(default=0.01, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_trade_count_thresholds(self) -> BacktestConfig:
+        if (
+            self.preliminary_trade_count_threshold
+            < self.insufficient_trade_count_threshold
+        ):
+            msg = (
+                "preliminary_trade_count_threshold must be >= "
+                "insufficient_trade_count_threshold"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class LLMModelSelection(_StrictModel):
@@ -330,33 +343,55 @@ class NotificationConfig(_StrictModel):
 class PostmortemConfig(_StrictModel):
     """`postmortem.*` in `settings.yaml` (P2-11, roadmap §5 P2-11)."""
 
-    horizon_5d_weight: float = 0.6
-    horizon_20d_weight: float = 0.4
-    neutral_threshold_pct: float = 0.5  # |return%| <= this -> NEUTRAL (要検証)
-    severe_threshold_pct: float = (
-        2.0  # return% < -this -> FALSE_POSITIVE_SEVERE (要検証)
-    )
-    preliminary_sample_threshold: int = 20  # raw n < this -> "暫定" label
-    lookback_window_days: int = 90  # trailing window for the markdown aggregation
+    horizon_5d_weight: float = Field(default=0.6, ge=0.0)
+    horizon_20d_weight: float = Field(default=0.4, ge=0.0)
+    neutral_threshold_pct: float = Field(
+        default=0.5, ge=0.0
+    )  # |return%| <= this -> NEUTRAL (要検証)
+    # return% < -this -> FALSE_POSITIVE_SEVERE (要検証)
+    severe_threshold_pct: float = Field(default=2.0, ge=0.0)
+    preliminary_sample_threshold: int = Field(default=20, ge=1)
+    lookback_window_days: int = Field(default=90, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_postmortem_thresholds(self) -> PostmortemConfig:
+        if not math.isclose(
+            self.horizon_5d_weight + self.horizon_20d_weight,
+            1.0,
+            abs_tol=1e-9,
+        ):
+            msg = "postmortem horizon weights must sum to 1.0"
+            raise ValueError(msg)
+        if self.severe_threshold_pct < self.neutral_threshold_pct:
+            msg = "severe_threshold_pct must be >= neutral_threshold_pct"
+            raise ValueError(msg)
+        return self
 
 
 class RegimeConfig(_StrictModel):
     """`regime.*` thresholds (roadmap §5 P3-13; all are 要検証)."""
 
-    ema_period: int = 50
-    bull_vix_max: float = 20.0
-    bear_spy_ema_ratio: float = 0.97
-    bear_vix_min: float = 30.0
-    distribution_window_days: int = 25
-    dd_decline_pct: float = -0.002
-    stall_abs_change_pct: float = 0.001
-    recovery_pct: float = 0.05
+    ema_period: int = Field(default=50, ge=1)
+    bull_vix_max: float = Field(default=20.0, ge=0.0)
+    bear_spy_ema_ratio: float = Field(default=0.97, gt=0.0)
+    bear_vix_min: float = Field(default=30.0, ge=0.0)
+    distribution_window_days: int = Field(default=25, ge=1)
+    dd_decline_pct: float = Field(default=-0.002, le=0.0)
+    stall_abs_change_pct: float = Field(default=0.001, ge=0.0)
+    recovery_pct: float = Field(default=0.05, ge=0.0)
     # Exposure Ceiling's REDUCE_ONLY multiplier (roadmap §5 P3-14, 要検証).
-    reduce_only_risk_multiplier: float = 0.5
+    reduce_only_risk_multiplier: float = Field(default=0.5, gt=0.0, le=1.0)
     # roadmap §5 P3-16（要検証）: display-only Follow-Through Day thresholds.
-    ftd_correction_decline_pct: float = 0.03
-    ftd_correction_down_days: int = 3
-    ftd_gain_pct: float = 0.0125
+    ftd_correction_decline_pct: float = Field(default=0.03, gt=0.0)
+    ftd_correction_down_days: int = Field(default=3, ge=1)
+    ftd_gain_pct: float = Field(default=0.0125, gt=0.0)
+
+    @model_validator(mode="after")
+    def _validate_vix_threshold_order(self) -> RegimeConfig:
+        if self.bear_vix_min < self.bull_vix_max:
+            msg = "bear_vix_min must be >= bull_vix_max"
+            raise ValueError(msg)
+        return self
 
 
 class Settings(_StrictModel):

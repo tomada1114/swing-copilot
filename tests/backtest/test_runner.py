@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
@@ -16,7 +16,7 @@ from swing_copilot.backtest.runner import (
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.universe import UniverseMember
-from tests.backtest.conftest import bars_frame, flat_bars
+from tests.backtest.conftest import bar_row, bars_frame, flat_bars
 
 STRATEGIES_CONFIG = {
     "strategies": {
@@ -151,3 +151,48 @@ def test_run_backtest_uses_benchmark_from_settings_when_not_overridden(
     result = run_backtest(BacktestRequest([], days[0], days[-1], 50_000.0), deps)
 
     assert len(result.benchmark_curve) == 3
+
+
+def test_run_backtest_loads_pre_start_screening_warmup(settings, tmp_path):
+    store = MarketStore(
+        Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+    )
+    days = [date(2026, 6, 1) + timedelta(days=i) for i in range(230)]
+    rows = []
+    for index, day in enumerate(days):
+        close = 100.0 + index
+        rows.append(bar_row("AAPL", day, (close, close + 1, close - 1, close)))
+        rows.append(bar_row("SPY", day, (400.0, 401.0, 399.0, 400.0)))
+    store.write_bars(bars_frame(_with_provider_columns(rows)))
+    universe = (
+        UniverseMember(
+            symbol="AAPL",
+            company_name="Apple",
+            gics_sector="Information Technology",
+            source_symbol="AAPL",
+        ),
+    )
+    strategies = {
+        "strategies": {
+            "warmup": {
+                "filters_all": [],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            }
+        }
+    }
+    deps = BacktestDependencies(store, universe, settings, strategies)
+
+    result = run_backtest(
+        BacktestRequest(
+            ["AAPL"],
+            start=days[-3],
+            end=days[-1],
+            initial_cash=100_000.0,
+            strategy_key="warmup",
+        ),
+        deps,
+    )
+
+    assert result.trade_count == 1
+    assert result.trades[0].entry_date == days[-2]

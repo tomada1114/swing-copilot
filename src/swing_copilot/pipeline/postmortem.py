@@ -319,8 +319,11 @@ def _process_horizon(
                 ),
             )
         )
-    if records:
-        state_store.record_signal_outcomes(records)
+    state_store.replace_signal_outcomes(
+        historical_run_id,
+        horizon_days,
+        records,
+    )
     return None
 
 

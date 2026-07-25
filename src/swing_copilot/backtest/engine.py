@@ -59,11 +59,15 @@ class Trade:
     # (P2-07's R-multiple is against the risk actually taken at entry, not
     # today's trailed stop). None only if never recorded.
     initial_stop_price: float | None = None
+    # Total round-trip commission in USD. Slippage is already reflected in
+    # entry_price/exit_price; commission is tracked separately so every
+    # trade-level metric reconciles to the cash ledger.
+    commission_usd: float = 0.0
 
     @property
     def pnl(self) -> float:
-        """Realized profit/loss for this trade, in USD."""
-        return (self.exit_price - self.entry_price) * self.shares
+        """Realized profit/loss after both entry and exit commission, in USD."""
+        return (self.exit_price - self.entry_price) * self.shares - self.commission_usd
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +98,7 @@ class _OpenPosition:
     shares: int
     stop_price: float
     initial_stop_price: float
+    entry_commission_usd: float
     days_held: int = 0
 
 
@@ -114,6 +119,22 @@ def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
     if rows.empty:
         return None
     row = rows.iloc[0]
+    return {
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+    }
+
+
+def _latest_bar(
+    bars: pd.DataFrame, symbol: str, as_of: date
+) -> dict[str, float] | None:
+    """Return the newest available bar on or before an inclusive cutoff."""
+    rows = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)]
+    if rows.empty:
+        return None
+    row = rows.sort_values("date").iloc[-1]
     return {
         "open": float(row["open"]),
         "high": float(row["high"]),
@@ -201,14 +222,14 @@ class BacktestEngine:
             equity_curve.append(
                 (day, state.cash + self._mark_to_market(state, bars, day))
             )
-            benchmark_bar = _bar(bars, benchmark_symbol, day)
+            benchmark_bar = _latest_bar(bars, benchmark_symbol, day)
             benchmark_curve.append(
                 (
                     day,
                     state.benchmark_cash
                     + state.benchmark_shares * benchmark_bar["close"]
                     if benchmark_bar is not None
-                    else float("nan"),
+                    else initial_cash,
                 )
             )
 
@@ -283,7 +304,9 @@ class BacktestEngine:
             if shares <= 0:
                 continue
 
-            cost = shares * entry_price * (1 + self._backtest_config.commission_pct)
+            entry_notional = shares * entry_price
+            entry_commission = entry_notional * self._backtest_config.commission_pct
+            cost = entry_notional + entry_commission
             if cost > state.cash:
                 continue
 
@@ -295,6 +318,7 @@ class BacktestEngine:
                 shares=shares,
                 stop_price=stop_price,
                 initial_stop_price=stop_price,
+                entry_commission_usd=entry_commission,
             )
 
     def _process_exits(self, day: date, bars: pd.DataFrame, state: _SimState) -> None:
@@ -326,11 +350,9 @@ class BacktestEngine:
         exit_reason: str,
     ) -> None:
         execution_price = exit_price * (1 - self._slippage_pct)
-        proceeds = (
-            position.shares
-            * execution_price
-            * (1 - self._backtest_config.commission_pct)
-        )
+        exit_notional = position.shares * execution_price
+        exit_commission = exit_notional * self._backtest_config.commission_pct
+        proceeds = exit_notional - exit_commission
         state.cash += proceeds
         state.closed_trades.append(
             Trade(
@@ -342,6 +364,7 @@ class BacktestEngine:
                 shares=position.shares,
                 exit_reason=exit_reason,
                 initial_stop_price=position.initial_stop_price,
+                commission_usd=position.entry_commission_usd + exit_commission,
             )
         )
         del state.open_positions[position.symbol]
@@ -362,7 +385,7 @@ class BacktestEngine:
     def _mark_to_market(self, state: _SimState, bars: pd.DataFrame, day: date) -> float:
         total = 0.0
         for position in state.open_positions.values():
-            bar = _bar(bars, position.symbol, day)
+            bar = _latest_bar(bars, position.symbol, day)
             if bar is not None:
                 total += position.shares * bar["close"]
         return total
@@ -371,7 +394,7 @@ class BacktestEngine:
         self, final_day: date, bars: pd.DataFrame, state: _SimState
     ) -> None:
         for position in list(state.open_positions.values()):
-            bar = _bar(bars, position.symbol, final_day)
+            bar = _latest_bar(bars, position.symbol, final_day)
             if bar is None:
                 continue
             self._settle_exit(

@@ -12,7 +12,13 @@ from swing_copilot.screening.base import (
     register_filter,
     register_signal,
 )
-from swing_copilot.screening.indicators import sma, symbol_bars, wilder_atr, wilder_rsi
+from swing_copilot.screening.indicators import (
+    percentile_ranks,
+    sma,
+    symbol_bars,
+    wilder_atr,
+    wilder_rsi,
+)
 from swing_copilot.screening.vcp import (
     VcpThresholds,
     detect_atr_zigzag,
@@ -168,16 +174,9 @@ class MinerviniStage2Signal:
                     )
                 )
 
-        count = len(values)
-        if count == 1:
-            return {values[0][0]: 50.0}
-        if count == 0:
-            return {}
         return {
-            symbol: rank / (count - 1) * 100.0
-            for rank, (symbol, _) in enumerate(
-                sorted(values, key=lambda item: (item[1], item[0]))
-            )
+            symbol: percentile * 100.0
+            for symbol, percentile in percentile_ranks(dict(values)).items()
         }
 
     def _metrics(

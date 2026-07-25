@@ -348,6 +348,17 @@ class TestPortfolioHeat:
         assert result.status == "calculated"
         assert result.heat_pct == 0.0
 
+    def test_trailed_stop_above_entry_never_offsets_other_position_risk(self):
+        positions = [
+            _position("GAIN", entry_price=100.0, stop_price=110.0, shares=100),
+            _position("RISK", entry_price=100.0, stop_price=90.0, shares=100),
+        ]
+
+        result = calculate_portfolio_heat(positions, account_equity=100_000.0)
+
+        assert result.status == "calculated"
+        assert result.heat_pct == pytest.approx(1.0)
+
 
 class TestCircuitBreaker:
     @pytest.mark.parametrize("state", [CircuitState.HALTED, CircuitState.COOLDOWN])

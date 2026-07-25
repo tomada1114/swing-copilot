@@ -21,6 +21,7 @@ from swing_copilot.screening.base import (
     SIGNAL_REGISTRY,
     Candidate,
     RejectionReasonCode,
+    RejectionStage,
     ScreeningInput,
     SignalHit,
     register_signal,
@@ -306,9 +307,15 @@ class TestCandidateAggregationAndRanking:
             pipeline = ScreeningPipeline(
                 strategies_config, market_store=None, settings=settings
             )
-            candidates = pipeline.run(data)
+            result = pipeline.run_with_rejections(data)
 
-            assert candidates == []
+            assert result.candidates == []
+            [rejection] = result.rejections
+            assert rejection.stage is RejectionStage.DATA_QUALITY
+            assert (
+                rejection.reason_code is RejectionReasonCode.DATA_INSUFFICIENT_HISTORY
+            )
+            assert rejection.detail["ranking_metrics"] == "unavailable"
         finally:
             del SIGNAL_REGISTRY["always_hit_short_history_test_signal"]
 
@@ -542,6 +549,22 @@ class TestCompositeScoring:
         metrics_by_symbol = {"SOLO": _metrics(rsi14=45.0)}
         candidates = _score_pipeline(settings, monkeypatch, metrics_by_symbol)
         assert candidates[0].metrics["score_liquidity"] == pytest.approx(0.1)
+
+    def test_equal_liquidity_receives_equal_percentile_and_symbol_tiebreak(
+        self, settings, monkeypatch
+    ):
+        metrics_by_symbol = {
+            "ZZZ": _metrics(rsi14=45.0, avg_volume=20.0),
+            "AAA": _metrics(rsi14=45.0, avg_volume=20.0),
+        }
+
+        candidates = _score_pipeline(settings, monkeypatch, metrics_by_symbol)
+
+        assert [candidate.symbol for candidate in candidates] == ["AAA", "ZZZ"]
+        assert candidates[0].metrics["score_liquidity"] == pytest.approx(0.1)
+        assert candidates[0].metrics["score"] == pytest.approx(
+            candidates[1].metrics["score"]
+        )
 
     def test_tie_broken_by_ascending_symbol_when_scores_are_equal(
         self, settings, monkeypatch

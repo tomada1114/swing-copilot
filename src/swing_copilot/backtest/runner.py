@@ -6,7 +6,7 @@ Wires the real `MarketStore`/`ScreeningPipeline` into `BacktestEngine` (FR-10).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 from swing_copilot.backtest.engine import BacktestEngine, BacktestResult
@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
+
+# The longest production screening feature currently uses 325 trading bars
+# (VCP). Two calendar years comfortably covers that window across weekends,
+# holidays, and ordinary data gaps without allowing a trade before start.
+_SCREENING_WARMUP_CALENDAR_DAYS = 730
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +128,8 @@ def run_backtest(
 
     trading_days = _trading_days(deps.market_store, benchmark_symbol, start, end)
     all_symbols = sorted({*request.symbols, benchmark_symbol})
-    bars = deps.market_store.read_bars(all_symbols, start, end, as_of=end)
+    bars_start = start - timedelta(days=_SCREENING_WARMUP_CALENDAR_DAYS)
+    bars = deps.market_store.read_bars(all_symbols, bars_start, end, as_of=end)
     fundamentals = deps.market_store.read_fundamentals(end)
     pipeline = ScreeningPipeline(
         deps.strategies_config,

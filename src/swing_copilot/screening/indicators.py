@@ -12,7 +12,30 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import date
+
+
+def percentile_ranks(values: Mapping[str, float]) -> dict[str, float]:
+    """Return deterministic 0..1 percentile ranks with equal values tied."""
+    ordered = sorted(values.items(), key=lambda item: (item[1], item[0]))
+    count = len(ordered)
+    if count == 0:
+        return {}
+    if count == 1:
+        return {ordered[0][0]: 0.5}
+
+    ranks: dict[str, float] = {}
+    start = 0
+    while start < count:
+        end = start + 1
+        while end < count and ordered[end][1] == ordered[start][1]:
+            end += 1
+        percentile = ((start + end - 1) / 2) / (count - 1)
+        for symbol, _value in ordered[start:end]:
+            ranks[symbol] = percentile
+        start = end
+    return ranks
 
 
 def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | None:

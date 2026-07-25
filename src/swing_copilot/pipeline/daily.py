@@ -36,6 +36,7 @@ from swing_copilot.config import (
 from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
+from swing_copilot.exceptions import ConfigError
 from swing_copilot.llm.client import LLMClient
 from swing_copilot.llm.decision_context import (
     format_market_regime,
@@ -1433,6 +1434,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser.add_argument("--skip-text", action="store_true")
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--strategy", default="default")
     args = parser.parse_args(argv)
     return DailyRunOptions(
         as_of=args.as_of,
@@ -1440,6 +1442,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         skip_text=args.skip_text,
         skip_llm=args.skip_llm,
         limit=args.limit,
+        strategy_key=args.strategy,
     )
 
 
@@ -1458,6 +1461,10 @@ def _compose_dependencies(
     options: DailyRunOptions, settings: Settings, strategies: StrategiesConfig
 ) -> DailyDependencies:
     """Wire real adapters for a live (non-test) run (composition root, FR-12)."""
+    if options.strategy_key not in strategies.strategies:
+        available = ", ".join(sorted(strategies.strategies))
+        msg = f"Unknown strategy {options.strategy_key!r}; available: {available}"
+        raise ConfigError(msg)
     secrets = load_secrets()
     require_secrets(secrets, _required_features(options, settings))
 
@@ -1529,6 +1536,7 @@ def _compose_dependencies(
         llm_client=llm_client,
         notifier=notifier,
         output_dir=output_dir,
+        strategy_key=options.strategy_key,
     )
 
 

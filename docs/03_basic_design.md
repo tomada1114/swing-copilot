@@ -118,7 +118,7 @@ flowchart TD
 | StateStore | `storage/state_store.py` | 実行、候補、リスク評価、ポジション、判断、LLM入出力ログを同じDuckDBへ保存 | FR-11, NFR-05 |
 | Filter/Signal基盤 | `screening/base.py` | フィルタ・シグナルのABCとプラガブルな登録レジストリ | FR-05, NFR-07 |
 | ファンダフィルタ | `screening/fundamental_filters.py` | 第1段: 黒字継続・FCF・自己資本比率によるユニバース絞り込み | FR-04 |
-| テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目シグナル評価 | FR-05 |
+| テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価 | FR-05, P5-21 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲート・Distribution Day・表示専用FTD状態機械を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |

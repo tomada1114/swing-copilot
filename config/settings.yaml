@@ -38,6 +38,34 @@ technical_signals:
   volume:
     avg_volume_days: 20
     min_avg_volume: 1000000
+  minervini:
+    # roadmap §5 P5-21; RS threshold and weights are 要検証.
+    sma200_rising_days: 22
+    min_low_multiple: 1.25
+    min_high_multiple: 0.75
+    min_rs_percentile: 70.0
+    rs_weight_63d: 0.40
+    rs_weight_126d: 0.20
+    rs_weight_189d: 0.20
+    rs_weight_252d: 0.20
+  execution:
+    # roadmap §5 P5-23（要検証）: d=(close-SMA50)/ATR14 thresholds.
+    damaged_max_d: -3.0
+    fair_max_d: 2.0
+    extended_max_d: 4.0
+  vcp:
+    # roadmap §5 P5-24（全値要検証）
+    zigzag_atr_multiplier: 2.0
+    first_depth_min: 0.08
+    first_depth_max: 0.35
+    small_cap_first_depth_max: 0.50
+    contraction_ratio_max: 0.75
+    min_contractions: 2
+    pattern_days_min: 15
+    pattern_days_max: 325
+    dry_up_ideal_max: 0.30
+    dry_up_weak_min: 0.70
+    chase_pivot_pct: 0.05
 
 backtest:
   initial_cash_usd: 100000

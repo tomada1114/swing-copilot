@@ -111,6 +111,26 @@ def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
     assert "成功率" not in markdown
 
 
+def test_terminal_and_markdown_show_execution_buckets_and_distance() -> None:
+    base = _brief()
+    candidate = replace(
+        base.candidates[0], execution_state="FAIR", execution_distance=1.0
+    )
+    brief = replace(base, candidates=(candidate,))
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert "即検討可: NVDA" in terminal
+    assert "様子見: 該当なし" in terminal
+    assert "見送り: 該当なし" in terminal
+    assert "FAIR (d=1.00)" in terminal
+    assert "### 即検討可" in markdown
+    assert "### 様子見" in markdown
+    assert "### 見送り" in markdown
+    assert "FAIR (d=1.00)" in markdown
+
+
 def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     brief = replace(
         _brief(),

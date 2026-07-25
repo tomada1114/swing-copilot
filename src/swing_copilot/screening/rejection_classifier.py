@@ -227,6 +227,8 @@ def _classify_signal(
         return _classify_trend_sma(symbol, data, settings)
     if signal_name == "pullback_rsi":
         return _classify_pullback_rsi(symbol, data, settings)
+    if signal_name == "minervini_stage2":
+        return _classify_minervini_stage2(symbol, data)
     # Any other configured signal key has no mirrored logic here (module
     # docstring: hardcoded to the current two signals, not generalized).
     msg = f"rejection_classifier has no mirrored logic for signal {signal_name!r}"
@@ -285,6 +287,32 @@ def _classify_pullback_rsi(
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_RSI_NOT_MET,
         {"rsi14": float(rsi.iloc[-1]), "threshold": config.rsi_threshold},
+    )
+
+
+def _classify_minervini_stage2(symbol: str, data: ScreeningInput) -> RejectionRecord:
+    """Classify Minervini history failures before its ordinary non-hit path.
+
+    The Stage 2 signal evaluates the 52-week high/low over a 252-bar window
+    and treats fewer than 200 rows as data-quality failure (P5-21 decision).
+    Remaining misses can be ordinary conditions (including RS). The existing
+    constrained rejection ledger has no generic technical code, so they use
+    `SIGNAL_TREND_NOT_MET` with the precise signal name in the detail.
+    """
+    series = symbol_bars(data.bars, symbol, data.as_of)
+    available = len(series) if series is not None else 0
+    required = 200
+    if available < required:
+        return _insufficient_history(symbol, available, required)
+    return RejectionRecord(
+        symbol,
+        RejectionStage.TECHNICAL_SIGNAL,
+        RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+        {
+            "signal": "minervini_stage2",
+            "available_bars": available,
+            "required_52_week_bars": required,
+        },
     )
 
 

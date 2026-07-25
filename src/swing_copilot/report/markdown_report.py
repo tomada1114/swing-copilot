@@ -101,10 +101,17 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
             "",
             "## Candidates",
             "",
-            "| Rank | Symbol | Close | Change | RSI14 | Score | Signals | Risk | Shares | Stop |",
-            "|---:|---|---:|---:|---:|---:|---|---|---:|---:|",
+            "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop |",
+            "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|",
         ]
     )
+    for bucket in ("即検討可", "様子見", "見送り"):
+        symbols = [
+            candidate.symbol
+            for candidate in brief.candidates
+            if _execution_bucket(candidate) == bucket
+        ]
+        lines.extend(["", f"### {bucket}", "", ", ".join(symbols) or "該当なし"])
     lines.extend(
         "| "
         + " | ".join(
@@ -115,6 +122,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 _percent(candidate.pct_change),
                 _number(candidate.rsi14, digits=1),
                 _number(candidate.score, digits=3),
+                _execution_state_text(candidate),
                 ", ".join(candidate.signals) or "-",
                 candidate.risk.status,
                 format_sizing(candidate.risk),
@@ -324,6 +332,21 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def _number(value: float | None, *, digits: int = 2) -> str:
     return "N/A" if value is None else f"{value:,.{digits}f}"
+
+
+def _execution_state_text(candidate: BriefCandidate) -> str:
+    """Render the code-owned P5-23 state and ATR-normalized distance."""
+    if candidate.execution_distance is None:
+        return f"{candidate.execution_state} (d=N/A)"
+    return f"{candidate.execution_state} (d={candidate.execution_distance:.2f})"
+
+
+def _execution_bucket(candidate: BriefCandidate) -> str:
+    if candidate.execution_state in {"PULLBACK_ZONE", "FAIR"}:
+        return "即検討可"
+    if candidate.execution_state == "EXTENDED":
+        return "様子見"
+    return "見送り"
 
 
 def _money(value: float | None) -> str:

@@ -8,7 +8,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date, datetime
     from uuid import UUID
 
@@ -29,7 +29,12 @@ _MARKET_LABELS = (("SPY", "SPY"), ("QQQ", "QQQ"), ("^VIX", "VIX"), ("^TNX", "US1
 _LOOKBACK_DAYS = 10
 _MIN_BARS_FOR_CHANGE = 2
 
-_SIGNAL_LABELS = {"trend_sma": "SMA200上抜け", "pullback_rsi": "RSI押し目"}
+_SIGNAL_LABELS = {
+    "trend_sma": "SMA200上抜け",
+    "pullback_rsi": "RSI押し目",
+    "minervini_stage2": "Minervini Stage2",
+    "vcp_breakout": "VCP",
+}
 _HIDDEN_SIGNALS = frozenset({"volume_min"})
 _DEGRADED_LLM_MESSAGE = "本日はニュース・開示分析を取得できませんでした"
 _NEUTRAL_LLM_MESSAGE = "ニュース・開示分析からの追加情報は今回ありません"
@@ -211,6 +216,8 @@ class BriefCandidate:
     # `_candidate_brief`. Defaults to `()` for markdown/terminal-only tests
     # that don't exercise this section.
     past_decisions: tuple[BriefPastDecision, ...] = ()
+    execution_state: str = "UNKNOWN"
+    execution_distance: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +441,7 @@ def _candidate_brief(
         score_trend_quality=candidate.metrics.get("score_trend_quality"),
         score_liquidity=candidate.metrics.get("score_liquidity"),
         signals=tuple(
-            _SIGNAL_LABELS.get(name, name)
+            _signal_label(name, candidate.metrics)
             for name in candidate.signal_names
             if name not in _HIDDEN_SIGNALS
         ),
@@ -453,7 +460,27 @@ def _candidate_brief(
             state_store,
         ),
         past_decisions=_past_decisions(candidate.symbol, context.brief, state_store),
+        execution_state=candidate.execution_state,
+        execution_distance=candidate.execution_distance,
     )
+
+
+def _signal_label(name: str, metrics: Mapping[str, float]) -> str:
+    """Return an evidence-bearing signal label for terminal and Markdown."""
+    label = _SIGNAL_LABELS.get(name, name)
+    if name == "minervini_stage2":
+        criteria = metrics.get("minervini_criteria_met")
+        if criteria is not None:
+            return f"{label} ({int(criteria)}/7条件)"
+    if name == "vcp_breakout":
+        count = metrics.get("vcp_contraction_count")
+        dry_up = metrics.get("vcp_dry_up_ratio")
+        pivot = metrics.get("vcp_pivot")
+        if count is not None and dry_up is not None and pivot is not None:
+            return (
+                f"{label} ({int(count)}収縮 / dry-up {dry_up:.2f} / pivot {pivot:.2f})"
+            )
+    return label
 
 
 def _past_decisions(

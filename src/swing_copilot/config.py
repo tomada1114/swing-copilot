@@ -149,12 +149,91 @@ class VolumeFilterConfig(_StrictModel):
     min_avg_volume: int = 1_000_000
 
 
+class MinerviniSignalConfig(_StrictModel):
+    """`technical_signals.minervini.*` (roadmap §5 P5-21)."""
+
+    # All defaults below are roadmap §5 P5-21 values. The RS threshold and
+    # weighting are explicitly 要検証 in that source, so remain configuration.
+    sma200_rising_days: int = Field(default=22, ge=1)
+    min_low_multiple: float = Field(default=1.25, gt=0.0)
+    min_high_multiple: float = Field(default=0.75, gt=0.0)
+    min_rs_percentile: float = Field(default=70.0, ge=0.0, le=100.0)
+    rs_weight_63d: float = Field(default=0.40, ge=0.0)
+    rs_weight_126d: float = Field(default=0.20, ge=0.0)
+    rs_weight_189d: float = Field(default=0.20, ge=0.0)
+    rs_weight_252d: float = Field(default=0.20, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_rs_weights(self) -> MinerviniSignalConfig:
+        weights = (
+            self.rs_weight_63d,
+            self.rs_weight_126d,
+            self.rs_weight_189d,
+            self.rs_weight_252d,
+        )
+        if not math.isclose(sum(weights), 1.0, abs_tol=1e-9):
+            msg = "minervini RS weights must sum to 1.0"
+            raise ValueError(msg)
+        return self
+
+
+class ExecutionStateConfig(_StrictModel):
+    """P5-23 ATR-normalized entry-state thresholds (roadmap §5, 要検証)."""
+
+    damaged_max_d: float = -3.0
+    fair_max_d: float = 2.0
+    extended_max_d: float = 4.0
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> ExecutionStateConfig:
+        if not self.damaged_max_d < 0.0 < self.fair_max_d < self.extended_max_d:
+            msg = "execution thresholds must satisfy damaged < 0 < fair < extended"
+            raise ValueError(msg)
+        return self
+
+
+class VcpSignalConfig(_StrictModel):
+    """P5-24 VCP thresholds (roadmap §5; every value is 要検証)."""
+
+    zigzag_atr_multiplier: float = Field(default=2.0, gt=0.0)
+    first_depth_min: float = Field(default=0.08, gt=0.0)
+    first_depth_max: float = Field(default=0.35, gt=0.0)
+    small_cap_first_depth_max: float = Field(default=0.50, gt=0.0)
+    contraction_ratio_max: float = Field(default=0.75, gt=0.0)
+    min_contractions: int = Field(default=2, ge=2)
+    pattern_days_min: int = Field(default=15, ge=1)
+    pattern_days_max: int = Field(default=325, ge=1)
+    dry_up_ideal_max: float = Field(default=0.30, gt=0.0)
+    dry_up_weak_min: float = Field(default=0.70, gt=0.0)
+    chase_pivot_pct: float = Field(default=0.05, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_ranges(self) -> VcpSignalConfig:
+        if (
+            not self.first_depth_min
+            <= self.first_depth_max
+            <= self.small_cap_first_depth_max
+        ):
+            msg = "VCP first-depth thresholds must be ordered"
+            raise ValueError(msg)
+        if self.pattern_days_max < self.pattern_days_min:
+            msg = "VCP pattern_days_max must be >= pattern_days_min"
+            raise ValueError(msg)
+        if self.dry_up_weak_min <= self.dry_up_ideal_max:
+            msg = "VCP dry-up weak threshold must exceed ideal threshold"
+            raise ValueError(msg)
+        return self
+
+
 class TechnicalSignalConfig(_StrictModel):
     """`technical_signals.*` in `settings.yaml`."""
 
     trend: TrendSignalConfig = TrendSignalConfig()
     pullback: PullbackSignalConfig = PullbackSignalConfig()
     volume: VolumeFilterConfig = VolumeFilterConfig()
+    minervini: MinerviniSignalConfig = MinerviniSignalConfig()
+    execution: ExecutionStateConfig = ExecutionStateConfig()
+    vcp: VcpSignalConfig = VcpSignalConfig()
 
 
 class BacktestConfig(_StrictModel):
@@ -317,6 +396,12 @@ class RankingConfig(_StrictModel):
     score_weights: ScoreWeights = ScoreWeights()
 
 
+class MinerviniStrategyConfig(_StrictModel):
+    """Per-strategy P5-21 acceptance threshold."""
+
+    min_criteria: int = Field(default=6, ge=1, le=7)
+
+
 class StrategySpec(_StrictModel):
     """Validated composition and ranking rules for one screening strategy."""
 
@@ -326,6 +411,7 @@ class StrategySpec(_StrictModel):
     signals_all: tuple[str, ...]
     candidate_limit: int = Field(gt=0, le=10)
     ranking: RankingConfig = RankingConfig()
+    minervini: MinerviniStrategyConfig | None = None
 
 
 class StrategiesConfig(_StrictModel):

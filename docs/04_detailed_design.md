@@ -1083,8 +1083,9 @@ def run_daily(
     offline E2Eではfixture/fake providerを注入し、実ネットワークを禁止する。
     skip_text/skip_llmはP1段階での動作確認用フラグ。
     戻り値: DailyRunResult.exit_code（0=成功/縮退成功、非ゼロ=ステップ1-4の致命的失敗）。
-    CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--skip-llm] [--limit N]`
+    CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--skip-llm] [--limit N] [--strategy KEY]`
     （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ）
+    （`--strategy`の既定は`default`。`strategies.yaml`にないキーは外部I/O前に利用可能なキー一覧を含む設定エラーでfail-fastする。）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
 
@@ -1467,6 +1468,16 @@ technical_signals:
   volume:
     avg_volume_days: 20
     min_avg_volume: 1000000
+  minervini:
+    # roadmap §5 P5-21。RSの閾値・重みは要検証であり設定値とする。
+    sma200_rising_days: 22
+    min_low_multiple: 1.25
+    min_high_multiple: 0.75
+    min_rs_percentile: 70.0
+    rs_weight_63d: 0.40
+    rs_weight_126d: 0.20
+    rs_weight_189d: 0.20
+    rs_weight_252d: 0.20
 
 backtest:
   initial_cash_usd: 100000
@@ -1534,6 +1545,20 @@ strategies:
         rsi_pullback: 0.5
         trend_quality: 0.3
         liquidity: 0.2
+  minervini_stage2:
+    filters_all:
+      - profitable_positive_fcf_equity
+      - volume_min
+    signals_all:
+      - minervini_stage2
+    candidate_limit: 10
+    minervini:
+      min_criteria: 6  # 7条件中6以上で合格（roadmap §5 P5-21）
+    ranking:
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2
 ```
 
 新しいフィルタ/シグナルを追加する場合、対応モジュールに登録クラスを追加し、本ファイルの`filters_all`/`signals_all`へキーを追加する。ランキングは複合スコア
@@ -1541,6 +1566,12 @@ strategies:
 [0,1]に正規化される: `rsi_pullback = clamp((rsi_threshold − rsi14) / rsi_threshold, 0, 1)`、
 `trend_quality = clamp((sma50/sma200 − 1) / 0.10, 0, 1)`、`liquidity`は候補集合内の
 `avg_volume20`パーセンタイル。同点時の最終tie-breakは必ず`symbol_asc`にして再現性を保つ。
+
+`minervini_stage2`は既定`default`戦略とは分離され、明示した場合だけ有効になる。終値とSMA150/SMA200、SMA200の連続上昇日数、SMA50、252営業日窓の52週高安、ユニバース内の63/126/189/252日加重リターンRSを7条件として判定する。252日リターンに必要な履歴がない銘柄はRS条件を満たさず、52週窓が200本未満なら高安条件も満たさない。候補には`minervini_criteria_met`と各条件・実値をmetricsとして保存し、terminal/Markdownでは`X/7条件`を根拠に表示する。既存の拒否コード制約にはMinervini専用値がないため、通常の条件未充足は`SIGNAL_TREND_NOT_MET`に`signal: minervini_stage2`を付けて互換的に記録し、履歴不足だけは既存の`DATA_INSUFFICIENT_HISTORY`とする。
+
+P5-23では、ランキング後の各候補に`d = (close - SMA50) / ATR14`による実行状態を付す。`d < -3`は`DAMAGED`、`[-3, 0)`は`PULLBACK_ZONE`、`[0, 2)`は`FAIR`、`[2, 4)`は`EXTENDED`、`d >= 4`は`OVEREXTENDED`である（閾値は`technical_signals.execution`の要検証設定）。`PULLBACK_ZONE`/`FAIR`は「即検討可」、`EXTENDED`は「様子見」、`DAMAGED`/`OVEREXTENDED`および指標不足の`UNKNOWN`は「見送り」とする。状態はスコアより優先し、見送りを必ず候補リスト末尾へ降格するが、候補から削除しない。terminal/Markdownは3バケット見出しと状態・d値を併記する。
+
+P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略である。終値の局所高安をATR14の2.0倍以上の反転だけに絞るジグザグから高値→安値の収縮列を作り、初回深さ・逓減率・最低2回・15〜325営業日を検証する。最終収縮高値をピボットとし、手前10本平均出来高/50日平均でdry-upを表す。closeがピボットを5%より大きく超える場合は追いかけとして候補にしない。収縮数・各深さ・dry-up比・ピボットはmetricsを通じて根拠列に表示する。全閾値は`technical_signals.vcp`の要検証設定である。
 
 ---
 

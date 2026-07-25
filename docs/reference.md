@@ -2,6 +2,22 @@
 
 ::: swing_copilot
 
+## スクリーニング戦略
+
+日次実行では`--strategy`で`config/strategies.yaml`に定義した戦略を選択できる。
+既定値は`default`であり、引数を省略しても従来のシグナル構成は変わらない。
+
+```bash
+copilot-daily --strategy default
+copilot-daily --strategy minervini_stage2
+copilot-daily --strategy vcp_breakout
+```
+
+`minervini_stage2`は七つのStage 2条件の充足数、`vcp_breakout`は収縮数・
+出来高dry-up・pivot距離を候補レポートへ出力する。候補はエントリーからの
+距離に応じて「即検討可」「様子見」「見送り」へ分類される。各しきい値と
+strategy定義は`config/settings.yaml`および`config/strategies.yaml`を正とする。
+
 ## 口座レベルリスク
 
 `risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションと承認候補の

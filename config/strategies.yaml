@@ -15,3 +15,31 @@ strategies:
         rsi_pullback: 0.5
         trend_quality: 0.3
         liquidity: 0.2
+  minervini_stage2:
+    filters_all:
+      - profitable_positive_fcf_equity
+      - volume_min
+    signals_all:
+      - minervini_stage2
+    candidate_limit: 10
+    # roadmap §5 P5-21; 6/7 is the configured, inclusive pass line.
+    minervini:
+      min_criteria: 6
+    ranking:
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2
+  vcp_breakout:
+    # Default strategy never includes this signal: explicit selection only.
+    filters_all:
+      - profitable_positive_fcf_equity
+      - volume_min
+    signals_all:
+      - vcp_breakout
+    candidate_limit: 10
+    ranking:
+      score_weights:
+        rsi_pullback: 0.5
+        trend_quality: 0.3
+        liquidity: 0.2

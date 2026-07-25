@@ -82,6 +82,7 @@ class DailyRunOptions:
     skip_text: bool = False
     skip_llm: bool = False
     limit: int | None = None
+    strategy_key: str = "default"
 
 
 @dataclass(frozen=True, slots=True)

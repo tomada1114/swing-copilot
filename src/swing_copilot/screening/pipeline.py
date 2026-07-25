@@ -7,7 +7,7 @@ new strategy module needs only a one-line addition to `strategies.yaml`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 
@@ -28,7 +28,7 @@ from swing_copilot.screening.indicators import sma, symbol_bars, wilder_atr, wil
 from swing_copilot.screening.rejection_classifier import classify_rejections
 
 if TYPE_CHECKING:
-    from swing_copilot.config import ScoreWeights, Settings
+    from swing_copilot.config import ExecutionStateConfig, ScoreWeights, Settings
     from swing_copilot.screening.base import ScreeningInput, SignalHit
     from swing_copilot.storage.market_store import MarketStore
 
@@ -41,6 +41,9 @@ _SMA_LONG_WINDOW = 200
 # Composite ranking score (P1-01, roadmap §5): normalization width for the
 # trend_quality component's (sma50/sma200 - 1) ratio.
 _TREND_QUALITY_NORMALIZATION = 0.10
+_DAMAGED_MAX_D = -3.0
+_FAIR_MAX_D = 2.0
+_EXTENDED_MAX_D = 4.0
 
 
 class ScreeningPipeline:
@@ -77,11 +80,19 @@ class ScreeningPipeline:
         spec = typed_config.strategies[strategy_key]
 
         self._filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
-        self._signals = [SIGNAL_REGISTRY[key](settings) for key in spec.signals_all]
+        self._signals = [
+            cast("Any", SIGNAL_REGISTRY[key])(
+                settings, min_criteria=spec.minervini.min_criteria
+            )
+            if key == "minervini_stage2" and spec.minervini is not None
+            else SIGNAL_REGISTRY[key](settings)
+            for key in spec.signals_all
+        ]
         self._candidate_limit = spec.candidate_limit
         self._rsi_threshold = settings.technical_signals.pullback.rsi_threshold
         self._score_weights: ScoreWeights = spec.ranking.score_weights
         self._settings = settings
+        self._execution_config = settings.technical_signals.execution
 
     def run(self, data: ScreeningInput) -> list[Candidate]:
         """Run the two-stage screen and return a ranked, capped candidate list.
@@ -166,8 +177,20 @@ class ScreeningPipeline:
             rows.append((symbol, signal_names, metrics))
 
         self._score_rows(rows)
-        rows.sort(key=lambda row: (-row[2]["score"], row[0]))
-        limited = rows[: self._candidate_limit]
+        classified_rows = [
+            (
+                symbol,
+                signal_names,
+                metrics,
+                _execution_state(_execution_distance(metrics), self._execution_config),
+                _execution_distance(metrics),
+            )
+            for symbol, signal_names, metrics in rows
+        ]
+        classified_rows.sort(
+            key=lambda row: _state_sort_key(row[3], row[2]["score"], row[0])
+        )
+        limited = classified_rows[: self._candidate_limit]
         candidates = [
             Candidate(
                 symbol=symbol,
@@ -175,8 +198,16 @@ class ScreeningPipeline:
                 signal_names=signal_names,
                 metrics=metrics,
                 rank=index + 1,
+                execution_state=execution_state,
+                execution_distance=execution_distance,
             )
-            for index, (symbol, signal_names, metrics) in enumerate(limited)
+            for index, (
+                symbol,
+                signal_names,
+                metrics,
+                execution_state,
+                execution_distance,
+            ) in enumerate(limited)
         ]
         return candidates, candidate_symbols, hits_by_signal
 
@@ -254,6 +285,51 @@ class ScreeningPipeline:
             "sma50": float(sma50),
             "sma200": float(sma200),
         }
+
+
+def _execution_distance(metrics: dict[str, float]) -> float | None:
+    """Return `(close - sma50) / atr14`, or `None` for missing/invalid inputs."""
+    close = metrics.get("close")
+    sma50 = metrics.get("sma50")
+    atr14 = metrics.get("atr14")
+    if close is None or sma50 is None or atr14 is None or atr14 <= 0.0:
+        return None
+    return (close - sma50) / atr14
+
+
+def _execution_state(
+    distance: float | None, config: ExecutionStateConfig | None = None
+) -> str:
+    """Classify P5-23's ATR-normalized entry timing state."""
+    if distance is None:
+        return "UNKNOWN"
+    damaged_max_d = config.damaged_max_d if config else _DAMAGED_MAX_D
+    fair_max_d = config.fair_max_d if config else _FAIR_MAX_D
+    extended_max_d = config.extended_max_d if config else _EXTENDED_MAX_D
+    if distance < damaged_max_d:
+        return "DAMAGED"
+    if distance < 0.0:
+        return "PULLBACK_ZONE"
+    if distance < fair_max_d:
+        return "FAIR"
+    if distance < extended_max_d:
+        return "EXTENDED"
+    return "OVEREXTENDED"
+
+
+def _execution_bucket(state: str) -> str:
+    """Map an execution state to its user-facing P5-23 bucket."""
+    if state in {"PULLBACK_ZONE", "FAIR"}:
+        return "即検討可"
+    if state == "EXTENDED":
+        return "様子見"
+    return "見送り"
+
+
+def _state_sort_key(state: str, score: float, symbol: str) -> tuple[int, float, str]:
+    """State cap first, then the established score/symbol ordering."""
+    bucket_order = {"即検討可": 0, "様子見": 1, "見送り": 2}
+    return bucket_order[_execution_bucket(state)], -score, symbol
 
 
 def _clamp01(value: float) -> float:

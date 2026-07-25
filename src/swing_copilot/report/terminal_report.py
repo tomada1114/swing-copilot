@@ -71,6 +71,11 @@ def render_terminal(
         console.print(
             f"[bold]Portfolio heat[/bold]: {_portfolio_heat_text(brief.portfolio_heat)}"
         )
+    console.print(
+        "[bold]即検討可[/bold]: " + _bucket_symbols(brief.candidates, "即検討可")
+    )
+    console.print("[bold]様子見[/bold]: " + _bucket_symbols(brief.candidates, "様子見"))
+    console.print("[bold]見送り[/bold]: " + _bucket_symbols(brief.candidates, "見送り"))
 
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("#", justify="right")
@@ -80,6 +85,7 @@ def render_terminal(
     table.add_column("RSI", justify="right")
     table.add_column("Score", justify="right")
     table.add_column("Breakdown", justify="left")
+    table.add_column("Execution", justify="left")
     table.add_column("Signal", justify="left")
     table.add_column("Risk", justify="left")
     table.add_column("Shares", justify="right")
@@ -93,6 +99,7 @@ def render_terminal(
             _number(candidate.rsi14, digits=1),
             _number(candidate.score, digits=3),
             _score_breakdown(candidate),
+            _execution_state_text(candidate),
             ", ".join(candidate.signals) or "-",
             candidate.risk.status,
             format_sizing(candidate.risk),
@@ -126,6 +133,30 @@ def _render_candidate_details(console: Console, candidate: BriefCandidate) -> No
             "  Sources: "
             + ", ".join(source.source_id for source in candidate.llm.sources)
         )
+
+
+def _execution_state_text(candidate: BriefCandidate) -> str:
+    if candidate.execution_distance is None:
+        return f"{candidate.execution_state} (d=N/A)"
+    return f"{candidate.execution_state} (d={candidate.execution_distance:.2f})"
+
+
+def _bucket_symbols(candidates: tuple[BriefCandidate, ...], bucket: str) -> str:
+    """Return ranked bucket members, preserving the pipeline's state-cap order."""
+    symbols = [
+        candidate.symbol
+        for candidate in candidates
+        if _execution_bucket(candidate) == bucket
+    ]
+    return ", ".join(symbols) if symbols else "該当なし"
+
+
+def _execution_bucket(candidate: BriefCandidate) -> str:
+    if candidate.execution_state in {"PULLBACK_ZONE", "FAIR"}:
+        return "即検討可"
+    if candidate.execution_state == "EXTENDED":
+        return "様子見"
+    return "見送り"
 
 
 def _render_regime(console: Console, brief: DailyBrief) -> None:

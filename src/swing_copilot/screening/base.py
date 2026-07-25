@@ -51,6 +51,8 @@ class Candidate:
     signal_names: tuple[str, ...]
     metrics: Mapping[str, float]
     rank: int
+    execution_state: str = "UNKNOWN"
+    execution_distance: float | None = None
 
 
 class RejectionStage(Enum):

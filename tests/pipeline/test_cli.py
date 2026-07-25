@@ -69,6 +69,12 @@ class TestParseArgs:
             limit=5,
         )
 
+    def test_strategy_defaults_to_default_and_accepts_named_strategy(self):
+        assert _parse_args([]).strategy_key == "default"
+        assert _parse_args(["--strategy", "minervini_stage2"]).strategy_key == (
+            "minervini_stage2"
+        )
+
 
 class TestRequiredFeatures:
     def test_full_run_requires_edgar_finnhub_fred_and_llm(self):
@@ -126,6 +132,23 @@ def fake_universe(monkeypatch):
 
 @pytest.mark.usefixtures("fake_universe")
 class TestComposeDependencies:
+    @pytest.mark.usefixtures("fake_universe")
+    def test_unknown_strategy_fails_before_secret_or_network_composition(
+        self, monkeypatch
+    ):
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+        monkeypatch.setattr(
+            daily_module,
+            "load_secrets",
+            lambda: pytest.fail("unknown strategy must fail before loading secrets"),
+        )
+
+        with pytest.raises(ConfigError, match="Unknown strategy 'missing'"):
+            _compose_dependencies(
+                DailyRunOptions(strategy_key="missing"), settings, strategies
+            )
+
     def test_missing_required_secret_raises_config_error(self, monkeypatch):
         monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
         settings = load_settings("config/settings.yaml")

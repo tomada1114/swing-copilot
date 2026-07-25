@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from swing_copilot.screening.base import ScreeningInput
+from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.screening.technical_signals import VcpBreakoutSignal
 from swing_copilot.screening.vcp import (
     SwingPoint,
@@ -132,3 +133,26 @@ def test_vcp_signal_records_pattern_metrics_and_rejects_chasing(
     assert len(hits) == 1
     assert hits[0].metrics["vcp_contraction_count"] == 2.0
     assert hits[0].metrics["vcp_depth_2"] == 0.13
+
+
+def test_vcp_pipeline_classifies_a_non_hit_without_an_exception(
+    settings: Settings,
+) -> None:
+    bars = make_bars("VCP", [100.0] * 60, start=pd.Timestamp("2026-01-01").date())
+    data = ScreeningInput(
+        as_of=pd.Timestamp("2026-12-31").date(),
+        universe=(),
+        fundamentals=pd.DataFrame(),
+        bars=bars,
+    )
+    strategies = {
+        "strategies": {
+            "vcp": {
+                "filters_all": [],
+                "signals_all": ["vcp_breakout"],
+                "candidate_limit": 10,
+            }
+        }
+    }
+
+    assert ScreeningPipeline(strategies, None, settings, "vcp").run(data) == []

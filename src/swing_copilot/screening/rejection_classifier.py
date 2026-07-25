@@ -229,6 +229,8 @@ def _classify_signal(
         return _classify_pullback_rsi(symbol, data, settings)
     if signal_name == "minervini_stage2":
         return _classify_minervini_stage2(symbol, data)
+    if signal_name == "vcp_breakout":
+        return _classify_vcp_breakout(symbol, data)
     # Any other configured signal key has no mirrored logic here (module
     # docstring: hardcoded to the current two signals, not generalized).
     msg = f"rejection_classifier has no mirrored logic for signal {signal_name!r}"
@@ -313,6 +315,25 @@ def _classify_minervini_stage2(symbol: str, data: ScreeningInput) -> RejectionRe
             "available_bars": available,
             "required_52_week_bars": required,
         },
+    )
+
+
+def _classify_vcp_breakout(symbol: str, data: ScreeningInput) -> RejectionRecord:
+    """Classify VCP's 50-bar volume-baseline prerequisite without crashing.
+
+    The ledger's fixed reason-code set predates VCP. Keep its established
+    generic technical code while preserving the real signal key in detail.
+    """
+    series = symbol_bars(data.bars, symbol, data.as_of)
+    available = len(series) if series is not None else 0
+    required = 50
+    if available < required:
+        return _insufficient_history(symbol, available, required)
+    return RejectionRecord(
+        symbol,
+        RejectionStage.TECHNICAL_SIGNAL,
+        RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+        {"signal": "vcp_breakout", "available_bars": available},
     )
 
 

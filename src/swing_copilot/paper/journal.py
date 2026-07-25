@@ -72,6 +72,10 @@ class PerformanceSummary:
     r_multiple_omitted_warning: str | None  # None if r_multiple_omitted_count == 0
     by_exit_reason: tuple[PerformanceBreakdownRow, ...]
     by_strategy: tuple[PerformanceBreakdownRow, ...]
+    avg_mae_usd: float | None = None
+    avg_mfe_usd: float | None = None
+    excursion_omitted_count: int = 0
+    excursion_notes: tuple[str, ...] = ()
 
 
 class PaperJournal:
@@ -269,20 +273,68 @@ class PaperJournal:
         earliest_entry = min(position.entry_date for position in positions)
 
         avg_r_multiple, omitted_count, warning = self._r_multiple_stats(positions, pnls)
+        avg_mae, avg_mfe, excursion_omitted = self._excursion_stats(positions, as_of)
+        expectancy = sum(pnls) / trade_count
 
         return PerformanceSummary(
             closed_trade_count=trade_count,
             total_pnl_usd=sum(pnls),
             win_rate=self._win_rate(pnls),
             spy_return_pct=self._spy_return_pct(market_store, earliest_entry, as_of),
-            expectancy_usd=sum(pnls) / trade_count,
+            expectancy_usd=expectancy,
             profit_factor=self._profit_factor(pnls),
             avg_r_multiple=avg_r_multiple,
             r_multiple_omitted_count=omitted_count,
             r_multiple_omitted_warning=warning,
             by_exit_reason=self._breakdown_by_exit_reason(positions, pnls),
             by_strategy=self._breakdown_by_strategy(rows, pnls),
+            avg_mae_usd=avg_mae,
+            avg_mfe_usd=avg_mfe,
+            excursion_omitted_count=excursion_omitted,
+            excursion_notes=self._excursion_notes(avg_mae, avg_mfe, expectancy),
         )
+
+    def _excursion_stats(
+        self, positions: list[Position], as_of: date
+    ) -> tuple[float | None, float | None, int]:
+        records = self._state_store.get_position_excursions(
+            [position.position_id for position in positions], as_of
+        )
+        mae_values: list[float] = []
+        mfe_values: list[float] = []
+        for position in positions:
+            record = records.get(position.position_id)
+            if (
+                record is not None
+                and record.mae_per_share is not None
+                and record.mfe_per_share is not None
+            ):
+                mae_values.append(record.mae_per_share * position.shares)
+                mfe_values.append(record.mfe_per_share * position.shares)
+        computed = len(mae_values)
+        return (
+            sum(mae_values) / computed if computed else None,
+            sum(mfe_values) / computed if computed else None,
+            len(positions) - computed,
+        )
+
+    @staticmethod
+    def _excursion_notes(
+        avg_mae: float | None, avg_mfe: float | None, expectancy: float
+    ) -> tuple[str, ...]:
+        notes: list[str] = []
+        comparison = abs(expectancy)
+        if avg_mfe is not None and avg_mfe > comparison:
+            notes.append(
+                "平均MFEが平均実現損益に対して大きいため、"
+                "利確が早すぎる可能性があります"
+            )
+        if avg_mae is not None and abs(avg_mae) > comparison:
+            notes.append(
+                "平均MAEが平均実現損益に対して大きいため、"
+                "ストップが緩い/エントリーが早い可能性があります"
+            )
+        return tuple(notes)
 
     @staticmethod
     def _position_pnl(position: Position) -> float:

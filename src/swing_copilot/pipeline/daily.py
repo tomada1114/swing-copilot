@@ -53,6 +53,7 @@ from swing_copilot.models import (
     RunStatus,
     StepStatus,
 )
+from swing_copilot.paper.excursions import update_position_excursions
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.earnings import collect_earnings_calendar
 from swing_copilot.pipeline.postmortem import run_postmortem_step
@@ -526,6 +527,7 @@ def _run_step_risk(
     str | None,
 ]:
     portfolio = deps.state_store.get_open_positions(is_paper=True)
+    excursions = update_position_excursions(deps.state_store, deps.market_store, as_of)
     closed = deps.state_store.get_closed_positions(is_paper=True, as_of=as_of)
     circuit_config = deps.settings.risk
     circuit_breaker = evaluate_circuit_breaker(
@@ -588,12 +590,15 @@ def _run_step_risk(
         if base_heat.status == "calculated" and assessments
         else base_heat
     )
+    notices = [earnings.notice] if earnings.notice else []
+    if excursions.missing_symbols:
+        notices.append("MAE_MFE_MISSING_BAR: " + ", ".join(excursions.missing_symbols))
     return (
         _StepOutcome(True),
         assessments,
         final_heat,
         circuit_breaker,
-        earnings.notice,
+        "; ".join(notices) if notices else None,
     )
 
 

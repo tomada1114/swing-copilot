@@ -282,6 +282,10 @@ def _render_performance(console: Console, summary: PerformanceSummary) -> None:
     console.print(f"Expectancy: {_fmt_money(summary.expectancy_usd)}")
     console.print(f"Profit factor: {_fmt_score(summary.profit_factor)}")
     console.print(f"Avg R-multiple: {_fmt_score(summary.avg_r_multiple)}")
+    console.print(f"Avg MAE: {_fmt_money(summary.avg_mae_usd)}")
+    console.print(f"Avg MFE: {_fmt_money(summary.avg_mfe_usd)}")
+    for note in summary.excursion_notes:
+        console.print(f"[yellow]{note}[/yellow]")
     if summary.r_multiple_omitted_warning:
         console.print(f"[yellow]{summary.r_multiple_omitted_warning}[/yellow]")
     console.print(f"SPY buy-and-hold: {_fmt_percent_points(summary.spy_return_pct)}")

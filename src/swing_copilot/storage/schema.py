@@ -134,6 +134,18 @@ INIT_SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS position_excursions (
+        position_id    UUID NOT NULL,
+        as_of_date     DATE NOT NULL,
+        mae_per_share  DOUBLE,
+        mfe_per_share  DOUBLE,
+        data_quality   VARCHAR NOT NULL
+            CHECK(data_quality IN ('OK','MISSING_BAR')),
+        created_at     TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (position_id, as_of_date)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS earnings_calendar (
         symbol          VARCHAR PRIMARY KEY,
         earnings_date   DATE NOT NULL,

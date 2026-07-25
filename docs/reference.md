@@ -22,3 +22,17 @@ Finnhubキー未設定時はガード全体を`NO_EARNINGS_DATA`として無効�
 市場データ収集とレポート生成は止めない。空の履歴は
 `TRADING_ALLOWED (EMPTY_STATE)`、欠損決済時刻・損益は安全側の
 `HALTED (PARTIAL)`となる。
+
+## MAE/MFE
+
+`paper/excursions.py`の`update_position_excursions()`は、オープン中および
+当日クローズしたペーパーポジションを対象に、`entry_date <= date <= as_of`の
+日足高安だけから1株あたりドル幅を算出する。MAEは`min(0, low-entry)`、
+MFEは`max(0, high-entry)`へclampし、`position_id + as_of_date`で
+correction-upsertする。当日バー欠損は0扱いせず、過去の極値を保ったまま
+`MISSING_BAR`を保存する。
+
+`PaperJournal.summarize_performance()`はクローズ済み取引だけを株数換算し、
+`avg_mae_usd`と`avg_mfe_usd`を返す。平均excursionの絶対額が平均実現損益の
+絶対額より大きいときだけ、利確時期またはストップ/エントリーに関する
+可能性表現の注記を返す。

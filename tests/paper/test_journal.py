@@ -17,6 +17,7 @@ from swing_copilot.paper.journal import (
 )
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.paper_records import PositionExcursionRecord
 from swing_copilot.storage.state_store import StateStore
 
 
@@ -323,6 +324,39 @@ class TestSummarizePerformance:
         assert result.r_multiple_omitted_warning is None
         assert result.by_exit_reason == ()
         assert result.by_strategy == ()
+        assert result.avg_mae_usd is None
+        assert result.avg_mfe_usd is None
+        assert result.excursion_notes == ()
+
+    def test_averages_closed_trade_excursions_and_adds_possibility_notes(
+        self, journal, state_store, market_store
+    ):
+        position = _open_position(
+            entry_price=100.0, shares=10, entry_date=date(2026, 7, 1)
+        )
+        state_store.upsert_position(position)
+        _close(journal, position, date(2026, 7, 10), 110.0, "target")
+        state_store.upsert_position_excursions(
+            [
+                PositionExcursionRecord(
+                    position.position_id,
+                    date(2026, 7, 10),
+                    -20.0,
+                    30.0,
+                    "OK",
+                )
+            ]
+        )
+
+        result = journal.summarize_performance(market_store, date(2026, 7, 20))
+
+        assert result.avg_mae_usd == pytest.approx(-200.0)
+        assert result.avg_mfe_usd == pytest.approx(300.0)
+        assert any("利確が早すぎる可能性" in note for note in result.excursion_notes)
+        assert any(
+            "ストップが緩い/エントリーが早い可能性" in note
+            for note in result.excursion_notes
+        )
 
     def test_computes_exact_pnl_and_win_rate_over_closed_trades(
         self, journal, state_store, market_store

@@ -964,7 +964,7 @@ class PaperJournal:
     ) -> "PerformanceSummary":
         """
         クローズ済みペーパートレードの集計P&L・勝率・期待値・profit_factor・
-        R-multiple・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
+        R-multiple・平均MAE/MFE・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
         entry_date..as_of）のSPYバイ&ホールドリターンを返す（P1-06,
         backtest/engine.pyのbenchmarkと同じ考え方を実トレードへ適用）。
         クローズ済み0件のときは全てのレート/比率フィールドがNone（例外は
@@ -1123,7 +1123,7 @@ uv run copilot-history performance [--db PATH]
 | `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
 | `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
 | `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
-| `performance` | P1-06で拡張された`PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/r_multiple_omitted警告/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
+| `performance` | `PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/平均MAE・MFE/可能性注記/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
@@ -1311,6 +1311,16 @@ CREATE TABLE IF NOT EXISTS positions (
     created_at    TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS position_excursions (
+    position_id    UUID NOT NULL,
+    as_of_date     DATE NOT NULL,
+    mae_per_share  DOUBLE,
+    mfe_per_share  DOUBLE,
+    data_quality   VARCHAR NOT NULL CHECK(data_quality IN ('OK','MISSING_BAR')),
+    created_at     TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (position_id, as_of_date)
+);
+
 CREATE TABLE IF NOT EXISTS earnings_calendar (
     symbol          VARCHAR PRIMARY KEY,
     earnings_date   DATE NOT NULL,
@@ -1325,6 +1335,15 @@ P4-19の`close_at`も冪等な`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追�
 新規決済は指定されたtimezone-aware時刻を保存し、省略時は後方互換のため
 `close_date`当日16:00 ETを保存する。移行前の既存決済は時刻を推測して埋めず
 NULLのまま残し、サーキットブレーカーが`PARTIAL`として安全側に扱う。
+
+P4-20の`position_excursions`は日次パイプラインのrisk stepで更新する。
+各runは`date <= as_of`のバーだけを読み、MAEを`min(0, low-entry)`、MFEを
+`max(0, high-entry)`へclampした1株あたりドル幅として保存する。同日再実行は
+correction-upsert、複数ポジションの書き込みは1トランザクションである。
+当日バー欠損は既存の累積極値を維持して`MISSING_BAR`を記録し、他銘柄を継続する。
+クローズ当日は集計対象に含める。performanceではクローズ済みだけを株数換算して
+平均USD値を求め、平均excursionの絶対額が平均実現損益の絶対額を上回る場合に限り、
+利確時期またはストップ/エントリーに関する「可能性」注記を表示する。
 
 ```sql
 CREATE TABLE IF NOT EXISTS trades_journal (

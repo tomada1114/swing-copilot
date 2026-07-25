@@ -429,6 +429,20 @@ class StateStore:
         """
         paper_records.record_trade_decision(self._database, record)
 
+    def upsert_position_excursions(
+        self, records: list[paper_records.PositionExcursionRecord]
+    ) -> None:
+        """Atomically correction-upsert daily position excursion snapshots."""
+        paper_records.upsert_position_excursions(self._database, records)
+
+    def get_position_excursions(
+        self, position_ids: list[UUID], as_of: date
+    ) -> dict[UUID, paper_records.PositionExcursionRecord]:
+        """Return latest point-in-time excursion snapshots for positions."""
+        return paper_records.get_position_excursions(
+            self._database, position_ids, as_of
+        )
+
     def get_decision_history(
         self, symbol: str, strategy_key: str, before_date: date, limit: int
     ) -> list[paper_records.DecisionHistoryEntry]:

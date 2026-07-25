@@ -181,6 +181,24 @@ class TestValidateArgs:
         )
         _validate_args(args, self._strategies())
 
+    @pytest.mark.parametrize("limit", ["0", "-1"])
+    def test_non_positive_limit_raises(self, limit):
+        args = _parse_args(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+                "--limit",
+                limit,
+            ]
+        )
+
+        with pytest.raises(BacktestCliError, match="1以上"):
+            _validate_args(args, self._strategies())
+
 
 class TestSelectSymbols:
     def _universe(self) -> tuple[UniverseMember, ...]:
@@ -199,9 +217,6 @@ class TestSelectSymbols:
 
     def test_limit_truncates(self):
         assert _select_symbols(self._universe(), 2) == ["AAA", "BBB"]
-
-    def test_limit_zero_returns_empty(self):
-        assert _select_symbols(self._universe(), 0) == []
 
 
 class TestOutputPath:
@@ -296,7 +311,7 @@ class TestAtomicWrite:
             _atomic_write(path, "new content")
 
         assert path.read_text(encoding="utf-8") == "original"
-        assert not path.with_name(".report.md.tmp").exists()
+        assert list(tmp_path.glob(".report.md.*.tmp")) == []
 
 
 class TestRenderTerminal:

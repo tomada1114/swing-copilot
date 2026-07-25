@@ -115,7 +115,7 @@ def calculate_portfolio_heat(
             "not_calculable", None, reason="account_equity is not set or positive"
         )
     total_risk = sum(
-        (position.entry_price - position.stop_price) * position.shares
+        max(0.0, position.entry_price - position.stop_price) * position.shares
         for position in positions
         if position.stop_price is not None
     )
@@ -341,7 +341,7 @@ class RiskChecker:
         ):
             return None
         return (
-            (assessment.entry_price - assessment.stop_price)
+            max(0.0, assessment.entry_price - assessment.stop_price)
             * assessment.max_shares
             / account_equity
             * 100

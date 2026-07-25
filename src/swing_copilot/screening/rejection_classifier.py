@@ -7,17 +7,14 @@ independently recomputes ranking metrics from raw bars rather than reusing
 signal internals (`docs/04_detailed_design.md` 2.1 #4). This keeps rejection
 detail available even for symbols no configured signal ever touches.
 
-This module is deliberately hardcoded to today's two Filters
-(`profitable_positive_fcf_equity`, `volume_min`) and two Signals
-(`trend_sma`, `pullback_rsi`) — exactly the strategies the closed
-`RejectionReasonCode` enum's members imply (Issue #11, P1-02). It does not
-generalize to arbitrary future Filters/Signals; extending the enum or adding
-a new Filter/Signal to `strategies.yaml` requires extending this classifier
-too (out of scope for this issue's "Not in scope" section).
+This module deliberately mirrors the currently registered strategy building
+blocks rather than generalizing arbitrary future Filters/Signals. Adding a
+new configured component requires extending this classifier too.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING
 
@@ -31,8 +28,6 @@ from swing_copilot.screening.base import (
 from swing_copilot.screening.indicators import sma, symbol_bars, wilder_rsi
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from swing_copilot.config import Settings
     from swing_copilot.screening.base import ScreeningInput, SignalHit
 
@@ -40,6 +35,16 @@ if TYPE_CHECKING:
 # is not settings-driven; duplicated here rather than imported across the
 # module boundary, matching this module's "mirror, don't reuse" contract.
 _PULLBACK_SMA_WINDOW = 50
+_RANKING_SMA_LONG_WINDOW = 200
+
+
+@dataclass(frozen=True, slots=True)
+class RejectionPlan:
+    """Configured component order and already-computed signal hits."""
+
+    filter_order: tuple[str, ...]
+    signal_order: tuple[str, ...]
+    hits_by_signal: tuple[tuple[SignalHit, ...], ...]
 
 
 def classify_rejections(
@@ -47,8 +52,7 @@ def classify_rejections(
     settings: Settings,
     *,
     candidate_symbols: set[str],
-    signal_order: Sequence[str],
-    hits_by_signal: Sequence[list[SignalHit]],
+    plan: RejectionPlan,
 ) -> list[RejectionRecord]:
     """Classify every universe symbol not in `candidate_symbols`.
 
@@ -57,14 +61,10 @@ def classify_rejections(
         settings: Loaded application settings (same sub-configs each mirrored
             Filter/Signal reads).
         candidate_symbols: Symbols that passed every configured Filter and
-            every configured Signal, *before* ranking/candidate_limit
-            truncation. Symbols excluded from the final candidate list only
-            by that later truncation (or, defensively, by a NaN ranking
-            metric) are intentionally omitted here too: none of the closed
-            enum's reason codes describes "ranked out", so they land in
-            neither `candidates` nor `rejections` for this run.
-        signal_order: Configured signal keys, in `strategies.yaml` order.
-        hits_by_signal: Each signal's hits, same order as `signal_order`
+            every configured Signal and have valid ranking metrics, before
+            candidate_limit truncation. Symbols excluded only by that later
+            truncation are intentionally omitted here.
+        plan: Configured filter/signal keys and each signal's hits
             (`ScreeningPipeline` already computes this once per run).
 
     Returns:
@@ -74,12 +74,18 @@ def classify_rejections(
         there is nothing this classifier's fixed buckets can meaningfully
         explain).
     """
-    if not signal_order:
+    if not plan.signal_order:
         return []
 
-    hit_sets = [{hit.symbol for hit in hits} for hits in hits_by_signal]
+    hit_sets = [{hit.symbol for hit in hits} for hits in plan.hits_by_signal]
     return [
-        _classify_symbol(member.symbol, data, settings, signal_order, hit_sets)
+        _classify_symbol(
+            member.symbol,
+            data,
+            settings,
+            plan,
+            hit_sets,
+        )
         for member in data.universe
         if member.symbol not in candidate_symbols
     ]
@@ -89,31 +95,44 @@ def _classify_symbol(
     symbol: str,
     data: ScreeningInput,
     settings: Settings,
-    signal_order: Sequence[str],
+    plan: RejectionPlan,
     hit_sets: list[set[str]],
 ) -> RejectionRecord:
-    fundamentals_result = _classify_fundamentals(symbol, data, settings)
-    if fundamentals_result is not None:
-        return fundamentals_result
+    for filter_name in plan.filter_order:
+        filter_result = _classify_filter(symbol, data, settings, filter_name)
+        if filter_result is not None:
+            return filter_result
 
-    liquidity_result = _classify_liquidity(symbol, data, settings)
-    if liquidity_result is not None:
-        return liquidity_result
-
-    for signal_name, hits in zip(signal_order, hit_sets, strict=True):
+    for signal_name, hits in zip(plan.signal_order, hit_sets, strict=True):
         if symbol not in hits:
             return _classify_signal(symbol, data, settings, signal_name)
 
-    # Unreachable by construction: the symbol passed the mirrored fundamental
-    # and liquidity checks and hit every configured signal, yet was passed
-    # in as a non-candidate. That means the classifier's buckets above are
-    # incomplete for this symbol -- a bug in this module, not a case to
-    # silently drop (see the module and `classify_rejections` docstrings for
-    # the one legitimate reason a passing symbol can still be absent: ranking
-    # truncation, which callers must exclude from `candidate_symbols` before
-    # calling this function).
-    msg = f"{symbol!r} matched no rejection rule; classifier bucket is incomplete"
-    raise AssertionError(msg)
+    series = symbol_bars(data.bars, symbol, data.as_of)
+    available = len(series) if series is not None else 0
+    return RejectionRecord(
+        symbol,
+        RejectionStage.DATA_QUALITY,
+        RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+        {
+            "available_bars": available,
+            "required_bars": _RANKING_SMA_LONG_WINDOW,
+            "ranking_metrics": "unavailable",
+        },
+    )
+
+
+def _classify_filter(
+    symbol: str,
+    data: ScreeningInput,
+    settings: Settings,
+    filter_name: str,
+) -> RejectionRecord | None:
+    if filter_name == "profitable_positive_fcf_equity":
+        return _classify_fundamentals(symbol, data, settings)
+    if filter_name == "volume_min":
+        return _classify_liquidity(symbol, data, settings)
+    msg = f"rejection_classifier has no mirrored logic for filter {filter_name!r}"
+    raise NotImplementedError(msg)
 
 
 def _classify_fundamentals(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
@@ -114,6 +115,9 @@ def _validate_args(args: argparse.Namespace, strategies: StrategiesConfig) -> No
     if args.start > args.end:
         msg = f"--start ({args.start}) は --end ({args.end}) より後ろにできません。"
         raise BacktestCliError(msg)
+    if args.limit is not None and args.limit <= 0:
+        msg = "--limit は1以上の整数で指定してください。"
+        raise BacktestCliError(msg)
     if args.strategy not in strategies.strategies:
         available = ", ".join(sorted(strategies.strategies))
         msg = f"戦略 '{args.strategy}' は見つかりません。利用可能: {available}"
@@ -152,12 +156,22 @@ def _missing_data_symbols(
 
 def _atomic_write(path: Path, content: str) -> None:
     """Write `content` via a same-directory temp file + `os.replace` (REQ-008)."""
-    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path: Path | None = None
     try:
-        tmp_path.write_text(content, encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(content)
         tmp_path.replace(path)
     except OSError:
-        tmp_path.unlink(missing_ok=True)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
         raise
 
 

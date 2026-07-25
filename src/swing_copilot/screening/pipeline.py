@@ -24,8 +24,17 @@ from swing_copilot.screening.base import (
     Candidate,
     ScreeningResult,
 )
-from swing_copilot.screening.indicators import sma, symbol_bars, wilder_atr, wilder_rsi
-from swing_copilot.screening.rejection_classifier import classify_rejections
+from swing_copilot.screening.indicators import (
+    percentile_ranks,
+    sma,
+    symbol_bars,
+    wilder_atr,
+    wilder_rsi,
+)
+from swing_copilot.screening.rejection_classifier import (
+    RejectionPlan,
+    classify_rejections,
+)
 
 if TYPE_CHECKING:
     from swing_copilot.config import ExecutionStateConfig, ScoreWeights, Settings
@@ -121,13 +130,16 @@ class ScreeningPipeline:
             priority order and its one intentional gap (candidate_limit
             truncation is not itself a rejection reason).
         """
-        candidates, candidate_symbols, hits_by_signal = self._build_candidates(data)
+        candidates, rankable_symbols, hits_by_signal = self._build_candidates(data)
         rejections = classify_rejections(
             data,
             self._settings,
-            candidate_symbols=candidate_symbols,
-            signal_order=[signal.name for signal in self._signals],
-            hits_by_signal=hits_by_signal,
+            candidate_symbols=rankable_symbols,
+            plan=RejectionPlan(
+                filter_order=tuple(filter_.name for filter_ in self._filters),
+                signal_order=tuple(signal.name for signal in self._signals),
+                hits_by_signal=tuple(tuple(hits) for hits in hits_by_signal),
+            ),
         )
         return ScreeningResult(candidates=candidates, rejections=rejections)
 
@@ -138,8 +150,7 @@ class ScreeningPipeline:
 
         Returns:
             The ranked, capped candidate list; the pre-limit set of symbols
-            that passed every Filter and every Signal (before ranking/
-            candidate_limit truncation, used by the rejection classifier);
+            with valid ranking metrics (used by the rejection classifier);
             and each signal's raw hits, in configured order.
         """
         filtered = {member.symbol for member in data.universe}
@@ -176,6 +187,7 @@ class ScreeningPipeline:
             metrics.update(ranking_metrics)
             rows.append((symbol, signal_names, metrics))
 
+        rankable_symbols = {symbol for symbol, _signal_names, _metrics in rows}
         self._score_rows(rows)
         classified_rows = [
             (
@@ -209,7 +221,7 @@ class ScreeningPipeline:
                 execution_distance,
             ) in enumerate(limited)
         ]
-        return candidates, candidate_symbols, hits_by_signal
+        return candidates, rankable_symbols, hits_by_signal
 
     def _score_rows(
         self, rows: list[tuple[str, tuple[str, ...], dict[str, float]]]
@@ -223,11 +235,11 @@ class ScreeningPipeline:
         """
         weights = self._score_weights
         rsi_threshold = self._rsi_threshold
-        ordered = sorted(range(len(rows)), key=lambda i: rows[i][2]["avg_volume"])
-        row_count = len(ordered)
-        for percentile_rank, row_index in enumerate(ordered):
-            metrics = rows[row_index][2]
-            liquidity = 0.5 if row_count == 1 else percentile_rank / (row_count - 1)
+        liquidity_by_symbol = percentile_ranks(
+            {symbol: metrics["avg_volume"] for symbol, _names, metrics in rows}
+        )
+        for symbol, _signal_names, metrics in rows:
+            liquidity = liquidity_by_symbol[symbol]
             rsi_pullback = _clamp01((rsi_threshold - metrics["rsi14"]) / rsi_threshold)
             trend_quality = _clamp01(
                 (metrics["sma50"] / metrics["sma200"] - 1)

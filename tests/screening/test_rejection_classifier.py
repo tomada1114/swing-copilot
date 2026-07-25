@@ -14,7 +14,10 @@ from swing_copilot.screening.base import (
     ScreeningInput,
     SignalHit,
 )
-from swing_copilot.screening.rejection_classifier import classify_rejections
+from swing_copilot.screening.rejection_classifier import (
+    RejectionPlan,
+    classify_rejections,
+)
 from swing_copilot.universe import UniverseMember
 from tests.screening.conftest import FundamentalsSpec, make_bars, make_fundamentals_row
 
@@ -109,8 +112,14 @@ def _classify(
         data,
         settings,
         candidate_symbols=candidate_symbols or set(),
-        signal_order=signal_order,
-        hits_by_signal=hits_by_signal if hits_by_signal is not None else [[], []],
+        plan=RejectionPlan(
+            filter_order=("profitable_positive_fcf_equity", "volume_min"),
+            signal_order=tuple(signal_order),
+            hits_by_signal=tuple(
+                tuple(hits)
+                for hits in (hits_by_signal if hits_by_signal is not None else [[], []])
+            ),
+        ),
     )
 
 
@@ -481,18 +490,18 @@ class TestBoundaryConditions:
         with pytest.raises(NotImplementedError, match="no mirrored logic"):
             _classify(data, settings, signal_order=("made_up_signal",))
 
-    def test_symbol_matching_no_rule_raises_assertion_error(self, settings):
-        # Defensive branch: a symbol that passed the mirrored fundamental and
-        # liquidity checks and (per the caller-supplied hit sets) hit every
-        # configured signal, yet was still passed in as a non-candidate --
-        # this should never happen by construction and must be loud, not
-        # silently dropped.
+    def test_symbol_missing_after_signals_is_classified_as_ranking_data_quality(
+        self, settings
+    ):
         rows = _healthy_fundamentals("XYZ")
         bars = _liquid_bars("XYZ")
         data = _input((_member("XYZ"),), rows, bars)
         hits = [SignalHit("XYZ", "trend_sma", "long", 1.0, {})]
 
-        with pytest.raises(AssertionError, match="matched no rejection rule"):
-            _classify(
-                data, settings, candidate_symbols=set(), hits_by_signal=[hits, hits]
-            )
+        [rejection] = _classify(
+            data, settings, candidate_symbols=set(), hits_by_signal=[hits, hits]
+        )
+
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.reason_code is RejectionReasonCode.DATA_INSUFFICIENT_HISTORY
+        assert rejection.detail["ranking_metrics"] == "unavailable"

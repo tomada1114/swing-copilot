@@ -234,6 +234,47 @@ def record_signal_outcomes(
             conn.execute("COMMIT")
 
 
+def replace_signal_outcomes(
+    database: Database,
+    run_id: UUID,
+    horizon_days: int,
+    outcomes: Sequence[SignalOutcomeRecord],
+) -> None:
+    """Atomically replace one historical run/horizon's complete outcome set."""
+    if any(
+        outcome.run_id != run_id or outcome.horizon_days != horizon_days
+        for outcome in outcomes
+    ):
+        msg = "all outcomes must match the replacement run_id and horizon_days"
+        raise ValueError(msg)
+
+    with database.connect() as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute(
+                "DELETE FROM signal_outcomes WHERE run_id = ? AND horizon_days = ?",
+                [str(run_id), horizon_days],
+            )
+            for outcome in outcomes:
+                conn.execute(
+                    _UPSERT_SIGNAL_OUTCOMES,
+                    [
+                        str(outcome.run_id),
+                        outcome.symbol,
+                        outcome.horizon_days,
+                        outcome.as_of,
+                        list(outcome.signal_names),
+                        outcome.forward_return_pct,
+                        outcome.classification,
+                    ],
+                )
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+
+
 def record_risk_assessments(
     database: Database, assessments: Sequence[RiskAssessment], run_id: UUID
 ) -> None:

@@ -284,3 +284,36 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
                 }
             }
         )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"risk": {"max_position_pct": 1.1}}, id="position-fraction"),
+        pytest.param({"backtest": {"commission_pct": -0.01}}, id="commission"),
+        pytest.param(
+            {
+                "backtest": {
+                    "insufficient_trade_count_threshold": 100,
+                    "preliminary_trade_count_threshold": 30,
+                }
+            },
+            id="trade-count-order",
+        ),
+        pytest.param(
+            {"postmortem": {"horizon_5d_weight": 0.8}},
+            id="postmortem-weight-sum",
+        ),
+        pytest.param(
+            {"regime": {"bull_vix_max": 35.0, "bear_vix_min": 30.0}},
+            id="vix-order",
+        ),
+        pytest.param(
+            {"technical_signals": {"vcp": {"contraction_ratio_max": 1.1}}},
+            id="vcp-ratio",
+        ),
+    ],
+)
+def test_settings_rejects_invalid_quantitative_thresholds(overrides):
+    with pytest.raises(ValidationError):
+        Settings.model_validate(overrides)

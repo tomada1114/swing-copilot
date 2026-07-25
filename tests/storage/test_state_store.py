@@ -1234,6 +1234,93 @@ class TestRecordSignalOutcomes:
             count = conn.execute("SELECT count(*) FROM signal_outcomes").fetchone()
         assert count == (0,)
 
+    def test_replacement_with_empty_sequence_removes_stale_rows(self, state_store):
+        run_id = uuid4()
+        outcome = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+        state_store.record_signal_outcomes([outcome])
+
+        state_store.replace_signal_outcomes(run_id, 5, [])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM signal_outcomes WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (0,)
+
+    def test_replacement_rejects_mixed_natural_keys_before_delete(self, state_store):
+        run_id = uuid4()
+        existing = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+        mismatched = SignalOutcomeRecord(
+            run_id=uuid4(),
+            symbol="MSFT",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.0,
+            classification="TRUE_POSITIVE",
+        )
+        state_store.record_signal_outcomes([existing])
+
+        with pytest.raises(ValueError, match="must match"):
+            state_store.replace_signal_outcomes(run_id, 5, [mismatched])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM signal_outcomes WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (1,)
+
+    def test_replacement_rolls_back_delete_when_insert_fails(self, state_store):
+        run_id = uuid4()
+        existing = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="AAPL",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=1.5,
+            classification="TRUE_POSITIVE",
+        )
+        invalid = SignalOutcomeRecord(
+            run_id=run_id,
+            symbol="MSFT",
+            horizon_days=5,
+            as_of=date(2026, 7, 24),
+            signal_names=("trend_sma",),
+            forward_return_pct=-1.0,
+            classification="NOT_A_CLASSIFICATION",
+        )
+        state_store.record_signal_outcomes([existing])
+
+        with pytest.raises(ConstraintException):
+            state_store.replace_signal_outcomes(run_id, 5, [invalid])
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, classification FROM signal_outcomes "
+                "WHERE run_id = ? AND horizon_days = 5",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("AAPL", "TRUE_POSITIVE")]
+
     def test_rerun_with_corrected_values_updates_the_existing_row(self, state_store):
         run_id = uuid4()
         first = SignalOutcomeRecord(

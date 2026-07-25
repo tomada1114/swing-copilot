@@ -619,6 +619,17 @@ class StateStore:
         """
         audit_records.record_signal_outcomes(self._database, outcomes)
 
+    def replace_signal_outcomes(
+        self,
+        run_id: UUID,
+        horizon_days: int,
+        outcomes: Sequence[SignalOutcomeRecord],
+    ) -> None:
+        """Replace one historical run/horizon's complete outcome set atomically."""
+        audit_records.replace_signal_outcomes(
+            self._database, run_id, horizon_days, outcomes
+        )
+
     def record_llm_call(self, call: LLMCallRecord) -> None:
         """Append one LLM call's audit record.
 

@@ -5,7 +5,25 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from swing_copilot.screening.indicators import sma, wilder_atr, wilder_rsi
+from swing_copilot.screening.indicators import (
+    percentile_ranks,
+    sma,
+    wilder_atr,
+    wilder_rsi,
+)
+
+
+class TestPercentileRanks:
+    def test_equal_values_share_average_rank(self):
+        assert percentile_ranks({"LOW": 1.0, "A": 2.0, "B": 2.0}) == {
+            "LOW": 0.0,
+            "A": 0.75,
+            "B": 0.75,
+        }
+
+    def test_empty_and_single_populations(self):
+        assert percentile_ranks({}) == {}
+        assert percentile_ranks({"ONLY": 10.0}) == {"ONLY": 0.5}
 
 
 class TestSma:

@@ -612,6 +612,8 @@ class RiskChecker:
         - 同一セクター上限max_sector_pct
         - 保有中ポジションと、それまでに承認した候補のstopリスク合計が
           max_portfolio_heat_pct（既定6.0%、単位はpercentage points）を超えないこと
+          （トレーリングstopがentryを上回ったpositionの残存下方リスクは0とし、
+          他positionの正のリスクを相殺する負値にはしない）
         - 銘柄間相関チェック（FR-06、ブロックしない警告のみ）
         を満たすかを判定する。セクター判定に必要な銘柄→セクターのマッピングは、
         universe.pyが取得・保存するGICSセクター（config/universe_snapshot.csv、
@@ -804,7 +806,7 @@ factsの`source_ids`へ追加しない。
 
 `NewsSummary`に`catalyst_quality: Literal["high","medium","low","none"]`と`catalyst_quality_source_ids`（`SourcedFact.source_ids`と同じ非空・非空白のprovenance制約）を追加し、判定基準（high=ガイダンス上方修正/beat-and-raise/FDA承認/初回の決算加速/大型契約、medium=M&A/製品ローンチ/提携/ショートスクイーズ、low=アナリスト格上げのみ/テーマのみ）を`summarize.py`の`_SYSTEM_PROMPT`に明記した。`_validate_source_ids()`（`llm/client.py`）を拡張し`catalyst_quality_source_ids`も`facts`と同じ「未知のsource_idを引用したらSchemaValidationErrorでfail-closed」規約に従わせた（fresh/cache双方の呼び出し元は同一関数のため片方だけ直す必要はない）。`catalyst_quality`系フィールドが新規必須のため、既存キャッシュ済み`llm_calls`行が`model_validate_json`で未捕捉の`pydantic.ValidationError`に到達しないよう`llm.schema_version`を1→2へ引き上げた（旧キャッシュ行は単純にキャッシュミスになる、安全側）。
 
-`risk_flags`必須反映語（dilution/secondary offering/investigation/lawsuit/resignation/downgrade）と行動パターン言及規則（「〜の可能性」は実績値と計画値の具体的数値差分が同一文/隣接factに存在する場合のみ許可）も`_SYSTEM_PROMPT`へ追加した。後者はCON-03側でも`llm/safety.py::check_no_unevidenced_behavioral_claims()`として実装し、`check_structured_output()`へ`check_no_imperative_language()`と並べて配線した——固定の心理状態語彙（「動揺」「パニック」「狼狽」「投資家心理」等、非網羅的と明記）が本文に現れ、かつ同一テキスト内に「可能性」等のhedge語と数値差分の兆候（`\d+%`または「計画」「予想」「実績」等）が共起しない場合にfail-closed（`ForbiddenLanguageError`、fresh/cache双方で未キャッシュ・リトライなしの既存fail-soft規約に自動的に従う）。
+`risk_flags`必須反映語（dilution/secondary offering/investigation/lawsuit/resignation/downgrade）と行動パターン言及規則（「〜の可能性」は実績値と計画値の具体的数値差分が同一文/隣接factに存在する場合のみ許可）も`_SYSTEM_PROMPT`へ追加した。後者はCON-03側でも`llm/safety.py::check_no_unevidenced_behavioral_claims()`として実装し、`check_structured_output()`へ`check_no_imperative_language()`と並べて配線した——固定の心理状態語彙（「動揺」「パニック」「狼狽」「投資家心理」等、非網羅的と明記）が本文に現れ、かつ同一テキスト内に「可能性」等のhedge語、具体的な割合（`\d+%`）、実績語（「実績」/`actual`）、計画語（「計画」「予想」/`planned`/`forecast`）の全てが共起しない場合にfail-closed（`ForbiddenLanguageError`、fresh/cache双方で未キャッシュ・リトライなしの既存fail-soft規約に自動的に従う）。
 
 **near-stale警告（REQ-030/040）の乖離記録**: `docs/goal-prompts/swing-copilot-reliability-p2/decisions.md`のフォールバック条項に従い、実装をメカニズムのみに限定した。本リポジトリにはキャッシュTTL（有効期限）概念がそもそも存在しない（`llm/`・`config.py`全体を検索し`ttl`/`expir`/`stale`に一致なし）ため、`llm.near_stale_threshold_days`（既定2日）をconfig追加し、`llm/decision_context.py::is_cache_near_stale(cached_at, as_of, ttl_days, threshold_days)`を純関数として実装・テストしたが、`ttl_days`は呼び出し元が明示的に渡す引数のままとし、`pipeline/daily.py`やreport層への配線は行っていない（実TTL値が存在しないため配線自体が架空の値の捏造になる）。将来キャッシュTTLが導入された時点でこの関数をレポート層へ接続する。
 
@@ -894,10 +896,11 @@ def run_backtest(
 - 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。
 - トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。60営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
+- `start`以前のバーはスクリーニング指標のウォームアップ（最大325取引バー）にのみ使い、注文生成と約定日は`start..end`の取引日に限定する。
 - 現在のS&P500構成銘柄しかない期間は、その事実と生存者バイアスを結果へ必ず表示する。
-- 最終日後に残るpositionは最終日価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。SPY benchmarkは整数株購入後の残cashをcurveへ含める。
+- 最終日後に残るpositionは最終日以前の最新観測価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。途中の欠損日も最新終値を繰り越して時価評価する。SPY benchmarkも同じ欠損規約とし、整数株購入後の残cashをcurveへ含める。
 
-**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
+**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。`Trade.pnl`は約定価格へ織り込み済みの両側slippageに加え、`commission_usd`へ記録したentry/exit両側commissionを控除した純損益とし、全トレードの合計が清算後cashの増減と一致する。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
 
 **P2-08実装時追記（roadmap §5 P2-08）**: バックテストを日常道具として実行するCLIエントリポイント`copilot-backtest`（`backtest/cli.py`、`pyproject.toml`の`[project.scripts]`で`copilot-backtest = "swing_copilot.backtest.cli:main"`として登録）を追加した。
 
@@ -1098,7 +1101,7 @@ def main(argv: list[str] | None = None) -> None:
 
 `run_daily()`の`_run_soft_steps()`に、LLM(6)と通知(7)の間の新しいfail-softステップ`"postmortem"`として追加した（既存の番号付き`5_text`/`6_llm`/`7_notify`/`8_output`はリネームしていない——複数の既存テストが厳密な文字列一致でアサートしており、無関係なリネームはスコープ外）。時間予算超過時は他のfail-softステップと同じ`_TIME_BUDGET_STEP_OUTCOME`でスキップされる。
 
-**目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
+**目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。同一`(run_id, horizon_days)`の結果はDELETEと再INSERTを1トランザクションで行う完全置換とし、訂正後に価格欠損となった候補の古い結果も削除する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
 
 **分類境界**（`classify_forward_return()`）: Issue #20の文言（「`|return| < 0.5%`はNEUTRAL」「`>0.5%`はTRUE_POSITIVE」）は厳密に読むと`+0.5%`・`-0.5%`ちょうどの帰属先が未定義になる。両方ともNEUTRAL側（`<=`）に倒すことで新しい閾値を発明せずギャップを解消した。`-2%`ちょうどはFALSE_POSITIVE_MILD（`-2%超の下落`のみSEVERE、閉区間として読む）。閾値は`settings.postmortem`（`neutral_threshold_pct=0.5`, `severe_threshold_pct=2.0`、いずれも要検証）。
 
@@ -1395,13 +1398,13 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 
 同一プロセス内で`(model, prompt_hash, schema_version)`に一致する最新の`status='success'`を先に検索し、存在すればAPIを呼ばず再利用する。失敗・予算超過も監査イベントとして複数回記録できるよう、テーブルにはこの3列のUNIQUE制約を置かない。P1〜P2は単一プロセス実行のため、分散ロックは導入しない。
 
-`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——`ScreeningPipeline._ranking_metrics()`が生の日足からランキング指標を再計算するのと同じ設計判断（本節冒頭2.1 #4）で、各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は決定的な優先順位（データ不足 → ファンダフィルタ → 流動性 → `strategies.yaml`のシグナル順）で行われ、1銘柄1段階につき`reason_code`は必ず1つに定まる。`reason_code`列挙は現行の`profitable_positive_fcf_equity`・`volume_min`・`trend_sma`・`pullback_rsi`の4つのFilter/Signalに固定でひも付いており、将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
+`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は`strategies.yaml`で実際に設定されたFilter順、Signal順、ランキング用データ品質の順で行われ、ランキング指標が欠損した銘柄も`DATA_INSUFFICIENT_HISTORY`として候補・落選のどちらにも出ない状態を避ける。candidate_limitだけで順位落ちした銘柄は落選理由を付けない。将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
 
 **Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
 
 `report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
 
-`signal_outcomes`（P2-11、roadmap §5 P2-11）は詳細を3.21a節に譲る。主キー`(run_id, symbol, horizon_days)`の`run_id`は**評価対象の過去run**のIDであり、今日ポストモーテムを実行しているrunのIDではない。書き込みは`storage/audit_records.py::record_signal_outcomes()`が担い、`ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE`で再計算（価格データ訂正後の再実行等）を補正upsertとして扱う（`MarketStore.upsert_fundamentals()`と同じ`ON CONFLICT DO UPDATE`パターン、`ON CONFLICT DO NOTHING`は使わない）。
+`signal_outcomes`（P2-11、roadmap §5 P2-11）は詳細を3.21a節に譲る。主キー`(run_id, symbol, horizon_days)`の`run_id`は**評価対象の過去run**のIDであり、今日ポストモーテムを実行しているrunのIDではない。通常の補正upsertは`storage/audit_records.py::record_signal_outcomes()`が`ON CONFLICT DO UPDATE`で扱う。ポストモーテム再計算は`replace_signal_outcomes()`が同一`(run_id, horizon_days)`の既存集合をDELETE後に再INSERTする完全置換を1トランザクションで行い、訂正で消えた結果を残さない（`ON CONFLICT DO NOTHING`は使わない）。
 
 DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しないようにする。空の型付きrelationを先に作る、または最初の書き込み後にビューを作成する実装とし、初期状態のテストを必須とする。
 
@@ -1572,6 +1575,8 @@ strategies:
 P5-23では、ランキング後の各候補に`d = (close - SMA50) / ATR14`による実行状態を付す。`d < -3`は`DAMAGED`、`[-3, 0)`は`PULLBACK_ZONE`、`[0, 2)`は`FAIR`、`[2, 4)`は`EXTENDED`、`d >= 4`は`OVEREXTENDED`である（閾値は`technical_signals.execution`の要検証設定）。`PULLBACK_ZONE`/`FAIR`は「即検討可」、`EXTENDED`は「様子見」、`DAMAGED`/`OVEREXTENDED`および指標不足の`UNKNOWN`は「見送り」とする。状態はスコアより優先し、見送りを必ず候補リスト末尾へ降格するが、候補から削除しない。terminal/Markdownは3バケット見出しと状態・d値を併記する。
 
 P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略である。終値の局所高安をATR14の2.0倍以上の反転だけに絞るジグザグから高値→安値の収縮列を作り、初回深さ・逓減率・最低2回・15〜325営業日を検証する。最終収縮高値をピボットとし、手前10本平均出来高/50日平均でdry-upを表す。closeがピボットを5%より大きく超える場合は追いかけとして候補にしない。収縮数・各深さ・dry-up比・ピボットはmetricsを通じて根拠列に表示する。全閾値は`technical_signals.vcp`の要検証設定である。
+
+**既知の設計ギャップ**: `validate_contractions()`は小型株用の初回深さ上限（既定50%）を受け取れるが、現行のpoint-in-timeデータモデルには時価総額がなく、`VcpBreakoutSignal`は`is_small_cap=False`でのみ呼び出す。そのため本番経路は通常上限（既定35%）を適用する。将来対応では取得時点の株価と発行済株式数をas-of境界つきで保存するか、別のpoint-in-time分類ソースを設計してから配線する。現在値による過去分類や固定銘柄リストで代用してはならない。
 
 ---
 

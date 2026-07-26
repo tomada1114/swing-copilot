@@ -66,13 +66,21 @@ class RejectionStage(Enum):
 class RejectionReasonCode(Enum):
     """Closed enum of rejection reasons (P1-02, roadmap §5).
 
-    Matches Issue #11's enum plus one deliberate addition:
-    `FILTER_LOW_LIQUIDITY`. The issue's enum has no code for the repo's
-    actual `volume_min` liquidity filter (`technical_signals.py::
-    MinAverageVolumeFilter`, registered as a `Filter`/stage 1 per `Filter`'s
-    own docstring). Repo reality wins over the spec document (AGENTS.md
-    conflict-resolution rule): recording this divergence here rather than
-    silently dropping real liquidity rejections.
+    Matches Issue #11's enum plus two deliberate additions:
+
+    - `FILTER_LOW_LIQUIDITY`. The issue's enum has no code for the repo's
+      actual `volume_min` liquidity filter (`technical_signals.py::
+      MinAverageVolumeFilter`, registered as a `Filter`/stage 1 per `Filter`'s
+      own docstring). Repo reality wins over the spec document (AGENTS.md
+      conflict-resolution rule): recording this divergence here rather than
+      silently dropping real liquidity rejections.
+    - `DATA_MISSING_NET_INCOME` (P6-25). A `NaN` `net_income` on a quarter
+      required by `fundamental_filters.min_profitable_quarters` is a data
+      gap (the filing lacked/failed to normalize that concept), not a
+      genuinely negative result; conflating the two under
+      `FILTER_NEGATIVE_NET_INCOME` misreports a real data-quality problem as
+      a business rejection. Stage is `data_quality`, matching
+      `DATA_INSUFFICIENT_HISTORY`'s convention.
     """
 
     FILTER_NEGATIVE_NET_INCOME = "FILTER_NEGATIVE_NET_INCOME"
@@ -82,6 +90,9 @@ class RejectionReasonCode(Enum):
     SIGNAL_TREND_NOT_MET = "SIGNAL_TREND_NOT_MET"
     SIGNAL_RSI_NOT_MET = "SIGNAL_RSI_NOT_MET"
     DATA_INSUFFICIENT_HISTORY = "DATA_INSUFFICIENT_HISTORY"
+    DATA_MISSING_NET_INCOME = (
+        "DATA_MISSING_NET_INCOME"  # divergence: see class docstring
+    )
 
 
 @dataclass(frozen=True, slots=True)

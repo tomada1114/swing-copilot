@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
 
 _FUNDAMENTALS_FORMS = ("10-K", "10-Q")
+_FINANCIAL_TAXONOMY_PREFIX = "us-gaap:"
 _MIN_REQUEST_INTERVAL_SECONDS = 0.1  # 10 requests/second cap
 _RETRY_DELAYS_SECONDS = (1.0, 2.0)  # 3 total attempts
 _DEFAULT_FUNDAMENTALS_LOOKBACK_DAYS = 400  # SEC filing lookback window; owned independently of pipeline/daily.py's price-history lookback
@@ -214,6 +215,16 @@ def _group_facts_by_filing(facts: list[_FactLike]) -> list[_FilingFacts]:
     and period (`accession`, `filing_date`, `period_end`) or filed under a
     form outside `_FUNDAMENTALS_FORMS` are dropped rather than raised on:
     they simply cannot contribute to a filing-level record.
+
+    `fiscal_period_end` is derived from `us-gaap` facts only. A filing's flat
+    fact list also carries `dei` (cover-page) facts such as
+    `dei:EntityCommonStockSharesOutstanding`, an `instant` fact dated weeks
+    after the quarter's actual period end (the filing date, not the fiscal
+    period). Including those in the `max(period_end)` computation lets a
+    cover-page fact silently hijack the derived period end, which then makes
+    every financial concept's exact-match lookup in `_pick_concept_value`
+    (which all use `us-gaap` concepts) fail and every metric come back `None`
+    -- even though the filing does have well-formed financial facts.
     """
     grouped: dict[str, list[_FactLike]] = defaultdict(list)
     for fact in facts:
@@ -232,7 +243,17 @@ def _group_facts_by_filing(facts: list[_FactLike]) -> list[_FilingFacts]:
         # non-`None` `filing_date`/`period_end`; re-filter here so mypy can
         # narrow the type without a `None`-can't-happen assert.
         filing_dates = [f.filing_date for f in group_facts if f.filing_date is not None]
-        period_ends = [f.period_end for f in group_facts if f.period_end is not None]
+        financial_period_ends = [
+            f.period_end
+            for f in group_facts
+            if f.period_end is not None
+            and f.concept.startswith(_FINANCIAL_TAXONOMY_PREFIX)
+        ]
+        if not financial_period_ends:
+            # No us-gaap fact in this filing at all (e.g. a filing that only
+            # ever surfaced dei cover-page facts): there is no financial
+            # period to derive, so this accession cannot contribute a record.
+            continue
         by_concept: dict[str, list[_FactLike]] = defaultdict(list)
         for fact in group_facts:
             by_concept[fact.concept.rsplit(":", 1)[-1]].append(fact)
@@ -241,7 +262,7 @@ def _group_facts_by_filing(facts: list[_FactLike]) -> list[_FilingFacts]:
                 accession_no=accession_no,
                 form=group_facts[0].form_type,
                 filed_at=_to_utc_datetime(filing_dates[0]),
-                fiscal_period_end=max(period_ends),
+                fiscal_period_end=max(financial_period_ends),
                 by_concept=by_concept,
             )
         )

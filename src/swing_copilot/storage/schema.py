@@ -86,7 +86,8 @@ INIT_SCHEMA_STATEMENTS = (
         stage        VARCHAR NOT NULL CHECK (stage IN ('data_quality','fundamental_filter','technical_signal')),
         reason_code  VARCHAR NOT NULL CHECK (reason_code IN (
             'FILTER_NEGATIVE_NET_INCOME','FILTER_NEGATIVE_FCF','FILTER_LOW_EQUITY_RATIO',
-            'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY'
+            'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY',
+            'DATA_MISSING_NET_INCOME'
         )),
         detail       JSON NOT NULL,
         as_of        DATE NOT NULL,

@@ -503,6 +503,89 @@ class TestFundamentalsStepSkipped:
         assert result.status == RunStatus.FAILED
 
 
+class TestFundamentalsSameDaySkip:
+    def test_rerun_with_past_as_of_still_skips_same_day_refetch(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Regression for P6-25.
+
+        `has_fundamentals_fetched_on` must be checked against the injected
+        `Clock`'s wall-clock date, not `as_of`: `fetched_at` is a real fetch
+        timestamp, so a same-day rerun with a *past* `--as-of` must still
+        skip the redundant EDGAR network fetch. Before this fix, the check
+        compared `fetched_at`'s date to `as_of` directly, which never
+        matched once `as_of` was in the past, so every rerun refetched.
+        """
+        past_as_of = AS_OF - timedelta(days=5)
+
+        class TodayFixedClock:
+            def today(self):
+                return AS_OF  # "real" wall-clock today, independent of as_of
+
+            def now(self):
+                return datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC)
+
+        class CountingEdgarClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_fundamentals(self, symbol, as_of):
+                del as_of
+                self.calls += 1
+                return [
+                    FundamentalsRecord(
+                        accession_no=f"acc-{symbol}-{self.calls}",
+                        symbol=symbol,
+                        form="10-Q",
+                        fiscal_period_end=past_as_of,
+                        filed_at=datetime.combine(
+                            past_as_of, datetime.min.time(), tzinfo=UTC
+                        ),
+                        revenue=1.0,
+                        net_income=1.0,
+                        fcf=1.0,
+                        equity=1.0,
+                        assets=2.0,
+                        shares=1.0,
+                        source_url="https://www.sec.gov/example",
+                        # Stamped with "today" (SystemClock, in production),
+                        # not `past_as_of` -- matching the real EdgarClient.
+                        fetched_at=datetime.combine(
+                            AS_OF, datetime.min.time(), tzinfo=UTC
+                        ),
+                    )
+                ]
+
+            def fetch_filing_texts(self, symbol, form_types, *, as_of):
+                del symbol, form_types, as_of
+                return []
+
+        universe = (_member("AAPL"),)
+        edgar_client = CountingEdgarClient()
+        deps_with_edgar = DailyDependencies(
+            data_provider=FakeDataProvider(_bars_for(["AAPL"], past_as_of)),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=universe,
+            strategies_config=STRATEGIES_CONFIG,
+            clock=TodayFixedClock(),
+            edgar_client=edgar_client,
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        first = run_daily(
+            DailyRunOptions(as_of=past_as_of, is_dry_run=True), deps_with_edgar
+        )
+        second = run_daily(
+            DailyRunOptions(as_of=past_as_of, is_dry_run=True), deps_with_edgar
+        )
+
+        assert first.status == RunStatus.SUCCESS
+        assert second.status == RunStatus.SUCCESS
+        assert edgar_client.calls == 1
+
+
 class TestUnexpectedStepException:
     def test_unexpected_exception_is_recorded_as_a_failed_step_not_a_crash(
         self, deps, state_store

@@ -152,5 +152,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   justfile/CI/pre-commit
 - The `create-pr` skill re-checks the working tree after `just check` so
   formatting changes cannot be left uncommitted behind a green checklist
+- EDGAR fundamentals extraction no longer lets a filing's `dei` cover-page
+  fact (e.g. `EntityCommonStockSharesOutstanding`, dated weeks after the
+  actual fiscal period) hijack the derived `fiscal_period_end`, which
+  previously made every `us-gaap` financial concept's exact-match lookup
+  fail and every metric (`net_income`, `revenue`, `fcf`, `equity`, `assets`)
+  come back `null` for many real filings, starving screening of candidates
+- Screening rejection detail for a `net_income` filter failure now reports
+  the actual quarter that failed the `> 0` check (with its `fiscal_period_end`)
+  instead of always the latest quarter, which could misreport a healthy
+  latest quarter's value when an older quarter was the real offender; a
+  `NaN` (missing) `net_income` is now classified as the new
+  `DATA_MISSING_NET_INCOME` reason code (`data_quality` stage) instead of
+  being reported as a business rejection under `FILTER_NEGATIVE_NET_INCOME`
+- The daily fundamentals step's same-day-rerun skip now compares against
+  the injected `Clock`'s wall-clock date instead of `--as-of`; a past
+  `--as-of` previously never matched `fetched_at` and forced every rerun to
+  refetch every symbol's fundamentals over the network
 
 [Unreleased]: https://github.com/tomada1114/swing-copilot/commits/main

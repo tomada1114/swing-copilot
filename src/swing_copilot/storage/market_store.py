@@ -286,6 +286,11 @@ class MarketStore:
         keyed by `accession_no` is unaffected: a later day's run always
         re-fetches and upserts, regardless of what this returns.
 
+        `fetched_at` is a real fetch timestamp, not a point-in-time value --
+        callers must pass the injected `Clock`'s wall-clock date here, never
+        `as_of` (P6-25: comparing against a possibly-past `as_of` would never
+        match `fetched_at` and defeat the same-day skip entirely).
+
         Args:
             symbol: Ticker to check.
             day: Calendar day to compare against `fetched_at`'s date.

@@ -45,9 +45,17 @@ from swing_copilot.llm.decision_context import (
     format_risk_constraints,
     format_score_breakdown,
 )
-from swing_copilot.llm.filings_analysis import FilingAnalysisRequest, analyze_filing
+from swing_copilot.llm.filings_analysis import (
+    FilingAnalysisRequest,
+    FilingAnalysisResult,
+    analyze_filing,
+)
 from swing_copilot.llm.pricing import ModelPricing
-from swing_copilot.llm.summarize import NewsSummaryRequest, summarize_news
+from swing_copilot.llm.summarize import (
+    NewsSummaryRequest,
+    NewsSummaryResult,
+    summarize_news,
+)
 from swing_copilot.models import (
     DailyRunOptions,
     DailyRunResult,
@@ -120,7 +128,6 @@ if TYPE_CHECKING:
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.llm.client import AnalyzeRequest
-    from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary
     from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
@@ -185,6 +192,10 @@ class _LLMClientLike(Protocol):
 
     def analyze(self, request: AnalyzeRequest) -> BaseModel:
         """Call Claude and return schema-validated structured output."""
+        # pragma: no cover
+
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        """Return this request's most recent successful call's creation date."""
         # pragma: no cover
 
 
@@ -286,8 +297,8 @@ class _OutputContext:
     """Grouped inputs for the final local-output step."""
 
     run: _RunContext
-    news_summaries: list[NewsSummary] | None
-    filing_analyses: list[FilingAnalysis] | None
+    news_summaries: list[NewsSummaryResult] | None
+    filing_analyses: list[FilingAnalysisResult] | None
     signal_performance: tuple[SignalPerformanceRow, ...]
     notices: tuple[str, ...]
     status: RunStatus
@@ -844,6 +855,10 @@ class _CallLimitedLLMClient:
         self._calls_made += 1
         return self._inner.analyze(request)
 
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        """Pass through: a pure cache lookup, never counted against the call cap."""
+        return self._inner.get_cached_at(request)
+
     def _record_skip(self, request: AnalyzeRequest) -> None:
         prompt = f"SYSTEM:\n{request.system_prompt}\n\nUSER:\n{request.prompt}"
         detail = f"max_llm_calls_per_run cap ({self._max_calls}) reached for this run"
@@ -875,7 +890,9 @@ def _run_step_llm(
     *,
     skip: bool,
     include_decision_history: bool,
-) -> tuple[_StepOutcome, list[NewsSummary] | None, list[FilingAnalysis] | None]:
+) -> tuple[
+    _StepOutcome, list[NewsSummaryResult] | None, list[FilingAnalysisResult] | None
+]:
     llm_client = deps.llm_client
     if skip:
         return _StepOutcome(True, "skipped: --skip-llm", is_skipped=True), None, None
@@ -957,7 +974,7 @@ def _summarize_news_per_candidate(
     ctx: _RunContext,
     text_items: list[TextItem],
     include_decision_history: bool,
-) -> tuple[list[NewsSummary], list[str]]:
+) -> tuple[list[NewsSummaryResult], list[str]]:
     summaries = []
     failed_symbols = []
     risk_by_symbol = {
@@ -997,6 +1014,9 @@ def _summarize_news_per_candidate(
             market_regime=format_market_regime(
                 ctx.regime_snapshot, ctx.exposure_decision
             ),
+            as_of=ctx.run_date,
+            cache_ttl_days=deps.settings.llm.cache_ttl_days,
+            near_stale_threshold_days=deps.settings.llm.near_stale_threshold_days,
         )
         try:
             summaries.append(summarize_news(llm_client, request))
@@ -1011,7 +1031,7 @@ def _analyze_filings_per_candidate(
     ctx: _RunContext,
     text_items: list[TextItem],
     include_decision_history: bool,
-) -> tuple[list[FilingAnalysis], list[str]]:
+) -> tuple[list[FilingAnalysisResult], list[str]]:
     analyses = []
     failed_symbols = []
     risk_by_symbol = {
@@ -1051,6 +1071,9 @@ def _analyze_filings_per_candidate(
                 market_regime=format_market_regime(
                     ctx.regime_snapshot, ctx.exposure_decision
                 ),
+                as_of=ctx.run_date,
+                cache_ttl_days=deps.settings.llm.cache_ttl_days,
+                near_stale_threshold_days=deps.settings.llm.near_stale_threshold_days,
             )
             try:
                 analyses.append(analyze_filing(llm_client, request))

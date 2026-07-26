@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from datetime import date, datetime
     from uuid import UUID
 
-    from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
+    from swing_copilot.llm.filings_analysis import FilingAnalysisResult
+    from swing_copilot.llm.schemas import SourcedFact
+    from swing_copilot.llm.summarize import NewsSummaryResult
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
@@ -113,6 +115,28 @@ class BriefSource:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefFilingAnalysis:
+    """One filing's analysis with code-owned identifying metadata (P6-27).
+
+    `filing_type`/`filed_at` let the report distinguish which of a symbol's
+    (potentially several) filing analyses a fact/interpretation came from
+    -- previously only the first filing analysis per symbol was shown at
+    all. `is_near_stale` surfaces `LLMClient.get_cached_at()`'s freshness
+    check as a report warning.
+    """
+
+    filing_type: str
+    filed_at: date
+    facts: tuple[str, ...] = ()
+    interpretation: tuple[str, ...] = ()
+    red_flags: tuple[str, ...] = ()
+    yoy_changes: tuple[str, ...] = ()
+    guidance_direction: str = "not_disclosed"
+    sources: tuple[BriefSource, ...] = ()
+    is_near_stale: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class BriefLlm:
     """Compact LLM analysis for one candidate."""
 
@@ -121,6 +145,15 @@ class BriefLlm:
     facts: tuple[str, ...] = ()
     risk_flags: tuple[str, ...] = ()
     sources: tuple[BriefSource, ...] = ()
+    # P6-27: every filing analysis for this candidate (previously only the
+    # first was ever shown), each individually identified by type/filed_at.
+    filings: tuple[BriefFilingAnalysis, ...] = ()
+    # P2-12 (REQ-006/007): display-only -- never feeds ranking/judgment logic
+    # ("判断はコード、叙述はLLM"). `None` when no news summary is available.
+    catalyst_quality: str | None = None
+    catalyst_quality_sources: tuple[BriefSource, ...] = ()
+    # P6-27: whether the news summary came from a near-stale cached response.
+    is_news_near_stale: bool = False
 
 
 _CONSTRAINT_LABELS = {
@@ -277,8 +310,8 @@ class DailyBriefContext:
     universe: tuple[UniverseMember, ...]
     candidates: list[Candidate]
     risk_assessments: list[RiskAssessment]
-    news_summaries: list[NewsSummary] | None
-    filing_analyses: list[FilingAnalysis] | None
+    news_summaries: list[NewsSummaryResult] | None
+    filing_analyses: list[FilingAnalysisResult] | None
     # REQ-008: the single strategy this run screened with, used to scope
     # `state_store.get_decision_history()` per candidate -- today's `Candidate`
     # objects don't carry a per-candidate strategy_key (one run == one strategy).
@@ -593,26 +626,33 @@ def _risk_brief(
 
 def _llm_brief(
     symbol: str,
-    news_summaries: list[NewsSummary] | None,
-    filing_analyses: list[FilingAnalysis] | None,
+    news_results: list[NewsSummaryResult] | None,
+    filing_results: list[FilingAnalysisResult] | None,
     state_store: StateStore,
 ) -> BriefLlm:
-    if news_summaries is None and filing_analyses is None:
+    if news_results is None and filing_results is None:
         return BriefLlm(True, _DEGRADED_LLM_MESSAGE)
-    news = next((item for item in news_summaries or [] if item.symbol == symbol), None)
-    filing = next(
-        (item for item in filing_analyses or [] if item.symbol == symbol), None
+    news_result = next(
+        (item for item in news_results or [] if item.summary.symbol == symbol), None
     )
-    if news is None and filing is None:
+    matching_filings = [
+        item for item in filing_results or [] if item.analysis.symbol == symbol
+    ]
+    if news_result is None and not matching_filings:
         return BriefLlm(True, _NEUTRAL_LLM_MESSAGE)
-    facts = (*tuple(news.facts if news else []), *tuple(filing.facts if filing else []))
+    news = news_result.summary if news_result else None
+    filing_analyses = [item.analysis for item in matching_filings]
+    facts = (
+        *tuple(news.facts if news else []),
+        *(fact for analysis in filing_analyses for fact in analysis.facts),
+    )
     interpretations = (
         *tuple(news.interpretation if news else []),
-        *tuple(filing.interpretation if filing else []),
+        *(text for analysis in filing_analyses for text in analysis.interpretation),
     )
     flags = (
         *tuple(news.risk_flags if news else []),
-        *tuple(filing.red_flags if filing else []),
+        *(flag for analysis in filing_analyses for flag in analysis.red_flags),
     )
     return BriefLlm(
         degraded=False,
@@ -620,17 +660,48 @@ def _llm_brief(
         facts=tuple(fact.statement for fact in facts),
         risk_flags=flags,
         sources=_sources(facts, state_store),
+        filings=tuple(_filing_brief(item, state_store) for item in matching_filings),
+        catalyst_quality=news.catalyst_quality if news else None,
+        catalyst_quality_sources=(
+            _sources_for_ids(news.catalyst_quality_source_ids, state_store)
+            if news
+            else ()
+        ),
+        is_news_near_stale=news_result.is_near_stale if news_result else False,
+    )
+
+
+def _filing_brief(
+    result: FilingAnalysisResult, state_store: StateStore
+) -> BriefFilingAnalysis:
+    analysis = result.analysis
+    facts = tuple(analysis.facts)
+    return BriefFilingAnalysis(
+        filing_type=analysis.filing_type,
+        filed_at=result.filed_at,
+        facts=tuple(fact.statement for fact in facts),
+        interpretation=tuple(analysis.interpretation),
+        red_flags=tuple(analysis.red_flags),
+        yoy_changes=tuple(analysis.yoy_changes),
+        guidance_direction=analysis.guidance_direction,
+        sources=_sources(facts, state_store),
+        is_near_stale=result.is_near_stale,
     )
 
 
 def _sources(
     facts: Sequence[SourcedFact], state_store: StateStore
 ) -> tuple[BriefSource, ...]:
-    source_ids = list(
-        dict.fromkeys(source_id for fact in facts for source_id in fact.source_ids)
-    )
-    urls = state_store.get_source_urls(source_ids)
+    source_ids = [source_id for fact in facts for source_id in fact.source_ids]
+    return _sources_for_ids(source_ids, state_store)
+
+
+def _sources_for_ids(
+    source_ids: Sequence[str], state_store: StateStore
+) -> tuple[BriefSource, ...]:
+    unique_ids = list(dict.fromkeys(source_ids))
+    urls = state_store.get_source_urls(unique_ids)
     return tuple(
         BriefSource(source_id, urls.get(source_id, source_id))
-        for source_id in source_ids
+        for source_id in unique_ids
     )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -26,13 +26,26 @@ MODEL = "claude-haiku-4-5-20251001"
 
 
 class FakeLLMClient:
-    def __init__(self, responses: Sequence[BaseModel]) -> None:
+    def __init__(
+        self,
+        responses: Sequence[BaseModel],
+        cached_at: date | None = None,
+    ) -> None:
         self._responses: list[BaseModel] = list(responses)
         self.requests: list[AnalyzeRequest] = []
+        # P6-27: a single simulated `get_cached_at()` answer for every
+        # request this fake serves -- these tests only ever exercise one
+        # logical response per case, so per-request differentiation isn't
+        # needed. `None` means "no cache entry found" (never near-stale).
+        self._cached_at = cached_at
 
     def analyze(self, request: AnalyzeRequest) -> BaseModel:
         self.requests.append(request)
         return self._responses.pop(0)
+
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        del request
+        return self._cached_at
 
 
 def _news_item(
@@ -77,6 +90,9 @@ def _news_request(  # noqa: PLR0913 - focused fixture knobs mirror request field
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
     decision_context_blocks: str = "",
     market_regime: str = "",
+    as_of: date | None = None,
+    cache_ttl_days: int = 30,
+    near_stale_threshold_days: int = 2,
 ) -> NewsSummaryRequest:
     return NewsSummaryRequest(
         run_id=uuid4(),
@@ -91,6 +107,9 @@ def _news_request(  # noqa: PLR0913 - focused fixture knobs mirror request field
         decision_history=decision_history,
         decision_context_blocks=decision_context_blocks,
         market_regime=market_regime,
+        as_of=as_of,
+        cache_ttl_days=cache_ttl_days,
+        near_stale_threshold_days=near_stale_threshold_days,
     )
 
 
@@ -114,6 +133,9 @@ def _filing_request(  # noqa: PLR0913 - focused fixture knobs mirror request fie
     decision_history: tuple[DecisionHistoryEntry, ...] = (),
     decision_context_blocks: str = "",
     market_regime: str = "",
+    as_of: date | None = None,
+    cache_ttl_days: int = 30,
+    near_stale_threshold_days: int = 2,
 ) -> FilingAnalysisRequest:
     return FilingAnalysisRequest(
         run_id=uuid4(),
@@ -128,6 +150,9 @@ def _filing_request(  # noqa: PLR0913 - focused fixture knobs mirror request fie
         decision_history=decision_history,
         decision_context_blocks=decision_context_blocks,
         market_regime=market_regime,
+        as_of=as_of,
+        cache_ttl_days=cache_ttl_days,
+        near_stale_threshold_days=near_stale_threshold_days,
     )
 
 
@@ -318,8 +343,9 @@ class TestChunkCap:
         result = analyze_filing(client, _filing_request(filing))
 
         assert client.requests == []
-        assert result.guidance_direction == "not_disclosed"
-        assert result.facts == []
+        assert result.analysis.guidance_direction == "not_disclosed"
+        assert result.analysis.facts == []
+        assert result.is_near_stale is False
 
 
 class TestTruncationDisclosure:
@@ -331,7 +357,7 @@ class TestTruncationDisclosure:
 
         result = analyze_filing(client, request)
 
-        assert any("全文未分析" in flag for flag in result.red_flags)
+        assert any("全文未分析" in flag for flag in result.analysis.red_flags)
 
     def test_no_disclosure_when_all_chunks_fit_within_the_cap(self):
         filing = _filing_text_item("Single short paragraph.")
@@ -339,7 +365,7 @@ class TestTruncationDisclosure:
 
         result = analyze_filing(client, _filing_request(filing))
 
-        assert not any("全文未分析" in flag for flag in result.red_flags)
+        assert not any("全文未分析" in flag for flag in result.analysis.red_flags)
 
 
 class TestMergeBehavior:
@@ -368,14 +394,14 @@ class TestMergeBehavior:
 
         result = analyze_filing(client, request)
 
-        assert result.facts == [shared_fact, new_fact]
-        assert result.interpretation == [
+        assert result.analysis.facts == [shared_fact, new_fact]
+        assert result.analysis.interpretation == [
             "Growth looks steady.",
             "Margins may be under pressure.",
         ]
-        assert result.red_flags == ["Rising debt."]
-        assert result.yoy_changes == ["Revenue +10% YoY"]
-        assert result.guidance_direction == "positive"
+        assert result.analysis.red_flags == ["Rising debt."]
+        assert result.analysis.yoy_changes == ["Revenue +10% YoY"]
+        assert result.analysis.guidance_direction == "positive"
 
 
 class TestDecisionContextInjection:
@@ -547,3 +573,151 @@ class TestBehavioralPatternRestriction:
         assert "行動パターン言及規則" in system_prompt
         assert "可能性" in system_prompt
         assert "断定的な心理診断" in system_prompt
+
+
+class TestFilingSourceIdProvenance:
+    """P6-27: root cause of 262/263 filing analyses failing provenance.
+
+    The real-API root cause was that the user prompt never told the model
+    which `source_id` to cite -- it had to guess, and guessed wrong
+    (`llm/client.py::_validate_source_ids()` then rejected the fabricated
+    IDs). The fix mirrors `llm/summarize.py::_format_news_item()`'s existing
+    `[source_id: ...]` convention: every `source_id` handed to the model via
+    `AnalyzeRequest.source_ids` must also appear, as a string, in the
+    prompt body actually sent.
+    """
+
+    def test_every_source_id_given_to_the_model_appears_in_the_filing_prompt(self):
+        filing = _filing_text_item("Paragraph one.\n\nParagraph two.")
+        request = _filing_request(filing, chunk_chars=20, max_chunks=4)
+        client = FakeLLMClient([_filing_analysis(), _filing_analysis()])
+
+        analyze_filing(client, request)
+
+        assert len(client.requests) == 2
+        for req in client.requests:
+            for source_id in req.source_ids:
+                assert source_id in req.prompt
+
+    def test_every_source_id_given_to_the_model_appears_in_the_news_prompt(self):
+        older = _news_item(
+            source_id="finnhub:old", published_at=datetime(2027, 1, 1, tzinfo=UTC)
+        )
+        newer = _news_item(
+            source_id="finnhub:new", published_at=datetime(2027, 1, 10, tzinfo=UTC)
+        )
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request(news_items=(older, newer)))
+
+        request = client.requests[0]
+        for source_id in request.source_ids:
+            assert source_id in request.prompt
+
+
+class TestNearStaleWiring:
+    """P6-27: near-stale cache-freshness reaches `analyze_filing()`/`summarize_news()`.
+
+    Sourced from `LLMClient.get_cached_at()` +
+    `llm/decision_context.py::is_cache_near_stale()`.
+    """
+
+    def test_filing_result_is_near_stale_when_remaining_ttl_is_within_threshold(self):
+        filing = _filing_text_item("Some filing text.")
+        request = _filing_request(
+            filing,
+            as_of=date(2027, 1, 10),
+            cache_ttl_days=10,
+            near_stale_threshold_days=2,
+        )
+        # cached_at(01-02) + ttl(10d) = 01-12; as_of=01-10 -> remaining=2d,
+        # exactly at threshold (boundary is inclusive, REQ-030/040).
+        client = FakeLLMClient([_filing_analysis()], cached_at=date(2027, 1, 2))
+
+        result = analyze_filing(client, request)
+
+        assert result.is_near_stale is True
+
+    def test_filing_result_is_not_near_stale_when_remaining_ttl_exceeds_threshold(self):
+        filing = _filing_text_item("Some filing text.")
+        request = _filing_request(
+            filing,
+            as_of=date(2027, 1, 10),
+            cache_ttl_days=10,
+            near_stale_threshold_days=2,
+        )
+        # cached_at(01-05) + ttl(10d) = 01-15; as_of=01-10 -> remaining=5d,
+        # comfortably outside the 2-day threshold.
+        client = FakeLLMClient([_filing_analysis()], cached_at=date(2027, 1, 5))
+
+        result = analyze_filing(client, request)
+
+        assert result.is_near_stale is False
+
+    def test_filing_result_is_never_near_stale_without_an_explicit_as_of(self):
+        # `as_of=None` (the default) means the caller isn't opting into the
+        # near-stale check -- a fresh, same-run call must never be flagged.
+        filing = _filing_text_item("Some filing text.")
+        request = _filing_request(filing)
+        client = FakeLLMClient([_filing_analysis()], cached_at=date(2000, 1, 1))
+
+        result = analyze_filing(client, request)
+
+        assert result.is_near_stale is False
+
+    def test_filing_result_is_not_near_stale_when_no_cache_entry_is_found(self):
+        filing = _filing_text_item("Some filing text.")
+        request = _filing_request(filing, as_of=date(2027, 1, 10))
+        client = FakeLLMClient([_filing_analysis()], cached_at=None)
+
+        result = analyze_filing(client, request)
+
+        assert result.is_near_stale is False
+
+    def test_filing_result_is_near_stale_if_any_chunk_served_a_stale_cache_entry(self):
+        filing = _filing_text_item("Paragraph one.\n\nParagraph two.")
+        request = _filing_request(
+            filing,
+            chunk_chars=20,
+            max_chunks=4,
+            as_of=date(2027, 1, 10),
+            cache_ttl_days=10,
+            near_stale_threshold_days=2,
+        )
+        # Both chunks share this fake's single `cached_at`, so a near-stale
+        # date here proves the merge is `any(...)`, not `all(...)`.
+        client = FakeLLMClient(
+            [_filing_analysis(), _filing_analysis()], cached_at=date(2027, 1, 1)
+        )
+
+        result = analyze_filing(client, request)
+
+        assert result.is_near_stale is True
+
+    def test_news_result_is_near_stale_when_remaining_ttl_is_within_threshold(self):
+        request = _news_request(
+            as_of=date(2027, 1, 10), cache_ttl_days=10, near_stale_threshold_days=2
+        )
+        client = FakeLLMClient([_news_summary()], cached_at=date(2027, 1, 2))
+
+        result = summarize_news(client, request)
+
+        assert result.is_near_stale is True
+
+    def test_news_result_is_not_near_stale_when_remaining_ttl_exceeds_threshold(self):
+        request = _news_request(
+            as_of=date(2027, 1, 10), cache_ttl_days=10, near_stale_threshold_days=2
+        )
+        client = FakeLLMClient([_news_summary()], cached_at=date(2027, 1, 5))
+
+        result = summarize_news(client, request)
+
+        assert result.is_near_stale is False
+
+    def test_news_result_is_never_near_stale_without_an_explicit_as_of(self):
+        request = _news_request()
+        client = FakeLLMClient([_news_summary()], cached_at=date(2000, 1, 1))
+
+        result = summarize_news(client, request)
+
+        assert result.is_near_stale is False

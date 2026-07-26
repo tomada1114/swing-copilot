@@ -73,3 +73,42 @@ correction-upsertする。当日バー欠損は0扱いせず、過去の極値�
 `settings.llm.max_llm_calls_per_run`（既定200）が1回の実行内の総LLM呼び出し数を
 上限し、超過分は実API呼び出しへ到達させず`"budget_skipped"`として監査記録する
 （月次予算ゲートとは独立した第二防御）。
+
+## 開示分析のprovenance修正・レポート反映・near-stale警告（roadmap §5 P2-12/P6-27）
+
+実API検証で、開示分析263件中262件がprovenance検証で失敗していた
+（唯一の「成功」もfactsが空）。`llm/filings_analysis.py`のユーザープロンプトが
+`source_id`をモデルへ一切明示していなかったため、モデルが引用すべきIDを
+知らずに文字列を捏造し、`llm/client.py::_validate_source_ids()`が
+`SchemaValidationError`でfail-closedにしていたことが原因だった。ニュース側
+`llm/summarize.py::_format_news_item()`と同様、ユーザープロンプト本文へ
+`source_id: {chunk_source_id}`を明記するよう修正した。プロンプト変更で
+`prompt_hash`が変わるため既存キャッシュ行は自然に無効化される。
+
+`report/daily_brief.py::_llm_brief()`は同一銘柄の最初の開示分析だけを
+採用していたため、2件目以降の開示（例: 10-Qに続く8-K）が黙って
+レポートから欠落していた。`analyze_filing()`/`summarize_news()`は
+`llm/filings_analysis.py::FilingAnalysisResult`/
+`llm/summarize.py::NewsSummaryResult`（分析本体 + 提出日等のメタデータ +
+`is_near_stale`）を返すようになり、`DailyBriefContext.filing_analyses`は
+当該銘柄の全開示分析を保持する。`BriefLlm.filings`（新規）が
+`BriefFilingAnalysis`（書類種別・提出日・facts等・`is_near_stale`）の
+tupleとして各開示を個別に描画し、terminal/markdownとも「どの開示に基づく
+分析か」を識別できる見出しを出す。
+
+`NewsSummary.catalyst_quality`/`catalyst_quality_source_ids`
+（roadmap §5 P2-12で追加、これまでprovenance検証にしか使われていなかった）
+は`BriefLlm.catalyst_quality`/`catalyst_quality_sources`として
+terminal/markdownへ表示専用で接続された。ランキング・判定ロジックには
+一切接続しない（改修原則4「判断はコード、叙述はLLM」）。
+
+`llm/decision_context.py::is_cache_near_stale()`（roadmap §5 P2-12で
+メカニズムのみ実装、TTL概念が存在せず未配線だった）を本番経路へ配線した。
+`settings.llm.cache_ttl_days`（既定30日、要検証）を新設し、
+`near_stale_threshold_days`（既定2日）が数える対象とした
+（`near_stale_threshold_days <= cache_ttl_days`を`LLMConfig`で検証）。
+`LLMClient.get_cached_at()`（新規、`analyze()`のシグネチャ/挙動は不変の
+純粋加算メソッド）がキャッシュ済み応答の作成日を返し、
+`summarize_news()`/`analyze_filing()`が実行のas_of（`ctx.run_date`、
+壁時計不使用）と突き合わせて`is_near_stale`を判定する。TTL残り日数が
+`near_stale_threshold_days`以下ならレポートに再実行を促す警告を表示する。

@@ -168,6 +168,9 @@ class FakeLLMClient:
             guidance_direction="neutral",
         )
 
+    def get_cached_at(self, request):
+        del request
+
 
 class FakeNotifier:
     def __init__(self):

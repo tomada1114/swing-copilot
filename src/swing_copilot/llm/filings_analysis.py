@@ -13,12 +13,16 @@ from html import escape
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from swing_copilot.llm.client import AnalyzeRequest
-from swing_copilot.llm.decision_context import format_decision_history
+from swing_copilot.llm.decision_context import (
+    format_decision_history,
+    is_cache_near_stale,
+)
 from swing_copilot.llm.safety import check_no_imperative_language
 from swing_copilot.llm.schemas import FilingAnalysis, SourcedFact
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from datetime import date
     from uuid import UUID
 
     from pydantic import BaseModel
@@ -79,6 +83,10 @@ class _LLMClientLike(Protocol):
         """Call Claude and return schema-validated structured output."""
         ...  # pragma: no cover
 
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        """Return this request's most recent successful call's creation date."""
+        ...  # pragma: no cover
+
 
 @dataclass(frozen=True, slots=True)
 class FilingAnalysisRequest:
@@ -101,11 +109,36 @@ class FilingAnalysisRequest:
     decision_context_blocks: str = ""
     # P3-15: code-owned market context belongs to the trusted system field.
     market_regime: str = ""
+    # P6-27 near-stale wiring: the run's point-in-time cutoff (never a
+    # wall-clock read) and `settings.llm.cache_ttl_days`/
+    # `near_stale_threshold_days`, used to compute `FilingAnalysisResult
+    # .is_near_stale` per chunk via `LLMClient.get_cached_at()` +
+    # `llm/decision_context.py::is_cache_near_stale()`. Defaults keep
+    # existing callers/tests that don't exercise this feature working
+    # unchanged (a same-day `as_of` is never near-stale).
+    as_of: date | None = None
+    cache_ttl_days: int = 30
+    near_stale_threshold_days: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class FilingAnalysisResult:
+    """`analyze_filing()`'s result plus code-owned metadata (P6-27).
+
+    The LLM schema itself must not carry this: `filed_at` is `TextItem`
+    metadata, not something to trust the model to echo back accurately, and
+    `is_near_stale` is a cache-freshness signal from `LLMClient
+    .get_cached_at()`, not an LLM output.
+    """
+
+    analysis: FilingAnalysis
+    filed_at: date
+    is_near_stale: bool = False
 
 
 def analyze_filing(
     client: _LLMClientLike, request: FilingAnalysisRequest
-) -> FilingAnalysis:
+) -> FilingAnalysisResult:
     """Analyze one filing's text into a merged `FilingAnalysis` (FR-08).
 
     Args:
@@ -113,7 +146,9 @@ def analyze_filing(
         request: Grouped analysis request (see `FilingAnalysisRequest`).
 
     Returns:
-        The structured, source-attributed, cross-chunk-merged analysis.
+        The structured, source-attributed, cross-chunk-merged analysis,
+        with the filing's `filed_at` date and whether any chunk's response
+        came from a near-stale cache entry (P6-27).
 
     Raises:
         ForbiddenLanguageError: The output contained imperative buy/sell language.
@@ -124,10 +159,12 @@ def analyze_filing(
     chunks = all_chunks[: request.max_chunks]
     truncated = len(all_chunks) > request.max_chunks
 
-    analyses = [
+    chunk_results = [
         _analyze_chunk(client, request, chunk_text, chunk_index)
         for chunk_index, chunk_text in enumerate(chunks)
     ]
+    analyses = [analysis for analysis, _ in chunk_results]
+    any_near_stale = any(near_stale for _, near_stale in chunk_results)
     merged = _merge_analyses(
         analyses,
         symbol=request.symbol,
@@ -142,7 +179,11 @@ def analyze_filing(
             *(fact.statement for fact in merged.facts),
         ]
     )
-    return merged
+    return FilingAnalysisResult(
+        analysis=merged,
+        filed_at=request.filing_text.published_at.date(),
+        is_near_stale=any_near_stale,
+    )
 
 
 def _analyze_chunk(
@@ -150,19 +191,22 @@ def _analyze_chunk(
     request: FilingAnalysisRequest,
     chunk_text: str,
     chunk_index: int,
-) -> FilingAnalysis:
+) -> tuple[FilingAnalysis, bool]:
     chunk_source_id = f"{request.filing_text.source_id}:{chunk_index}"
     user_prompt = (
         f"対象銘柄: {escape(request.symbol, quote=False)}\n"
         f"書類種別: {escape(request.filing_type, quote=False)}\n"
-        f"提出日: {request.filing_text.published_at.date().isoformat()}\n\n"
+        f"提出日: {request.filing_text.published_at.date().isoformat()}\n"
+        f"source_id: {escape(chunk_source_id, quote=False)}\n\n"
         f"{format_decision_history(request.decision_history)}"
         f"{request.decision_context_blocks}"
         "以下は当該書類の抜粋です。\n\n"
         "<untrusted_filing_text>\n"
         f"{escape(chunk_text, quote=False)}\n"
         "</untrusted_filing_text>\n\n"
-        "上記からFilingAnalysisスキーマに従いJSONを出力してください。"
+        "上記からFilingAnalysisスキーマに従いJSONを出力してください。\n"
+        f"facts各要素のsource_idsには上記のsource_id（{escape(chunk_source_id, quote=False)}）"
+        "を使用してください。"
     )
     analyze_request = AnalyzeRequest(
         run_id=request.run_id,
@@ -174,7 +218,28 @@ def _analyze_chunk(
         model=request.model,
         max_tokens=request.max_tokens,
     )
-    return cast("FilingAnalysis", client.analyze(analyze_request))
+    analysis = cast("FilingAnalysis", client.analyze(analyze_request))
+    is_near_stale = _is_response_near_stale(client, request, analyze_request)
+    return analysis, is_near_stale
+
+
+def _is_response_near_stale(
+    client: _LLMClientLike,
+    request: FilingAnalysisRequest,
+    analyze_request: AnalyzeRequest,
+) -> bool:
+    """P6-27: whether the just-completed call served a near-stale cached response."""
+    if request.as_of is None:
+        return False
+    cached_at = client.get_cached_at(analyze_request)
+    if cached_at is None:
+        return False
+    return is_cache_near_stale(
+        cached_at,
+        request.as_of,
+        request.cache_ttl_days,
+        request.near_stale_threshold_days,
+    )
 
 
 def _system_prompt(market_regime: str) -> str:

@@ -784,6 +784,8 @@ cache hashと入力token概算はsystem+user promptの両方を対象にする�
 
 **第二防御としての実行単位呼び出し上限（roadmap §5 P6-26）**: 上記の月次予算ゲートは1呼び出しごとの概算額しか見ないため、1回の実行内で候補・開示件数が想定以上に膨らむと、次回実行のゲートが働く前に月間予算を使い切る余地が残る。`config.py`の`LLMConfig.max_llm_calls_per_run`（既定200、要検証）と`pipeline/daily.py::_CallLimitedLLMClient`（`_LLMClientLike`を実装するrunスコープの薄いラッパー、`_run_step_llm()`が`_summarize_news_per_candidate()`/`_analyze_filings_per_candidate()`の両方へ同一インスタンスを渡すため、ニュース・開示分析を合算した1run単位のカウンタになる）で実施する。上限到達後の呼び出しは`LLMClient.analyze()`（実API呼び出し）へ一切到達させず、既存の`"budget_skipped"`ステータスを再利用して監査記録する（スキーマ変更なし）。`error_detail`に`"max_llm_calls_per_run"`という文言を含めることで、月次予算ゲート起因の`budget_skipped`行と実行単位の呼び出し上限起因の行を区別できる。
 
+**P6-27追記（near-stale警告の配線用、`get_cached_at()`）**: `LLMClient`に`get_cached_at(request: AnalyzeRequest) -> date | None`を追加した。`analyze()`自体のシグネチャ・キャッシュ/予算/監査挙動は一切変更しない、純粋加算のメソッドである。`analyze()`と同じ自然キー（model/prompt_hash/schema_version）で`storage/llm_records.py::get_cached_response_created_at()`（`get_cached_response()`と対になる新規クエリ、`status='success'`の最新行の`created_at`日付を返す）を引く。呼び出し元（`llm/summarize.py`/`llm/filings_analysis.py`）が`analyze()`成功直後に同一の`AnalyzeRequest`で呼び、`llm/decision_context.py::is_cache_near_stale(cached_at, as_of, ttl_days, threshold_days)`と突き合わせて`is_near_stale`を判定する。キャッシュヒット時（`analyze()`のキャッシュ分岐は新規行を記録せず早期returnする）は元の呼び出し日、フレッシュ呼び出し直後は「今日」相当の日付が返るため、同一run内の新規分析が誤ってnear-stale扱いになることはない。
+
 ### 3.17 `llm/summarize.py` / `llm/filings_analysis.py`（FR-08）
 
 ```python
@@ -816,7 +818,13 @@ factsの`source_ids`へ追加しない。
 
 `risk_flags`必須反映語（dilution/secondary offering/investigation/lawsuit/resignation/downgrade）と行動パターン言及規則（「〜の可能性」は実績値と計画値の具体的数値差分が同一文/隣接factに存在する場合のみ許可）も`_SYSTEM_PROMPT`へ追加した。後者はCON-03側でも`llm/safety.py::check_no_unevidenced_behavioral_claims()`として実装し、`check_structured_output()`へ`check_no_imperative_language()`と並べて配線した——固定の心理状態語彙（「動揺」「パニック」「狼狽」「投資家心理」等、非網羅的と明記）が本文に現れ、かつ同一テキスト内に「可能性」等のhedge語、具体的な割合（`\d+%`）、実績語（「実績」/`actual`）、計画語（「計画」「予想」/`planned`/`forecast`）の全てが共起しない場合にfail-closed（`ForbiddenLanguageError`、fresh/cache双方で未キャッシュ・リトライなしの既存fail-soft規約に自動的に従う）。
 
-**near-stale警告（REQ-030/040）の乖離記録**: `docs/goal-prompts/swing-copilot-reliability-p2/decisions.md`のフォールバック条項に従い、実装をメカニズムのみに限定した。本リポジトリにはキャッシュTTL（有効期限）概念がそもそも存在しない（`llm/`・`config.py`全体を検索し`ttl`/`expir`/`stale`に一致なし）ため、`llm.near_stale_threshold_days`（既定2日）をconfig追加し、`llm/decision_context.py::is_cache_near_stale(cached_at, as_of, ttl_days, threshold_days)`を純関数として実装・テストしたが、`ttl_days`は呼び出し元が明示的に渡す引数のままとし、`pipeline/daily.py`やreport層への配線は行っていない（実TTL値が存在しないため配線自体が架空の値の捏造になる）。将来キャッシュTTLが導入された時点でこの関数をレポート層へ接続する。
+**near-stale警告（REQ-030/040）のP6-27配線（P2-12の乖離記録を解消）**: P2-12時点では本リポジトリにキャッシュTTL概念が一切存在せず、`is_cache_near_stale()`はメカニズムのみに限定していた。P6-27で`llm.cache_ttl_days`（既定30日、要検証）をconfig追加し、`near_stale_threshold_days`（既定2日）が数えるTTLの実体とした（`LLMConfig`に`near_stale_threshold_days <= cache_ttl_days`のvalidatorを追加）。`NewsSummaryRequest`/`FilingAnalysisRequest`に`as_of: date | None`（既定`None`、後方互換）・`cache_ttl_days`・`near_stale_threshold_days`を追加し、`pipeline/daily.py`の`_summarize_news_per_candidate()`/`_analyze_filings_per_candidate()`が`ctx.run_date`（当該runのas_of、壁時計不使用）と`settings.llm.*`を渡す。`summarize_news()`は`AnalyzeRequest`を組み立てて`analyze()`成功後、同一requestで`LLMClient.get_cached_at()`を呼び`is_cache_near_stale()`と突き合わせ、`NewsSummaryResult(summary, is_near_stale)`を返す。`analyze_filing()`も同様だが1書類が複数チャンクに分割されるため、`_analyze_chunk()`がチャンクごとに`(FilingAnalysis, bool)`を返し、`any(...)`（1チャンクでもnear-staleならその開示全体をnear-stale扱い）で集約して`FilingAnalysisResult(analysis, filed_at, is_near_stale)`を構築する（`filed_at`は`TextItem.published_at`由来のコード側メタデータであり、LLM出力ではない）。`as_of=None`（既定）の呼び出し元は常に`is_near_stale=False`を返す——後方互換のためのフォールバックであり、通常経路では必ず`as_of`を渡す。
+
+**開示分析provenance修正（P6-27、実API検証: 開示分析263件中262件がprovenance検証で失敗、唯一の「成功」もfacts空）**: `llm/filings_analysis.py::_analyze_chunk()`は`chunk_source_id`（`{filing_text.source_id}:{chunk_index}`）を`AnalyzeRequest.source_ids`へは渡すが、ユーザープロンプト本文に一切書いていなかった。モデルは引用すべきsource_idを知らされないまま「facts各要素にsource_id必須」と指示され、`Item 2.02`等の文字列を捏造し`llm/client.py::_validate_source_ids()`（`facts[].source_ids`が渡した`source_ids`の部分集合であることを要求）でfail-closed（`SchemaValidationError`）になっていた。対照的に`llm/summarize.py::_format_news_item()`は`[source_id: {item.source_id}]`を各記事の先頭に明記しており全件成功していた。修正: `_analyze_chunk()`のユーザープロンプトに`source_id: {chunk_source_id}`（見出し部）と、末尾に`facts各要素のsource_idsには上記のsource_id（{chunk_source_id}）を使用してください`という明示指示を追加した——ニュース側と同じ「本文にsource_idを明記する」原則。プロンプト変更によりprompt_hashが変わり既存キャッシュ行は自然に無効化される（想定内、対応不要）。チャンクIDの重複排除キー（`_merge_analyses`/`_dedupe_facts`）は変更していない。
+
+**開示分析のレポート反映拡張（P6-27、P2-12残件）**: `report/daily_brief.py::_llm_brief()`はこれまで`next((item for item in filing_analyses or [] if item.symbol == symbol), None)`で銘柄ごとに最初の1件しか採用していなかった——同一銘柄に複数の開示（例: 10-Qと8-K）があっても2件目以降は黙って捨てられていた。修正後は当該銘柄の`FilingAnalysisResult`を全件保持し、`BriefLlm.filings: tuple[BriefFilingAnalysis, ...]`（新規）へマッピングする。`BriefFilingAnalysis`は`filing_type`/`filed_at`/`facts`/`interpretation`/`red_flags`/`yoy_changes`/`guidance_direction`/`sources`/`is_near_stale`を持ち、`terminal_report.py`は`Filing [{type} {filed_at}]: {interpretation[0]}`の1行、`markdown_report.py`は`### 開示分析: {type} ({filed_at})`の個別小節（Fact/Interpretation/Red flag/YoY change/Source、near-stale時は警告文）として描画する——どの開示に基づく分析かを識別可能にする。既存の集約フィールド（`BriefLlm.facts`/`risk_flags`/`sources`、`conclusion`）は全開示・ニュースを跨いだ集計のまま後方互換を保つ（今回、複数開示分を含むよう対象範囲が広がった点のみ変更）。
+
+**catalyst_qualityの表示接続（P2-12残件）**: `NewsSummary.catalyst_quality`/`catalyst_quality_source_ids`（P2-12で追加済み）はこれまでprovenance検証にしか使われずレポート経路に現れなかった。`BriefLlm`に`catalyst_quality: str | None`と`catalyst_quality_sources: tuple[BriefSource, ...]`を追加し、`_llm_brief()`がニュース要約から表示専用でマッピングする。terminal/markdownとも`Catalyst quality: {value}`の1行を追加するのみで、ランキング・判定ロジック（スクリーニング/リスク/実行状態分類）には一切接続しない（改修原則4「判断はコード、叙述はLLM」）。
 
 ### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
 
@@ -883,6 +891,8 @@ class DiscordNotifier:
 MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`trades_journal`を更新し、生成ファイル内のmarker付き判断セクションを正本から再描画する。過去判断のLLM入力条件とdelimiterは`docs/05_ui_design.md` 7章を正とする。
 
 **P1-05（roadmap §5、REQ-008）**: `DailyBriefContext`は実行時の戦略キーを保持する`strategy_key: str`フィールドを持つ（`pipeline/daily.py`の`_run_step_output()`が`deps.strategy_key`をそのまま渡す。1回の実行は常に単一戦略のため、`Candidate`側は候補ごとの戦略キーを持たない）。`BriefCandidate`は`past_decisions: tuple[BriefPastDecision, ...] = ()`を追加で持ち、`_candidate_brief()`が`state_store.get_decision_history(candidate.symbol, context.brief.strategy_key, context.brief.run_date, limit=3)`（LLM判断履歴と同じ3.17節の関数、`mode='live'`かつ`run_date < before_date`で point-in-time 安全・新しい順）の結果をそのままフィールドマッピングする。`BriefPastDecision`は`run_date` / `decision` / `reason_memo` / `realized_return_pct`の4フィールドのfrozen dataclass。`markdown_report.py::_candidate_section()`は各候補の`## <SYMBOL>`節内に「過去判断」小節（`### 過去判断`、日付/判断/理由/実現損益率のテーブル）を追加描画するが、`past_decisions`が空のときは見出しごと省略する（Facts/LLM risk flags/Sourcesと同じ0件時の描画方針）。terminal（`terminal_report.py`）は本節の対象外（変更なし）。
+
+**P6-27（roadmap §5、公開データ形状変更）**: `DailyBriefContext.news_summaries`/`filing_analyses`の要素型が`NewsSummary`/`FilingAnalysis`から`llm/summarize.py::NewsSummaryResult`/`llm/filings_analysis.py::FilingAnalysisResult`（3.17節）へ変更された——`report/`は`pipeline/`に依存しない方針のため、この2型は`llm/`側に置く（`report/daily_brief.py`は既に`llm.schemas`の型をimportしており、同じ依存方向）。`BriefLlm`に`filings: tuple[BriefFilingAnalysis, ...] = ()`（3.18節冒頭の全開示分析）・`catalyst_quality: str | None = None`・`catalyst_quality_sources: tuple[BriefSource, ...] = ()`・`is_news_near_stale: bool = False`を追加した。`BriefFilingAnalysis`は`filing_type`/`filed_at`/`facts`/`interpretation`/`red_flags`/`yoy_changes`/`guidance_direction`/`sources`/`is_near_stale`のfrozen dataclass。`_llm_brief()`の集約フィールド（`facts`/`risk_flags`/`sources`/`conclusion`）は意味を変えず全開示・ニュースを跨ぐ集計のまま維持し、`filings`はそれを個別開示単位に展開したものを追加提供する。新規フィールドは全てデフォルト値付きのため、この型を直接構築する既存の呼び出し元（テスト含む）への破壊的変更はない。
 
 ### 3.19 `backtest/engine.py` / `backtest/runner.py`（FR-10）
 
@@ -1658,15 +1668,19 @@ sourcesフィールドには参照した記事のURLをすべて含めてくだ�
 対象銘柄: {symbol}
 書類種別: {filing_type}
 提出日: {filing_date}
+source_id: {chunk_source_id}
 
 以下は当該書類の抜粋です。
 
 {filing_text_excerpt}
 
 上記からFilingAnalysisスキーマに従いJSONを出力してください。
+facts各要素のsource_idsには上記のsource_id（{chunk_source_id}）を使用してください。
 ```
 
 **長文処理（固定）**: EDGARから抽出した本文を見出し境界優先で`llm.filing_chunk_chars`以下へ分割し、先頭から最大`max_filing_chunks`件を個別分析する。各チャンクに`{accession_no}:{chunk_index}`のsource_idを付け、個別結果をコード側で重複排除して統合する。チャンクをLLMで再要約する多段呼び出しはP1〜P2では行わない。切り捨てが発生した場合は`red_flags`とレポートへ「全文未分析」を明示する。ニュースは公開日時の新しい順に最大`max_news_items_per_symbol`件、各`max_news_chars_per_item`文字までとする。いずれも予算ゲートを先に通す。
+
+**P6-27追記（provenance修正、実API検証: 開示分析263件中262件がprovenance検証で失敗）**: 当初の草案（およびP1〜P2実装）はユーザープロンプト本文に`source_id`を書いておらず、モデルが引用すべきIDを知らないまま出力し`llm/client.py::_validate_source_ids()`でfail-closedになっていた。上記テンプレートの`source_id: {chunk_source_id}`行と末尾の明示指示が修正後の実装（`llm/filings_analysis.py::_analyze_chunk()`）であり、ニュース側`llm/summarize.py::_format_news_item()`の`[source_id: ...]`と同じ「本文に明記する」原則に揃えた。3.17節に詳細を記す。
 
 ---
 

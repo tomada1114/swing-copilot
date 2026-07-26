@@ -190,15 +190,15 @@ def format_performance_summary(summary: PerformanceSummary | None) -> str:
 def is_cache_near_stale(
     cached_at: date, as_of: date, ttl_days: int, threshold_days: int
 ) -> bool:
-    """P2-12 (REQ-030/040): whether a cached analysis is near its TTL expiry.
+    """P2-12/P6-27 (REQ-030/040): whether a cached analysis is near its TTL expiry.
 
     `ttl_days` is an explicit parameter, not read from any global config,
-    because no cache-TTL concept exists anywhere in this repo yet (confirmed:
-    zero `ttl`/`expir`/`stale` hits across `llm/`/`config.py`). This function
-    exists so the near-stale *mechanism* is implemented and fully tested,
-    ready to be wired to a real TTL once one is introduced elsewhere; it is
-    deliberately not called from `pipeline/daily.py` or any report today
-    (roadmap divergence note, P2-12).
+    since the caller (`llm/summarize.py`/`llm/filings_analysis.py`) already
+    has `settings.llm.cache_ttl_days` in scope via its request dataclass.
+    Wired into `pipeline/daily.py`'s LLM step via `LLMClient.get_cached_at()`
+    (roadmap §5 P6-27; the mechanism was implemented but left unwired at
+    P2-12 time, since no cache-TTL concept existed anywhere in this repo
+    then -- `cache_ttl_days` introduces one).
 
     Args:
         cached_at: The date the cached analysis was produced.

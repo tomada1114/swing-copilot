@@ -262,6 +262,13 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
     lines.extend(_score_breakdown_section(candidate))
+    if candidate.llm.catalyst_quality is not None:
+        # P2-12 (REQ-006/007): display-only, never feeds ranking/judgment.
+        lines.append(f"- Catalyst quality: {candidate.llm.catalyst_quality}")
+    if candidate.llm.is_news_near_stale:
+        lines.append(
+            "- Warning: ニュース分析のキャッシュがTTL間近です。再実行を検討してください。"
+        )
     if candidate.llm.facts:
         lines.extend(["", "### Facts", ""])
         lines.extend(f"- {fact}" for fact in candidate.llm.facts)
@@ -273,7 +280,40 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
         lines.extend(
             f"- [{source.source_id}]({source.url})" for source in candidate.llm.sources
         )
+    lines.extend(_filing_analysis_sections(candidate))
     lines.extend(_past_decisions_section(candidate))
+    return lines
+
+
+def _filing_analysis_sections(candidate: BriefCandidate) -> list[str]:
+    """P6-27: one identified subsection per filing analysis (type + filed date).
+
+    Previously only the first filing analysis per symbol reached the report
+    at all (`report/daily_brief.py::_llm_brief()`'s old `next(...)` lookup);
+    now every filing analysis for this candidate is shown, individually
+    labeled so which disclosure a fact/interpretation came from is clear.
+    """
+    lines: list[str] = []
+    for filing in candidate.llm.filings:
+        lines.extend(
+            [
+                "",
+                f"### 開示分析: {filing.filing_type} ({filing.filed_at.isoformat()})",
+                "",
+            ]
+        )
+        if filing.is_near_stale:
+            lines.append(
+                "_警告: このキャッシュ済み分析はTTL間近です。再実行を検討してください。_"
+            )
+        lines.append(f"- Guidance direction: {filing.guidance_direction}")
+        lines.extend(f"- Fact: {fact}" for fact in filing.facts)
+        lines.extend(f"- Interpretation: {text}" for text in filing.interpretation)
+        lines.extend(f"- Red flag: {flag}" for flag in filing.red_flags)
+        lines.extend(f"- YoY change: {change}" for change in filing.yoy_changes)
+        lines.extend(
+            f"- Source: [{source.source_id}]({source.url})" for source in filing.sources
+        )
     return lines
 
 

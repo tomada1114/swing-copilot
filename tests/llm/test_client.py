@@ -277,6 +277,86 @@ class TestCaching:
         assert len(fake_client.messages.calls) == 2
 
 
+class TestGetCachedAt:
+    """P6-27: `get_cached_at()` never alters `analyze()`'s own behavior.
+
+    Purely additive: it only reports the natural key's most recent
+    successful call's creation date (or `None`).
+    """
+
+    def test_returns_none_before_any_call_is_recorded(self, state_store):
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+        assert client.get_cached_at(_request()) is None
+
+    def test_returns_a_date_right_after_a_fresh_call_is_recorded(self, state_store):
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+        request = _request()
+
+        client.analyze(request)
+
+        assert client.get_cached_at(request) is not None
+
+    def test_a_cache_hit_reports_the_original_calls_date_not_a_new_one(
+        self, state_store
+    ):
+        # `analyze()`'s cache-hit branch returns early without re-recording
+        # (`llm/client.py::analyze()`), so `get_cached_at()` must keep
+        # reporting the *original* row -- otherwise every cache hit would
+        # look artificially fresh and near-stale warnings would never fire.
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+        request = _request()
+        client.analyze(request)
+        first_cached_at = client.get_cached_at(request)
+
+        client.analyze(request)  # cache hit: no new `llm_calls` row
+        second_cached_at = client.get_cached_at(request)
+
+        assert first_cached_at == second_cached_at
+
+    def test_does_not_match_a_different_natural_key(self, state_store):
+        client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+        client.analyze(_request(prompt="prompt A"))
+
+        assert client.get_cached_at(_request(prompt="prompt B")) is None
+
+
 class TestRefusalAndErrors:
     def test_refusal_stop_reason_raises_and_records_failure(self, state_store):
         response = FakeResponse(None, stop_reason="refusal")

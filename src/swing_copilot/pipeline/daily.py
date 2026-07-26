@@ -116,6 +116,13 @@ from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 
 logger = logging.getLogger(__name__)
 
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from uuid import UUID
@@ -143,7 +150,6 @@ _FILING_FORM_TYPES = ["8-K", "10-Q"]
 _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
-_FUNDAMENTALS_PROGRESS_LOG_INTERVAL = 25
 _DECISION_HISTORY_LIMIT = 3
 
 
@@ -434,10 +440,7 @@ def _fetch_or_skip_fundamentals(
 
 
 def _log_fundamentals_progress(position: int, total: int) -> None:
-    if position % _FUNDAMENTALS_PROGRESS_LOG_INTERVAL == 0:
-        logger.info("fundamentals: %d/%d symbols processed", position, total)
-    else:
-        logger.debug("fundamentals: %d/%d symbols processed", position, total)
+    logger.debug("fundamentals: %d/%d symbols processed", position, total)
 
 
 def _run_step_fundamentals(
@@ -491,7 +494,7 @@ def _run_step_fundamentals(
         _log_fundamentals_progress(index + 1, total)
 
     if skipped_same_day:
-        logger.info(
+        logger.debug(
             "fundamentals: skipped %d/%d symbol(s) already fetched today",
             skipped_same_day,
             total,
@@ -1124,7 +1127,7 @@ def _run_mae_mfe_soft_step(
 ) -> _StepOutcome:
     """Execute and audit MAE/MFE without crossing the fatal boundary."""
     started_at = time.perf_counter()
-    logger.info("step mae_mfe starting")
+    logger.debug("step mae_mfe starting")
     try:
         outcome = _run_step_excursions(deps, as_of)
     except Exception as exc:
@@ -1147,7 +1150,7 @@ def _run_text_soft_step(
         logger.warning("step 5_text skipped: time budget exceeded")
         outcome, items = _TIME_BUDGET_STEP_OUTCOME, None
     else:
-        logger.info("step 5_text starting")
+        logger.debug("step 5_text starting")
         outcome, items = _run_step_text(
             deps, text_symbols, ctx.run_date, skip=options.skip_text
         )
@@ -1236,7 +1239,7 @@ def _record_step(
         status = StepStatus.SKIPPED
     else:
         status = StepStatus.SUCCESS if outcome.success else StepStatus.FAILED
-    logger.info(
+    logger.debug(
         "step %s finished: status=%s duration=%.2fs%s",
         step,
         status.value,
@@ -1371,7 +1374,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     ]
 
     for step_name, step_fn in fatal_steps:
-        logger.info("step %s starting", step_name)
+        logger.debug("step %s starting", step_name)
         started_at = time.perf_counter()
         try:
             outcome = step_fn()
@@ -1452,7 +1455,7 @@ def _run_soft_steps(
             None,
         )
     else:
-        logger.info("step 6_llm starting")
+        logger.debug("step 6_llm starting")
         llm_outcome, news_summaries, filing_analyses = _run_step_llm(
             deps,
             ctx,
@@ -1469,7 +1472,7 @@ def _run_soft_steps(
         logger.warning("step postmortem skipped: time budget exceeded")
         postmortem_outcome, signal_performance = _TIME_BUDGET_STEP_OUTCOME, ()
     else:
-        logger.info("step postmortem starting")
+        logger.debug("step postmortem starting")
         postmortem_outcome, signal_performance = _run_step_postmortem(
             deps, ctx.run_date
         )
@@ -1481,7 +1484,7 @@ def _run_soft_steps(
         logger.warning("step 7_notify skipped: time budget exceeded")
         notify_outcome = _TIME_BUDGET_STEP_OUTCOME
     else:
-        logger.info("step 7_notify starting")
+        logger.debug("step 7_notify starting")
         notify_outcome = _run_step_notify(
             deps,
             ctx.candidates,
@@ -1508,7 +1511,7 @@ def _run_soft_steps(
         and (not outcome.success or not outcome.is_skipped)
     )
     started_at = time.perf_counter()
-    logger.info("step 8_output starting")
+    logger.debug("step 8_output starting")
     output_outcome, report_path, brief = _run_step_output(
         deps,
         _OutputContext(
@@ -1544,6 +1547,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--strategy", default="default")
+    parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
     args = parser.parse_args(argv)
     return DailyRunOptions(
         as_of=args.as_of,
@@ -1552,6 +1556,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         skip_llm=args.skip_llm,
         limit=args.limit,
         strategy_key=args.strategy,
+        log_level=args.log_level,
     )
 
 
@@ -1696,14 +1701,14 @@ class _SecretRedactionFilter(logging.Filter):
         return redacted
 
 
-def _configure_logging(secrets: Secrets) -> None:
-    """Configure root logging (INFO, to stderr) with secret redaction.
+def _configure_logging(secrets: Secrets, *, level: str | None = None) -> None:
+    """Configure stderr logging levels and secret redaction.
 
-    A live run's step progress and failures are always visible this way --
-    this batch otherwise has no other output surface until the final brief is
-    rendered. A `_SecretRedactionFilter` seeded from every configured secret is
-    attached to each root handler so a leaked API key/webhook URL (record
-    message or exception traceback) never reaches stderr in the clear.
+    The default keeps third-party loggers at WARNING while preserving INFO for
+    `swing_copilot`. Passing `--log-level` applies the selected level to both.
+    A `_SecretRedactionFilter` seeded from every configured secret is attached
+    to each root handler so a leaked API key/webhook URL (record message or
+    exception traceback) never reaches stderr in the clear.
 
     Factored out of `main()` so tests can exercise the redaction behavior
     without invoking the whole CLI.
@@ -1711,12 +1716,17 @@ def _configure_logging(secrets: Secrets) -> None:
     Args:
         secrets: Loaded secrets to redact from now on. Unset (`None`/empty)
             values are ignored.
+        level: Optional CLI log-level override.
     """
+    root_level = _LOG_LEVELS[level] if level is not None else logging.WARNING
+    application_level = _LOG_LEVELS[level] if level is not None else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=root_level,
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger().setLevel(root_level)
+    logging.getLogger("swing_copilot").setLevel(application_level)
     redaction_filter = _SecretRedactionFilter(
         (
             secrets.finnhub_api_key,
@@ -1735,8 +1745,8 @@ def main(argv: list[str] | None = None) -> None:
     Args:
         argv: Argument list, or `None` to use `sys.argv[1:]`.
     """
-    _configure_logging(load_secrets())
     options = _parse_args(argv)
+    _configure_logging(load_secrets(), level=options.log_level)
     settings = load_settings()
     strategies = load_strategies()
     deps = _compose_dependencies(options, settings, strategies)

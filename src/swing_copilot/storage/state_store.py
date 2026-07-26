@@ -655,6 +655,27 @@ class StateStore:
             self._database, model, prompt_hash, schema_version
         )
 
+    def get_cached_llm_response_created_at(
+        self, model: str, prompt_hash: str, schema_version: int
+    ) -> date | None:
+        """Return the most recent successful call's creation date for this natural key.
+
+        Purely additive companion to `get_cached_llm_response()` (P6-27
+        near-stale wiring): see `llm_records.get_cached_response_created_at()`.
+
+        Args:
+            model: Model ID the original call used.
+            prompt_hash: Hash of the original prompt text.
+            schema_version: Schema version the original call used.
+
+        Returns:
+            The cached response's `created_at` date, or `None` if no
+            successful call matches.
+        """
+        return llm_records.get_cached_response_created_at(
+            self._database, model, prompt_hash, schema_version
+        )
+
     def record_text_items(self, items: Sequence[TextItem]) -> None:
         """Persist collected text items, upserted by `source_id`.
 

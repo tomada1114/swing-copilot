@@ -100,6 +100,42 @@ def get_cached_response(
     return row[0] if row is not None else None
 
 
+def get_cached_response_created_at(
+    database: Database, model: str, prompt_hash: str, schema_version: int
+) -> date | None:
+    """Return the most recent successful call's creation date for this natural key.
+
+    Purely additive companion to `get_cached_response()` (P6-27 near-stale
+    wiring, roadmap §5 P2-12/P6-27): reused by `llm/client.py::LLMClient
+    .get_cached_at()` to report a cached response's age without changing
+    `analyze()`'s own cache/budget/audit behavior. For a cache hit, this is
+    the *original* call's date (the row `analyze()`'s cache-hit branch never
+    re-records); for a call that just recorded a fresh success, this is
+    effectively "today" (the row `analyze()` itself just wrote).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        model: Model ID the original call used.
+        prompt_hash: Hash of the original prompt text.
+        schema_version: Schema version the original call used.
+
+    Returns:
+        The cached response's `created_at` date, or `None` if no successful
+        call matches.
+    """
+    with database.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT created_at FROM llm_calls
+            WHERE model = ? AND prompt_hash = ? AND schema_version = ? AND status = 'success'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [model, prompt_hash, schema_version],
+        ).fetchone()
+    return row[0].date() if row is not None else None
+
+
 def get_monthly_cost(database: Database, as_of: date) -> float:
     """Return the sum of `cost_usd` for every call in `as_of`'s month.
 

@@ -103,6 +103,9 @@ class ExplodingLLMClient:
         msg = "Claude API unreachable"
         raise RuntimeError(msg)
 
+    def get_cached_at(self, request):
+        del request
+
 
 class ExplodingCalendarClient:
     def fetch_calendar_events(self, start, end):
@@ -209,6 +212,9 @@ class PartiallyFailingLLMClient:
             guidance_direction="neutral",
         )
 
+    def get_cached_at(self, request):
+        del request
+
 
 class CapturingLLMClient:
     """A real fake that records every `AnalyzeRequest` it was called with.
@@ -237,6 +243,9 @@ class CapturingLLMClient:
             catalyst_quality="none",
             catalyst_quality_source_ids=list(request.source_ids),
         )
+
+    def get_cached_at(self, request):
+        del request
 
 
 class FailingNotifier:

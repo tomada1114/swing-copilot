@@ -91,10 +91,14 @@ llm:
   filing_chunk_chars: 30000
   max_filing_chunks: 4
   # roadmap §5 P2-12: cache "near-stale" warning threshold in days of TTL
-  # remaining (as_of basis). Mechanism-only for now -- no cache TTL concept
-  # exists yet, so this value is unused by any live code path (see
-  # llm/decision_context.py::is_cache_near_stale()).
+  # remaining (as_of basis; see llm/decision_context.py::is_cache_near_stale()
+  # and cache_ttl_days below). Wired into pipeline/daily.py's LLM step
+  # (roadmap §5 P6-27) via LLMClient.get_cached_at().
   near_stale_threshold_days: 2
+  # roadmap §5 P6-27: code-owned cache-TTL horizon near_stale_threshold_days
+  # counts down from (no real Anthropic-side cache expiry exists; a cached
+  # llm_calls row is reused indefinitely by natural key). 要検証.
+  cache_ttl_days: 30
   # docs/06_reliability_roadmap.md §5 P6-26: filing text collection recency
   # bound (days) and per-symbol count cap, symmetric with
   # max_news_items_per_symbol above -- previously unbounded (every filing

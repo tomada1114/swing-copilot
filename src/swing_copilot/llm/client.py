@@ -21,6 +21,7 @@ from swing_copilot.llm.safety import ForbiddenLanguageError, check_structured_ou
 from swing_copilot.storage.llm_records import LLMCallRecord
 
 if TYPE_CHECKING:
+    from datetime import date
     from uuid import UUID
 
     from pydantic import BaseModel
@@ -269,6 +270,35 @@ class LLMClient:
         )
         self._record(request, prompt_hash, pricing, outcome)
         return parsed
+
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        """Return this request's most recent successful call's creation date.
+
+        Purely additive lookup (roadmap §5 P6-27 near-stale wiring): reuses
+        `analyze()`'s own natural key (model/prompt-hash/schema-version)
+        without altering `analyze()`'s cache/budget/audit behavior or
+        signature. Callers (`llm/summarize.py`, `llm/filings_analysis.py`)
+        call this *after* `analyze()` succeeds and compare the result against
+        `as_of` via `llm/decision_context.py::is_cache_near_stale()`.
+
+        For a genuine cache hit, this is the *original* call's date (the
+        cache-hit branch above returns early without re-recording). For a
+        fresh (non-cache-hit) call, this is the row `analyze()` itself just
+        wrote -- effectively "today" -- so a same-run fresh response is
+        never reported as near-stale.
+
+        Args:
+            request: The same `AnalyzeRequest` just passed to `analyze()`.
+
+        Returns:
+            The cached response's creation date, or `None` if no successful
+            call matches this natural key.
+        """
+        full_prompt = _full_prompt(request)
+        prompt_hash = _prompt_hash(full_prompt)
+        return self._state_store.get_cached_llm_response_created_at(
+            request.model, prompt_hash, request.schema_version
+        )
 
     def _estimate_cost(
         self, prompt: str, max_tokens: int, pricing: tuple[float, float]

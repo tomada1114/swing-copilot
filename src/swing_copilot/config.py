@@ -313,12 +313,16 @@ class LLMConfig(_StrictModel):
     filing_chunk_chars: int = 30_000
     max_filing_chunks: int = 4
     # roadmap §5 P2-12: cache "near-stale" warning threshold, in days of TTL
-    # remaining (as_of basis, REQ-030/040). No cache-TTL concept exists yet
-    # anywhere in this repo; this config value and
-    # `llm/decision_context.py::is_cache_near_stale()` implement the warning
-    # *mechanism* only, per the documented scope decision -- neither is wired
-    # into a live code path until a real TTL is introduced.
+    # remaining (as_of basis, REQ-030/040), used with `cache_ttl_days` below by
+    # `llm/decision_context.py::is_cache_near_stale()`.
     near_stale_threshold_days: int = 2
+    # roadmap §5 P6-27: the cache-TTL concept `near_stale_threshold_days`
+    # counts down from. No real Anthropic-side cache expiry exists (a cached
+    # `llm_calls` row is reused indefinitely by natural key) -- this is a
+    # code-owned "treat this analysis as due for a refresh after N days"
+    # horizon, wired into `pipeline/daily.py`'s LLM step and surfaced as a
+    # report warning via `LLMClient.get_cached_at()` (30, 要検証).
+    cache_ttl_days: int = 30
     # roadmap §5 P6-26: filing text collection previously had no lower bound
     # or count cap (unlike news' `max_news_items_per_symbol`), fetching every
     # filing ever submitted for a symbol. These two bound
@@ -332,6 +336,13 @@ class LLMConfig(_StrictModel):
     # bounds an unexpectedly large candidate/filing fan-out within one run,
     # independent of that run's estimated per-call cost (200, 要検証).
     max_llm_calls_per_run: int = Field(default=200, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_near_stale_threshold(self) -> LLMConfig:
+        if self.near_stale_threshold_days > self.cache_ttl_days:
+            msg = "near_stale_threshold_days must be <= cache_ttl_days"
+            raise ValueError(msg)
+        return self
 
 
 class BudgetConfig(_StrictModel):

@@ -169,5 +169,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the injected `Clock`'s wall-clock date instead of `--as-of`; a past
   `--as-of` previously never matched `fetched_at` and forced every rerun to
   refetch every symbol's fundamentals over the network
+- Filing analysis prompts now state each chunk's `source_id` in the user
+  prompt body (matching news summarization's existing convention); the
+  model previously had to guess which ID to cite in `facts[].source_ids`
+  and almost always fabricated one, failing provenance validation for
+  262 of 263 real filing analyses in production
+- The daily report now shows every filing analysis for a candidate,
+  individually labeled by filing type and filed date — previously only
+  the first filing analysis per symbol reached the report, silently
+  dropping any second or later filing (e.g. an 8-K following a 10-Q)
+- `catalyst_quality`/`catalyst_quality_source_ids` (added for provenance
+  validation only) now render in the terminal/Markdown report as
+  display-only information; they still never feed screening/risk/ranking
+  logic
+- The cache "near-stale" warning mechanism is now wired into the daily
+  report: a filing/news analysis served from a cache entry within
+  `llm.cache_ttl_days` (new setting) of `near_stale_threshold_days`
+  remaining now surfaces a re-run warning instead of being silently reused
 
 [Unreleased]: https://github.com/tomada1114/swing-copilot/commits/main

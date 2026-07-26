@@ -317,3 +317,27 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
 def test_settings_rejects_invalid_quantitative_thresholds(overrides):
     with pytest.raises(ValidationError):
         Settings.model_validate(overrides)
+
+
+def test_near_stale_threshold_days_cannot_exceed_cache_ttl_days():
+    # P6-27: `near_stale_threshold_days` counts down from `cache_ttl_days`;
+    # a threshold longer than the TTL itself is nonsensical (remaining TTL
+    # could never exceed it, so "near-stale" would be permanently true).
+    with pytest.raises(ValidationError, match="near_stale_threshold_days"):
+        Settings.model_validate(
+            {"llm": {"cache_ttl_days": 5, "near_stale_threshold_days": 10}}
+        )
+
+
+def test_near_stale_threshold_days_equal_to_cache_ttl_days_is_allowed():
+    settings = Settings.model_validate(
+        {"llm": {"cache_ttl_days": 5, "near_stale_threshold_days": 5}}
+    )
+    assert settings.llm.cache_ttl_days == 5
+    assert settings.llm.near_stale_threshold_days == 5
+
+
+def test_llm_cache_ttl_days_defaults_to_thirty():
+    settings = load_settings("config/settings.yaml")
+    assert settings.llm.cache_ttl_days == 30
+    assert settings.llm.near_stale_threshold_days == 2

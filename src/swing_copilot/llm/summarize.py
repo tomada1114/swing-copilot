@@ -7,11 +7,15 @@ from html import escape
 from typing import TYPE_CHECKING, Protocol, cast
 
 from swing_copilot.llm.client import AnalyzeRequest
-from swing_copilot.llm.decision_context import format_decision_history
+from swing_copilot.llm.decision_context import (
+    format_decision_history,
+    is_cache_near_stale,
+)
 from swing_copilot.llm.safety import check_no_imperative_language
 from swing_copilot.llm.schemas import NewsSummary
 
 if TYPE_CHECKING:
+    from datetime import date
     from uuid import UUID
 
     from pydantic import BaseModel
@@ -83,6 +87,10 @@ class _LLMClientLike(Protocol):
         """Call Claude and return schema-validated structured output."""
         ...  # pragma: no cover
 
+    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
+        """Return this request's most recent successful call's creation date."""
+        ...  # pragma: no cover
+
 
 @dataclass(frozen=True, slots=True)
 class NewsSummaryRequest:
@@ -105,9 +113,33 @@ class NewsSummaryRequest:
     # P3-15: trusted, code-computed regime block. It is deliberately appended
     # to the system field, never to the user field containing untrusted text.
     market_regime: str = ""
+    # P6-27 near-stale wiring: the run's point-in-time cutoff (never a
+    # wall-clock read) and `settings.llm.cache_ttl_days`/
+    # `near_stale_threshold_days`, used to compute `NewsSummaryResult
+    # .is_near_stale` via `LLMClient.get_cached_at()` +
+    # `llm/decision_context.py::is_cache_near_stale()`. Defaults keep
+    # existing callers/tests that don't exercise this feature working
+    # unchanged (a same-day `as_of` is never near-stale).
+    as_of: date | None = None
+    cache_ttl_days: int = 30
+    near_stale_threshold_days: int = 2
 
 
-def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsSummary:
+@dataclass(frozen=True, slots=True)
+class NewsSummaryResult:
+    """`summarize_news()`'s result plus a cache-freshness signal (P6-27).
+
+    `is_near_stale` comes from `LLMClient.get_cached_at()`, not an LLM
+    output -- the schema itself (`NewsSummary`) must not carry it.
+    """
+
+    summary: NewsSummary
+    is_near_stale: bool = False
+
+
+def summarize_news(
+    client: _LLMClientLike, request: NewsSummaryRequest
+) -> NewsSummaryResult:
     """Summarize recent news for one symbol into a `NewsSummary` (FR-08).
 
     Args:
@@ -115,7 +147,8 @@ def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsS
         request: Grouped summarization request (see `NewsSummaryRequest`).
 
     Returns:
-        The structured, source-attributed news summary.
+        The structured, source-attributed news summary, with whether the
+        response came from a near-stale cache entry (P6-27).
 
     Raises:
         ForbiddenLanguageError: The output contained imperative buy/sell language.
@@ -139,7 +172,27 @@ def summarize_news(client: _LLMClientLike, request: NewsSummaryRequest) -> NewsS
             *(fact.statement for fact in summary.facts),
         ]
     )
-    return summary
+    is_near_stale = _is_response_near_stale(client, request, analyze_request)
+    return NewsSummaryResult(summary=summary, is_near_stale=is_near_stale)
+
+
+def _is_response_near_stale(
+    client: _LLMClientLike,
+    request: NewsSummaryRequest,
+    analyze_request: AnalyzeRequest,
+) -> bool:
+    """P6-27: whether the just-completed call served a near-stale cached response."""
+    if request.as_of is None:
+        return False
+    cached_at = client.get_cached_at(analyze_request)
+    if cached_at is None:
+        return False
+    return is_cache_near_stale(
+        cached_at,
+        request.as_of,
+        request.cache_ttl_days,
+        request.near_stale_threshold_days,
+    )
 
 
 def _system_prompt(market_regime: str) -> str:

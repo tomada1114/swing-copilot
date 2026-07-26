@@ -15,6 +15,7 @@ from swing_copilot.report.daily_brief import (
     BriefCandidate,
     BriefCircuitBreaker,
     BriefExposure,
+    BriefFilingAnalysis,
     BriefFundamentals,
     BriefLlm,
     BriefMarketItem,
@@ -78,6 +79,12 @@ def _brief() -> DailyBrief:
 def _brief_with_sizing(risk: BriefRisk) -> DailyBrief:
     base = _brief()
     candidate = replace(base.candidates[0], risk=risk)
+    return replace(base, candidates=(candidate,))
+
+
+def _brief_with_llm(llm: BriefLlm) -> DailyBrief:
+    base = _brief()
+    candidate = replace(base.candidates[0], llm=llm)
     return replace(base, candidates=(candidate,))
 
 
@@ -410,6 +417,95 @@ def test_markdown_contains_auditable_details_and_source_urls() -> None:
     assert "売上高は前年同期比で増加した" in output
     assert "[news:123](https://example.com/news/123)" in output
     assert "本レポートは情報提供のみを目的とし、投資助言ではありません" in output
+
+
+def _llm_with_filing(**overrides: object) -> BriefLlm:
+    filing = BriefFilingAnalysis(
+        filing_type="10-Q",
+        filed_at=date(2026, 7, 21),
+        facts=("Revenue up 10%",),
+        interpretation=("Growth appears steady",),
+        red_flags=(),
+        yoy_changes=(),
+        guidance_direction="positive",
+        sources=(BriefSource("filing:1", "https://example.com/filing/1"),),
+    )
+    base = BriefLlm(
+        degraded=False,
+        conclusion="conclusion",
+        filings=(filing,),
+    )
+    return replace(base, **overrides)  # type: ignore[arg-type]
+
+
+def test_terminal_shows_each_filing_analysis_with_type_and_filed_date() -> None:
+    # P6-27: previously only the first filing analysis per symbol ever
+    # reached the report; now each is individually identified.
+    output = render_terminal(
+        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS, width=200
+    )
+
+    assert "Filing [10-Q 2026-07-21]: Growth appears steady" in output
+
+
+def test_markdown_shows_each_filing_analysis_in_its_own_labeled_section() -> None:
+    output = render_markdown(_brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS)
+
+    assert "### 開示分析: 10-Q (2026-07-21)" in output
+    assert "Revenue up 10%" in output
+    assert "Guidance direction: positive" in output
+    assert "[filing:1](https://example.com/filing/1)" in output
+
+
+def test_terminal_and_markdown_show_catalyst_quality_display_only() -> None:
+    llm = replace(_llm_with_filing(), catalyst_quality="high")
+
+    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
+
+    assert "Catalyst quality: high" in terminal
+    assert "Catalyst quality: high" in markdown
+
+
+def test_terminal_and_markdown_omit_catalyst_quality_when_absent() -> None:
+    output_terminal = render_terminal(_brief(), RunStatus.SUCCESS, width=200)
+    output_markdown = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "Catalyst quality" not in output_terminal
+    assert "Catalyst quality" not in output_markdown
+
+
+def test_terminal_and_markdown_show_a_near_stale_warning_for_news() -> None:
+    llm = replace(_llm_with_filing(), is_news_near_stale=True)
+
+    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
+
+    assert "TTL" in terminal
+    assert "ニュース分析のキャッシュがTTL間近です" in markdown
+
+
+def test_terminal_and_markdown_show_a_near_stale_warning_for_a_filing() -> None:
+    stale_filing = replace(_llm_with_filing().filings[0], is_near_stale=True)
+    llm = replace(_llm_with_filing(), filings=(stale_filing,))
+
+    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
+
+    assert "TTL" in terminal
+    assert "このキャッシュ済み分析はTTL間近です" in markdown
+
+
+def test_terminal_and_markdown_omit_near_stale_warning_when_fresh() -> None:
+    output_terminal = render_terminal(
+        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS, width=200
+    )
+    output_markdown = render_markdown(
+        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS
+    )
+
+    assert "TTL" not in output_terminal
+    assert "TTL" not in output_markdown
 
 
 def test_terminal_shows_score_column_and_breakdown() -> None:

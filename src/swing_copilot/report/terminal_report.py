@@ -133,6 +133,21 @@ def _render_candidate_details(console: Console, candidate: BriefCandidate) -> No
             "  Sources: "
             + ", ".join(source.source_id for source in candidate.llm.sources)
         )
+    # P6-27: identify each filing analysis (previously only the first one
+    # per symbol ever reached the report at all).
+    for filing in candidate.llm.filings:
+        console.print(
+            f"  Filing [{filing.filing_type} {filing.filed_at.isoformat()}]: "
+            f"{filing.interpretation[0] if filing.interpretation else '-'}"
+        )
+    if candidate.llm.catalyst_quality is not None:
+        console.print(f"  Catalyst quality: {candidate.llm.catalyst_quality}")
+    if candidate.llm.is_news_near_stale or any(
+        filing.is_near_stale for filing in candidate.llm.filings
+    ):
+        console.print(
+            "  Warning: LLM分析キャッシュがTTL間近です。再実行を検討してください。"
+        )
 
 
 def _execution_state_text(candidate: BriefCandidate) -> str:

@@ -141,3 +141,54 @@ class TestGetCachedResponse:
         )
 
         assert state_store.get_cached_llm_response(MODEL, "hash-1", 2) is None
+
+
+class TestGetCachedResponseCreatedAt:
+    """P6-27: `LLMClient.get_cached_at()`'s storage-layer companion.
+
+    Mirrors `TestGetCachedResponse` above (same natural key, same
+    `status='success'`-only cacheability), but returns the row's
+    `created_at` date instead of its `response_json` -- used to compute
+    near-stale cache-freshness warnings.
+    """
+
+    def test_returns_none_when_no_successful_call_matches(
+        self, state_store: StateStore
+    ) -> None:
+        state_store.record_llm_call(
+            _call(status="failed", cost_usd=0.2, response_json='{"symbol": "AAPL"}')
+        )
+
+        assert (
+            state_store.get_cached_llm_response_created_at(MODEL, "hash-1", 1) is None
+        )
+
+    def test_returns_the_most_recent_successful_calls_creation_date(
+        self, state_store: StateStore
+    ) -> None:
+        state_store.record_llm_call(
+            _call(status="failed", cost_usd=0.2, response_json='{"symbol": "STALE"}')
+        )
+        state_store.record_llm_call(
+            _call(status="success", cost_usd=0.1, response_json='{"symbol": "AAPL"}')
+        )
+
+        result = state_store.get_cached_llm_response_created_at(MODEL, "hash-1", 1)
+
+        assert result == _today()
+
+    def test_schema_version_mismatch_is_a_cache_miss(
+        self, state_store: StateStore
+    ) -> None:
+        state_store.record_llm_call(
+            _call(
+                status="success",
+                cost_usd=0.1,
+                schema_version=1,
+                response_json='{"symbol": "AAPL"}',
+            )
+        )
+
+        assert (
+            state_store.get_cached_llm_response_created_at(MODEL, "hash-1", 2) is None
+        )

@@ -57,6 +57,7 @@ Markdown が `reports/` に原子的に残るため「実行結果の永続化�
 | P3 市場レジームゲート | レジームスコア、Distribution Day、Exposure Ceiling、FTD | 最大のドメインギャップ（D3）の解消 |
 | P4 口座レベルリスク規律 | ポートフォリオヒート、決算近接、サーキットブレーカー、MAE/MFE | 候補単体→口座全体への守りの拡張 |
 | P5 シグナル拡充（検証済み導入） | Minervini、決算後スコア、実行状態分類、VCP | P2 の装置で裏取りしながら追加 |
+| P6 実運用ギャップ修正 | 実 API 動作確認で発見したリグレッション・境界欠落・会計/表示バグの修正 | P1〜P5 を「テストが通る」から「毎日回る」へ |
 
 実施順序は P1 → P2 → P3 → P4 → P5 を基本とするが、フェーズ内は並列可能、
 P3/P4 は P2 完了を待たず着手可能（P5 のみ P2 完了が前提）。
@@ -559,6 +560,146 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
   不成立になる境界テスト。dry-run で VCP 戦略有効時に metrics が表示されること。
 - **Not in scope**: 週足での検証、チャート画像出力
 - **依存**: P1-01, P2-08, P2-11
+
+---
+
+### P6: 実運用ギャップ修正（2026-07-25 実 API 動作確認より）
+
+P1〜P5 完了後、実 API（yfinance / SEC EDGAR / Finnhub / Anthropic）を使った
+動作確認を2セッション実施した。ローカルメモは gitignore 対象のため、
+判断に必要な結論は本節に記録する。
+
+**総合診断**: ガードレール機構（fail-soft、キャッシュ再利用と再検証、
+provenance 検証、予算ゲート機構そのもの、補正 upsert、原子的置換、
+バックテスト一式、P3/P4 のゲート群）はすべて設計どおり動作した。
+設計の見直しは不要。修正対象は次の3クラスに限られる:
+
+1. **リグレッション**: fundamentals 抽出がコミット `29ffa2c`（bulk facts API 化）で
+   壊れ、net_income 等の 76% が NULL 化 → スクリーニングが候補0件（P6-25）
+2. **開示経路だけの境界欠落**: ニュース側には存在する lookback・件数上限・
+   ソート・プロンプトへの source_id 明記が、開示側だけ欠けている非対称
+   （P6-26, P6-27）。1回の実行で LLM 呼び出し 3,000 回超・provenance 検証
+   実効成功率 0% の複合要因
+3. **会計・表示の局所バグ**: 応答受信後の検証失敗が cost_usd=0 で記録され
+   月次予算上限が素通し（上限 $0.30 に対し実消費 約$1.5 を観測）、
+   markdown テーブル分断、株数0の理由誤表示（P6-26, P6-28）
+
+### P6-25 【最優先/worktree:p6-screening】data/screening/storage - fundamentals 抽出リグレッション修正とスクリーニング機能回復
+
+- **目的**: 実データで候補0件になる主因（fundamentals の 76% NULL）を解消する。
+- **スコープ**: `data/edgar.py`, `screening/rejection_classifier.py`,
+  `storage/market_store.py`, `pipeline/daily.py`
+- **主要仕様**:
+  - 根本原因: `_group_facts_by_filing` の `fiscal_period_end = max(period_ends)` が
+    `dei` タクソノミの表紙 fact（`EntityCommonStockSharesOutstanding` 等、
+    期末より 30〜45 日後の日付を持つ）に乗っ取られ、
+    `_pick_concept_value` の期末日厳密一致が全 concept で失敗する
+    （net_income だけでなく revenue/equity/assets/fcf も同時に NULL 化）。
+    期末日算出を `us-gaap` タクソノミの fact のみに限定して修正する。
+    `filed_at`（可視性境界）には触れないため as-of 規律への影響はない。
+  - 落選 detail の根拠修正: `_classify_fundamentals` の net_income 判定は
+    「直近 N 四半期のいずれかが不合格」で落選させた後、最新四半期の値を
+    detail に書いている。実際に条件を満たさなかった四半期の
+    `fiscal_period_end` と値を記録する。「古い四半期が原因で最新は陽性」の
+    回帰テストを追加する（現状このシナリオのテストが存在しない）。
+  - 理由コードの分離: net_income が NULL（データ欠損）の場合は
+    `FILTER_NEGATIVE_NET_INCOME` ではなくデータ不足系の理由コードに分離する
+    （「純損失で落ちた」と「データが無くて判定不能」は別の事実）。
+  - fundamentals キャッシュ判定の修正: `has_fundamentals_fetched_on` の呼び出し側が
+    `as_of` を渡すため、過去日 `--as-of` では `CAST(fetched_at AS DATE) = day` が
+    永久に不成立で毎回フル取得になる。判定を注入 Clock の wall clock 基準に
+    改める（as_of は可視性境界、wall time はキャッシュ鮮度、という役割分離。
+    AGENTS.md「wall time は metadata」の裏返しの誤用を正す）。
+- **動作確認**: dry-run `--limit 150` で fundamentals の NULL 率が激減し
+  （post-2011 の非訂正申告で 99% 超が値を持つ見込み）、落選理由が実データに
+  基づくこと。同一 `--as-of` での再実行で EDGAR 取得がスキップされること。
+- **Not in scope**: Q4 離散値の導出（FY − ΣQ1..Q3）。10-K 行は通期値のまま扱う
+- **依存**: なし
+
+### P6-26 【最優先/worktree:p6-llm】llm/storage/data - LLM 予算会計の実支出化と開示取得の境界設定
+
+- **目的**: NFR-01 の月次予算上限を「実支出に対する保証」にする。
+  1回の実行で予算を溶かす構造を止める。
+- **スコープ**: `llm/client.py`, `storage/llm_records.py`, `config.py`,
+  `config/settings.yaml`, `data/edgar.py`, `text/edgar_filings.py`,
+  `pipeline/daily.py`
+- **主要仕様**:
+  - 会計の実支出化: 応答受信後の検証失敗（SchemaValidationError /
+    ForbiddenLanguageError）と refusal の監査記録に `response.usage` 由来の
+    実トークン数・実コストを載せる（status は failed のまま）。
+    API 例外分岐は response 不在のため現状どおり 0 で正しい。
+  - 月次集計の意味論変更: `get_monthly_cost()` の `WHERE status = 'success'` を
+    廃し、実際に課金が発生した全行（cost_usd）の合算にする。
+    これを直さない限り client 側の記録修正はゲートに反映されない。
+  - トークン見積もり係数: `_CHARS_PER_TOKEN_ESTIMATE = 4` は日本語主体
+    プロンプトの実測（約 2.0）に対し2倍過小見積もりで、「保守的」の意図と
+    逆方向。2.0 に変更しコメントを実態に合わせる。
+  - 開示取得の境界: `filing_lookback_days`（既定 90）と
+    `max_filings_per_symbol`（既定 3）を config 化し、取得〜LLM 分析の経路に
+    通す（ニュース側 `max_news_items_per_symbol` と対称）。
+    `fetch_filing_texts` の結果を `filed_at` 降順で決定的にソートする
+    （現状は外部ライブラリの返却順に依存し、fundamentals 側の明示ソートと
+    非対称）。
+  - 実行単位の呼び出し上限: `max_llm_calls_per_run` を config 化し、
+    パイプラインの LLM ステップで超過分をスキップ・監査記録する
+    （予算ゲートの第二防御。無音の暴走を防ぐ）。
+- **動作確認**: オフラインテストで (a) 検証失敗・refusal 時に cost_usd > 0 が
+  記録され月次集計とゲートに反映される (b) 開示が 90日・3件・filed_at 降順に
+  絞られる (c) 呼び出し上限超過でスキップと監査記録が残ること。
+- **Not in scope**: 開示分析のプロンプト修正・レポート反映（P6-27）
+- **依存**: なし
+
+### P6-27 【依存あり/worktree:p6-llm】llm/report - 開示分析の provenance 修正とレポート反映・P2-12 残件
+
+- **目的**: 実効成功率 0% の開示分析を機能させ、生成した分析を捨てない。
+- **スコープ**: `llm/filings_analysis.py`, `report/daily_brief.py`,
+  `report/markdown_report.py`, `report/terminal_report.py`, `config/settings.yaml`
+- **主要仕様**:
+  - provenance 修正: `_analyze_chunk` のユーザープロンプトに
+    `[source_id: {chunk_source_id}]` を明記する（ニュース側
+    `_format_news_item` と同形）。モデルは引用すべき ID を知らされないまま
+    「source_ids 必須」と指示され、263 件中 262 件が検証失敗していた。
+    回帰テストは「プロンプト本文に source_ids の各要素が含まれること」を
+    assert する。プロンプト変更により prompt_hash が変わり既存キャッシュは
+    自然に無効化される（想定内）。
+  - レポート反映の拡張: 銘柄あたり最初の 1 件のみだった開示分析を、
+    `max_filings_per_symbol` 件まで表示する（terminal / markdown 両方）。
+  - `catalyst_quality` の表示接続: `BriefLlm` に追加しレポートに表示する
+    （表示のみ。ランキングへの定量統合は P6-29 で別途判断）。
+  - near-stale 警告: `is_cache_near_stale()` を本番経路に接続し、TTL 残り
+    2 日以内のキャッシュ済み分析に警告を表示する（P2-12 未完項目の解消）。
+- **動作確認**: オフラインテストに加え、絞った予算上限での実 API 再検証で
+  開示分析が provenance 検証を通過し facts が非空であること
+  （実 API 実行は事前にユーザー確認を取る）。
+- **Not in scope**: catalyst_quality のランキング統合（P6-29）
+- **依存**: P6-26（境界設定と会計修正が先）
+
+### P6-28 【並列可/worktree:p6-report】report - 表示の正確性修正
+
+- **目的**: レポートが事実と異なる・壊れた表示をしない。
+- **スコープ**: `report/markdown_report.py`, `report/daily_brief.py`
+- **主要仕様**:
+  - markdown の Candidates テーブル: ヘッダ行・区切り行の直後にバケット見出し
+    （### 即検討可 等）が挿入され、データ行が見出しの後ろに孤立して
+    テーブルとして描画されない。バケットごとに完結したテーブルを出力する形に
+    修正する（P5-23 のバケット節導入時のリグレッション）。
+  - 株数 0 の理由表示: `max_shares == 0` で固定文言「資金規模過小」を返す
+    単純化をやめ、`binding_constraint` 由来の文言にする（レジーム起因なら
+    その旨を表示。DB・LLM プロンプトへは正しい値が渡っており表示層のみの問題）。
+- **動作確認**: バケットに候補が分散するフィクスチャで markdown が有効な
+  テーブルとしてレンダリングされること。`binding_constraint = regime` の
+  候補で表示文言が一致すること。
+- **Not in scope**: レポートのレイアウト変更・新節の追加
+- **依存**: なし
+
+### P6-29 【後続検討】screening/llm - catalyst_quality のランキング統合検討
+
+- **目的**: 表示接続（P6-27）の先にある「定性シグナルを定量ランキングに
+  組み込むか」の設計判断を行う。
+- **実装しない**。改修原則 4（判断はコード、叙述は LLM。LLM はコードの定量判定を
+  上書きしない）との整合が論点であり、検討結果（採否と理由）を本 Issue に
+  記録して閉じる。採用する場合は別 Issue を起こす。
+- **依存**: P6-27
 
 ## 6. 知見の出典と信頼性
 

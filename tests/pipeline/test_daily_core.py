@@ -560,8 +560,10 @@ class TestFundamentalsSameDaySkip:
                     )
                 ]
 
-            def fetch_filing_texts(self, symbol, form_types, *, as_of):
-                del symbol, form_types, as_of
+            def fetch_filing_texts(
+                self, symbol, form_types, *, as_of, since=None, limit=None
+            ):
+                del symbol, form_types, as_of, since, limit
                 return []
 
         universe = (_member("AAPL"),)

@@ -405,36 +405,65 @@ class EdgarClient:
         ]
 
     def fetch_filing_texts(
-        self, symbol: str, form_types: list[str], *, as_of: datetime
+        self,
+        symbol: str,
+        form_types: list[str],
+        *,
+        as_of: datetime,
+        since: datetime | None = None,
+        limit: int | None = None,
     ) -> list[TextItem]:
         """Return recent filings' full text, normalized for text collection (FR-07).
+
+        Unlike `fetch_fundamentals()` (explicitly `filed_at`-sorted), the
+        external `get_filings()` result order is whatever edgartools returns
+        it in. `since`/`limit` bound *which* filings qualify (independent of
+        as-of visibility) and the result is always sorted `filed_at`
+        descending before the `limit` cut, so a caller asking for "the 3 most
+        recent filings" reliably gets the most recent ones rather than
+        whatever the external library happened to list first (roadmap §5
+        P6-26).
 
         Args:
             symbol: Ticker symbol.
             form_types: SEC form types to fetch (e.g. `["8-K", "10-Q"]`).
-            as_of: Only filings submitted at or before this instant are returned.
+            as_of: Only filings submitted at or before this instant are
+                returned (inclusive upper bound; point-in-time visibility).
+            since: Only filings submitted at or after this instant are
+                returned (inclusive lower bound). `None` means no lower bound.
+            limit: Maximum number of filings to return, most-recent
+                (`filed_at` descending) first. `None` means no cap.
 
         Returns:
-            One `TextItem` per matching filing (`source_type="filing"`).
+            One `TextItem` per matching filing (`source_type="filing"`),
+            ordered `filed_at` descending.
         """
         filings = self._with_retries(
             lambda: self._company_factory(symbol).get_filings(form=form_types)
         )
 
-        items = []
-        for filing in filings:
-            if _to_utc_datetime(filing.filing_date) > as_of:
-                continue
-            items.append(
-                TextItem(
-                    source_id=f"edgar:{filing.accession_number}",
-                    symbol=symbol,
-                    source_type="filing",
-                    published_at=_to_utc_datetime(filing.filing_date),
-                    title=f"{filing.form} - {symbol}",
-                    source_url=filing.filing_url,
-                    content_text=self._with_retries(filing.text),
-                    fetched_at=self._date_clock.now(),
-                )
+        matching = [
+            filing
+            for filing in filings
+            if _to_utc_datetime(filing.filing_date) <= as_of
+            and (since is None or _to_utc_datetime(filing.filing_date) >= since)
+        ]
+        matching.sort(
+            key=lambda filing: _to_utc_datetime(filing.filing_date), reverse=True
+        )
+        if limit is not None:
+            matching = matching[:limit]
+
+        return [
+            TextItem(
+                source_id=f"edgar:{filing.accession_number}",
+                symbol=symbol,
+                source_type="filing",
+                published_at=_to_utc_datetime(filing.filing_date),
+                title=f"{filing.form} - {symbol}",
+                source_url=filing.filing_url,
+                content_text=self._with_retries(filing.text),
+                fetched_at=self._date_clock.now(),
             )
-        return items
+            for filing in matching
+        ]

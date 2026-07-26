@@ -593,3 +593,85 @@ class TestFetchFilingTexts:
         )
 
         assert [item.source_id for item in items] == ["edgar:old"]
+
+
+class TestFetchFilingTextsBounds:
+    """P6-26: `since`/`limit` bound disclosure fetch instead of unlimited."""
+
+    def test_since_boundary_is_inclusive_immediately_before_at_and_after(self):
+        filings = [
+            FakeFiling("before", "8-K", date(2026, 7, 17), date(2026, 7, 17)),
+            FakeFiling("at", "8-K", date(2026, 7, 18), date(2026, 7, 18)),
+            FakeFiling("after", "8-K", date(2026, 7, 19), date(2026, 7, 19)),
+        ]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany(filings)),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts(
+            "AAPL",
+            ["8-K"],
+            as_of=datetime(2026, 7, 20, tzinfo=UTC),
+            since=datetime(2026, 7, 18, tzinfo=UTC),
+        )
+
+        assert [item.source_id for item in items] == ["edgar:after", "edgar:at"]
+
+    def test_limit_caps_the_returned_filing_count(self):
+        filings = [
+            FakeFiling(f"acc-{i}", "8-K", date(2026, 7, 10 + i), date(2026, 7, 10 + i))
+            for i in range(5)
+        ]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany(filings)),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC), limit=2
+        )
+
+        assert len(items) == 2
+
+    def test_results_are_sorted_filed_at_descending_regardless_of_source_order(self):
+        filings = [
+            FakeFiling("oldest", "8-K", date(2026, 7, 10), date(2026, 7, 10)),
+            FakeFiling("newest", "8-K", date(2026, 7, 18), date(2026, 7, 18)),
+            FakeFiling("middle", "8-K", date(2026, 7, 14), date(2026, 7, 14)),
+        ]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany(filings)),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )
+
+        assert [item.source_id for item in items] == [
+            "edgar:newest",
+            "edgar:middle",
+            "edgar:oldest",
+        ]
+
+    def test_limit_keeps_the_most_recent_filings_after_sorting(self):
+        filings = [
+            FakeFiling("oldest", "8-K", date(2026, 7, 10), date(2026, 7, 10)),
+            FakeFiling("newest", "8-K", date(2026, 7, 18), date(2026, 7, 18)),
+            FakeFiling("middle", "8-K", date(2026, 7, 14), date(2026, 7, 14)),
+        ]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany(filings)),
+            sleep_fn=lambda _s: None,
+        )
+
+        items = client.fetch_filing_texts(
+            "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC), limit=1
+        )
+
+        assert [item.source_id for item in items] == ["edgar:newest"]

@@ -52,3 +52,24 @@ correction-upsertする。当日バー欠損は0扱いせず、過去の極値�
 `avg_mae_usd`と`avg_mfe_usd`を返す。平均excursionの絶対額が平均実現損益の
 絶対額より大きいときだけ、利確時期またはストップ/エントリーに関する
 可能性表現の注記を返す。
+
+## LLM予算会計と開示取得の境界（NFR-01、roadmap §5 P6-26）
+
+`llm/client.py`の`LLMClient.analyze()`は、応答受信後の検証失敗
+（`SchemaValidationError`/`ForbiddenLanguageError`）や`stop_reason=="refusal"`
+でも、Anthropic側が既に課金した`response.usage`由来の実トークン数・実コストを
+`llm_calls`へ記録する（`status`は`"failed"`のまま）。SDK呼び出し自体が例外を
+送出した場合のみ応答が存在しないため0のまま記録する。
+`storage/llm_records.py::get_monthly_cost()`はこの実コストを`status`を問わず
+全行合算するため、NFR-01の月次予算上限は「実際に課金された金額」に対する
+保証になる（以前は`status='success'`のみ合算しており、失敗呼び出しの実消費が
+ゲートから見えなかった）。予算ゲートの事前概算に使う文字/トークン比
+（`_CHARS_PER_TOKEN_ESTIMATE`）は日本語主体プロンプトの実測値`2.0`を使う。
+
+開示取得（`data/edgar.py::EdgarClient.fetch_filing_texts()`）は
+`settings.llm.filing_lookback_days`（既定90日）・`max_filings_per_symbol`
+（既定3件、ニュース側`max_news_items_per_symbol`と対称）で絞り込み、
+`filed_at`降順に決定的ソートしてから件数上限を適用する。加えて
+`settings.llm.max_llm_calls_per_run`（既定200）が1回の実行内の総LLM呼び出し数を
+上限し、超過分は実API呼び出しへ到達させず`"budget_skipped"`として監査記録する
+（月次予算ゲートとは独立した第二防御）。

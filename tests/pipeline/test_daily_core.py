@@ -441,8 +441,10 @@ class TestFundamentalsStepSkipped:
                 msg = "EDGAR unreachable"
                 raise RuntimeError(msg)
 
-            def fetch_filing_texts(self, symbol, form_types, *, as_of):
-                del symbol, form_types, as_of
+            def fetch_filing_texts(
+                self, symbol, form_types, *, as_of, since=None, limit=None
+            ):
+                del symbol, form_types, as_of, since, limit
                 return []
 
         universe = (_member("AAPL"), _member("MSFT"))
@@ -480,8 +482,10 @@ class TestFundamentalsStepSkipped:
                 msg = "EDGAR unreachable"
                 raise RuntimeError(msg)
 
-            def fetch_filing_texts(self, symbol, form_types, *, as_of):
-                del symbol, form_types, as_of
+            def fetch_filing_texts(
+                self, symbol, form_types, *, as_of, since=None, limit=None
+            ):
+                del symbol, form_types, as_of, since, limit
                 return []
 
         universe = (_member("AAPL"),)
@@ -584,8 +588,10 @@ class TestTimeoutBudget:
                     )
                 ]
 
-            def fetch_filing_texts(self, symbol, form_types, *, as_of):
-                del symbol, form_types, as_of
+            def fetch_filing_texts(
+                self, symbol, form_types, *, as_of, since=None, limit=None
+            ):
+                del symbol, form_types, as_of, since, limit
                 return []
 
         universe = (_member("AAPL"), _member("MSFT"))

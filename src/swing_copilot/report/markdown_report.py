@@ -96,42 +96,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Portfolio heat: {_portfolio_heat_text(brief.portfolio_heat)}",
             ]
         )
-    lines.extend(
-        [
-            "",
-            "## Candidates",
-            "",
-            "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop |",
-            "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|",
-        ]
-    )
-    for bucket in ("即検討可", "様子見", "見送り"):
-        symbols = [
-            candidate.symbol
-            for candidate in brief.candidates
-            if _execution_bucket(candidate) == bucket
-        ]
-        lines.extend(["", f"### {bucket}", "", ", ".join(symbols) or "該当なし"])
-    lines.extend(
-        "| "
-        + " | ".join(
-            (
-                str(candidate.rank),
-                candidate.symbol,
-                _money(candidate.close),
-                _percent(candidate.pct_change),
-                _number(candidate.rsi14, digits=1),
-                _number(candidate.score, digits=3),
-                _execution_state_text(candidate),
-                ", ".join(candidate.signals) or "-",
-                candidate.risk.status,
-                format_sizing(candidate.risk),
-                _money(candidate.risk.stop_price),
-            )
-        )
-        + " |"
-        for candidate in brief.candidates
-    )
+    lines.extend(_candidates_section(brief.candidates))
     for candidate in brief.candidates:
         lines.extend(_candidate_section(candidate))
     lines.extend(["", "## 落選サマリ", ""])
@@ -230,6 +195,57 @@ def _render_decisions(decisions: list[TradeDecisionRecord]) -> str:
             f"{fill} | {reason} |"
         )
     return "\n".join(lines)
+
+
+def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
+    """P6-28: one self-contained table per P5-23 execution bucket.
+
+    Each bucket gets its own heading, header row, separator row, and data
+    rows in sequence, rather than a single table interrupted midstream by
+    bucket headings -- the latter breaks Markdown table rendering because a
+    heading between the header/separator and the data rows ends the table.
+    """
+    lines = ["", "## Candidates"]
+    for bucket in ("即検討可", "様子見", "見送り"):
+        bucket_candidates = [
+            candidate
+            for candidate in candidates
+            if _execution_bucket(candidate) == bucket
+        ]
+        lines.extend(["", f"### {bucket}", ""])
+        if not bucket_candidates:
+            lines.append("該当なし")
+            continue
+        lines.extend(
+            [
+                "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop |",
+                "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|",
+            ]
+        )
+        lines.extend(_candidate_row(candidate) for candidate in bucket_candidates)
+    return lines
+
+
+def _candidate_row(candidate: BriefCandidate) -> str:
+    return (
+        "| "
+        + " | ".join(
+            (
+                str(candidate.rank),
+                candidate.symbol,
+                _money(candidate.close),
+                _percent(candidate.pct_change),
+                _number(candidate.rsi14, digits=1),
+                _number(candidate.score, digits=3),
+                _execution_state_text(candidate),
+                ", ".join(candidate.signals) or "-",
+                candidate.risk.status,
+                format_sizing(candidate.risk),
+                _money(candidate.risk.stop_price),
+            )
+        )
+        + " |"
+    )
 
 
 def _candidate_section(candidate: BriefCandidate) -> list[str]:

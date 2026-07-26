@@ -131,6 +131,69 @@ def test_terminal_and_markdown_show_execution_buckets_and_distance() -> None:
     assert "FAIR (d=1.00)" in markdown
 
 
+def test_markdown_candidates_table_is_self_contained_per_bucket() -> None:
+    # P6-28 (a): each non-empty execution bucket renders its own complete
+    # table (heading -> header row -> separator row -> data rows), not one
+    # table interrupted midstream by a bucket heading -- the latter breaks
+    # Markdown table rendering, since a heading between the separator and
+    # the data rows ends the table.
+    base = _brief()
+    pullback = replace(
+        base.candidates[0],
+        symbol="NVDA",
+        execution_state="PULLBACK_ZONE",
+        execution_distance=0.1,
+    )
+    extended = replace(
+        base.candidates[0],
+        symbol="AMD",
+        rank=2,
+        execution_state="EXTENDED",
+        execution_distance=2.0,
+    )
+    brief = replace(base, candidates=(pullback, extended))
+
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+    lines = markdown.splitlines()
+
+    header = (
+        "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | "
+        "Signals | Risk | Shares | Stop |"
+    )
+    separator = "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|"
+    header_indices = [index for index, line in enumerate(lines) if line == header]
+
+    # One populated bucket (即検討可) gets one table; the other populated
+    # bucket (様子見) gets its own table; 見送り stays empty.
+    assert len(header_indices) == 2
+    for index in header_indices:
+        assert lines[index + 1] == separator
+        data_row = lines[index + 2]
+        assert data_row.startswith("| ")
+        assert not data_row.startswith("###")
+    assert "NVDA" in lines[header_indices[0] + 2]
+    assert "AMD" in lines[header_indices[1] + 2]
+
+
+def test_markdown_empty_bucket_keeps_no_match_placeholder() -> None:
+    # P6-28 (b): a bucket with no candidates keeps the plain "該当なし"
+    # placeholder (no empty/broken table).
+    base = _brief()
+    candidate = replace(
+        base.candidates[0], execution_state="PULLBACK_ZONE", execution_distance=0.1
+    )
+    brief = replace(base, candidates=(candidate,))
+
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+    lines = markdown.splitlines()
+
+    heading_index = lines.index("### 見送り")
+    # Heading, blank line, then the placeholder immediately -- no header
+    # row/separator for an empty bucket.
+    assert lines[heading_index + 1] == ""
+    assert lines[heading_index + 2] == "該当なし"
+
+
 def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     brief = replace(
         _brief(),
@@ -289,6 +352,24 @@ def test_terminal_shows_zero_shares_without_exception() -> None:
     )
     output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
     assert "0株（摩擦: 資金規模過小）" in output
+
+
+def test_markdown_shows_regime_wording_not_friction_for_regime_zero_shares() -> None:
+    # P6-28: a regime-driven zero-share candidate (e.g. Exposure Ceiling
+    # CASH_PRIORITY) must not be shown with the small-account-friction
+    # wording, since the account was never the binding constraint.
+    risk = BriefRisk(
+        status="rejected",
+        max_shares=0,
+        stop_price=None,
+        reasons=("REGIME_CASH_PRIORITY",),
+        warnings=(),
+        binding_constraint="regime",
+        max_trade_risk_pct=0.0,
+    )
+    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
+    assert "0株（レジーム: 新規建て停止）" in output
+    assert "資金規模過小" not in output
 
 
 def test_markdown_still_shows_dash_for_not_calculable_max_shares() -> None:

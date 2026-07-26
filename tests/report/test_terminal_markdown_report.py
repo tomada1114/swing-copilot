@@ -108,7 +108,7 @@ def test_terminal_and_markdown_show_market_regime_before_candidates() -> None:
     terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
     markdown = render_markdown(brief, RunStatus.SUCCESS)
 
-    assert terminal.index("Market regime") < terminal.index("Symbol")
+    assert terminal.index("Market regime") < terminal.index("銘柄")
     assert "Gate: BULL" in terminal
     assert "FTD" in terminal
     assert "quality 70" in terminal
@@ -131,7 +131,7 @@ def test_terminal_and_markdown_show_execution_buckets_and_distance() -> None:
     assert "即検討可: NVDA" in terminal
     assert "様子見: 該当なし" in terminal
     assert "見送り: 該当なし" in terminal
-    assert "FAIR (d=1.00)" in terminal
+    assert "FAIR (d=1.00)" not in terminal
     assert "### 即検討可" in markdown
     assert "### 様子見" in markdown
     assert "### 見送り" in markdown
@@ -216,7 +216,7 @@ def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
     markdown = render_markdown(brief, RunStatus.SUCCESS)
 
-    assert terminal.index("Exposure Ceiling") < terminal.index("Symbol")
+    assert terminal.index("Exposure Ceiling") < terminal.index("銘柄")
     assert "CASH_PRIORITY" in terminal
     assert markdown.index("## Exposure Ceiling") < markdown.index("## Candidates")
     assert "Verdict: `CASH_PRIORITY`" in markdown
@@ -243,7 +243,7 @@ def test_circuit_breaker_banner_is_alongside_exposure_before_candidates() -> Non
     markdown = render_markdown(brief, RunStatus.SUCCESS)
 
     assert terminal.index("Exposure Ceiling") < terminal.index("Circuit Breaker")
-    assert terminal.index("Circuit Breaker") < terminal.index("Symbol")
+    assert terminal.index("Circuit Breaker") < terminal.index("銘柄")
     assert markdown.index("## Exposure Ceiling") < markdown.index("## Circuit Breaker")
     assert markdown.index("## Circuit Breaker") < markdown.index("## Candidates")
     assert "HALTED" in terminal
@@ -263,7 +263,7 @@ def test_terminal_and_markdown_always_show_portfolio_heat_before_candidates() ->
     terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
     markdown = render_markdown(brief, RunStatus.SUCCESS)
 
-    assert terminal.index("Portfolio heat: 4.40% / 6.00%") < terminal.index("Symbol")
+    assert terminal.index("Portfolio heat: 4.40% / 6.00%") < terminal.index("銘柄")
     assert markdown.index("## Portfolio risk") < markdown.index("## Candidates")
     assert "Portfolio heat: `4.40% / 6.00%`" in markdown
 
@@ -392,16 +392,35 @@ def test_markdown_still_shows_dash_for_not_calculable_max_shares() -> None:
 
 
 def test_terminal_output_is_a_compact_decision_brief() -> None:
-    output = render_terminal(_brief(), RunStatus.DEGRADED, width=120, color=False)
+    report_path = Path("reports/2026-07-22/report.md")
+    output = render_terminal(
+        _brief(),
+        RunStatus.DEGRADED,
+        width=120,
+        color=False,
+        report_path=report_path,
+    )
 
     assert "Swing Copilot" in output
     assert "2026-07-22" in output
     assert "DEGRADED" in output
     assert "NVDA" in output
     assert "171.20" in output
-    assert "approved" in output
+    assert "順位" not in output
+    assert "銘柄" in output
+    assert "終値" in output
+    assert "前日比" in output
+    assert "スコア" in output
+    assert "株数" in output
+    assert "ストップ" in output
+    assert "approved" not in output
+    assert "Breakdown" not in output
+    assert "Execution" not in output
+    assert "PULLBACK_ZONE" not in output
+    assert "落選サマリ" not in output
     assert "業績見通しは維持されているが規制リスクが残る" in output
     assert "FREDカレンダーを取得できませんでした" in output
+    assert output.rstrip().endswith(f"詳細レポート: {report_path}")
     assert "<html" not in output
 
 
@@ -508,12 +527,11 @@ def test_terminal_and_markdown_omit_near_stale_warning_when_fresh() -> None:
     assert "TTL" not in output_markdown
 
 
-def test_terminal_shows_score_column_and_breakdown() -> None:
-    # REQ-007
+def test_terminal_shows_score_column_without_breakdown() -> None:
     output = render_terminal(_brief(), RunStatus.SUCCESS, width=200, color=False)
 
     assert "0.627" in output
-    assert "rsi 0.17 / trend 0.30 / liq 0.16" in output
+    assert "rsi 0.17 / trend 0.30 / liq 0.16" not in output
 
 
 def test_markdown_shows_score_column_and_breakdown_table() -> None:
@@ -569,7 +587,7 @@ def test_terminal_renders_empty_candidate_set_without_error() -> None:
     output = render_terminal(_brief_without_candidates(), RunStatus.SUCCESS, width=120)
 
     assert "Candidates: 0" in output
-    assert "Score" in output  # header still renders
+    assert "スコア" in output  # header still renders
 
 
 def _brief_with_rejections() -> DailyBrief:
@@ -582,14 +600,12 @@ def _brief_with_rejections() -> DailyBrief:
     )
 
 
-def test_terminal_shows_rejection_summary_counts() -> None:
-    # REQ-005: 落選サマリ, reason_code別件数.
+def test_terminal_omits_rejection_summary_counts() -> None:
     output = render_terminal(_brief_with_rejections(), RunStatus.SUCCESS, width=120)
 
-    assert "落選サマリ" in output
-    assert "FILTER_LOW_LIQUIDITY" in output
-    assert "3" in output
-    assert "SIGNAL_RSI_NOT_MET" in output
+    assert "落選サマリ" not in output
+    assert "FILTER_LOW_LIQUIDITY" not in output
+    assert "SIGNAL_RSI_NOT_MET" not in output
 
 
 def test_markdown_shows_rejection_summary_table() -> None:
@@ -601,13 +617,11 @@ def test_markdown_shows_rejection_summary_table() -> None:
     assert "SIGNAL_RSI_NOT_MET" in output
 
 
-def test_terminal_renders_empty_rejection_summary_without_error() -> None:
-    # REQ-010 boundary: zero rejections renders a "0件" style message, no
-    # exception.
+def test_terminal_omits_empty_rejection_summary() -> None:
     output = render_terminal(_brief(), RunStatus.SUCCESS, width=120)
 
-    assert "落選サマリ" in output
-    assert "0件" in output
+    assert "落選サマリ" not in output
+    assert "0件" not in output
 
 
 def test_markdown_renders_empty_rejection_summary_without_error() -> None:

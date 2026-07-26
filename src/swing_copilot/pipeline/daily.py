@@ -1749,6 +1749,7 @@ def main(argv: list[str] | None = None) -> None:
                 result.status,
                 width=width,
                 color=sys.stdout.isatty(),
+                report_path=result.report_path,
             )
         )
     raise SystemExit(result.exit_code)

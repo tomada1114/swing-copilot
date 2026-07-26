@@ -140,6 +140,7 @@ _ZERO_SHARE_TEXTS = {
     "portfolio_heat": "0株（制約: ポートフォリオヒート上限）",
     "earnings": "0株（制約: 決算近接）",
     "sector": "0株（制約: セクター集中）",
+    "correlation": "0株（制約: 相関集中）",
     "not_calculable": "0株（算出不可）",
 }
 _SMALL_ACCOUNT_FRICTION_TEXT = "0株（摩擦: 資金規模過小）"

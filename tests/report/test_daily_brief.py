@@ -370,6 +370,24 @@ class TestFormatSizing:
         assert rendered == "0株（レジーム: 新規建て停止）"
         assert "資金規模過小" not in rendered
 
+    def test_zero_shares_correlation_binding_uses_correlation_wording_not_friction(
+        self,
+    ) -> None:
+        # Same category of bug as the regime case above: a correlation veto
+        # (like sector concentration) is not a sizing-floor friction, and
+        # must not be mislabeled as small-account friction either.
+        risk = BriefRisk(
+            "rejected",
+            0,
+            None,
+            (),
+            (),
+            binding_constraint="correlation",
+        )
+        rendered = format_sizing(risk)
+        assert rendered == "0株（制約: 相関集中）"
+        assert "資金規模過小" not in rendered
+
     def test_issue_example_1_trade_risk_string(self) -> None:
         risk = BriefRisk(
             "approved",

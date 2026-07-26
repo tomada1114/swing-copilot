@@ -169,7 +169,7 @@ class TestDataInsufficientHistoryFundamentals:
 
 
 class TestFundamentalFilterReasons:
-    def test_negative_net_income_uses_latest_value(self, settings):
+    def test_negative_net_income_on_latest_quarter_reports_that_quarter(self, settings):
         # Issue Example 1.
         rows = _quarterly_rows("XYZ", [10.0, 10.0, 10.0, -500000.0])
         data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
@@ -178,20 +178,69 @@ class TestFundamentalFilterReasons:
 
         assert rejection.stage is RejectionStage.FUNDAMENTAL_FILTER
         assert rejection.reason_code is RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME
-        assert rejection.detail == {"net_income": -500000.0, "threshold": 0}
+        assert rejection.detail == {
+            "fiscal_period_end": "2025-12-31",
+            "net_income": -500000.0,
+            "threshold": 0,
+        }
 
-    def test_missing_net_income_reports_null_not_nan(self, settings):
-        # Regression: a real EDGAR data gap (NaN net_income on the latest
-        # filed quarter) must not reach json_guard.dumps_safe() as a raw
-        # non-finite float — mirror the fcf/equity_ratio null-reporting
-        # convention already used for the same situation just below.
+    def test_negative_net_income_on_older_quarter_reports_that_quarter_not_latest(
+        self, settings
+    ):
+        # Regression for P6-25: the bug reported the latest (index 3, here
+        # healthy) quarter's value even when an *older* quarter was the one
+        # that actually failed the `> 0` requirement.
+        rows = _quarterly_rows("XYZ", [-500000.0, 10.0, 10.0, 10.0])
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(data, settings)
+
+        assert rejection.stage is RejectionStage.FUNDAMENTAL_FILTER
+        assert rejection.reason_code is RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME
+        assert rejection.detail == {
+            "fiscal_period_end": "2025-03-31",
+            "net_income": -500000.0,
+            "threshold": 0,
+        }
+
+    def test_missing_net_income_on_latest_quarter_is_data_quality_not_filter(
+        self, settings
+    ):
+        # Regression for P6-25: a real EDGAR data gap (NaN net_income, e.g.
+        # from the fundamentals-extraction bug that briefly nulled out
+        # net_income for most filings) is a data-quality problem, not a
+        # genuinely negative business result -- it must not be classified
+        # (or reported) as FILTER_NEGATIVE_NET_INCOME.
         rows = _quarterly_rows("XYZ", [10.0, 10.0, 10.0, float("nan")])
         data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
 
         [rejection] = _classify(data, settings)
 
-        assert rejection.reason_code is RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME
-        assert rejection.detail == {"net_income": None, "threshold": 0}
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.reason_code is RejectionReasonCode.DATA_MISSING_NET_INCOME
+        assert rejection.detail == {
+            "fiscal_period_end": "2025-12-31",
+            "net_income": None,
+        }
+
+    def test_missing_net_income_on_older_quarter_reports_that_quarter_not_latest(
+        self, settings
+    ):
+        # Regression for P6-25: old quarter NaN, latest quarter healthy --
+        # the old NaN quarter must still fail min_profitable_quarters (mirrors
+        # ProfitablePositiveFCFEquityFilter.apply()'s `.all()` check), and the
+        # detail must point at the actual offending (older) quarter.
+        rows = _quarterly_rows("XYZ", [float("nan"), 10.0, 10.0, 10.0])
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(data, settings)
+
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.reason_code is RejectionReasonCode.DATA_MISSING_NET_INCOME
+        assert rejection.detail == {
+            "fiscal_period_end": "2025-03-31",
+            "net_income": None,
+        }
 
     def test_negative_fcf(self, settings):
         rows = _healthy_fundamentals("XYZ")

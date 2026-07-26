@@ -1234,7 +1234,8 @@ CREATE TABLE IF NOT EXISTS screening_rejections (
     stage        VARCHAR NOT NULL CHECK (stage IN ('data_quality','fundamental_filter','technical_signal')),
     reason_code  VARCHAR NOT NULL CHECK (reason_code IN (
         'FILTER_NEGATIVE_NET_INCOME','FILTER_NEGATIVE_FCF','FILTER_LOW_EQUITY_RATIO',
-        'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY'
+        'FILTER_LOW_LIQUIDITY','SIGNAL_TREND_NOT_MET','SIGNAL_RSI_NOT_MET','DATA_INSUFFICIENT_HISTORY',
+        'DATA_MISSING_NET_INCOME'
     )),
     detail       JSON NOT NULL,
     as_of        DATE NOT NULL,
@@ -1401,6 +1402,8 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 `screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は`strategies.yaml`で実際に設定されたFilter順、Signal順、ランキング用データ品質の順で行われ、ランキング指標が欠損した銘柄も`DATA_INSUFFICIENT_HISTORY`として候補・落選のどちらにも出ない状態を避ける。candidate_limitだけで順位落ちした銘柄は落選理由を付けない。将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
 
 **Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
+
+`_classify_fundamentals()`は`min_profitable_quarters`件のうち`net_income > 0`を満たさない四半期があると、直近4件中で実際に条件を満たさなかった最新の四半期（NaN含む）を`fiscal_period_end`とともに`detail`へ記録する（P6-25で、常に最新四半期の値を報告していた旧実装のバグを修正）。その四半期の`net_income`が`NaN`（EDGARデータの実欠損。純損失という事実とは別物）の場合は8番目の値`DATA_MISSING_NET_INCOME`（`stage='data_quality'`。`DATA_INSUFFICIENT_HISTORY`と同じ扱い）を、非NaNで`<=0`の場合のみ既存の`FILTER_NEGATIVE_NET_INCOME`（`stage='fundamental_filter'`）を使う。
 
 `report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
 

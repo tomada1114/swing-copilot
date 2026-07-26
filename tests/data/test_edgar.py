@@ -408,6 +408,68 @@ class TestFetchFundamentals:
 
         assert records[0].revenue == 100.0
 
+    def test_dei_cover_page_fact_does_not_hijack_fiscal_period_end(self):
+        """Regression for P6-25 (a `dei` fact must not hijack the period end).
+
+        Reproduces the real AMD accession 0000002488-25-000108 (10-Q filed
+        for the quarter ended 2025-06-28): its `dei:
+        EntityCommonStockSharesOutstanding` cover-page fact is dated
+        2025-07-30, weeks after every us-gaap financial fact's period end.
+        Before this fix, `max(period_end)` picked up the dei date, so every
+        us-gaap concept's exact-match lookup failed and every metric came
+        back `None`.
+        """
+        period_end = date(2025, 6, 28)
+        us_gaap_facts = _filing_facts(
+            FilingKey("0000002488-25-000108", "10-Q", date(2025, 7, 30), period_end),
+            revenue=100.0,
+            net_income=20.0,
+        )
+        dei_cover_page_fact = FakeFact(
+            "dei:EntityCommonStockSharesOutstanding",
+            "0000002488-25-000108",
+            "10-Q",
+            date(2025, 7, 30),
+            date(2025, 7, 30),  # weeks after the fiscal period end
+            1_000_000.0,
+        )
+        company = FakeCompany(
+            facts=FakeEntityFacts(DEFAULT_CIK, [*us_gaap_facts, dei_cover_page_fact])
+        )
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(company),
+            sleep_fn=lambda _s: None,
+        )
+
+        records = client.fetch_fundamentals("AMD", datetime(2025, 8, 1, tzinfo=UTC))
+
+        assert len(records) == 1
+        assert records[0].fiscal_period_end == period_end
+        assert records[0].revenue == 100.0
+        assert records[0].net_income == 20.0
+
+    def test_filing_with_only_dei_facts_is_dropped(self):
+        """A filing with only `dei` facts has no derivable fiscal period."""
+        dei_only = FakeFact(
+            "dei:EntityCommonStockSharesOutstanding",
+            "0001-26-000001",
+            "10-Q",
+            date(2026, 7, 10),
+            date(2026, 6, 30),
+            1_000_000.0,
+        )
+        company = FakeCompany(facts=FakeEntityFacts(DEFAULT_CIK, [dei_only]))
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(company),
+            sleep_fn=lambda _s: None,
+        )
+
+        records = client.fetch_fundamentals("AAPL", datetime(2026, 7, 20, tzinfo=UTC))
+
+        assert records == []
+
     def test_excludes_dimensioned_segment_facts(self):
         period_end = date(2026, 6, 30)
         segment_fact = FakeFact(

@@ -376,7 +376,7 @@ def _fetch_or_skip_fundamentals(
     market_store: MarketStore,
     edgar_client: _EdgarClientLike,
     symbol: str,
-    as_of: date,
+    today: date,
     as_of_cutoff: datetime,
 ) -> tuple[list[FundamentalsRecord], bool, bool]:
     """Fetch one symbol's fundamentals, or skip a same-day rerun.
@@ -386,19 +386,21 @@ def _fetch_or_skip_fundamentals(
             the eventual upsert.
         edgar_client: Configured EDGAR client (never `None` here).
         symbol: Ticker to fetch.
-        as_of: Run's evaluation date, both the filing cutoff and the
-            same-day-skip comparison date.
+        today: Wall-clock calendar date (from the injected `Clock`), compared
+            against `fetched_at`'s date to detect a same-day rerun. Must not
+            be `as_of` -- `fetched_at` is a real fetch timestamp, so a past
+            `--as-of` would never match it and every run would refetch (P6-25).
         as_of_cutoff: `as_of` widened to end-of-day UTC for the filing cutoff.
 
     Returns:
         `(records, failed, was_skipped)`. `failed` is `True` only if the
         network fetch itself raised; a same-day skip is never a failure.
     """
-    if market_store.has_fundamentals_fetched_on(symbol, as_of):
+    if market_store.has_fundamentals_fetched_on(symbol, today):
         logger.debug(
             "fundamentals: %s already fetched today (%s), skipping fetch",
             symbol,
-            as_of,
+            today,
         )
         return [], False, True
     try:
@@ -424,9 +426,15 @@ def _run_step_fundamentals(
     Two fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
 
     - Same-day rerun skip: a symbol already fetched today (`fetched_at`'s
-      date == `as_of`) is not re-fetched over the network. Correction
-      semantics are unaffected — the next day's run always re-fetches and
-      upserts by `accession_no`.
+      date == `deps.clock.today()`) is not re-fetched over the network. This
+      is deliberately the injected `Clock`'s wall-clock date, not `as_of`:
+      `fetched_at` is a real fetch timestamp, so comparing it against a
+      possibly-past `as_of` would never match and every rerun would refetch
+      over the network regardless of `--as-of` (P6-25). Point-in-time
+      correctness is unaffected -- callers still read fundamentals filtered
+      by `as_of`, never by `fetched_at`. Correction semantics are also
+      unaffected — the next day's run always re-fetches and upserts by
+      `accession_no`.
     - NFR-03 time budget: once `deps.monotonic() >= deadline`, fetching
       stops early with whatever records were already gathered upserted, and
       the step still succeeds (not fatal) with a detail explaining the
@@ -439,6 +447,7 @@ def _run_step_fundamentals(
             True, "skipped: no EDGAR client configured", is_skipped=True
         )
 
+    today = deps.clock.today()
     as_of_cutoff = datetime.combine(as_of, datetime.max.time(), tzinfo=UTC)
     total = len(symbols)
     records: list[FundamentalsRecord] = []
@@ -452,7 +461,7 @@ def _run_step_fundamentals(
             logger.warning("fundamentals step stopping early: %s", budget_detail)
             break
         symbol_records, failed, was_skipped = _fetch_or_skip_fundamentals(
-            deps.market_store, edgar_client, symbol, as_of, as_of_cutoff
+            deps.market_store, edgar_client, symbol, today, as_of_cutoff
         )
         records.extend(symbol_records)
         failed_symbols.extend([symbol] if failed else [])

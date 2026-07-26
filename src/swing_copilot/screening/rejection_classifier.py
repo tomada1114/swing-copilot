@@ -135,6 +135,50 @@ def _classify_filter(
     raise NotImplementedError(msg)
 
 
+def _isoformat_date(value: object) -> str:
+    """Normalize a fundamentals-row date cell to a plain ISO date string.
+
+    `fundamentals` rows come from tests as `datetime.date` and from
+    `MarketStore.read_fundamentals()` (DuckDB `.df()`) as `pandas.Timestamp`;
+    both need coercing to a JSON-safe `str` before reaching
+    `json_guard.dumps_safe()`, which cannot serialize either type directly.
+    """
+    return pd.Timestamp(value).date().isoformat()  # type: ignore[arg-type]  # Any: object cell from a DataFrame row
+
+
+def _classify_net_income(symbol: str, recent: pd.DataFrame) -> RejectionRecord:
+    """Classify a `min_profitable_quarters` net-income failure (P6-25).
+
+    `recent` is sorted newest-first; this reports the most recent quarter
+    that actually failed the `> 0` requirement rather than always the
+    newest quarter — an older failing quarter must not be misreported as
+    the current (possibly perfectly healthy) quarter's value. A `NaN`
+    net_income is a real data gap (the filing lacked/failed to normalize
+    the concept), distinct from a genuinely negative result, and must not
+    be reported as a business rejection under `FILTER_NEGATIVE_NET_INCOME`.
+    """
+    failing = recent[~(recent["net_income"] > 0)]
+    offending = failing.iloc[0]
+    fiscal_period_end = _isoformat_date(offending["fiscal_period_end"])
+    if pd.isna(offending["net_income"]):
+        return RejectionRecord(
+            symbol,
+            RejectionStage.DATA_QUALITY,
+            RejectionReasonCode.DATA_MISSING_NET_INCOME,
+            {"fiscal_period_end": fiscal_period_end, "net_income": None},
+        )
+    return RejectionRecord(
+        symbol,
+        RejectionStage.FUNDAMENTAL_FILTER,
+        RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME,
+        {
+            "fiscal_period_end": fiscal_period_end,
+            "net_income": float(offending["net_income"]),
+            "threshold": 0,
+        },
+    )
+
+
 def _classify_fundamentals(
     symbol: str, data: ScreeningInput, settings: Settings
 ) -> RejectionRecord | None:
@@ -169,18 +213,7 @@ def _classify_fundamentals(
 
     latest = recent.iloc[0]
     if not (recent["net_income"] > 0).all():
-        # A NaN net_income (real data gap, distinct from a genuinely negative
-        # value) must report as null, not a non-finite float reaching
-        # json_guard.dumps_safe() — same convention as fcf/equity_ratio below.
-        net_income = (
-            float(latest["net_income"]) if pd.notna(latest["net_income"]) else None
-        )
-        return RejectionRecord(
-            symbol,
-            RejectionStage.FUNDAMENTAL_FILTER,
-            RejectionReasonCode.FILTER_NEGATIVE_NET_INCOME,
-            {"net_income": net_income, "threshold": 0},
-        )
+        return _classify_net_income(symbol, recent)
     if config.require_positive_fcf and not (
         pd.notna(latest["fcf"]) and latest["fcf"] > 0
     ):

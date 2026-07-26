@@ -36,6 +36,9 @@ site/
 # Point-in-time universe fallback, auto-generated on first successful fetch
 /config/universe_snapshot.csv
 
+# Local verification / retrospective notes (timestamped, never committed)
+/notes/
+
 # IDE
 .vscode/
 .idea/

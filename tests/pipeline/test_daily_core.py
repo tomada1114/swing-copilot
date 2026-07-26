@@ -237,6 +237,11 @@ class TestHappyPath:
         )
         assert set(bars["fetched_at"]) == {pd.Timestamp("2027-03-01T12:00:00Z")}
 
+    def test_default_null_progress_keeps_run_daily_stderr_silent(self, deps, capsys):
+        run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert capsys.readouterr().err == ""
+
     def test_persists_insufficient_regime_snapshot_without_stopping_run(
         self, deps, state_store
     ):

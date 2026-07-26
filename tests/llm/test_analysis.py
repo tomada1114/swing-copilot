@@ -291,6 +291,27 @@ class TestUntrustedInstructions:
         assert "信頼できない入力" not in client.requests[0].prompt
 
 
+class TestOutputLanguage:
+    def test_news_system_prompt_requires_japanese_output(self):
+        client = FakeLLMClient([_news_summary()])
+
+        summarize_news(client, _news_request())
+
+        assert "出力するすべてのテキストフィールドは必ず日本語で記述してください。" in (
+            client.requests[0].system_prompt
+        )
+
+    def test_filing_system_prompt_requires_japanese_output(self):
+        filing = _filing_text_item("Some filing text.")
+        client = FakeLLMClient([_filing_analysis()])
+
+        analyze_filing(client, _filing_request(filing))
+
+        assert "出力するすべてのテキストフィールドは必ず日本語で記述してください。" in (
+            client.requests[0].system_prompt
+        )
+
+
 class TestForbiddenLanguageCheck:
     def test_news_summary_with_imperative_buy_language_raises(self):
         client = FakeLLMClient(

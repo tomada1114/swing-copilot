@@ -50,11 +50,13 @@ MarketStore / StateStore / Pipeline values
 
 1. 日付、run status、候補数、run ID
 2. 市場概況
-3. 候補比較テーブル
-4. 候補ごとのLLM結論、リスク警告、source ID
-5. run全体の警告
+3. 市場レジーム、exposure ceiling、circuit breaker、portfolio heat、実行バケット
+4. 候補比較テーブル
+5. 候補ごとのLLM結論、リスク警告、source ID
+6. run全体の警告
+7. 詳細レポートパス
 
-候補表は最大10件を前提とし、列は順位、Symbol、Close、Change、RSI、Signal、Risk、Shares、Stopに限定する。詳細なfactsとURLはMarkdownへ保存し、ターミナルでは結論ファーストにする。
+候補表は最大10件を前提とし、順位、銘柄、終値、前日比、スコア、株数、ストップの7列を日本語ヘッダと罫線付きで表示する。実行状態は実行バケット行で、リスク警告は候補別詳細で表示する。落選サマリはターミナルには表示せず、監査用のMarkdownレポートだけに保持する。出力末尾には詳細レポートのパスを表示する。詳細なfactsとURLはMarkdownへ保存し、ターミナルでは結論ファーストにする。
 
 Richは幅計算・日本語折り返し・TTY色制御にだけ使用する。CLI引数解析はargparseを維持する。非TTYまたはテストでは色を無効化し、安定したプレーンテキストを返す。
 

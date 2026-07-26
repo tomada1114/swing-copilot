@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from swing_copilot.config import Secrets, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError
-from swing_copilot.models import DailyRunOptions, RunMode
+from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
@@ -58,6 +59,8 @@ class TestParseArgs:
                 "--skip-llm",
                 "--limit",
                 "5",
+                "--log-level",
+                "DEBUG",
             ]
         )
 
@@ -67,6 +70,7 @@ class TestParseArgs:
             skip_text=True,
             skip_llm=True,
             limit=5,
+            log_level="DEBUG",
         )
 
     def test_strategy_defaults_to_default_and_accepts_named_strategy(self):
@@ -74,6 +78,12 @@ class TestParseArgs:
         assert _parse_args(["--strategy", "minervini_stage2"]).strategy_key == (
             "minervini_stage2"
         )
+
+    def test_log_level_is_optional_and_restricted_to_supported_levels(self):
+        assert _parse_args([]).log_level is None
+        assert _parse_args(["--log-level", "WARNING"]).log_level == "WARNING"
+        with pytest.raises(SystemExit):
+            _parse_args(["--log-level", "TRACE"])
 
 
 class TestRequiredFeatures:
@@ -309,6 +319,45 @@ class TestMain:
         assert calls["options"].is_dry_run is True
         assert calls["run_daily"] == (calls["options"], "fake-deps")
 
+    def test_renders_brief_with_report_path(self, monkeypatch, capsys):
+        brief = object()
+        report_path = Path("reports/2026-07-22/report.md")
+        calls = {}
+
+        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
+        monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
+        monkeypatch.setattr(
+            daily_module, "_compose_dependencies", lambda *_args: "fake-deps"
+        )
+        monkeypatch.setattr(
+            daily_module,
+            "run_daily",
+            lambda *_args: SimpleNamespace(
+                exit_code=0,
+                brief=brief,
+                status=RunStatus.SUCCESS,
+                report_path=report_path,
+            ),
+        )
+
+        def fake_render_terminal(brief_arg, status, **kwargs):
+            calls["render"] = (brief_arg, status, kwargs)
+            return "terminal output\n"
+
+        monkeypatch.setattr(daily_module, "render_terminal", fake_render_terminal)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+        assert exc_info.value.code == 0
+        assert capsys.readouterr().out == "terminal output\n"
+        assert calls["render"] == (
+            brief,
+            RunStatus.SUCCESS,
+            {"width": 120, "color": False, "report_path": report_path},
+        )
+
 
 class TestConfigureLoggingRedactsSecrets:
     """Tests `_SecretRedactionFilter`, attached to root logging by `_configure_logging`.
@@ -319,6 +368,45 @@ class TestConfigureLoggingRedactsSecrets:
     as URL query params that `httpx.HTTPStatusError` embeds verbatim in its
     message.
     """
+
+    def test_defaults_to_quiet_root_and_informative_application_logger(self):
+        root_logger = logging.getLogger()
+        application_logger = logging.getLogger("swing_copilot")
+        previous_root_level = root_logger.level
+        previous_application_level = application_logger.level
+        try:
+            _configure_logging(_isolated_secrets())
+
+            assert root_logger.level == logging.WARNING
+            assert application_logger.level == logging.INFO
+        finally:
+            root_logger.setLevel(previous_root_level)
+            application_logger.setLevel(previous_application_level)
+
+    @pytest.mark.parametrize(
+        ("level_name", "level"),
+        [
+            ("DEBUG", logging.DEBUG),
+            ("INFO", logging.INFO),
+            ("WARNING", logging.WARNING),
+            ("ERROR", logging.ERROR),
+        ],
+    )
+    def test_explicit_log_level_applies_to_root_and_application_logger(
+        self, level_name, level
+    ):
+        root_logger = logging.getLogger()
+        application_logger = logging.getLogger("swing_copilot")
+        previous_root_level = root_logger.level
+        previous_application_level = application_logger.level
+        try:
+            _configure_logging(_isolated_secrets(), level=level_name)
+
+            assert root_logger.level == level
+            assert application_logger.level == level
+        finally:
+            root_logger.setLevel(previous_root_level)
+            application_logger.setLevel(previous_application_level)
 
     def test_redacts_secret_from_message_and_traceback(self, caplog):
         secrets = _isolated_secrets(

@@ -128,6 +128,23 @@ _CONSTRAINT_LABELS = {
     "correlation": "相関",
 }
 
+# P6-28: zero-share wording keyed by the actual `binding_constraint` that
+# produced it. `trade_risk`/`position_cap` (and anything unlisted here) fall
+# through to the small-account-friction wording below, since only those two
+# constraints mean the position-sizing floor itself rounded down to zero.
+# Every other constraint means sizing *could* place shares but something
+# else vetoed the trade -- attributing that to "資金規模過小" would misstate
+# the reason (e.g. a regime-driven CASH_PRIORITY halt).
+_ZERO_SHARE_TEXTS = {
+    "regime": "0株（レジーム: 新規建て停止）",
+    "portfolio_heat": "0株（制約: ポートフォリオヒート上限）",
+    "earnings": "0株（制約: 決算近接）",
+    "sector": "0株（制約: セクター集中）",
+    "correlation": "0株（制約: 相関集中）",
+    "not_calculable": "0株（算出不可）",
+}
+_SMALL_ACCOUNT_FRICTION_TEXT = "0株（摩擦: 資金規模過小）"
+
 
 @dataclass(frozen=True, slots=True)
 class BriefRisk:
@@ -152,14 +169,17 @@ def format_sizing(risk: BriefRisk) -> str:
 
     Returns `"-"` when `max_shares` is `None` (not calculable, the pre-P1-03
     fallback existing snapshots assert on). A final share count of `0`
-    always renders with Example 4's friction wording regardless of which
-    constraint was binding, since a floored-to-zero trade is unplaceable
-    either way.
+    renders Example 4's friction wording only when `trade_risk`/`position_cap`
+    was binding (P6-28: a genuine sizing-floor-to-zero); any other binding
+    constraint (e.g. a regime halt) renders that constraint's own wording so
+    the display doesn't misattribute the reason.
     """
     if risk.max_shares is None:
         return "-"
     if risk.max_shares == 0:
-        return "0株（摩擦: 資金規模過小）"
+        return _ZERO_SHARE_TEXTS.get(
+            risk.binding_constraint, _SMALL_ACCOUNT_FRICTION_TEXT
+        )
     if risk.binding_constraint == "trade_risk" and risk.max_trade_risk_pct is not None:
         return (
             f"{risk.max_shares}株（制約: リスク{risk.max_trade_risk_pct * 100:.1f}%）"

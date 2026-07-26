@@ -336,6 +336,8 @@ class TestFormatSizing:
         assert format_sizing(risk) == "-"
 
     def test_zero_shares_uses_example_4_friction_wording(self) -> None:
+        # True small-account friction: trade_risk/position_cap bound and
+        # the sizing floor itself rounded down to zero.
         risk = BriefRisk(
             "approved",
             0,
@@ -348,6 +350,43 @@ class TestFormatSizing:
             max_position_pct=0.001,
         )
         assert format_sizing(risk) == "0株（摩擦: 資金規模過小）"
+
+    def test_zero_shares_regime_binding_uses_regime_wording_not_friction(
+        self,
+    ) -> None:
+        # P6-28: an Exposure Ceiling CASH_PRIORITY (or circuit-breaker) halt
+        # sizes zero shares via `binding_constraint="regime"`, which is not
+        # small-account friction and must not be mislabeled as such.
+        risk = BriefRisk(
+            "rejected",
+            0,
+            None,
+            ("REGIME_CASH_PRIORITY",),
+            (),
+            binding_constraint="regime",
+            max_trade_risk_pct=0.0,
+        )
+        rendered = format_sizing(risk)
+        assert rendered == "0株（レジーム: 新規建て停止）"
+        assert "資金規模過小" not in rendered
+
+    def test_zero_shares_correlation_binding_uses_correlation_wording_not_friction(
+        self,
+    ) -> None:
+        # Same category of bug as the regime case above: a correlation veto
+        # (like sector concentration) is not a sizing-floor friction, and
+        # must not be mislabeled as small-account friction either.
+        risk = BriefRisk(
+            "rejected",
+            0,
+            None,
+            (),
+            (),
+            binding_constraint="correlation",
+        )
+        rendered = format_sizing(risk)
+        assert rendered == "0株（制約: 相関集中）"
+        assert "資金規模過小" not in rendered
 
     def test_issue_example_1_trade_risk_string(self) -> None:
         risk = BriefRisk(

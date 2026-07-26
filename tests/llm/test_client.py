@@ -295,8 +295,16 @@ class TestRefusalAndErrors:
             client.analyze(_request())
 
         with state_store._database.connect() as conn:  # noqa: SLF001
-            status = conn.execute("SELECT status FROM llm_calls").fetchone()
-        assert status == ("failed",)
+            row = conn.execute(
+                "SELECT status, input_tokens, output_tokens, cost_usd FROM llm_calls"
+            ).fetchone()
+        assert row[0] == "failed"
+        # P6-26: a refusal still bills Anthropic for the tokens already
+        # consumed (`response.usage`, the `FakeResponse` default), so this
+        # must not silently record 0/0/0.0 like the pre-P6-26 behavior.
+        assert row[1] == 100
+        assert row[2] == 50
+        assert row[3] == pytest.approx((100 * 1.0 + 50 * 5.0) / 1_000_000)
 
     def test_api_error_raises_llm_error_and_records_failure(self, state_store):
         exc = anthropic.APIConnectionError(
@@ -317,8 +325,16 @@ class TestRefusalAndErrors:
             client.analyze(_request())
 
         with state_store._database.connect() as conn:  # noqa: SLF001
-            status = conn.execute("SELECT status FROM llm_calls").fetchone()
-        assert status == ("failed",)
+            row = conn.execute(
+                "SELECT status, input_tokens, output_tokens, cost_usd FROM llm_calls"
+            ).fetchone()
+        assert row[0] == "failed"
+        # No `response` exists on this branch (the SDK call itself raised),
+        # so there is no usage to report -- 0/0/0.0 stays correct here,
+        # unlike the refusal/validation-failure branches above (P6-26).
+        assert row[1] == 0
+        assert row[2] == 0
+        assert row[3] == 0.0
 
     def test_fact_citing_unknown_source_id_raises_schema_validation_error(
         self, state_store
@@ -337,6 +353,17 @@ class TestRefusalAndErrors:
 
         with pytest.raises(SchemaValidationError):
             client.analyze(_request(source_ids=("news:1",)))
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT status, input_tokens, output_tokens, cost_usd FROM llm_calls"
+            ).fetchone()
+        assert row[0] == "failed"
+        # P6-26: a schema-validation failure still bills Anthropic for the
+        # tokens already consumed.
+        assert row[1] == 100
+        assert row[2] == 50
+        assert row[3] == pytest.approx((100 * 1.0 + 50 * 5.0) / 1_000_000)
 
     def test_catalyst_quality_citing_unknown_source_id_raises_schema_validation_error(
         self, state_store
@@ -378,8 +405,17 @@ class TestRefusalAndErrors:
             client.analyze(_request())
 
         with state_store._database.connect() as conn:  # noqa: SLF001
-            row = conn.execute("SELECT status, response_json FROM llm_calls").fetchone()
-        assert row == ("failed", None)
+            row = conn.execute(
+                "SELECT status, response_json, input_tokens, output_tokens, cost_usd "
+                "FROM llm_calls"
+            ).fetchone()
+        assert row[0] == "failed"
+        assert row[1] is None
+        # P6-26: a CON-03 forbidden-language failure still bills Anthropic
+        # for the tokens already consumed.
+        assert row[2] == 100
+        assert row[3] == 50
+        assert row[4] == pytest.approx((100 * 1.0 + 50 * 5.0) / 1_000_000)
 
 
 class TestBudgetGate:
@@ -404,6 +440,121 @@ class TestBudgetGate:
         with state_store._database.connect() as conn:  # noqa: SLF001
             status = conn.execute("SELECT status FROM llm_calls").fetchone()
         assert status == ("budget_skipped",)
+
+    def test_a_prior_failed_calls_real_cost_counts_toward_the_monthly_gate(
+        self, state_store
+    ):
+        """P6-26: `get_monthly_cost()` must not silently ignore failed-call cost.
+
+        A refusal still bills Anthropic for the tokens it consumed
+        (`response.usage`). If the monthly-cost query only summed
+        `status='success'` rows (the pre-P6-26 bug), that real spend would
+        never reach the budget gate, and a tiny follow-up call would sail
+        through even though the account has already been billed past its cap.
+
+        `record_llm_call()` stamps `created_at` with the storage layer's own
+        real `now()` (an audit insert time, not the injected `Clock`'s
+        `as_of`), so both clients here use `today()` = the real current date
+        -- the injected `Clock` only drives which calendar month
+        `get_monthly_llm_cost()` totals, and it must be the month the row
+        was actually just inserted into.
+        """
+        today = datetime.now(UTC).date()
+        refusing_client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(
+                    FakeResponse(None, stop_reason="refusal")
+                ),
+                clock=FakeClock(today),
+            ),
+        )
+        with pytest.raises(LLMError, match="refused"):
+            refusing_client.analyze(_request())
+        # Real cost billed by the refusal above: (100*1.0 + 50*5.0) / 1e6.
+
+        # This second call's own estimated cost is tiny (1-char prompt/
+        # system_prompt, max_tokens=1) -- small enough to fit under the cap
+        # entirely on its own. It is blocked only because the refusal above
+        # already spent real budget this month.
+        tiny_request = AnalyzeRequest(
+            run_id=uuid4(),
+            system_prompt="s",
+            prompt="p",
+            source_ids=("news:1",),
+            schema=NewsSummary,
+            schema_version=1,
+            model=MODEL,
+            max_tokens=1,
+        )
+        gated_client = LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=0.0001,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(today),
+            ),
+        )
+
+        with pytest.raises(BudgetExceededError):
+            gated_client.analyze(tiny_request)
+
+
+class TestEstimateCost:
+    """P6-26: `_CHARS_PER_TOKEN_ESTIMATE` (2.0) drives the pre-call estimate.
+
+    `_estimate_cost()` has no public equivalent (it only feeds the pre-call
+    budget check inside `analyze()`), so it is exercised directly here,
+    matching this file's existing pattern of reaching past the public
+    interface (`state_store._database`) when a formula has no other
+    observable seam.
+    """
+
+    def _client(self, state_store: StateStore) -> LLMClient:
+        return LLMClient(
+            "test-key",
+            state_store,
+            ModelPricing(),
+            monthly_budget_cap_usd=5.0,
+            test_seams=LLMClientTestSeams(
+                anthropic_client=FakeAnthropicClient(FakeResponse(_news_summary())),
+                clock=FakeClock(date(2027, 1, 1)),
+            ),
+        )
+
+    def test_applies_the_chars_per_token_estimate_to_input_tokens(self, state_store):
+        client = self._client(state_store)
+        pricing = ModelPricing().get(MODEL)  # (1.0, 5.0)
+
+        # 200 chars / 2.0 chars-per-token (P6-26) = 100 estimated input tokens.
+        estimated = client._estimate_cost(  # noqa: SLF001
+            "x" * 200, max_tokens=1000, pricing=pricing
+        )
+
+        expected = (100 * pricing[0] + 1000 * pricing[1]) / 1_000_000
+        assert estimated == pytest.approx(expected)
+
+    def test_scales_linearly_with_prompt_length(self, state_store):
+        client = self._client(state_store)
+        pricing = ModelPricing().get(MODEL)
+
+        short = client._estimate_cost("x" * 20, max_tokens=0, pricing=pricing)  # noqa: SLF001
+        long = client._estimate_cost("x" * 2000, max_tokens=0, pricing=pricing)  # noqa: SLF001
+
+        assert long == pytest.approx(short * 100)
+
+    def test_empty_prompt_still_reflects_max_tokens_cost(self, state_store):
+        client = self._client(state_store)
+        pricing = ModelPricing().get(MODEL)
+
+        estimated = client._estimate_cost("", max_tokens=1000, pricing=pricing)  # noqa: SLF001
+
+        assert estimated == pytest.approx(1000 * pricing[1] / 1_000_000)
 
 
 class TestUnknownPricing:
@@ -447,8 +598,17 @@ class TestCon03BehavioralClaims:
             client.analyze(_request())
 
         with state_store._database.connect() as conn:  # noqa: SLF001
-            row = conn.execute("SELECT status, response_json FROM llm_calls").fetchone()
-        assert row == ("failed", None)
+            row = conn.execute(
+                "SELECT status, response_json, input_tokens, output_tokens, cost_usd "
+                "FROM llm_calls"
+            ).fetchone()
+        assert row[0] == "failed"
+        assert row[1] is None
+        # P6-26: a CON-03 forbidden-language failure still bills Anthropic
+        # for the tokens already consumed.
+        assert row[2] == 100
+        assert row[3] == 50
+        assert row[4] == pytest.approx((100 * 1.0 + 50 * 5.0) / 1_000_000)
 
     def test_evidenced_behavioral_claim_is_accepted_and_cached(self, state_store):
         evidenced = _news_summary().model_copy(

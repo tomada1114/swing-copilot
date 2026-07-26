@@ -91,8 +91,8 @@ class FakeEdgarClient:
             )
         ]
 
-    def fetch_filing_texts(self, symbol, form_types, *, as_of):
-        del form_types
+    def fetch_filing_texts(self, symbol, form_types, *, as_of, since=None, limit=None):
+        del form_types, since, limit
         return [
             TextItem(
                 source_id=f"edgar:{symbol}",

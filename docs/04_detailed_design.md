@@ -309,6 +309,8 @@ class EdgarClient:
 **依存**: `edgartools`
 **エラー処理**: EDGAR境界の一時障害は合計3試行（既定backoff 1秒、2秒）までとし、各試行前に10リクエスト/秒制限を適用する。fake clock/sleepで「一時失敗後成功」「3回で停止」「全試行がthrottle対象」を検証する。設定・入力検証エラーはretryしない。銘柄単位で取得失敗した場合はスキップしログ記録、バッチは継続する。
 
+**P6-26実装時追記（roadmap §5 P6-26）**: `fetch_filing_texts(symbol, form_types, *, as_of, since=None, limit=None)`に`since`/`limit`を追加した。従来は`as_of`（point-in-time上限）のみで下限も件数上限もなく、返却順も外部`get_filings()`の順そのまま——`fetch_fundamentals()`が`filed_at`で明示ソートしているのと非対称だった。`since`（`filed_at >= since`、inclusive下限）と`limit`（最大件数）で絞り込んだ後、常に`filed_at`降順でソートしてから`limit`を適用するため、「直近N件」の意味が外部ライブラリの返却順に左右されない。呼び出し元`text/edgar_filings.py::fetch_recent_filings_text()`は`FilingLookbackBounds(lookback_days, limit)`（`settings.llm.filing_lookback_days`/`max_filings_per_symbol`、既定90日・3件）から`since = as_of - lookback_days`を計算して渡す。`fetch_recent_filings()`（`FilingRef`を返す方、`pipeline/daily.py`からは未使用）は本Issueのスコープ外のため変更していない。
+
 ### 3.7 `storage/database.py` / `storage/market_store.py`
 
 ```python
@@ -704,6 +706,8 @@ def fetch_calendar_events(start: "date", end: "date") -> list["CalendarEvent"]:
 
 **エラー処理**: いずれも銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)(7)(8)は縮退版で継続する（FR-12）。
 
+**P6-26実装時追記（roadmap §5 P6-26）**: 実際の`fetch_recent_filings_text(edgar_client, symbol, form_types, as_of, bounds: FilingLookbackBounds)`は、上記の擬似シグネチャに`bounds`（`lookback_days`/`limit`をまとめたfrozen dataclass。5引数ガイドライン順守のためグルーピング）を追加している。`since = as_of - bounds.lookback_days`を計算し`data/edgar.py::EdgarClient.fetch_filing_texts()`へ`since`/`limit`として渡す。`pipeline/daily.py::_fetch_symbol_text_items()`は`settings.llm.filing_lookback_days`/`max_filings_per_symbol`（既定90日・3件、ニュース側`max_news_items_per_symbol`と対称）から`FilingLookbackBounds`を組み立てて呼び出す。
+
 ### 3.15 `llm/schemas.py`（FR-08、CON-03）
 
 ```python
@@ -775,6 +779,10 @@ class LLMClient:
 ```
 
 cache hashと入力token概算はsystem+user promptの両方を対象にする。外部本文はHTML/XML風delimiter内へescapeして格納し、本文が閉じdelimiterや追加命令を含んでもsystem instructionへ昇格しない。prompt、response、exception、audit detailの全経路でAPI key等をredactする。
+
+**P6-26実装時追記（roadmap §5 P6-26、実API検証: 検証失敗262件がcost_usd=0で記録され上限$0.30に対し実消費約$1.5が予算ゲートから見えなかった）**: 応答受信後の検証失敗（`SchemaValidationError`/`ForbiddenLanguageError`、`_validate_source_ids()`/`check_structured_output()`起因）と`stop_reason == "refusal"`分岐は、`response.usage`が取得済みであるにもかかわらず`_CallOutcome`既定値（`input_tokens=0, output_tokens=0, cost_usd=0.0`）のまま記録していた。両分岐とも`response.usage`由来の実トークン数・実コストを`_CallOutcome`へ載せるよう修正した（`status`は`"failed"`のまま）。`anthropic.AnthropicError`分岐（SDK呼び出し自体が例外を送出）はレスポンスが存在しないため0のままで正しく、変更していない。`storage/llm_records.py::get_monthly_cost()`の`WHERE status = 'success'`を廃し、`cost_usd`を全`status`（success/failed/budget_skipped）で合算するよう変更した——client側の記録修正だけではゲートに反映されず、この2点は不可分（片方だけでは無意味）。`get_cached_response()`（キャッシュ再利用）は`status = 'success'`のまま変更していない：失敗行に信頼できる`response_json`はないため。加えて、`_CHARS_PER_TOKEN_ESTIMATE`（予算ゲートの事前概算に使う文字/トークン比）を英語想定の`4`から日本語主体プロンプトの実測値`2.0`（実測例: 13,526字→6,873tok、6,822字→3,293tok）へ変更した——`4`のままだと入力token数を約2倍過小評価し、「保守的」というコメントの意図と逆に予算ゲートを緩めていた。
+
+**第二防御としての実行単位呼び出し上限（roadmap §5 P6-26）**: 上記の月次予算ゲートは1呼び出しごとの概算額しか見ないため、1回の実行内で候補・開示件数が想定以上に膨らむと、次回実行のゲートが働く前に月間予算を使い切る余地が残る。`config.py`の`LLMConfig.max_llm_calls_per_run`（既定200、要検証）と`pipeline/daily.py::_CallLimitedLLMClient`（`_LLMClientLike`を実装するrunスコープの薄いラッパー、`_run_step_llm()`が`_summarize_news_per_candidate()`/`_analyze_filings_per_candidate()`の両方へ同一インスタンスを渡すため、ニュース・開示分析を合算した1run単位のカウンタになる）で実施する。上限到達後の呼び出しは`LLMClient.analyze()`（実API呼び出し）へ一切到達させず、既存の`"budget_skipped"`ステータスを再利用して監査記録する（スキーマ変更なし）。`error_detail`に`"max_llm_calls_per_run"`という文言を含めることで、月次予算ゲート起因の`budget_skipped`行と実行単位の呼び出し上限起因の行を区別できる。
 
 ### 3.17 `llm/summarize.py` / `llm/filings_analysis.py`（FR-08）
 

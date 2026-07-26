@@ -101,7 +101,16 @@ def get_cached_response(
 
 
 def get_monthly_cost(database: Database, as_of: date) -> float:
-    """Return the sum of `cost_usd` for successful calls in `as_of`'s month.
+    """Return the sum of `cost_usd` for every call in `as_of`'s month.
+
+    Sums across every `status` ("success", "failed", "budget_skipped"), not
+    only "success" -- a call that Anthropic already billed for and then
+    failed our own post-hoc validation (schema/CON-03) or was refused still
+    has `cost_usd > 0` (`llm/client.py::analyze()`), and NFR-01's monthly
+    budget cap must see that real spend to actually bound it (roadmap §5
+    P6-26). Rows that were never billed (e.g. `budget_skipped`, or a pre-
+    response API error) keep `cost_usd == 0.0`, so including them here is a
+    no-op for the total.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -114,7 +123,7 @@ def get_monthly_cost(database: Database, as_of: date) -> float:
         row = conn.execute(
             """
             SELECT coalesce(sum(cost_usd), 0.0) FROM llm_calls
-            WHERE status = 'success' AND date_trunc('month', created_at) = date_trunc('month', ?::TIMESTAMPTZ)
+            WHERE date_trunc('month', created_at) = date_trunc('month', ?::TIMESTAMPTZ)
             """,
             [as_of],
         ).fetchone()

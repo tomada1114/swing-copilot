@@ -31,7 +31,12 @@ if TYPE_CHECKING:
 
 _MAX_TOTAL_TIMEOUT_SECONDS = 60.0
 _SDK_MAX_RETRIES = 2  # + 1 initial attempt = 3 total, per decisions.md D8
-_CHARS_PER_TOKEN_ESTIMATE = 4  # rough, conservative pre-call budget estimate
+# Pre-call budget estimate. Real-API measurement on this repo's Japanese-
+# heavy prompts (roadmap §5 P6-26) found ~2.0 chars/token (e.g. 13,526 chars
+# -> 6,873 tokens; 6,822 chars -> 3,293 tokens), not the English-oriented
+# ~4 previously assumed here -- that stale value under-estimated input
+# tokens by ~2x, making the pre-call budget gate looser than intended.
+_CHARS_PER_TOKEN_ESTIMATE = 2.0
 
 
 class LLMError(SwingCopilotError):
@@ -52,6 +57,13 @@ def _prompt_hash(prompt: str) -> str:
 
 def _full_prompt(request: AnalyzeRequest) -> str:
     return f"SYSTEM:\n{request.system_prompt}\n\nUSER:\n{request.prompt}"
+
+
+def _cost_usd(
+    input_tokens: int, output_tokens: int, pricing: tuple[float, float]
+) -> float:
+    input_price, output_price = pricing
+    return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
 
 def _validate_source_ids(parsed: BaseModel, source_ids: tuple[str, ...]) -> None:
@@ -199,12 +211,27 @@ class LLMClient:
 
         raw_parsed = response.parsed_output
         if response.stop_reason == "refusal" or raw_parsed is None:
+            # `response` (and its `.usage`) exists even on a refusal/empty
+            # parse -- only the `anthropic.AnthropicError` branch above lacks
+            # a response. Recording the real usage/cost here (instead of the
+            # `_CallOutcome` default 0/0) is what makes NFR-01's monthly
+            # budget gate see this call's actual spend (roadmap §5 P6-26).
             detail = f"model refused or returned no structured output (stop_reason={response.stop_reason})"
             self._record(
                 request,
                 prompt_hash,
                 pricing,
-                _CallOutcome("failed", error_detail=detail),
+                _CallOutcome(
+                    "failed",
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    cost_usd=_cost_usd(
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                        pricing,
+                    ),
+                    error_detail=detail,
+                ),
             )
             msg = "Claude refused to produce structured output"
             raise LLMError(msg)
@@ -214,13 +241,25 @@ class LLMClient:
             _validate_source_ids(parsed, request.source_ids)
             check_structured_output(parsed)
         except (SchemaValidationError, ForbiddenLanguageError) as exc:
-            outcome = _CallOutcome("failed", error_detail=str(exc))
+            # Same real-usage/cost recording as the refusal branch above:
+            # `response.usage` reflects tokens Anthropic already billed for
+            # this attempt, regardless of whether the parsed output later
+            # fails our own post-hoc validation (roadmap §5 P6-26).
+            outcome = _CallOutcome(
+                "failed",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                cost_usd=_cost_usd(
+                    response.usage.input_tokens, response.usage.output_tokens, pricing
+                ),
+                error_detail=str(exc),
+            )
             self._record(request, prompt_hash, pricing, outcome)
             raise
 
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
-        cost = (input_tokens * pricing[0] + output_tokens * pricing[1]) / 1_000_000
+        cost = _cost_usd(input_tokens, output_tokens, pricing)
         outcome = _CallOutcome(
             "success",
             input_tokens=input_tokens,

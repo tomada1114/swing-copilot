@@ -95,6 +95,15 @@ llm:
   # exists yet, so this value is unused by any live code path (see
   # llm/decision_context.py::is_cache_near_stale()).
   near_stale_threshold_days: 2
+  # docs/06_reliability_roadmap.md §5 P6-26: filing text collection recency
+  # bound (days) and per-symbol count cap, symmetric with
+  # max_news_items_per_symbol above -- previously unbounded (every filing
+  # ever submitted for a symbol).
+  filing_lookback_days: 90
+  max_filings_per_symbol: 3
+  # docs/06_reliability_roadmap.md §5 P6-26: per-run ceiling on total Claude
+  # API calls (second defense alongside the monthly cost gate; 要検証).
+  max_llm_calls_per_run: 200
 
 budget:
   monthly_cap_usd_prototype: 5

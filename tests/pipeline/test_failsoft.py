@@ -551,6 +551,62 @@ class TestMixedOutcomeLLMStepPreservesSuccesses:
         assert "本日はニュース・開示分析を取得できませんでした" not in markdown
 
 
+class TestLLMCallLimitPerRun:
+    """P6-26: `max_llm_calls_per_run` is a second, count-based defense.
+
+    Independent of the per-call monthly cost gate, a run-level counter
+    (`pipeline/daily.py::_CallLimitedLLMClient`) caps total `.analyze()`
+    calls so an unexpectedly large candidate/filing fan-out cannot spend an
+    unbounded amount within one run before the next run's budget gate would
+    ever see it.
+    """
+
+    def test_calls_beyond_the_cap_are_skipped_and_audited(
+        self, base_deps, state_store, settings
+    ):
+        object.__setattr__(settings.llm, "max_llm_calls_per_run", 1)
+        llm_client = CapturingLLMClient()
+        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        # Both AAPL and MSFT have news to summarize (2 candidates -> 2
+        # would-be calls), but the cap only lets the first one through.
+        assert len(llm_client.requests) == 1
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert _step_status(state_store, result.run_id, "6_llm") == "failed"
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT status, error_detail FROM llm_calls ORDER BY created_at"
+            ).fetchall()
+        statuses = [row[0] for row in rows]
+        assert statuses.count("budget_skipped") == 1
+        skipped_detail = next(
+            detail for status, detail in rows if status == "budget_skipped"
+        )
+        assert "max_llm_calls_per_run" in skipped_detail
+
+    def test_a_high_enough_cap_lets_every_candidate_through(
+        self, base_deps, state_store, settings
+    ):
+        object.__setattr__(settings.llm, "max_llm_calls_per_run", 200)
+        llm_client = CapturingLLMClient()
+        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert len(llm_client.requests) == 2
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            statuses = [
+                row[0]
+                for row in conn.execute("SELECT status FROM llm_calls").fetchall()
+            ]
+        assert "budget_skipped" not in statuses
+
+
 class TestHeldSymbolGetsTextCoverage:
     def test_held_symbol_absent_from_todays_candidates_still_gets_text_coverage(
         self, base_deps, state_store

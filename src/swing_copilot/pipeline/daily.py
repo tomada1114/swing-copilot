@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from uuid import uuid4
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
@@ -37,7 +38,7 @@ from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.exceptions import ConfigError
-from swing_copilot.llm.client import LLMClient
+from swing_copilot.llm.client import LLMClient, LLMError
 from swing_copilot.llm.decision_context import (
     format_market_regime,
     format_performance_summary,
@@ -94,10 +95,14 @@ from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
+from swing_copilot.storage.llm_records import LLMCallRecord
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.calendar_fred import FredCalendarClient
-from swing_copilot.text.edgar_filings import fetch_recent_filings_text
+from swing_copilot.text.edgar_filings import (
+    FilingLookbackBounds,
+    fetch_recent_filings_text,
+)
 from swing_copilot.text.news_finnhub import FinnhubNewsClient
 from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 
@@ -145,7 +150,13 @@ class _EdgarClientLike(Protocol):
         # pragma: no cover
 
     def fetch_filing_texts(
-        self, symbol: str, form_types: list[str], *, as_of: datetime
+        self,
+        symbol: str,
+        form_types: list[str],
+        *,
+        as_of: datetime,
+        since: datetime | None = None,
+        limit: int | None = None,
     ) -> list[TextItem]:
         """Fetch recent filings' full text, normalized for text collection."""
         # pragma: no cover
@@ -698,7 +709,14 @@ def _fetch_symbol_text_items(
         try:
             items.extend(
                 fetch_recent_filings_text(
-                    deps.edgar_client, symbol, _FILING_FORM_TYPES, as_of
+                    deps.edgar_client,
+                    symbol,
+                    _FILING_FORM_TYPES,
+                    as_of,
+                    FilingLookbackBounds(
+                        lookback_days=deps.settings.llm.filing_lookback_days,
+                        limit=deps.settings.llm.max_filings_per_symbol,
+                    ),
                 )
             )
         except Exception:
@@ -796,6 +814,60 @@ def _run_step_text(
     return _text_step_outcome(items, failed_symbols, calendar_failed, len(symbols))
 
 
+class _CallLimitedLLMClient:
+    """Wraps an `_LLMClientLike`, capping total `.analyze()` calls per run.
+
+    `max_llm_calls_per_run` (roadmap §5 P6-26) is a second, count-based
+    defense alongside `LLMClient.analyze()`'s own per-call monthly cost gate:
+    that gate only ever sees one call's own estimated cost, so an
+    unexpectedly large candidate/filing fan-out within a single run can
+    still exhaust the whole month's budget before the next run's gate would
+    ever see it. Calls beyond the cap never reach the wrapped client; they
+    are still audited with the existing "budget_skipped" status (no schema
+    change) so both defenses land in the same audit trail, distinguished by
+    `error_detail`.
+    """
+
+    def __init__(
+        self, inner: _LLMClientLike, state_store: StateStore, max_calls: int
+    ) -> None:
+        self._inner = inner
+        self._state_store = state_store
+        self._max_calls = max_calls
+        self._calls_made = 0
+
+    def analyze(self, request: AnalyzeRequest) -> BaseModel:
+        if self._calls_made >= self._max_calls:
+            self._record_skip(request)
+            msg = f"max_llm_calls_per_run cap ({self._max_calls}) reached for this run"
+            raise LLMError(msg)
+        self._calls_made += 1
+        return self._inner.analyze(request)
+
+    def _record_skip(self, request: AnalyzeRequest) -> None:
+        prompt = f"SYSTEM:\n{request.system_prompt}\n\nUSER:\n{request.prompt}"
+        detail = f"max_llm_calls_per_run cap ({self._max_calls}) reached for this run"
+        self._state_store.record_llm_call(
+            LLMCallRecord(
+                call_id=uuid4(),
+                run_id=request.run_id,
+                model=request.model,
+                schema_name=request.schema.__name__,
+                schema_version=request.schema_version,
+                prompt_text=prompt,
+                prompt_hash=hashlib.sha256(prompt.encode()).hexdigest(),
+                source_ids=request.source_ids,
+                status="budget_skipped",
+                input_tokens=0,
+                output_tokens=0,
+                input_price_per_mtok=0.0,
+                output_price_per_mtok=0.0,
+                cost_usd=0.0,
+                error_detail=detail,
+            )
+        )
+
+
 def _run_step_llm(
     deps: DailyDependencies,
     ctx: _RunContext,
@@ -827,11 +899,16 @@ def _run_step_llm(
         ctx, performance_summary=_compute_performance_summary(deps, ctx.run_date)
     )
 
+    # P6-26: one counter shared by both per-candidate loops below, so the cap
+    # is truly per-run (news + filing analyses together), not per-loop.
+    call_limited_client = _CallLimitedLLMClient(
+        llm_client, deps.state_store, deps.settings.llm.max_llm_calls_per_run
+    )
     news_summaries, failed_news_symbols = _summarize_news_per_candidate(
-        llm_client, deps, ctx, text_items, include_decision_history
+        call_limited_client, deps, ctx, text_items, include_decision_history
     )
     filing_analyses, failed_filing_symbols = _analyze_filings_per_candidate(
-        llm_client, deps, ctx, text_items, include_decision_history
+        call_limited_client, deps, ctx, text_items, include_decision_history
     )
     failed_symbols = sorted({*failed_news_symbols, *failed_filing_symbols})
 

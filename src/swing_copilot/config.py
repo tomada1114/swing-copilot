@@ -319,6 +319,19 @@ class LLMConfig(_StrictModel):
     # *mechanism* only, per the documented scope decision -- neither is wired
     # into a live code path until a real TTL is introduced.
     near_stale_threshold_days: int = 2
+    # roadmap §5 P6-26: filing text collection previously had no lower bound
+    # or count cap (unlike news' `max_news_items_per_symbol`), fetching every
+    # filing ever submitted for a symbol. These two bound
+    # `text/edgar_filings.py::fetch_recent_filings_text()`'s recency window
+    # and per-symbol count, symmetric with the news-side limit.
+    filing_lookback_days: int = Field(default=90, ge=1)
+    max_filings_per_symbol: int = Field(default=3, ge=1)
+    # roadmap §5 P6-26: a per-run ceiling on total `LLMClient.analyze()`
+    # calls, enforced in `pipeline/daily.py::_run_step_llm()`. A second,
+    # count-based defense alongside the per-call monthly cost gate -- it
+    # bounds an unexpectedly large candidate/filing fan-out within one run,
+    # independent of that run's estimated per-call cost (200, 要検証).
+    max_llm_calls_per_run: int = Field(default=200, ge=1)
 
 
 class BudgetConfig(_StrictModel):

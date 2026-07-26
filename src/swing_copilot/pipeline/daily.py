@@ -21,11 +21,13 @@ import shutil
 import sys
 import time
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
+
+from rich.console import Console
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
@@ -67,6 +69,7 @@ from swing_copilot.paper.excursions import update_position_excursions
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.earnings import collect_earnings_calendar
 from swing_copilot.pipeline.postmortem import run_postmortem_step
+from swing_copilot.pipeline.progress import NullProgressReporter, ProgressReporter
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
 from swing_copilot.regime.ftd import FtdSnapshot, FtdThresholds, calculate_ftd_snapshot
@@ -151,6 +154,16 @@ _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
 _DECISION_HISTORY_LIMIT = 3
+_VISIBLE_PIPELINE_STEPS = (
+    "1_prices",
+    "2_fundamentals",
+    "3_screening",
+    "4_risk",
+    "5_text",
+    "6_llm",
+    "7_notify",
+    "8_output",
+)
 
 
 class _EdgarClientLike(Protocol):
@@ -229,6 +242,7 @@ class DailyDependencies:
     provider_name: str = "yfinance"
     strategy_key: str = "default"
     output_dir: str = "reports"
+    progress: ProgressReporter = field(default_factory=NullProgressReporter)
 
 
 def _compute_performance_summary(
@@ -492,6 +506,7 @@ def _run_step_fundamentals(
         failed_symbols.extend([symbol] if failed else [])
         skipped_same_day += 1 if was_skipped else 0
         _log_fundamentals_progress(index + 1, total)
+        deps.progress.substep(index + 1, total, "fundamentals")
 
     if skipped_same_day:
         logger.debug(
@@ -1151,6 +1166,7 @@ def _run_text_soft_step(
         outcome, items = _TIME_BUDGET_STEP_OUTCOME, None
     else:
         logger.debug("step 5_text starting")
+        _step_started(deps, "5_text")
         outcome, items = _run_step_text(
             deps, text_symbols, ctx.run_date, skip=options.skip_text
         )
@@ -1247,6 +1263,18 @@ def _record_step(
         f" detail={outcome.detail}" if outcome.detail else "",
     )
     deps.state_store.record_run_step(run_id, step, status, outcome.detail, duration)
+    if step in _VISIBLE_PIPELINE_STEPS:
+        index = _VISIBLE_PIPELINE_STEPS.index(step) + 1
+        progress_status = "ok" if outcome.success else status.value
+        deps.progress.step_finished(
+            index, len(_VISIBLE_PIPELINE_STEPS), step, progress_status, duration
+        )
+
+
+def _step_started(deps: DailyDependencies, step: str) -> None:
+    """Notify the injected reporter when a user-visible step begins."""
+    index = _VISIBLE_PIPELINE_STEPS.index(step) + 1
+    deps.progress.step_started(index, len(_VISIBLE_PIPELINE_STEPS), step)
 
 
 def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
@@ -1375,6 +1403,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     for step_name, step_fn in fatal_steps:
         logger.debug("step %s starting", step_name)
+        _step_started(deps, step_name)
         started_at = time.perf_counter()
         try:
             outcome = step_fn()
@@ -1456,6 +1485,7 @@ def _run_soft_steps(
         )
     else:
         logger.debug("step 6_llm starting")
+        _step_started(deps, "6_llm")
         llm_outcome, news_summaries, filing_analyses = _run_step_llm(
             deps,
             ctx,
@@ -1485,6 +1515,7 @@ def _run_soft_steps(
         notify_outcome = _TIME_BUDGET_STEP_OUTCOME
     else:
         logger.debug("step 7_notify starting")
+        _step_started(deps, "7_notify")
         notify_outcome = _run_step_notify(
             deps,
             ctx.candidates,
@@ -1512,6 +1543,7 @@ def _run_soft_steps(
     )
     started_at = time.perf_counter()
     logger.debug("step 8_output starting")
+    _step_started(deps, "8_output")
     output_outcome, report_path, brief = _run_step_output(
         deps,
         _OutputContext(
@@ -1651,6 +1683,7 @@ def _compose_dependencies(
         notifier=notifier,
         output_dir=output_dir,
         strategy_key=options.strategy_key,
+        progress=ProgressReporter(Console(stderr=True)),
     )
 
 

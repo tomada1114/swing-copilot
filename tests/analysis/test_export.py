@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 import pytest
 
@@ -137,6 +138,8 @@ def _request(
     )
     return ExportRequest(
         as_of=AS_OF,
+        run_id=UUID("123e4567-e89b-12d3-a456-426614174000"),
+        strategy_key="default",
         generated_at=GENERATED_AT,
         regime_snapshot=_snapshot(),
         exposure_decision=_exposure(),
@@ -151,8 +154,11 @@ class TestBuildAnalysisInput:
     def test_it_stamps_the_agreed_schema_version_and_as_of(self):
         payload = build_analysis_input(_request())
 
-        assert payload.schema_version == "analysis-input-v1"
+        assert payload.schema_version == "analysis-input-v2"
         assert payload.as_of == AS_OF
+        assert str(payload.run_id) == "123e4567-e89b-12d3-a456-426614174000"
+        assert payload.strategy_key == "default"
+        assert len(payload.input_digest) == 64
         assert payload.generated_at == GENERATED_AT
 
     def test_a_candidate_without_any_text_is_still_exported(self):

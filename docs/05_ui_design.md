@@ -14,8 +14,8 @@
 | 日次ブリーフ | 当日の意思決定支援 | stdout |
 | Markdown | 人間向け監査スナップショット | `reports/<run_date>/<run_id>.md` |
 | 最新版 | 直近runへの固定パス | `reports/latest.md` |
-| 分析入力 | 定性分析スキルへの唯一の入力・監査証跡 | `reports/<run_date>/analysis_input.json` |
-| 分析結果 | スキルの回答・監査証跡（スキルが書く） | `reports/<run_date>/analysis_result.json` |
+| 分析入力 | 定性分析スキルへの唯一の入力・監査証跡 | `reports/<run_date>/<run_id>/analysis_input.json` |
+| 分析結果 | スキルの回答・監査証跡（スキルが書く） | `reports/<run_date>/<run_id>/analysis_result.json` |
 | 再描画用context | ingest時に同じブリーフを再現するスナップショット | `reports/<run_date>/report_context.json` |
 | 判断履歴 | 正本 | DuckDB `trades_journal` |
 
@@ -83,7 +83,7 @@ reports/
 
 Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、判断記録、免責文を含める。
 
-同じディレクトリには`analysis_input.json`（分析へ渡した入力）、`analysis_result.json`（スキルの回答）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v1`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`はこれらだけを読んで同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
+各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v2`）、`analysis_result.json`（スキルの回答、schema `analysis-result-v2`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v2`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
 
 ## 6. 判断記録CLI
 

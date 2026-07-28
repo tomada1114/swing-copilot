@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.analysis.snapshot import (
     CONTEXT_SCHEMA_VERSION,
     REPORT_CONTEXT_FILENAME,
@@ -38,6 +39,14 @@ from swing_copilot.report.daily_brief import (
 
 RUN_ID = UUID("11111111-2222-3333-4444-555555555555")
 RUN_DATE = date(2027, 3, 1)
+INPUT_DIGEST = "a" * 64
+
+
+def _context(status: RunStatus, output_dir: Path) -> ReportContext:
+    """Build one valid v2 context with its immutable input binding."""
+    return ReportContext(
+        _populated_brief(), status, output_dir, "default", INPUT_DIGEST
+    )
 
 
 def _populated_brief() -> DailyBrief:
@@ -137,9 +146,7 @@ def _populated_brief() -> DailyBrief:
 
 class TestRoundTrip:
     def test_every_populated_section_survives_a_write_and_read(self, tmp_path):
-        context = ReportContext(
-            _populated_brief(), RunStatus.DEGRADED, tmp_path / "reports"
-        )
+        context = _context(RunStatus.DEGRADED, tmp_path / "reports")
 
         path = write_report_context(context, tmp_path / "reports" / "2027-03-01")
         reloaded = read_report_context(path)
@@ -152,24 +159,28 @@ class TestRoundTrip:
         destination_dir = tmp_path / "reports" / "2027-03-01"
 
         path = write_report_context(
-            ReportContext(_populated_brief(), RunStatus.SUCCESS, Path("reports")),
+            _context(RunStatus.SUCCESS, Path("reports")),
             destination_dir,
         )
 
         assert path == destination_dir / REPORT_CONTEXT_FILENAME
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["schema_version"] == CONTEXT_SCHEMA_VERSION
+        assert payload["run_id"] == str(RUN_ID)
+        assert payload["as_of"] == RUN_DATE.isoformat()
+        assert payload["input_digest"] == INPUT_DIGEST
+        assert len(payload["context_digest"]) == 64
         assert payload["status"] == "success"
 
     def test_a_rerun_replaces_the_previous_archive(self, tmp_path):
         destination_dir = tmp_path / "reports" / "2027-03-01"
         write_report_context(
-            ReportContext(_populated_brief(), RunStatus.SUCCESS, Path("reports")),
+            _context(RunStatus.SUCCESS, Path("reports")),
             destination_dir,
         )
 
         path = write_report_context(
-            ReportContext(_populated_brief(), RunStatus.DEGRADED, Path("reports")),
+            _context(RunStatus.DEGRADED, Path("reports")),
             destination_dir,
         )
 
@@ -199,21 +210,17 @@ class TestReadFailures:
         path = tmp_path / REPORT_CONTEXT_FILENAME
         path.write_text(json.dumps({"schema_version": "v0"}), encoding="utf-8")
 
-        with pytest.raises(AnalysisIngestError, match="Unsupported report context"):
+        with pytest.raises(AnalysisIngestError, match="failed validation"):
             read_report_context(path)
 
     def test_an_unknown_run_status_is_a_hard_failure(self, tmp_path):
-        path = tmp_path / REPORT_CONTEXT_FILENAME
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": CONTEXT_SCHEMA_VERSION,
-                    "status": "exploded",
-                    "brief": {},
-                }
-            ),
-            encoding="utf-8",
+        path = write_report_context(_context(RunStatus.SUCCESS, tmp_path), tmp_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["status"] = "exploded"
+        payload["context_digest"] = canonical_json_digest(
+            payload, excluded_field="context_digest"
         )
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
         with pytest.raises(AnalysisIngestError, match="failed validation"):
             read_report_context(path)
@@ -222,7 +229,7 @@ class TestReadFailures:
         # Defaulting to the CWD would silently rewrite the report outside the
         # run's own archive directory.
         path = write_report_context(
-            ReportContext(_populated_brief(), RunStatus.SUCCESS, Path("reports")),
+            _context(RunStatus.SUCCESS, Path("reports")),
             tmp_path,
         )
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -233,17 +240,13 @@ class TestReadFailures:
             read_report_context(path)
 
     def test_a_corrupt_brief_is_a_hard_failure(self, tmp_path):
-        path = tmp_path / REPORT_CONTEXT_FILENAME
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": CONTEXT_SCHEMA_VERSION,
-                    "status": "success",
-                    "brief": {"run_id": "not-a-uuid"},
-                }
-            ),
-            encoding="utf-8",
+        path = write_report_context(_context(RunStatus.SUCCESS, tmp_path), tmp_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["brief"] = {"run_id": "not-a-uuid"}
+        payload["context_digest"] = canonical_json_digest(
+            payload, excluded_field="context_digest"
         )
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
         with pytest.raises(AnalysisIngestError, match="failed validation"):
             read_report_context(path)

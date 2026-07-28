@@ -297,6 +297,7 @@ class _OutputContext:
     # Set only when step 6 exported one; `_run_step_output` archives the
     # matching `report_context.json` beside it so ingest can re-render.
     analysis_input_path: Path | None
+    analysis_input_digest: str | None
     signal_performance: tuple[SignalPerformanceRow, ...]
     notices: tuple[str, ...]
     status: RunStatus
@@ -821,15 +822,14 @@ def _run_step_text(
     return _text_step_outcome(items, failed_symbols, calendar_failed, len(symbols))
 
 
-def _run_output_dir(deps: DailyDependencies, run_date: date) -> Path:
-    """The dated report directory every per-run artifact shares.
+def _run_output_dir(deps: DailyDependencies, run_date: date, run_id: UUID) -> Path:
+    """Return the dedicated artifact directory for one immutable daily run.
 
-    Deliberately identical to `report/markdown_report.py`'s own dated
-    directory: `analysis_input.json`, `report_context.json`, and the Markdown
-    archive must sit together so the skill and `copilot-ingest-analysis` can
-    find each of them from any one of them.
+    Markdown archives remain under their dated directory for stable report
+    links, while input/context/result/work artifacts live below their exact
+    UUID. This preserves every same-day run without trusting a shared path.
     """
-    return Path(deps.output_dir) / run_date.isoformat()
+    return Path(deps.output_dir) / run_date.isoformat() / str(run_id)
 
 
 def _run_step_analysis_export(
@@ -838,7 +838,7 @@ def _run_step_analysis_export(
     text_items: list[TextItem] | None,
     *,
     include_decision_history: bool,
-) -> tuple[_StepOutcome, Path | None]:
+) -> tuple[_StepOutcome, Path | None, str | None]:
     """Export `analysis_input.json` for the qualitative-analysis skill.
 
     No model is called here, so this step is cheap and unconditional -- it is
@@ -860,10 +860,12 @@ def _run_step_analysis_export(
         return (
             _StepOutcome(True, "skipped: no candidates to analyze", is_skipped=True),
             None,
+            None,
         )
     if text_items is None:
         return (
             _StepOutcome(True, "skipped: step 5 produced no text", is_skipped=True),
+            None,
             None,
         )
 
@@ -876,15 +878,17 @@ def _run_step_analysis_export(
                 deps, ctx, text_items, include_decision_history=include_decision_history
             )
         )
-        path = write_analysis_input(payload, _run_output_dir(deps, ctx.run_date))
+        path = write_analysis_input(
+            payload, _run_output_dir(deps, ctx.run_date, ctx.run_id)
+        )
     except Exception as exc:
         # Fail-soft like every other step here: an export problem (disk, or
         # unexpectedly unserializable state) degrades the run and still lets
         # step 8 produce a screening-only report.
         logger.exception("analysis input export failed")
-        return _StepOutcome(False, f"analysis input export failed: {exc}"), None
+        return _StepOutcome(False, f"analysis input export failed: {exc}"), None, None
     logger.info("analysis input exported: %s", path)
-    return _StepOutcome(True, f"exported {path}"), path
+    return _StepOutcome(True, f"exported {path}"), path, payload.input_digest
 
 
 def _export_request(
@@ -911,6 +915,8 @@ def _export_request(
     analysis_config = deps.settings.analysis
     return ExportRequest(
         as_of=ctx.run_date,
+        run_id=ctx.run_id,
+        strategy_key=deps.strategy_key,
         generated_at=deps.clock.now(),
         regime_snapshot=ctx.regime_snapshot,
         exposure_decision=ctx.exposure_decision,
@@ -1055,11 +1061,20 @@ def _run_step_output(
         report_path = write_markdown_report(brief, output.status, deps.output_dir)
     except Exception as exc:
         return _StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
-    if output.analysis_input_path is not None:
+    if (
+        output.analysis_input_path is not None
+        and output.analysis_input_digest is not None
+    ):
         try:
             write_report_context(
-                ReportContext(brief, output.status, Path(deps.output_dir)),
-                _run_output_dir(deps, output.run.run_date),
+                ReportContext(
+                    brief,
+                    output.status,
+                    Path(deps.output_dir),
+                    deps.strategy_key,
+                    output.analysis_input_digest,
+                ),
+                _run_output_dir(deps, output.run.run_date, output.run.run_id),
             )
         except Exception as exc:
             return (
@@ -1338,15 +1353,23 @@ def _run_soft_steps(
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step 6_analysis_export skipped: time budget exceeded")
-        export_outcome, analysis_input_path = _TIME_BUDGET_STEP_OUTCOME, None
+        export_outcome, analysis_input_path, analysis_input_digest = (
+            _TIME_BUDGET_STEP_OUTCOME,
+            None,
+            None,
+        )
     else:
         logger.debug("step 6_analysis_export starting")
         _step_started(deps, "6_analysis_export")
-        export_outcome, analysis_input_path = _run_step_analysis_export(
-            deps,
-            ctx,
-            text_items,
-            include_decision_history=(not options.is_dry_run and options.as_of is None),
+        export_outcome, analysis_input_path, analysis_input_digest = (
+            _run_step_analysis_export(
+                deps,
+                ctx,
+                text_items,
+                include_decision_history=(
+                    not options.is_dry_run and options.as_of is None
+                ),
+            )
         )
     _record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
     degraded = degraded or not export_outcome.success
@@ -1404,6 +1427,7 @@ def _run_soft_steps(
         _OutputContext(
             run=ctx,
             analysis_input_path=analysis_input_path,
+            analysis_input_digest=analysis_input_digest,
             signal_performance=signal_performance,
             notices=notices,
             status=status_before_output,

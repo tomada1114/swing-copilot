@@ -753,7 +753,7 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
   - 日次バッチのステップ 6 を `6_llm` から `6_analysis_export` へ。候補と
     テキストがあれば `analysis_input.json`（strict スキーマ）を日付付き
     レポートディレクトリへ原子的に書き出す。あわせて `report_context.json`
-    （`DailyBrief` のスナップショット、schema `report-context-v1`）を保存。
+    （`DailyBrief` のスナップショット、schema `report-context-v2`）を保存。
   - 新 CLI `copilot-ingest-analysis` が strict スキーマ検証・provenance 検証
     （`source_ids` ⊆ 入力、facts 非空）・CON-03 機械検査（旧 `llm/safety.py` の
     純関数を `analysis/safety.py` へ移設）を行い、違反銘柄は fail-closed で

@@ -748,6 +748,10 @@ class TestPerformanceSummaryReachesAnalysisInput:
         assert (
             result.analysis_input_path
             == (
-                tmp_path / "reports" / AS_OF.isoformat() / ANALYSIS_INPUT_FILENAME
+                tmp_path
+                / "reports"
+                / AS_OF.isoformat()
+                / str(result.run_id)
+                / ANALYSIS_INPUT_FILENAME
             ).resolve()
         )

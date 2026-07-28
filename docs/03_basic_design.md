@@ -146,7 +146,7 @@ flowchart TD
 | 分析スキーマ | `analysis/schemas.py` | `analysis_input.json`/`analysis_result.json`双方のstrict pydanticスキーマ（`extra="forbid"`）。`SourcedFact.source_ids`は1件以上必須 | FR-08, CON-03 |
 | 分析文脈整形 | `analysis/context.py` | コード計算済みのスコア内訳・リスク制約・市場レジーム・実績サマリ・過去判断を、上書き不可の明示付きで不活性テキストへ整形する純関数群 | FR-08, P2-12, P3-15 |
 | 分析入力エクスポート | `analysis/export.py` | 上記文脈と収集済み未信頼テキストを`analysis_input.json`として日付付きレポートディレクトリへ原子的に書き出す。モデルを呼ばない | FR-08 |
-| ブリーフスナップショット | `analysis/snapshot.py` | 再描画のため`DailyBrief`・run status・出力先を`report_context.json`（schema `report-context-v1`）へ保存/復元する | FR-08, NFR-05 |
+| ブリーフスナップショット | `analysis/snapshot.py` | 再描画のため`DailyBrief`・run status・出力先と入力束縛を`report_context.json`（schema `report-context-v2`）へ保存/復元する | FR-08, NFR-05 |
 | 分析結果検証 | `analysis/validate.py` | スキル出力を信頼せず、strictスキーマ・provenance（`source_ids` ⊆ 当該銘柄の供給ID）・CON-03を検証し、違反銘柄を銘柄単位でfail-closedに縮退させる | FR-08, CON-03 |
 | CON-03検査 | `analysis/safety.py` | 断定的売買指示・根拠なき心理/行動診断を全ユーザー表示テキストから検出する純関数（旧`llm/safety.py`） | CON-03 |
 | 分析取り込みCLI | `analysis/cli.py` | `copilot-ingest-analysis`。3つのJSONだけを読み、検証を通った定性欄でレポートを再描画する。ネットワーク・スクリーニング再計算なし | FR-08, FR-09 |
@@ -302,11 +302,11 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 用途 | ニュース解釈、開示（8-K/10-Q）解釈、スクリーニング結果の定性評価、銘柄ごとのverdict決定（FR-08） |
 | 実行主体 | 利用者のClaude Codeセッション。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェント（またはWorkflow）へ並列委譲する |
 | 認証 | なし（APIキーを持たない）。利用者のClaude Code環境が実行権限を担う |
-| 渡すもの | `reports/<run_date>/analysis_input.json`（schema `analysis-input-v1`）。決定論的な文脈ブロックと未信頼テキストを、フィールドレベルで分離して含む |
-| 受け取るもの | `reports/<run_date>/analysis_result.json`（schema `analysis-result-v1`）。スキルが書く唯一の成果物 |
-| 信頼境界 | スキル出力は未信頼入力として扱う。`copilot-ingest-analysis`がstrictスキーマ・provenance・CON-03を検証するまで、いかなる文字列もレポートへ出さない |
-| 失敗時 | 銘柄単位でfail-closed（当該銘柄の定性欄を非表示にして継続、リトライなし）。`as_of`不一致・JSON破損・スキーマ違反はrun全体のhard fail |
-| 監査記録 | `analysis_input.json`／`analysis_result.json`／`report_context.json`をレポートディレクトリにそのまま残す（NFR-05） |
+| 渡すもの | `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v2`）。決定論的な文脈ブロックと未信頼テキストを、フィールドレベルで分離して含む |
+| 受け取るもの | `reports/<run_date>/<run_id>/analysis_result.json`（schema `analysis-result-v2`）。スキルが書く唯一の成果物 |
+| 信頼境界 | スキル出力は未信頼入力として扱う。`copilot-ingest-analysis`が3文書のstrict schema・run identity・provenance・CON-03を検証するまで、いかなる文字列もレポートへ出さない |
+| 失敗時 | 銘柄単位でfail-closed（当該銘柄の定性欄を非表示にして継続、リトライなし）。`run_id`、`as_of`、`strategy_key`、input digest不一致・JSON破損・スキーマ違反は既存レポート不変のrun全体hard fail |
+| 監査記録 | run専用ディレクトリに`analysis_input.json`／`analysis_result.json`／`report_context.json`をそのまま残す（NFR-05） |
 | 未信頼テキストの分離 | ニュース・開示本文はスキーマ上の専用フィールド（`news[].summary`／`filings[].text`）に置き、コード計算済みの文脈は別フィールドの`<market_regime>`等のブロックに置く。本文が指示を含んでもコード側の判定を装えない |
 | マクロ/経済カレンダー情報 | symbolを持たない`TextItem`（`source_type="calendar"`）は候補ごとの`news`/`filings`ではなく、run単位の`context.calendar_events`に載る。provenance検証はこのIDをどの銘柄の分析からの引用も許容する（ニュース/開示IDは引き続き当該銘柄限定） |
 

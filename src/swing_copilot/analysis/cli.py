@@ -27,10 +27,12 @@ from swing_copilot.analysis.snapshot import (
 )
 from swing_copilot.analysis.validate import (
     AnalysisIngestError,
+    ArtifactIdentity,
     ValidatedAnalysis,
     load_analysis_input,
     load_analysis_result,
     validate_analysis,
+    validate_artifact_identity,
 )
 from swing_copilot.report.daily_brief import DailyBrief, build_analysis_brief
 from swing_copilot.report.markdown_report import write_markdown_report
@@ -111,8 +113,18 @@ def ingest(analysis_input_path: Path, result_path: Path, context_path: Path) -> 
     """
     analysis_input = load_analysis_input(analysis_input_path)
     result = load_analysis_result(result_path)
-    validated = validate_analysis(analysis_input, result)
     context = read_report_context(context_path)
+    validate_artifact_identity(
+        analysis_input,
+        result,
+        ArtifactIdentity(
+            run_id=context.brief.run_id,
+            as_of=context.brief.run_date,
+            strategy_key=context.strategy_key,
+            input_digest=context.input_digest,
+        ),
+    )
+    validated = validate_analysis(analysis_input, result)
     brief = _rebuild_brief(context.brief, validated)
     report_path = write_markdown_report(brief, context.status, context.output_dir)
     width = shutil.get_terminal_size(fallback=(120, 24)).columns

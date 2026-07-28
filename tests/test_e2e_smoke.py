@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 import pytest
 
+from swing_copilot.analysis.cli import ingest
 from swing_copilot.config import load_settings
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
@@ -256,7 +257,10 @@ class TestFiveSymbolEndToEnd:
         assert result.analysis_input_path.is_file()
 
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
-        assert payload["schema_version"] == "analysis-input-v1"
+        assert payload["schema_version"] == "analysis-input-v2"
+        assert payload["run_id"] == str(result.run_id)
+        assert payload["strategy_key"] == "default"
+        assert len(payload["input_digest"]) == 64
         assert payload["as_of"] == AS_OF.isoformat()
         assert payload["context"]["market_regime"] is not None
 
@@ -270,6 +274,61 @@ class TestFiveSymbolEndToEnd:
             filing_ids = {item["source_id"] for item in candidate["filings"]}
             assert filing_ids == {f"edgar:{symbol}"}
             assert candidate["filings"][0]["form_type"] == "10-Q"
+
+    def test_same_day_runs_keep_independent_analysis_artifact_directories(self, deps):
+        first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert first.analysis_input_path is not None
+        assert second.analysis_input_path is not None
+        assert first.analysis_input_path != second.analysis_input_path
+        assert first.analysis_input_path.parent.name == str(first.run_id)
+        assert second.analysis_input_path.parent.name == str(second.run_id)
+        assert (first.analysis_input_path.parent / "report_context.json").is_file()
+        assert (second.analysis_input_path.parent / "report_context.json").is_file()
+
+    def test_exported_run_identity_allows_offline_skill_result_ingest(self, deps):
+        run = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert run.analysis_input_path is not None
+        input_payload = json.loads(run.analysis_input_path.read_text(encoding="utf-8"))
+        result_payload = {
+            "schema_version": "analysis-result-v2",
+            "run_id": input_payload["run_id"],
+            "as_of": input_payload["as_of"],
+            "strategy_key": input_payload["strategy_key"],
+            "input_digest": input_payload["input_digest"],
+            "generated_by": "offline skill fixture",
+            "symbols": [
+                {
+                    "symbol": candidate["symbol"],
+                    "news_summary": None,
+                    "filing_analyses": [],
+                    "screening_assessment": {
+                        "summary": "No extra qualitative concern.",
+                        "strengths": [],
+                        "concerns": [],
+                    },
+                    "verdict": {"recommendation": "proceed", "reasons": []},
+                }
+                for candidate in input_payload["candidates"]
+            ],
+            "no_trade": False,
+            "no_trade_reason": None,
+        }
+        result_path = run.analysis_input_path.with_name("analysis_result.json")
+        result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+
+        report_path = ingest(
+            run.analysis_input_path,
+            result_path,
+            run.analysis_input_path.with_name("report_context.json"),
+        )
+
+        assert report_path == run.report_path
+        assert "No extra qualitative concern." in report_path.read_text(
+            encoding="utf-8"
+        )
 
     def test_price_step_also_populates_the_market_strip(self, deps):
         # The market strip's symbols (SPY/QQQ/^VIX/^TNX) are never part of

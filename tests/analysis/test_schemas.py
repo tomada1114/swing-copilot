@@ -27,12 +27,35 @@ from tests.analysis.conftest import (
 
 class TestSchemaVersions:
     def test_input_and_result_versions_are_the_agreed_constants(self):
-        assert INPUT_SCHEMA_VERSION == "analysis-input-v1"
-        assert RESULT_SCHEMA_VERSION == "analysis-result-v1"
+        assert INPUT_SCHEMA_VERSION == "analysis-input-v2"
+        assert RESULT_SCHEMA_VERSION == "analysis-result-v2"
 
     def test_a_wrong_result_schema_version_is_rejected(self):
         with pytest.raises(ValidationError, match="schema_version"):
             AnalysisResult.model_validate(result_payload(schema_version="v2"))
+
+
+class TestRunIdentity:
+    def test_input_and_result_preserve_a_full_canonical_input_digest(self):
+        analysis_input = input_payload()
+        analysis_result = result_payload()
+
+        parsed_input = AnalysisInput.model_validate(analysis_input)
+        parsed_result = AnalysisResult.model_validate(analysis_result)
+
+        assert str(parsed_input.run_id) == analysis_input["run_id"]
+        assert parsed_input.strategy_key == "default"
+        assert parsed_input.input_digest == analysis_input["input_digest"]
+        assert str(parsed_result.run_id) == analysis_input["run_id"]
+        assert parsed_result.strategy_key == "default"
+        assert parsed_result.input_digest == analysis_input["input_digest"]
+
+    def test_a_changed_input_payload_is_rejected_by_its_digest(self):
+        payload = input_payload()
+        payload["candidates"][0]["news"][0]["summary"] = "Changed after export."
+
+        with pytest.raises(ValidationError, match="input_digest"):
+            AnalysisInput.model_validate(payload)
 
 
 class TestUnknownFieldsAreRejected:

@@ -12,6 +12,11 @@ from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
 )
+from swing_copilot.analysis.schemas import (
+    INPUT_SCHEMA_VERSION,
+    RESULT_SCHEMA_VERSION,
+    canonical_json_digest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,13 +26,17 @@ AS_OF = date(2027, 3, 1)
 NEWS_ID = "finnhub:1"
 FILING_ID = "edgar:0000320193-27-000001"
 CALENDAR_ID = "fred:1:2027-03-05"
+RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
+STRATEGY_KEY = "default"
 
 
 def input_payload(**overrides: Any) -> dict[str, Any]:
     """A minimal, valid `analysis_input.json` payload for one candidate."""
     payload: dict[str, Any] = {
-        "schema_version": "analysis-input-v1",
+        "schema_version": INPUT_SCHEMA_VERSION,
+        "run_id": RUN_ID,
         "as_of": AS_OF.isoformat(),
+        "strategy_key": STRATEGY_KEY,
         "generated_at": datetime(2027, 3, 1, 12, tzinfo=UTC).isoformat(),
         "context": {
             "market_regime": "<market_regime>\n</market_regime>\n",
@@ -72,14 +81,20 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
         ],
     }
     payload.update(overrides)
+    payload["input_digest"] = canonical_json_digest(
+        payload, excluded_field="input_digest"
+    )
     return payload
 
 
 def result_payload(**overrides: Any) -> dict[str, Any]:
     """A minimal, valid `analysis_result.json` payload answering `input_payload()`."""
     payload: dict[str, Any] = {
-        "schema_version": "analysis-result-v1",
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "run_id": RUN_ID,
         "as_of": AS_OF.isoformat(),
+        "strategy_key": STRATEGY_KEY,
+        "input_digest": input_payload()["input_digest"],
         "generated_by": "swing-daily skill",
         "symbols": [symbol_payload()],
         "no_trade": False,
@@ -135,7 +150,7 @@ def write_documents(tmp_path: Path) -> Callable[..., tuple[Path, Path]]:
         analysis_input: dict[str, Any] | str | None = None,
         result: dict[str, Any] | str | None = None,
     ) -> tuple[Path, Path]:
-        directory = tmp_path / "reports" / AS_OF.isoformat()
+        directory = tmp_path / "reports" / AS_OF.isoformat() / RUN_ID
         directory.mkdir(parents=True, exist_ok=True)
         input_path = directory / ANALYSIS_INPUT_FILENAME
         result_path = directory / ANALYSIS_RESULT_FILENAME

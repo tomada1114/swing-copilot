@@ -186,7 +186,7 @@ def require_secrets(secrets: Secrets, features: set[str]) -> None:
 > テーブルのパース・列名仕様（本節および3.2節末尾の記載）は変更ない。
 > パース/バリデーション失敗はリトライ対象外のまま。
 
-**責務**: S&P500構成銘柄シンボルリスト（GICSセクター付き）の取得・保存・週次更新。
+**責務**: S&P500構成銘柄シンボルリスト（GICSセクター付き）の取得、CSVキャッシュとDuckDB履歴への保存、評価日時点で可視なスナップショットの選択。
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -198,27 +198,38 @@ class UniverseMember:
 
 def get_sp500_universe(as_of: date, force_refresh: bool = False) -> list[UniverseMember]:
     """
-    S&P500構成銘柄のティッカーシンボルとGICSセクターの一覧を返す。
-    取得元はWikipediaの "List of S&P 500 companies" ページのテーブルを
-    pandas.read_html で取得する（テーブル構造・列名は実装時に要確認）。
-    取得結果は config/universe_snapshot.csv にスナップショットとして保存し、
-    取得に失敗した場合はこのスナップショットへフォールバックする（NFR-04）。
-    force_refresh=Falseの場合はStateStoreに保存済みの最新リストを優先して使う
-    （週次更新、FR-01）。settings.yaml の universe.manual_include /
-    universe.manual_exclude による手動上書き（銘柄の追加・除外）を、
-    取得結果に適用してから返す。
+    current-universe 用のCSVキャッシュ境界。Wikipediaから取得して
+    config/universe_snapshot.csv を原子的に置換し、取得失敗時は既存CSVへ
+    フォールバックする。日次pipelineの point-in-time 選択には使わない。
     """
 
 def refresh_universe(as_of: date, state_store: "StateStore") -> list[UniverseMember]:
     """
-    Wikipediaから最新のユニバース（シンボル＋GICSセクター）を再取得し、
-    config/universe_snapshot.csv を更新した上でStateStoreへ保存する。
-    前回取得日からの差分（追加/除外銘柄）をrun_stepsのdetailに記録する。
+    Wikipediaから空でない生のユニバースを再取得し、CSVとStateStoreへ
+    同じmembershipを保存する。CSVフォールバックを新しいas_ofで再保存しない。
     """
+
+def select_persisted_universe(
+    as_of: date, state_store: "StateStore"
+) -> "UniverseResolution | None":
+    """snapshot_date <= as_of の最新履歴を選び、手動上書きだけを適用する。"""
+
+def resolve_daily_universe(
+    as_of: date, state_store: "StateStore", *, is_historical: bool,
+    refresh_interval_days: int,
+) -> "UniverseResolution":
+    """日次run用に履歴を再利用・更新・フォールバックする唯一の境界。"""
 ```
 
+**選択・保存ポリシー**:
+
+- CSVと`universe_membership`へ保存するのは取得元からの生のmembershipだけである。同日再保存はStateStoreの完全置換であり、訂正後に存在しない銘柄も削除する。
+- `manual_include`/`manual_exclude`は選択後にメモリ上だけで順序どおり適用する。これにより設定変更が過去の生スナップショットを書き換えず、手動追加銘柄もCSV/DuckDB履歴へ混入しない。
+- 明示的な`--as-of=D`は`StateStore.get_latest_universe_membership(D)`だけを参照し、`snapshot_date <= D`の最新を使う。取得は行わず、履歴がなければ価格プロバイダを作る前に`UniverseError`で停止する。
+- 通常live実行は、最新履歴の年齢が`refresh_interval_days`未満なら再利用し、同値以上なら外部取得を1回実行してCSVとDuckDBへ保存する。取得または空membership検証に失敗しても履歴があれば、その日付と失敗理由を`UniverseResolution.warning`として返す。`pipeline/daily.py`は警告を`run_steps`の`0_universe`（failed）、レポートnotice、`RunStatus.DEGRADED`へ反映する。履歴もなければhard failする。
+- `copilot-backtest`は終了日以前のStateStore履歴を優先する。十分な履歴がない場合はcurrent-universe CSV境界へフォールバックし、日ごとの歴史的membershipを復元していない生存者バイアス注記を必ず出す。
+
 **依存**: `storage/state_store.py`, `pandas`（`read_html`用）
-**エラー処理**: Wikipediaページの取得・パースに失敗した場合、`config/universe_snapshot.csv`へフォールバックし、stepを`success`のまま`detail="degraded: fallback to universe snapshot"`と記録する。snapshotも無い場合のみstepをfailedにする。
 
 ### 3.3 `data/base.py`（FR-02, NFR-07）
 
@@ -1000,7 +1011,7 @@ def run_backtest(
 - トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。60営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
 - `start`以前のバーはスクリーニング指標のウォームアップ（最大325取引バー）にのみ使い、注文生成と約定日は`start..end`の取引日に限定する。
-- 現在のS&P500構成銘柄しかない期間は、その事実と生存者バイアスを結果へ必ず表示する。
+- `copilot-backtest`は`end`以前の最新`universe_membership`を優先する。ただし日ごとの歴史的membershipは復元しないため、履歴が無い場合のcurrent-universeフォールバックを含め、単一構成銘柄集合を全期間へ適用する限界と生存者バイアスを結果へ必ず表示する。
 - 最終日後に残るpositionは最終日以前の最新観測価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。途中の欠損日も最新終値を繰り越して時価評価する。SPY benchmarkも同じ欠損規約とし、整数株購入後の残cashをcurveへ含める。
 
 **P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。`Trade.pnl`は約定価格へ織り込み済みの両側slippageに加え、`commission_usd`へ記録したentry/exit両側commissionを控除した純損益とし、全トレードの合計が清算後cashの増減と一致する。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
@@ -1116,6 +1127,8 @@ class PerformanceSummary:
 （テキスト、分析入力エクスポート、通知、出力）は`RunStatus.DEGRADED`へ縮退して
 終了コード0を保つ。主表示はステップ8でstdoutへ出す。併せて同じ`DailyBrief`から
 Markdownを原子保存し、ブラウザ自動起動は行わない。
+
+ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
 **P7（スキル移行）でのステップ6の変更**: ステップ名は`6_llm`から`6_analysis_export`
 へ変わり、内容もLLM分析から`analysis_input.json`のエクスポートだけになった

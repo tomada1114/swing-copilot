@@ -37,9 +37,11 @@ if TYPE_CHECKING:
     from swing_copilot.screening.base import Candidate
 
 SURVIVORSHIP_BIAS_NOTE = (
-    "This backtest uses the current S&P 500 constituent list for the entire "
-    "period. Symbols delisted or removed from the index during the period "
-    "are absent, which overstates historical performance (survivorship bias)."
+    "This backtest applies one S&P 500 constituent snapshot to the entire "
+    "period. It does not reconstruct day-by-day index membership; when "
+    "historical membership is unavailable, the current universe is used. "
+    "Removed or delisted symbols may be absent, overstating historical "
+    "performance (survivorship bias)."
 )
 _ATR_PERIOD = 14
 

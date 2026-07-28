@@ -108,7 +108,11 @@ from swing_copilot.text.edgar_filings import (
     fetch_recent_filings_text,
 )
 from swing_copilot.text.news_finnhub import FinnhubNewsClient
-from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
+from swing_copilot.universe import (
+    UniverseError,
+    UniverseFetchOptions,
+    resolve_daily_universe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +212,9 @@ class DailyDependencies:
     universe: tuple[UniverseMember, ...]
     strategies_config: dict[str, Any]  # Any: arbitrary-depth parsed YAML
     clock: Clock
+    # Present only when a live refresh failed and an older persisted snapshot
+    # was selected. It is data quality, not a reason to skip screening.
+    universe_warning: str | None = None
     # Injectable monotonic time source for the NFR-03 run-timeout budget.
     # Deliberately separate from `clock` (calendar/business time): this is
     # wall-clock elapsed-time measurement, never a substitute for `as_of`.
@@ -1215,6 +1222,18 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         len(symbols),
     )
 
+    if deps.universe_warning is not None:
+        logger.warning(
+            "run %s universe data quality: %s", run_id, deps.universe_warning
+        )
+        _record_step(
+            deps,
+            run_id,
+            "0_universe",
+            _StepOutcome(False, deps.universe_warning),
+            time.perf_counter(),
+        )
+
     # NFR-03 stuck-run detection: a run that crashed mid-execution never
     # reaches `complete_run()` and would sit in `status='running'` forever.
     stale_cutoff = deps.clock.now() - timedelta(seconds=budget_s)
@@ -1339,7 +1358,7 @@ def _run_soft_steps(
     cheap/local and always attempts to complete regardless of budget, so a
     timed-out run still produces terminal output and a Markdown archive.
     """
-    degraded = False
+    degraded = deps.universe_warning is not None
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
     excursion_outcome = _run_mae_mfe_soft_step(deps, ctx.run_id, ctx.run_date)
@@ -1406,18 +1425,20 @@ def _run_soft_steps(
 
     status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
     notices = (
-        (ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ()
-    ) + tuple(
-        f"{label}: {outcome.detail}"
-        for label, outcome in (
-            ("MAE/MFE", excursion_outcome),
-            ("text", text_outcome),
-            ("analysis export", export_outcome),
-            ("postmortem", postmortem_outcome),
-            ("notification", notify_outcome),
+        ((deps.universe_warning,) if deps.universe_warning is not None else ())
+        + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
+        + tuple(
+            f"{label}: {outcome.detail}"
+            for label, outcome in (
+                ("MAE/MFE", excursion_outcome),
+                ("text", text_outcome),
+                ("analysis export", export_outcome),
+                ("postmortem", postmortem_outcome),
+                ("notification", notify_outcome),
+            )
+            if outcome.detail is not None
+            and (not outcome.success or not outcome.is_skipped)
         )
-        if outcome.detail is not None
-        and (not outcome.success or not outcome.is_skipped)
     )
     started_at = time.perf_counter()
     logger.debug("step 8_output starting")
@@ -1497,15 +1518,16 @@ def _compose_dependencies(
     state_store.init_schema()
     clock = SystemClock()
 
-    universe = tuple(
-        get_sp500_universe(
-            clock.today(),
-            options=UniverseFetchOptions(
-                snapshot_path=settings.universe.snapshot_path,
-                manual_include=settings.universe.manual_include,
-                manual_exclude=settings.universe.manual_exclude,
-            ),
-        )
+    universe_resolution = resolve_daily_universe(
+        options.as_of or clock.today(),
+        state_store,
+        is_historical=options.as_of is not None,
+        refresh_interval_days=settings.universe.refresh_interval_days,
+        options=UniverseFetchOptions(
+            snapshot_path=settings.universe.snapshot_path,
+            manual_include=settings.universe.manual_include,
+            manual_exclude=settings.universe.manual_exclude,
+        ),
     )
 
     edgar_client = (
@@ -1537,9 +1559,10 @@ def _compose_dependencies(
         market_store=market_store,
         state_store=state_store,
         settings=settings,
-        universe=universe,
+        universe=universe_resolution.members,
         strategies_config=strategies.model_dump(),
         clock=clock,
+        universe_warning=universe_resolution.warning,
         edgar_client=edgar_client,
         earnings_client=earnings_client,
         news_client=news_client,
@@ -1641,7 +1664,10 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(load_secrets(), level=options.log_level)
     settings = load_settings()
     strategies = load_strategies()
-    deps = _compose_dependencies(options, settings, strategies)
+    try:
+        deps = _compose_dependencies(options, settings, strategies)
+    except UniverseError as exc:
+        raise SystemExit(str(exc)) from exc
     result = run_daily(options, deps)
     if result.brief is not None:
         width = shutil.get_terminal_size(fallback=(120, 24)).columns

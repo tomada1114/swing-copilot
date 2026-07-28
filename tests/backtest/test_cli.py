@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +14,7 @@ from swing_copilot.backtest.cli import (
     BacktestCliError,
     ReportMeta,
     _atomic_write,
+    _compose_dependencies,
     _grid_output_path,
     _missing_data_symbols,
     _output_path,
@@ -40,6 +41,7 @@ from swing_copilot.backtest.sensitivity import (
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 from tests.backtest.conftest import bars_frame, flat_bars
 
@@ -563,6 +565,65 @@ def seeded_db(tmp_path):
     ]
     store.write_bars(bars_frame(_with_provider_columns(rows)))
     return db_path, days
+
+
+class TestPointInTimeUniverseComposition:
+    def test_uses_persisted_snapshot_not_after_backtest_end(
+        self,
+        seeded_db: tuple[Path, list[date]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path, days = seeded_db
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+        state_store = StateStore(Database(db_path))
+        state_store.init_schema()
+        state_store.record_universe_membership(
+            days[-2],
+            [
+                UniverseMember(
+                    symbol="PIT",
+                    company_name="Point in time Corp.",
+                    gics_sector="Industrials",
+                    source_symbol="PIT",
+                )
+            ],
+        )
+        state_store.record_universe_membership(
+            days[-1] + timedelta(days=1),
+            [
+                UniverseMember(
+                    symbol="FUTURE",
+                    company_name="Future Corp.",
+                    gics_sector="Industrials",
+                    source_symbol="FUTURE",
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "get_sp500_universe",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a persisted historical snapshot must avoid current-universe fallback"
+            ),
+        )
+
+        args = _parse_args(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+            ]
+        )
+        deps, symbols, _missing = _compose_dependencies(args, settings, strategies)
+
+        assert [member.symbol for member in deps.universe] == ["PIT"]
+        assert symbols == ["PIT"]
 
 
 @pytest.mark.usefixtures("two_symbol_universe")

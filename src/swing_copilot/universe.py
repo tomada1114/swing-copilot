@@ -2,10 +2,10 @@
 
 ``get_sp500_universe`` returns the current membership, preferring the local
 CSV snapshot when ``force_refresh`` is false and falling back to it if a
-Wikipedia refetch fails (NFR-04). ``refresh_universe`` always refetches and
-persists the result through ``UniverseStateStore``, a narrow structural
-Protocol that ``storage.state_store.StateStore`` satisfies once it exists;
-the daily pipeline decides when a refresh (vs. the cached snapshot) is due.
+Wikipedia refetch fails (NFR-04). ``resolve_daily_universe`` is the
+point-in-time boundary used by the daily pipeline: historical runs select a
+persisted snapshot at or before ``as_of``, while live runs reuse or refresh a
+snapshot according to the configured interval.
 """
 
 from __future__ import annotations
@@ -49,6 +49,15 @@ class UniverseMember:
     company_name: str
     gics_sector: str
     source_symbol: str
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseResolution:
+    """Membership selected for one run, with any data-quality warning."""
+
+    members: tuple[UniverseMember, ...]
+    snapshot_date: date
+    warning: str | None = None
 
 
 class UniverseStateStore(Protocol):
@@ -147,6 +156,22 @@ def _write_snapshot(snapshot_path: Path, members: Sequence[UniverseMember]) -> N
     tmp_path.replace(snapshot_path)
 
 
+def _fetch_and_write_snapshot(options: UniverseFetchOptions) -> list[UniverseMember]:
+    """Fetch a non-empty provider membership and replace the local CSV cache."""
+    try:
+        fetched = options.fetch_fn()
+    except Exception as exc:
+        msg = "Failed to fetch the S&P 500 universe"
+        raise UniverseError(msg) from exc
+
+    if not fetched:
+        msg = "Fetched S&P 500 universe is empty"
+        raise UniverseError(msg)
+
+    _write_snapshot(Path(options.snapshot_path), fetched)
+    return fetched
+
+
 def _apply_manual_overrides(
     members: Sequence[UniverseMember],
     manual_include: Sequence[str],
@@ -215,8 +240,8 @@ def get_sp500_universe(
             )
 
     try:
-        fetched = opts.fetch_fn()
-    except Exception as exc:
+        fetched = _fetch_and_write_snapshot(opts)
+    except UniverseError as exc:
         fallback = _read_snapshot(path)
         if fallback is None:
             msg = "Failed to fetch the S&P 500 universe and no snapshot fallback exists"
@@ -225,7 +250,6 @@ def get_sp500_universe(
             fallback, opts.manual_include, opts.manual_exclude
         )
 
-    _write_snapshot(path, fetched)
     return _apply_manual_overrides(fetched, opts.manual_include, opts.manual_exclude)
 
 
@@ -248,6 +272,103 @@ def refresh_universe(
     Raises:
         UniverseError: The fetch failed and no snapshot fallback exists.
     """
-    members = get_sp500_universe(as_of, force_refresh=True, options=options)
+    opts = options or UniverseFetchOptions()
+    members = _fetch_and_write_snapshot(opts)
     state_store.record_universe_membership(as_of, members)
-    return members
+    return _apply_manual_overrides(members, opts.manual_include, opts.manual_exclude)
+
+
+def _resolve_persisted_universe(
+    snapshot_date: date,
+    members: Sequence[UniverseMember],
+    options: UniverseFetchOptions,
+    *,
+    warning: str | None = None,
+) -> UniverseResolution:
+    """Apply run-local overrides without mutating raw persisted membership."""
+    return UniverseResolution(
+        members=tuple(
+            _apply_manual_overrides(
+                members, options.manual_include, options.manual_exclude
+            )
+        ),
+        snapshot_date=snapshot_date,
+        warning=warning,
+    )
+
+
+def select_persisted_universe(
+    as_of: date,
+    state_store: UniverseStateStore,
+    *,
+    options: UniverseFetchOptions | None = None,
+) -> UniverseResolution | None:
+    """Select raw StateStore history visible at ``as_of`` without network I/O."""
+    persisted = state_store.get_latest_universe_membership(as_of)
+    if persisted is None:
+        return None
+
+    snapshot_date, members = persisted
+    return _resolve_persisted_universe(
+        snapshot_date, members, options or UniverseFetchOptions()
+    )
+
+
+def resolve_daily_universe(
+    as_of: date,
+    state_store: UniverseStateStore,
+    *,
+    is_historical: bool,
+    refresh_interval_days: int,
+    options: UniverseFetchOptions | None = None,
+) -> UniverseResolution:
+    """Resolve the one universe snapshot visible to a daily run.
+
+    Explicit ``--as-of`` runs are historical and therefore never refresh: the
+    latest StateStore membership with ``snapshot_date <= as_of`` is required.
+    Live runs reuse a younger snapshot, otherwise refetch and persist raw
+    provider membership to both CSV and DuckDB. A live refresh failure can use
+    a previously persisted snapshot, but is returned with an explicit warning.
+    """
+    if refresh_interval_days < 1:
+        msg = "refresh_interval_days must be at least 1"
+        raise ValueError(msg)
+
+    opts = options or UniverseFetchOptions()
+    persisted = state_store.get_latest_universe_membership(as_of)
+
+    if is_historical:
+        if persisted is None:
+            msg = (
+                "No persisted universe snapshot is available at or before "
+                f"{as_of.isoformat()} for this historical run"
+            )
+            raise UniverseError(msg)
+        snapshot_date, members = persisted
+        return _resolve_persisted_universe(snapshot_date, members, opts)
+
+    if persisted is not None:
+        snapshot_date, members = persisted
+        if (as_of - snapshot_date).days < refresh_interval_days:
+            return _resolve_persisted_universe(snapshot_date, members, opts)
+
+    try:
+        refreshed = _fetch_and_write_snapshot(opts)
+        state_store.record_universe_membership(as_of, refreshed)
+    except UniverseError as exc:
+        if persisted is None:
+            msg = (
+                "Failed to resolve the live universe and no persisted universe "
+                "snapshot is available"
+            )
+            raise UniverseError(msg) from exc
+        snapshot_date, members = persisted
+        warning = (
+            f"Universe refresh failed; using persisted snapshot "
+            f"{snapshot_date.isoformat()}: {exc.__cause__ or exc}"
+        )
+        return _resolve_persisted_universe(
+            snapshot_date, members, opts, warning=warning
+        )
+
+    return _resolve_persisted_universe(as_of, refreshed, opts)

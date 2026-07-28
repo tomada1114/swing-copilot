@@ -49,9 +49,76 @@ class TestUnevidencedBehavioralClaims:
                 ["実績は計画を12%下回り、投資家心理は悪化している。"]
             )
 
+    @pytest.mark.parametrize(
+        ("text", "missing"),
+        [
+            pytest.param(
+                "売上が12%増えており、投資家心理が悪化した可能性がある。",
+                "actual/plan markers",
+                id="percentage-only",
+            ),
+            pytest.param(
+                "実績が計画を下回り、投資家心理が悪化した可能性がある。",
+                "percentage",
+                id="markers-without-a-number",
+            ),
+            pytest.param(
+                "実績は12%下回っており、投資家心理が悪化した可能性がある。",
+                "plan marker",
+                id="actual-and-percentage-without-plan",
+            ),
+            pytest.param(
+                "計画を12%下回っており、投資家心理が悪化した可能性がある。",
+                "actual marker",
+                id="plan-and-percentage-without-actual",
+            ),
+        ],
+    )
+    def test_partial_evidence_is_still_rejected(self, text, missing):
+        # The three evidence signals are conjunctive: any one of them missing
+        # leaves the claim unfalsifiable. Weakening the `and` chain in
+        # `safety.py` to an `or` must fail here.
+        assert missing
+        with pytest.raises(ForbiddenLanguageError, match="behavioral/psychological"):
+            check_no_unevidenced_behavioral_claims([text])
+
     def test_a_hedge_paired_with_actual_versus_planned_numbers_passes(self):
         check_no_unevidenced_behavioral_claims(
             ["実績が計画を12%下回っており、投資家心理が悪化した可能性がある。"]
+        )
+
+    def test_an_english_bare_behavioral_claim_is_rejected(self):
+        with pytest.raises(ForbiddenLanguageError, match="behavioral/psychological"):
+            check_no_unevidenced_behavioral_claims(
+                ["Management is anxious about the outlook."]
+            )
+
+    def test_an_english_hedge_with_full_evidence_passes(self):
+        check_no_unevidenced_behavioral_claims(
+            [
+                "Actual results missed the planned target by 12%, a possible "
+                "shift in investor sentiment.",
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        "hedged",
+        [
+            pytest.param("投資家心理が悪化した可能性がある。", id="可能性"),
+            pytest.param("投資家心理が悪化したと考えられる。", id="考えられる"),
+            pytest.param("投資家心理の悪化を示唆しうる。", id="示唆"),
+            pytest.param("投資家心理は悪化したと読める。", id="と読める"),
+            pytest.param(
+                "入力の範囲では投資家心理は悪化している。", id="入力の範囲では"
+            ),
+        ],
+    )
+    def test_every_hedge_the_skill_docs_offer_satisfies_the_check(self, hedged):
+        # AC12 presents these as interchangeable, so the machine check must
+        # accept all of them; otherwise a conventions-following writer gets
+        # their symbol withheld for an arbitrary word choice.
+        check_no_unevidenced_behavioral_claims(
+            [f"実績が計画を12%下回っており、{hedged}"]
         )
 
     def test_text_without_any_behavioral_keyword_passes(self):

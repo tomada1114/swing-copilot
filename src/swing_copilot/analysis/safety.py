@@ -31,9 +31,15 @@ _BEHAVIORAL_KEYWORDS: tuple[str, ...] = (
     "investor sentiment",
     "management is anxious",
 )
-# A hedge phrase ("〜の可能性" / "possible"/"possibly") permitted only when
-# co-occurring with concrete evidence in the same text (below).
-_HEDGE_PATTERN = re.compile(r"可能性|possibly|possible", re.IGNORECASE)
+# A hedge phrase, permitted only when co-occurring with concrete evidence in
+# the same text (below). Kept in sync with the hedge expressions AC12 of
+# `.claude/skills/swing-daily/references/analysis-conventions.md` tells the
+# skill to use: a writer who follows the documented conventions must not be
+# withheld for picking one documented hedge over another.
+_HEDGE_PATTERN = re.compile(
+    r"可能性|考えられる|示唆|と読める|入力の範囲では|possibly|possible",
+    re.IGNORECASE,
+)
 # Concrete actual-vs-planned numeric discrepancy requires all three signals
 # in the same text: a percentage, an actual marker, and a plan marker.
 _PERCENTAGE_PATTERN = re.compile(r"\d+(\.\d+)?\s*%")

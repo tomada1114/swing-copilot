@@ -18,3 +18,7 @@ def test_skill_reuses_only_fragments_bound_to_the_same_input() -> None:
     assert "analysis-result-v2" in skill
     assert '"input_digest"' in schema
     assert "reports/<run_date>/<run_id>/" in schema
+    assert "input にある symbol を落とさない" in skill
+    assert "入力と完全一致" in schema
+    assert "no_trade=true" in schema
+    assert "NFKC" in schema

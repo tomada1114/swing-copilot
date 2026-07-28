@@ -31,6 +31,26 @@ class TestImperativeLanguage:
     def test_an_empty_collection_passes(self):
         check_no_imperative_language([])
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("ＡＡＰＬを購入してください。", id="full-width-japanese"),
+            pytest.param("ＡＡＰＬを購入せよ。", id="japanese-command"),
+            pytest.param("ポジションを閉じなさい。", id="japanese-close-command"),
+            pytest.param(
+                "\uff39\uff2f\uff35\u3000\uff2d\uff35\uff33\uff34\u3000\uff22\uff35\uff39\u3000"
+                "\uff21\uff21\uff30\uff2c\u3002",
+                id="full-width-english-obligation",
+            ),
+            pytest.param("Please sell AAPL immediately.", id="english-command"),
+            pytest.param("「購入せよ」は禁止表現です。", id="quoted-command"),
+            pytest.param("購入すべきではない。", id="negated-obligation"),
+        ],
+    )
+    def test_normalized_commands_and_obligations_are_rejected(self, text):
+        with pytest.raises(ForbiddenLanguageError, match="forbidden imperative"):
+            check_no_imperative_language([text])
+
 
 class TestUnevidencedBehavioralClaims:
     def test_a_bare_psychological_claim_is_rejected(self):

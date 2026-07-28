@@ -908,11 +908,11 @@ def ingest(analysis_input_path: Path, result_path: Path, context_path: Path) -> 
 def main(argv: list[str] | None = None) -> None: ...
 ```
 
-**検証の3段（銘柄単位）**: (1) strictスキーマで解析できること、(2) 引用された`source_id`がすべて当該銘柄について実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄からも引用可）であり、各factが1件以上引用していること、(3) ユーザー表示テキストがCON-03に違反しないこと。(2)(3)は**銘柄単位でfail-closed**とし、違反銘柄の定性セクションを保留（`SymbolOutcome.error`を設定し、他の全フィールドを空に）してログへ記録するだけで、リトライしない。`SymbolOutcome`は`error`が非`None`のとき必ず全分析フィールドが空になるため、呼び出し側がフラグの確認を忘れて保留内容を誤って描画することがない。
+**検証の3段（銘柄単位）**: (1) strictスキーマで解析できること、(2) 引用された`source_id`がすべて当該銘柄について実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄からも引用可）であり、各factが1件以上引用していること、(3) ユーザー表示テキストがCON-03に違反しないこと。(2)(3)は**銘柄単位でfail-closed**とし、違反銘柄の定性セクションを保留（`SymbolOutcome.error`を設定し、他の全フィールドを空に）してログへ記録するだけで、リトライしない。CON-03はUnicode NFKC正規化後に、売買動詞と命令形・義務表現を小さく監査可能な規則で照合する。`SymbolOutcome`は`error`が非`None`のとき必ず全分析フィールドが空になるため、呼び出し側がフラグの確認を忘れて保留内容を誤って描画することがない。
 
-**hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、入力/文脈digest不正、または3文書の`run_id`・`as_of`・`strategy_key`・`input_digest`が食い違う場合は、レポート・`latest.md`・既存3成果物を変更せず`AnalysisIngestError`でrun全体を失敗させる。別のrunを記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
+**hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、入力/文脈digest不正、候補/結果symbolや候補内source_idの重複、resultのsymbol集合がinput候補集合と不一致、`no_trade`と理由の組み合わせが不正、または3文書の`run_id`・`as_of`・`strategy_key`・`input_digest`が食い違う場合は、レポート・`latest.md`・既存3成果物を変更せず`AnalysisIngestError`でrun全体を失敗させる。部分結果は意図的に許可しない。別のrunを記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
 
-**コード所有メタデータの解決**: 書類種別・提出日は`analysis_input.json`の`FilingInput`から、ソースURLは`ValidatedAnalysis.source_urls`（入力側のnews/filing URL）から解決する。レポートはスキルが申告したリンクを一切信頼せず、ingestはこの解決のためにデータベースへ触れない。
+**コード所有メタデータの解決**: 書類種別・提出日は`analysis_input.json`の`FilingInput`から、ソースURLは`ValidatedAnalysis.source_urls`（入力側news/filing/calendar URLのうち`http`/`https`だけ）から解決する。不正・空URLはリンクにもbare URLにもせずattributionを省略する。レポートはスキルが申告したリンクを一切信頼せず、ingestはこの解決のためにデータベースへ触れない。
 
 **再描画（`analysis/snapshot.py` + `analysis/cli.py`）**: `copilot-ingest-analysis`は`copilot-daily`が出したレポートを、定性セクションだけ差し替えて正確に再生成しなければならない。スクリーニングを再実行すると時点再現性が失われネットワークにも触れるため、日次runは表示非依存の`DailyBrief`を`analysis_input.json`の隣へ`report_context.json`として保存しておき、ingestはそれを読み直す。`_rebuild_brief()`は候補ごとの`analysis`フィールドと run単位の`no_trade`/`no_trade_reason`だけを置き換え、スコア・サイジング・実行状態・落選・レジームは無変更で持ち越す。ingestはネットワーク接続もスクリーニング再計算も行わない。
 
@@ -986,7 +986,7 @@ MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`tra
 
 **P7（スキル移行、公開データ形状変更）**: `DailyBriefContext`は`news_summaries`/`filing_analyses`を持たず、検証済みの`analysis: ValidatedAnalysis | None`を1つ受け取る（`copilot-daily`は常に`None`を渡すため、日次runのレポートは定性欄が「分析待ち」になる）。`BriefLlm`は`BriefAnalysis`へ置き換わり、`degraded: bool` / `conclusion: str` / `facts` / `risk_flags` / `sources` / `filings` / `verdict` / `verdict_summary` / `strengths` / `concerns`を持つfrozen dataclassとなった。`BriefFilingAnalysis`は`filing_type` / `filed_at` / `facts` / `interpretation` / `red_flags` / `yoy_changes` / `sources`（`guidance_direction`と`is_near_stale`は3.17節の注記のとおり廃止）。
 
-`build_analysis_brief(symbol, analysis)`は不合格経路をすべて`degraded=True`＋説明文へ畳む——分析未実施（`analysis is None`）は「分析待ち（swing-daily スキルで分析を実行してください）」、当該銘柄が分析対象外なら「定性分析なし」、`analysis/validate.py`が保留した銘柄は「検証不合格のため非表示」。部分描画は行わない。`format_verdict(analysis)`はterminal/markdown共通のverdict行を返す純関数で、`degraded`または`verdict`が`None`のときは`None`（＝何も描画しない）を返す——沈黙が「懸念なし」と読まれてはならないためである。`skip`は`⚠ 定性: 見送り推奨（要約）`、`proceed`は`✓ 定性: 懸念なし`。`DailyBrief`はrun単位の`no_trade: bool = False`/`no_trade_reason: str | None = None`を持ち、真のときヘッダ直後に「本日は取引なし（定性判断）」を強調表示する。
+`build_analysis_brief(symbol, analysis)`は不合格経路をすべて`degraded=True`＋説明文へ畳む——分析未実施（`analysis is None`）は「分析待ち（swing-daily スキルで分析を実行してください）」、`analysis/validate.py`が保留した銘柄は「検証不合格のため非表示」。正常にingestしたresultは候補symbolを完全被覆するため「定性分析なし」は手組みの`ValidatedAnalysis`に対する防御的fallbackに限られる。部分描画は行わない。`format_verdict(analysis)`はterminal/markdown共通のverdict行を返す純関数で、`degraded`または`verdict`が`None`のときは`None`（＝何も描画しない）を返す——沈黙が「懸念なし」と読まれてはならないためである。`skip`は`⚠ 定性: 見送り推奨（要約）`、`proceed`は`✓ 定性: 懸念なし`。`DailyBrief`はrun単位の`no_trade: bool = False`/`no_trade_reason: str | None = None`を持ち、真のときヘッダ直後に「本日は取引なし（定性判断）」を強調表示する。
 
 `analysis/cli.py::ingest()`は`report_context.json`から復元した`DailyBrief`に対し`build_analysis_brief()`を各候補へ適用し、`no_trade`系フィールドと併せて差し替えるだけで、決定論的フィールド（スコア・サイジング・実行状態・落選・レジーム）は無変更で持ち越す。
 

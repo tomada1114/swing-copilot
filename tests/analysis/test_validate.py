@@ -137,7 +137,7 @@ class TestProvenance:
 
     def test_another_symbols_news_id_is_still_rejected(self, write_documents):
         base_candidate = input_payload()["candidates"][0]
-        other_candidate = {
+        other_candidate: dict[str, Any] = {
             "symbol": "MSFT",
             "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
             "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
@@ -164,9 +164,19 @@ class TestProvenance:
                 "risk_flags": [],
             }
         )
+        other_result = symbol_payload(
+            symbol="MSFT",
+            news_summary=None,
+            filing_analyses=[],
+            verdict={"recommendation": "proceed", "reasons": []},
+        )
 
         input_path, result_path = write_documents(
-            custom_input, result_payload(symbols=[payload])
+            custom_input,
+            result_payload(
+                input_digest=custom_input["input_digest"],
+                symbols=[payload, other_result],
+            ),
         )
         validated = validate_analysis(
             load_analysis_input(input_path), load_analysis_result(result_path)
@@ -325,16 +335,37 @@ class TestCon03:
     def test_one_symbols_violation_does_not_withhold_another(self, write_documents):
         clean = symbol_payload()
         dirty = symbol_payload(
-            symbol="AAPL",
+            symbol="MSFT",
+            news_summary=None,
+            filing_analyses=[],
             screening_assessment={
                 "summary": "今すぐ買う",
                 "strengths": [],
                 "concerns": [],
             },
+            verdict={"recommendation": "proceed", "reasons": []},
         )
-        # Both entries name AAPL, but only the violating one is withheld;
-        # a per-symbol failure must never take a sibling down with it.
-        validated = _validated(write_documents, symbols=[clean, dirty])
+        other_candidate: dict[str, Any] = {
+            "symbol": "MSFT",
+            "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
+            "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
+            "decision_history": None,
+            "news": [],
+            "filings": [],
+        }
+        custom_input = input_payload(
+            candidates=[input_payload()["candidates"][0], other_candidate]
+        )
+        input_path, result_path = write_documents(
+            custom_input,
+            result_payload(
+                input_digest=custom_input["input_digest"], symbols=[clean, dirty]
+            ),
+        )
+        # A per-symbol failure must never take its complete-result sibling down.
+        validated = validate_analysis(
+            load_analysis_input(input_path), load_analysis_result(result_path)
+        )
 
         assert validated.outcomes[0].error is None
         assert validated.outcomes[1].error is not None
@@ -383,17 +414,23 @@ class TestSymbolWithoutText:
 
 
 class TestSymbolCoverage:
-    def test_a_symbol_absent_from_the_input_is_an_error_outcome(self, write_documents):
-        validated = _validated(write_documents, symbols=[symbol_payload(symbol="TSLA")])
+    def test_a_symbol_absent_from_the_input_is_a_hard_failure(self, write_documents):
+        input_path, result_path = write_documents(
+            None, result_payload(symbols=[symbol_payload(symbol="TSLA")])
+        )
 
-        outcome = validated.for_symbol("TSLA")
-        assert outcome is not None
-        assert outcome.error == "symbol is absent from analysis_input.json"
+        with pytest.raises(AnalysisIngestError, match=r"unexpected.*TSLA"):
+            validate_analysis(
+                load_analysis_input(input_path), load_analysis_result(result_path)
+            )
 
-    def test_a_symbol_absent_from_the_result_has_no_outcome(self, write_documents):
-        validated = _validated(write_documents, symbols=[])
+    def test_a_symbol_absent_from_the_result_is_a_hard_failure(self, write_documents):
+        input_path, result_path = write_documents(None, result_payload(symbols=[]))
 
-        assert validated.for_symbol("AAPL") is None
+        with pytest.raises(AnalysisIngestError, match=r"missing.*AAPL"):
+            validate_analysis(
+                load_analysis_input(input_path), load_analysis_result(result_path)
+            )
 
 
 class TestResolvedMetadata:
@@ -440,6 +477,34 @@ class TestResolvedMetadata:
             validated.source_urls[CALENDAR_ID]
             == "https://fred.stlouisfed.org/release?rid=1"
         )
+
+    @pytest.mark.parametrize(
+        ("url", "is_linked"),
+        [
+            pytest.param("https://example.com/news", True, id="https"),
+            pytest.param("http://example.com/news", True, id="http"),
+            pytest.param("", False, id="empty"),
+            pytest.param("javascript:alert(1)", False, id="javascript"),
+            pytest.param("data:text/html,unsafe", False, id="data"),
+            pytest.param("file:///tmp/unsafe", False, id="file"),
+        ],
+    )
+    def test_only_http_and_https_input_urls_are_linkable(
+        self, write_documents, url, is_linked
+    ):
+        candidate = input_payload()["candidates"][0]
+        candidate["news"][0]["url"] = url
+        custom_input = input_payload(candidates=[candidate])
+        input_path, result_path = write_documents(
+            custom_input,
+            result_payload(input_digest=custom_input["input_digest"]),
+        )
+
+        validated = validate_analysis(
+            load_analysis_input(input_path), load_analysis_result(result_path)
+        )
+
+        assert (NEWS_ID in validated.source_urls) is is_linked
 
 
 class TestInputLoading:

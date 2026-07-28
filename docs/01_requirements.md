@@ -147,6 +147,9 @@ Part1調査の結論として、本システムは意思決定支援ツールと
   - 引用された`source_ids`が、当該銘柄について`analysis_input.json`で実際に供給したID集合の部分集合であることを検証できる。部分集合でない銘柄はfail-closedで縮退表示となり、リトライしないことをテストで確認できる。
   - 書類種別・提出日・ソースURLといったコード側メタデータは`analysis_input.json`から解決され、スキル出力の申告値をそのまま採用しないことを確認できる。
   - facts、interpretation、risk/red flag、YoY変化、スクリーニング評価、verdict理由を含む全ユーザー表示文字列についてCON-03検査をingest時に一元実施し、違反銘柄が表示されず縮退することを検証できる。
+  - `analysis_input.json`の候補symbolと候補内source_id、`analysis_result.json`のsymbolがそれぞれ一意であり、resultのsymbol集合がinput候補集合と完全一致しなければrun全体をhard failすることを検証できる。
+  - `no_trade=true`では非空白の理由を必須、`false`では理由を`null`に固定し、Unicode NFKC正規化後にもCON-03の売買命令・義務表現を検出できることを検証できる。
+  - input由来URLは`http`/`https`だけをリンク化し、それ以外はattributionなしで安全に縮退することを検証できる。
   - `analysis_result.json`の`as_of`が`analysis_input.json`の`as_of`と一致しない場合はrun全体のhard failとし、部分的に読み込まないことを確認できる。
   - 銘柄ごとのverdict（`proceed`／`skip`）と、run全体の`no_trade`表示がレポートへ反映され、検証未通過・分析未実施の銘柄では「懸念なし」と誤読される表示が出ないことを確認できる。
   - `copilot-ingest-analysis`がネットワークアクセスもスクリーニング再計算も行わず、`report_context.json`に保存済みのブリーフの定性欄だけを差し替えることをテストで確認できる。

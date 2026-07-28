@@ -109,6 +109,8 @@
 
 - `source_id` というキー名は【固定】。
 - news/filings が空の候補も `candidates` に含まれる（screening 評価は行うため）。
+- `candidates[].symbol` は文書内で一意、各候補の news と filings を合わせた
+  `source_id` も一意にする。重複は strict schema の parse failure になる。
 
 ## analysis_result.json（スキルが生成、ingest が検証）
 
@@ -160,12 +162,14 @@
   `input_digest`は入力本体の canonical JSON（キーソート、UTF-8、安定した日時表現）から
   Python が計算した完全 SHA-256 であり、短縮・再計算・書き換えをしない。
 - `screening_assessment` と `verdict` は **全銘柄必須**。
+- `symbols[].symbol` は重複不可で、`analysis_input.json` の `candidates[].symbol` と
+  **入力と完全一致**させる。入力にある銘柄を落としたり、入力外銘柄を追加したりしない。
 - `facts[].source_ids` は **非空**、かつ入力の該当銘柄の `source_id` 集合
   （＋ `context.calendar_events` の ID。これは全銘柄共通で引用可）の部分集合。
 - `verdict.reasons[].source_ids`: ニュース／開示／`context.calendar_events`に基づく
   理由は該当 `source_id` を必ず引用。スコア等の決定論的入力のみに基づく理由は空リスト可。
-- `no_trade` は全銘柄 skip などの場合に統括が `true` にできる。`true` なら
-  `no_trade_reason` に理由を書く（CON-03 検査対象）。
+- `no_trade=true` のときだけ、非空白の `no_trade_reason` に理由を書く（CON-03 検査対象）。
+  `no_trade=false` のときは `no_trade_reason` を必ず `null` にする。
 
 ## ingest の検証規則【固定】
 
@@ -174,14 +178,18 @@
 2. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id`、または
    `context.calendar_events` の `source_id`（全銘柄共通で引用可）の部分集合。
    `facts` の `source_ids` は非空。
-3. CON-03 機械検査を、ユーザー表示される全テキストフィールドに適用
+3. CON-03 機械検査を、Unicode NFKC 正規化後のユーザー表示テキスト全フィールドに適用
    （`facts[].text`, `interpretation`, `risk_flags`, `red_flags`, `yoy_changes`,
    `screening_assessment.*`, `verdict.reasons[].text`, `no_trade_reason`）。
+   売買動詞と命令形・義務表現の組み合わせを禁止し、引用・否定を含む場合も安全側で
+   検査対象にする。
 4. 違反は **銘柄単位の fail-closed**。当該銘柄の定性セクションを縮退表示し、
    リトライはしない。
-5. input に無い symbol が result にあれば当該 symbol は error 扱い。
-   input にあって result に無い symbol は「分析なし」として縮退表示。
-6. ingest はネットワークアクセスもスクリーニング再実行もしない。
+5. result の symbol 集合が input と完全一致しなければ run 全体を hard fail とする。
+   部分結果・重複・不足・入力外銘柄を縮退表示で受け入れない。
+6. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
+   事実本文を表示しても source attribution を付けない。
+7. ingest はネットワークアクセスもスクリーニング再実行もしない。
 
 ## レポート表示（ingest 側の責務、参考）
 

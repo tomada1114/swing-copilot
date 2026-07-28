@@ -18,10 +18,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime
-from typing import Annotated, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v2"]] = "analysis-input-v2"
 RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v2"]] = "analysis-result-v2"
@@ -74,6 +77,16 @@ class _StrictModel(BaseModel):
     """Base for both directions of the contract: reject unknown fields."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _duplicate_value(values: Iterable[str]) -> str | None:
+    """Return the first repeated value, preserving the document's order."""
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            return value
+        seen.add(value)
+    return None
 
 
 class NewsInput(_StrictModel):
@@ -165,6 +178,27 @@ class AnalysisInput(_StrictModel):
             raise ValueError(msg)
         return value
 
+    @model_validator(mode="after")
+    def _verify_unique_candidates_and_sources(self) -> Self:
+        """Reject ambiguous candidate and per-candidate source identities."""
+        duplicate_symbol = _duplicate_value(
+            candidate.symbol for candidate in self.candidates
+        )
+        if duplicate_symbol is not None:
+            msg = f"candidate symbols must be unique: {duplicate_symbol!r}"
+            raise ValueError(msg)
+        for candidate in self.candidates:
+            source_ids = [item.source_id for item in candidate.news]
+            source_ids.extend(item.source_id for item in candidate.filings)
+            duplicate_source_id = _duplicate_value(source_ids)
+            if duplicate_source_id is not None:
+                msg = (
+                    "candidate source_ids must be unique for "
+                    f"{candidate.symbol!r}: {duplicate_source_id!r}"
+                )
+                raise ValueError(msg)
+        return self
+
 
 class SourcedFact(_StrictModel):
     """One factual statement tied to the input source(s) it came from."""
@@ -244,4 +278,19 @@ class AnalysisResult(_StrictModel):
     generated_by: str
     symbols: list[SymbolAnalysis] = []
     no_trade: bool = False
-    no_trade_reason: str | None = None
+    no_trade_reason: NonBlankText | None = None
+
+    @model_validator(mode="after")
+    def _verify_complete_no_trade_contract(self) -> Self:
+        """Reject ambiguous result identities and run-level trade state."""
+        duplicate_symbol = _duplicate_value(symbol.symbol for symbol in self.symbols)
+        if duplicate_symbol is not None:
+            msg = f"result symbols must be unique: {duplicate_symbol!r}"
+            raise ValueError(msg)
+        if self.no_trade and self.no_trade_reason is None:
+            msg = "no_trade_reason is required when no_trade is true"
+            raise ValueError(msg)
+        if not self.no_trade and self.no_trade_reason is not None:
+            msg = "no_trade_reason must be null when no_trade is false"
+            raise ValueError(msg)
+        return self

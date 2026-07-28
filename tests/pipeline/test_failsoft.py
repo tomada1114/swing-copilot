@@ -460,6 +460,33 @@ class TestMaeMfeFailureDegrades:
         )
 
 
+class TestUniverseFallbackDegrades:
+    def test_fallback_snapshot_is_recorded_and_visible_in_a_degraded_report(
+        self, base_deps: DailyDependencies, state_store: StateStore
+    ) -> None:
+        warning = (
+            "Universe refresh failed; using persisted snapshot 2026-07-13: "
+            "wikipedia unavailable"
+        )
+        deps = replace(base_deps, universe_warning=warning)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert _step_status(state_store, result.run_id, "0_universe") == "failed"
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT detail FROM run_steps WHERE run_id = ? AND step = '0_universe'",
+                [str(result.run_id)],
+            ).fetchone()
+        assert row is not None
+        detail = row[0]
+        assert detail == warning
+        assert result.report_path is not None
+        assert warning in result.report_path.read_text(encoding="utf-8")
+
+
 class TestMixedOutcomeTextStepPreservesSuccesses:
     def test_one_symbol_failing_keeps_the_other_symbols_news_and_degrades_the_run(
         self, base_deps, state_store

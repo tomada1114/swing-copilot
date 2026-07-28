@@ -127,7 +127,7 @@ flowchart TD
 
 | コンポーネント | 主な配置 | 責務 | 対応FR/NFR |
 |---|---|---|---|
-| Universe管理 | `universe.py` | S&P500構成銘柄リストの取得・保存・更新 | FR-01 |
+| Universe管理 | `universe.py` | S&P500構成銘柄のCSVキャッシュとDuckDB履歴の取得・保存・更新。`as_of`時点で可視な履歴選択、live更新周期、フォールバック警告を一元化する | FR-01 |
 | DataProvider | `data/base.py`, `data/yfinance_provider.py`, `data/eodhd_provider.py` | 日足株価の取得を抽象化し、試作(yfinance)・本番(EODHD)を差し替え可能にする | FR-02, NFR-07, CON-02 |
 | EDGARクライアント | `data/edgar.py` | SEC EDGAR公式APIから財務諸表・ファンダメンタルズを取得 | FR-03 |
 | Database | `storage/database.py` | 単一DuckDB接続・スキーマ初期化・トランザクション境界 | NFR-02, NFR-05 |

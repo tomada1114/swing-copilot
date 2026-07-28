@@ -17,6 +17,7 @@ from swing_copilot.universe import (
     fetch_from_wikipedia,
     get_sp500_universe,
     refresh_universe,
+    resolve_daily_universe,
 )
 
 if TYPE_CHECKING:
@@ -312,6 +313,211 @@ class TestRefreshUniverse:
         assert state_store.get_latest_universe_membership() == (
             date(2026, 7, 27),
             tuple(second),
+        )
+
+
+class TestResolveDailyUniverse:
+    @pytest.mark.parametrize(
+        ("as_of", "expected_snapshot_date", "expected_symbol"),
+        [
+            (date(2026, 7, 14), date(2026, 7, 13), "OLD"),
+            (date(2026, 7, 20), date(2026, 7, 20), "EXACT"),
+            (date(2026, 7, 21), date(2026, 7, 20), "EXACT"),
+        ],
+    )
+    def test_historical_run_selects_latest_snapshot_not_after_as_of(
+        self, tmp_path, as_of, expected_snapshot_date, expected_symbol
+    ):
+        state_store = FakeUniverseStateStore()
+        state_store.history = [
+            (
+                date(2026, 7, 13),
+                tuple(_members(("OLD", "Old Corp.", "Industrials", "OLD"))),
+            ),
+            (
+                date(2026, 7, 20),
+                tuple(_members(("EXACT", "Exact Corp.", "Industrials", "EXACT"))),
+            ),
+            (
+                date(2026, 7, 22),
+                tuple(_members(("FUTURE", "Future Corp.", "Industrials", "FUTURE"))),
+            ),
+        ]
+
+        def _must_not_fetch() -> list[UniverseMember]:
+            msg = "historical runs must not refresh the current universe"
+            raise AssertionError(msg)
+
+        result = resolve_daily_universe(
+            as_of,
+            state_store,
+            is_historical=True,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(
+                snapshot_path=tmp_path / "universe_snapshot.csv",
+                fetch_fn=_must_not_fetch,
+            ),
+        )
+
+        assert result.snapshot_date == expected_snapshot_date
+        assert [member.symbol for member in result.members] == [expected_symbol]
+        assert result.warning is None
+
+    def test_live_run_reuses_snapshot_younger_than_refresh_interval(self, tmp_path):
+        state_store = FakeUniverseStateStore()
+        cached = _members(("AAPL", "Apple Inc.", "Information Technology", "AAPL"))
+        state_store.record_universe_membership(AS_OF.replace(day=14), cached)
+        fetch_calls = 0
+
+        def _fetch() -> list[UniverseMember]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return _members(
+                ("MSFT", "Microsoft Corp.", "Information Technology", "MSFT")
+            )
+
+        result = resolve_daily_universe(
+            AS_OF,
+            state_store,
+            is_historical=False,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(
+                snapshot_path=tmp_path / "universe_snapshot.csv", fetch_fn=_fetch
+            ),
+        )
+
+        assert result.snapshot_date == date(2026, 7, 14)
+        assert list(result.members) == cached
+        assert fetch_calls == 0
+
+    def test_live_run_refreshes_at_interval_and_persists_raw_membership(self, tmp_path):
+        snapshot_path = tmp_path / "universe_snapshot.csv"
+        state_store = FakeUniverseStateStore()
+        state_store.record_universe_membership(
+            AS_OF.replace(day=13),
+            _members(("OLD", "Old Corp.", "Industrials", "OLD")),
+        )
+        fresh = _members(("MSFT", "Microsoft Corp.", "Information Technology", "MSFT"))
+        fetch_calls = 0
+
+        def _fetch() -> list[UniverseMember]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return fresh
+
+        result = resolve_daily_universe(
+            AS_OF,
+            state_store,
+            is_historical=False,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(snapshot_path=snapshot_path, fetch_fn=_fetch),
+        )
+
+        assert result.snapshot_date == AS_OF
+        assert list(result.members) == fresh
+        assert fetch_calls == 1
+        assert state_store.get_latest_universe_membership() == (AS_OF, tuple(fresh))
+        assert (
+            get_sp500_universe(
+                AS_OF,
+                options=UniverseFetchOptions(snapshot_path=snapshot_path),
+            )
+            == fresh
+        )
+
+    def test_refresh_failure_reuses_persisted_snapshot_with_warning(self, tmp_path):
+        state_store = FakeUniverseStateStore()
+        cached = _members(("AAPL", "Apple Inc.", "Information Technology", "AAPL"))
+        state_store.record_universe_membership(date(2026, 7, 13), cached)
+
+        def _boom() -> list[UniverseMember]:
+            msg = "wikipedia unavailable"
+            raise RuntimeError(msg)
+
+        result = resolve_daily_universe(
+            AS_OF,
+            state_store,
+            is_historical=False,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(
+                snapshot_path=tmp_path / "universe_snapshot.csv", fetch_fn=_boom
+            ),
+        )
+
+        assert result.snapshot_date == date(2026, 7, 13)
+        assert list(result.members) == cached
+        assert result.warning is not None
+        assert "2026-07-13" in result.warning
+        assert "wikipedia unavailable" in result.warning
+        assert state_store.history == [(date(2026, 7, 13), tuple(cached))]
+
+    def test_empty_refresh_reuses_persisted_snapshot_without_writing_empty_csv(
+        self, tmp_path
+    ):
+        snapshot_path = tmp_path / "universe_snapshot.csv"
+        state_store = FakeUniverseStateStore()
+        cached = _members(("AAPL", "Apple Inc.", "Information Technology", "AAPL"))
+        state_store.record_universe_membership(date(2026, 7, 13), cached)
+
+        def _empty() -> list[UniverseMember]:
+            return []
+
+        result = resolve_daily_universe(
+            AS_OF,
+            state_store,
+            is_historical=False,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(snapshot_path=snapshot_path, fetch_fn=_empty),
+        )
+
+        assert list(result.members) == cached
+        assert result.warning is not None
+        assert "empty" in result.warning.lower()
+        assert state_store.history == [(date(2026, 7, 13), tuple(cached))]
+        assert not snapshot_path.exists()
+
+    def test_live_run_without_snapshot_fails_clearly(self, tmp_path):
+        def _boom() -> list[UniverseMember]:
+            msg = "wikipedia unavailable"
+            raise RuntimeError(msg)
+
+        with pytest.raises(UniverseError, match="no persisted universe snapshot"):
+            resolve_daily_universe(
+                AS_OF,
+                FakeUniverseStateStore(),
+                is_historical=False,
+                refresh_interval_days=7,
+                options=UniverseFetchOptions(
+                    snapshot_path=tmp_path / "universe_snapshot.csv", fetch_fn=_boom
+                ),
+            )
+
+    def test_manual_overrides_apply_after_raw_snapshot_is_persisted(self, tmp_path):
+        snapshot_path = tmp_path / "universe_snapshot.csv"
+        raw = _members(("AAPL", "Apple Inc.", "Information Technology", "AAPL"))
+        state_store = FakeUniverseStateStore()
+
+        result = resolve_daily_universe(
+            AS_OF,
+            state_store,
+            is_historical=False,
+            refresh_interval_days=7,
+            options=UniverseFetchOptions(
+                snapshot_path=snapshot_path,
+                manual_include=("NVDA",),
+                manual_exclude=("AAPL",),
+                fetch_fn=lambda: raw,
+            ),
+        )
+
+        assert [member.symbol for member in result.members] == ["NVDA"]
+        assert state_store.get_latest_universe_membership() == (AS_OF, tuple(raw))
+        assert (
+            get_sp500_universe(
+                AS_OF,
+                options=UniverseFetchOptions(snapshot_path=snapshot_path),
+            )
+            == raw
         )
 
 

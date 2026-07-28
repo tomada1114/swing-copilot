@@ -41,7 +41,12 @@ from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
-from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
+from swing_copilot.storage.state_store import StateStore
+from swing_copilot.universe import (
+    UniverseFetchOptions,
+    get_sp500_universe,
+    select_persisted_universe,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -514,14 +519,24 @@ def _compose_dependencies(
     # DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing ("data/copilot.duckdb" +
     # "data/bars") -- `--db` overrides both together, never just the DB.
     market_store = MarketStore(database, parquet_root=Path(args.db).parent / "bars")
-    universe = tuple(
-        get_sp500_universe(
-            args.end,
-            options=UniverseFetchOptions(
-                snapshot_path=settings.universe.snapshot_path,
-                manual_include=settings.universe.manual_include,
-                manual_exclude=settings.universe.manual_exclude,
-            ),
+    state_store = StateStore(database)
+    state_store.init_schema()
+    universe_options = UniverseFetchOptions(
+        snapshot_path=settings.universe.snapshot_path,
+        manual_include=settings.universe.manual_include,
+        manual_exclude=settings.universe.manual_exclude,
+    )
+    persisted_universe = select_persisted_universe(
+        args.end, state_store, options=universe_options
+    )
+    universe = (
+        persisted_universe.members
+        if persisted_universe is not None
+        else tuple(
+            get_sp500_universe(
+                args.end,
+                options=universe_options,
+            )
         )
     )
     symbols = _select_symbols(universe, args.limit)

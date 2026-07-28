@@ -1,6 +1,6 @@
 """Tests for pipeline/daily.py's CLI parsing and composition root (FR-12).
 
-`_compose_dependencies` is exercised with `load_secrets`/`get_sp500_universe`
+`_compose_dependencies` is exercised with `load_secrets`/`resolve_daily_universe`
 monkeypatched to avoid any real network access or dependency on a
 developer's local `.env` (never read directly in this suite).
 """
@@ -30,7 +30,7 @@ from swing_copilot.pipeline.daily import (
 )
 from swing_copilot.report.terminal_report import TerminalPaths
 from swing_copilot.storage.database import DEFAULT_DB_PATH
-from swing_copilot.universe import UniverseMember
+from swing_copilot.universe import UniverseError, UniverseMember, UniverseResolution
 
 
 def _make_status_error(message: str) -> httpx.HTTPStatusError:
@@ -119,8 +119,13 @@ def fake_universe(monkeypatch):
             source_symbol="AAPL",
         )
     ]
+    resolution = UniverseResolution(
+        members=tuple(members), snapshot_date=date(2026, 7, 20)
+    )
     monkeypatch.setattr(
-        daily_module, "get_sp500_universe", lambda *_args, **_kwargs: members
+        daily_module,
+        "resolve_daily_universe",
+        lambda *_args, **_kwargs: resolution,
     )
     # edgar.set_identity() sets the real EDGAR_IDENTITY environment variable
     # (see tests/data/test_edgar.py) -- never let a composition-root test
@@ -178,6 +183,49 @@ class TestComposeDependencies:
         assert deps.earnings_client is None
         assert deps.calendar_client is None
         assert deps.notifier is None
+
+    def test_explicit_as_of_uses_the_point_in_time_universe_resolver(self, monkeypatch):
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+        expected_as_of = date(2026, 7, 20)
+        captured = {}
+
+        def _resolve(as_of, state_store, **kwargs):
+            captured["as_of"] = as_of
+            captured["state_store"] = state_store
+            captured.update(kwargs)
+            return UniverseResolution(
+                members=(
+                    UniverseMember(
+                        symbol="PIT",
+                        company_name="Point in time Corp.",
+                        gics_sector="Industrials",
+                        source_symbol="PIT",
+                    ),
+                ),
+                snapshot_date=expected_as_of,
+            )
+
+        monkeypatch.setattr(daily_module, "resolve_daily_universe", _resolve)
+        monkeypatch.setattr(
+            daily_module,
+            "load_secrets",
+            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+        )
+
+        deps = _compose_dependencies(
+            DailyRunOptions(as_of=expected_as_of, skip_text=True),
+            settings,
+            strategies,
+        )
+
+        assert captured["as_of"] == expected_as_of
+        assert captured["state_store"] is deps.state_store
+        assert captured["is_historical"] is True
+        assert (
+            captured["refresh_interval_days"] == settings.universe.refresh_interval_days
+        )
+        assert [member.symbol for member in deps.universe] == ["PIT"]
 
     def test_configured_secrets_wire_up_the_matching_clients(self, monkeypatch):
         monkeypatch.setattr(
@@ -275,6 +323,36 @@ class TestPathsForMode:
 
 
 class TestMain:
+    def test_historical_missing_snapshot_exits_before_price_provider(
+        self, monkeypatch, tmp_path
+    ):
+        settings = load_settings("config/settings.yaml")
+        strategies = load_strategies("config/strategies.yaml")
+
+        def _missing_snapshot(*_args, **_kwargs):
+            msg = "No persisted universe snapshot is available at or before 2026-07-20"
+            raise UniverseError(msg)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            daily_module,
+            "load_secrets",
+            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+        )
+        monkeypatch.setattr(daily_module, "load_settings", lambda: settings)
+        monkeypatch.setattr(daily_module, "load_strategies", lambda: strategies)
+        monkeypatch.setattr(daily_module, "resolve_daily_universe", _missing_snapshot)
+        monkeypatch.setattr(
+            daily_module,
+            "YFinanceProvider",
+            lambda: pytest.fail(
+                "price provider must not be composed without a snapshot"
+            ),
+        )
+
+        with pytest.raises(SystemExit, match="No persisted universe snapshot"):
+            main(["--as-of", "2026-07-20", "--skip-text"])
+
     def test_parses_args_composes_and_exits_with_run_result_code(self, monkeypatch):
         calls = {}
 

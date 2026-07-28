@@ -26,6 +26,15 @@ DECISIONS_START = "<!-- decisions:start -->"
 DECISIONS_END = "<!-- decisions:end -->"
 
 
+class LatestMarkdownUpdateError(OSError):
+    """The immutable run archive exists, but `latest.md` could not be updated."""
+
+    def __init__(self, report_path: Path, cause: OSError) -> None:
+        """Keep the durable archive path while preserving the write failure."""
+        super().__init__(str(cause))
+        self.report_path = report_path
+
+
 def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
     """Render a generated, human-readable audit snapshot."""
     lines = [
@@ -36,6 +45,8 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         f"- Status: `{status.value}`",
         f"- Run ID: `{brief.run_id}`",
         f"- Generated at: `{brief.generated_at.isoformat()}`",
+        f"- Data provider: `{brief.provider_name}`",
+        _data_tier_disclosure(brief.data_tier),
         "",
     ]
     if brief.no_trade:
@@ -156,8 +167,17 @@ def write_markdown_report(
     content = render_markdown(brief, status)
     report_path = dated_dir / f"{brief.run_id}.md"
     _atomic_write(report_path, content)
-    _atomic_write(root / "latest.md", content)
+    try:
+        _atomic_write(root / "latest.md", content)
+    except OSError as exc:
+        raise LatestMarkdownUpdateError(report_path, exc) from exc
     return report_path
+
+
+def _data_tier_disclosure(data_tier: str) -> str:
+    if data_tier == "prototype":
+        return "- Data tier: `prototype`（非公式データに基づく試作結果）"
+    return f"- Data tier: `{data_tier}`"
 
 
 def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:

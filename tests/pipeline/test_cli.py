@@ -11,13 +11,14 @@ import logging
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from swing_copilot.config import Secrets, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError
-from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
+from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
@@ -28,7 +29,6 @@ from swing_copilot.pipeline.daily import (
     _required_features,
     main,
 )
-from swing_copilot.report.terminal_report import TerminalPaths
 from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.universe import UniverseError, UniverseMember, UniverseResolution
 
@@ -226,6 +226,7 @@ class TestComposeDependencies:
             captured["refresh_interval_days"] == settings.universe.refresh_interval_days
         )
         assert [member.symbol for member in deps.universe] == ["PIT"]
+        assert deps.universe_snapshot_date == expected_as_of
 
     def test_configured_secrets_wire_up_the_matching_clients(self, monkeypatch):
         monkeypatch.setattr(
@@ -366,6 +367,13 @@ class TestMain:
             class _Result:
                 exit_code = 7
                 brief = None
+                run_id = uuid4()
+                status = RunStatus.FAILED
+                report_path = None
+                analysis_input_path = None
+                provider_name = "yfinance"
+                data_tier = DataTier.PROTOTYPE
+                missing_sources = ()
 
             return _Result()
 
@@ -403,6 +411,10 @@ class TestMain:
                 status=RunStatus.SUCCESS,
                 report_path=report_path,
                 analysis_input_path=analysis_input_path,
+                run_id=uuid4(),
+                provider_name="yfinance",
+                data_tier=DataTier.PROTOTYPE,
+                missing_sources=(),
             ),
         )
 
@@ -411,21 +423,23 @@ class TestMain:
             return "terminal output\n"
 
         monkeypatch.setattr(daily_module, "render_terminal", fake_render_terminal)
+        monkeypatch.setattr(
+            daily_module,
+            "render_run_summary",
+            lambda *_args, **_kwargs: "run summary\n",
+        )
 
         with pytest.raises(SystemExit) as exc_info:
             main([])
 
         assert exc_info.value.code == 0
-        assert capsys.readouterr().out == "terminal output\n"
+        assert capsys.readouterr().out == "terminal output\nrun summary\n"
         assert calls["render"] == (
             brief,
             RunStatus.SUCCESS,
             {
                 "width": 120,
                 "color": False,
-                "paths": TerminalPaths(
-                    report=report_path, analysis_input=analysis_input_path
-                ),
             },
         )
 

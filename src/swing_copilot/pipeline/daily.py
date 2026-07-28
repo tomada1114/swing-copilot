@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from rich.console import Console
 
+from swing_copilot import __version__
 from swing_copilot.analysis.export import (
     ExportCandidate,
     ExportRequest,
@@ -55,6 +56,7 @@ from swing_copilot.exceptions import ConfigError
 from swing_copilot.models import (
     DailyRunOptions,
     DailyRunResult,
+    DataTier,
     RunMode,
     RunStatus,
     StepStatus,
@@ -80,8 +82,16 @@ from swing_copilot.report.daily_brief import (
     build_daily_brief,
 )
 from swing_copilot.report.discord_notify import DiscordNotifier
-from swing_copilot.report.markdown_report import write_markdown_report
-from swing_copilot.report.terminal_report import TerminalPaths, render_terminal
+from swing_copilot.report.markdown_report import (
+    LatestMarkdownUpdateError,
+    write_markdown_report,
+)
+from swing_copilot.report.terminal_report import (
+    TerminalPaths,
+    TerminalRunSummary,
+    render_run_summary,
+    render_terminal,
+)
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
     PortfolioHeatResult,
@@ -212,6 +222,10 @@ class DailyDependencies:
     universe: tuple[UniverseMember, ...]
     strategies_config: dict[str, Any]  # Any: arbitrary-depth parsed YAML
     clock: Clock
+    # The exact persisted universe snapshot selected for this run. Manual
+    # inclusions/exclusions are already reflected in `universe` and therefore
+    # in the metadata identity below, but never mutate the raw snapshot.
+    universe_snapshot_date: date | None = None
     # Present only when a live refresh failed and an older persisted snapshot
     # was selected. It is data quality, not a reason to skip screening.
     universe_warning: str | None = None
@@ -225,6 +239,7 @@ class DailyDependencies:
     calendar_client: _CalendarClientLike | None = None
     notifier: Notifier | None = None
     provider_name: str = "yfinance"
+    data_tier: DataTier = DataTier.PROTOTYPE
     strategy_key: str = "default"
     output_dir: str = "reports"
     progress: ProgressReporter = field(default_factory=NullProgressReporter)
@@ -310,9 +325,90 @@ class _OutputContext:
     status: RunStatus
 
 
-def _config_hash(settings: Settings) -> str:
-    payload = json.dumps(settings.model_dump(mode="json"), sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+@dataclass(frozen=True, slots=True)
+class _OutputCompletion:
+    """Everything needed to record the final run state after step 8."""
+
+    outcome: _StepOutcome
+    report_path: Path | None
+    brief: DailyBrief | None
+    analysis_input_path: Path | None
+    text_outcome: _StepOutcome
+    export_outcome: _StepOutcome
+
+
+_RUN_METADATA_SCHEMA_VERSION = "run-metadata-v1"
+
+
+def _canonical_json(payload: object) -> str:
+    """Encode an audit payload deterministically before hashing or storage."""
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _config_hash(
+    settings: Settings, strategies_config: dict[str, Any], strategy_key: str
+) -> str:
+    """Return the full effective-run fingerprint required for reconstruction.
+
+    `Settings` and `StrategiesConfig` have already passed their strict
+    Pydantic validation in the composition root. The pipeline receives the
+    model-dumped selected strategy so the same exact values drive both the
+    fingerprint and `ScreeningPipeline` without preserving a second config
+    representation.
+    """
+    try:
+        selected_strategy = strategies_config["strategies"][strategy_key]
+    except (KeyError, TypeError) as exc:
+        msg = f"strategy {strategy_key!r} is missing from validated strategies"
+        raise ConfigError(msg) from exc
+    payload = {
+        "settings": settings.model_dump(mode="json"),
+        "strategy_key": strategy_key,
+        "strategy_spec": selected_strategy,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _universe_snapshot_identity(universe: tuple[UniverseMember, ...]) -> str:
+    """Return a stable digest of the effective, point-in-time universe."""
+    members = sorted(
+        (
+            {
+                "symbol": member.symbol,
+                "source_symbol": member.source_symbol,
+                "company_name": member.company_name,
+                "gics_sector": member.gics_sector,
+            }
+            for member in universe
+        ),
+        key=lambda member: member["symbol"],
+    )
+    return hashlib.sha256(_canonical_json(members).encode("utf-8")).hexdigest()
+
+
+def _run_metadata(deps: DailyDependencies) -> dict[str, object]:
+    """Build non-secret data required to reproduce a stored daily run."""
+    return {
+        "schema_version": _RUN_METADATA_SCHEMA_VERSION,
+        "app_version": __version__,
+        "provider": {
+            "name": deps.provider_name,
+            "data_tier": deps.data_tier.value,
+        },
+        "universe_snapshot": {
+            "snapshot_date": (
+                deps.universe_snapshot_date.isoformat()
+                if deps.universe_snapshot_date is not None
+                else None
+            ),
+            "identity": _universe_snapshot_identity(deps.universe),
+        },
+    }
 
 
 def _run_mode(options: DailyRunOptions) -> RunMode:
@@ -1059,6 +1155,8 @@ def _run_step_output(
         ftd_snapshot=output.run.ftd_snapshot,
         portfolio_heat=output.run.portfolio_heat,
         max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
+        provider_name=deps.provider_name,
+        data_tier=deps.data_tier.value,
     )
     try:
         brief = build_daily_brief(context, deps.market_store, deps.state_store)
@@ -1066,6 +1164,12 @@ def _run_step_output(
         return _StepOutcome(False, f"brief construction failed: {exc}"), None, None
     try:
         report_path = write_markdown_report(brief, output.status, deps.output_dir)
+    except LatestMarkdownUpdateError as exc:
+        return (
+            _StepOutcome(False, f"latest Markdown update failed: {exc}"),
+            exc.report_path,
+            brief,
+        )
     except Exception as exc:
         return _StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
     if (
@@ -1179,9 +1283,10 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         deps: Real (or fake, for dry-run/tests) collaborators.
 
     Returns:
-        The run outcome. `exit_code` is nonzero only if one of steps 1-4
-        (prices, fundamentals, screening, risk) failed outright; steps 5-8
-        degrade the run (`RunStatus.DEGRADED`) but keep `exit_code == 0`.
+        The run outcome. `exit_code` is nonzero when a required step (1-4)
+        fails or when no local brief/run-specific Markdown can be produced.
+        Optional source, notification, `latest.md`, and report-context
+        failures leave the surviving run artifact visible as `DEGRADED`.
     """
     run_started_at = deps.monotonic()
     budget_s = deps.settings.schedule.timeout_minutes * 60
@@ -1213,7 +1318,13 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         except Exception as exc:
             prefetch_error = f"unexpected error: {exc}"
 
-    run_id = deps.state_store.start_run(run_date, mode, _config_hash(deps.settings))
+    config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
+    run_id = deps.state_store.start_run(
+        run_date,
+        mode,
+        config_hash,
+        metadata=_run_metadata(deps),
+    )
     logger.info(
         "run %s started: mode=%s run_date=%s symbols=%d",
         run_id,
@@ -1455,19 +1566,88 @@ def _run_soft_steps(
         ),
     )
     _record_step(deps, ctx.run_id, "8_output", output_outcome, started_at)
-    degraded = degraded or not output_outcome.success
+    return _finalize_output(
+        deps,
+        ctx,
+        _OutputCompletion(
+            outcome=output_outcome,
+            report_path=report_path,
+            brief=brief,
+            analysis_input_path=analysis_input_path,
+            text_outcome=text_outcome,
+            export_outcome=export_outcome,
+        ),
+        degraded,
+    )
 
-    final_status = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
-    deps.state_store.complete_run(ctx.run_id, final_status, report_path=report_path)
+
+def _finalize_output(
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    completion: _OutputCompletion,
+    degraded: bool,
+) -> DailyRunResult:
+    """Persist and return the only terminal state compatible with step 8."""
+    missing_sources = _missing_sources(
+        deps, completion.text_outcome, completion.export_outcome
+    )
+    if not completion.outcome.success and completion.report_path is None:
+        deps.state_store.complete_run(
+            ctx.run_id,
+            RunStatus.FAILED,
+            error_summary=completion.outcome.detail,
+        )
+        logger.error(
+            "run %s failed to produce a local report: %s",
+            ctx.run_id,
+            completion.outcome.detail,
+        )
+        return DailyRunResult(
+            ctx.run_id,
+            ctx.run_date,
+            RunStatus.FAILED,
+            exit_code=1,
+            brief=completion.brief,
+            analysis_input_path=completion.analysis_input_path,
+            provider_name=deps.provider_name,
+            data_tier=deps.data_tier,
+            missing_sources=missing_sources,
+        )
+
+    final_degraded = degraded or not completion.outcome.success
+    final_status = RunStatus.DEGRADED if final_degraded else RunStatus.SUCCESS
+    deps.state_store.complete_run(
+        ctx.run_id, final_status, report_path=completion.report_path
+    )
     logger.info("run %s completed: status=%s", ctx.run_id, final_status.value)
     return DailyRunResult(
         ctx.run_id,
         ctx.run_date,
         final_status,
         exit_code=0,
-        report_path=report_path,
-        brief=brief,
-        analysis_input_path=analysis_input_path,
+        report_path=completion.report_path,
+        brief=completion.brief,
+        analysis_input_path=completion.analysis_input_path,
+        provider_name=deps.provider_name,
+        data_tier=deps.data_tier,
+        missing_sources=missing_sources,
+    )
+
+
+def _missing_sources(
+    deps: DailyDependencies,
+    text_outcome: _StepOutcome,
+    export_outcome: _StepOutcome,
+) -> tuple[str, ...]:
+    """List unavailable source boundaries without conflating notifications."""
+    return tuple(
+        label
+        for label, outcome in (
+            ("universe", _StepOutcome(deps.universe_warning is None)),
+            ("text", text_outcome),
+            ("analysis input", export_outcome),
+        )
+        if not outcome.success
     )
 
 
@@ -1562,6 +1742,7 @@ def _compose_dependencies(
         universe=universe_resolution.members,
         strategies_config=strategies.model_dump(),
         clock=clock,
+        universe_snapshot_date=universe_resolution.snapshot_date,
         universe_warning=universe_resolution.warning,
         edgar_client=edgar_client,
         earnings_client=earnings_client,
@@ -1669,20 +1850,32 @@ def main(argv: list[str] | None = None) -> None:
     except UniverseError as exc:
         raise SystemExit(str(exc)) from exc
     result = run_daily(options, deps)
+    paths = TerminalPaths(
+        report=result.report_path,
+        analysis_input=result.analysis_input_path,
+    )
+    summary = TerminalRunSummary(
+        run_id=result.run_id,
+        status=result.status,
+        exit_code=result.exit_code,
+        provider_name=result.provider_name,
+        data_tier=result.data_tier,
+        missing_sources=result.missing_sources,
+        paths=paths,
+    )
+    width = shutil.get_terminal_size(fallback=(120, 24)).columns
     if result.brief is not None:
-        width = shutil.get_terminal_size(fallback=(120, 24)).columns
         sys.stdout.write(
             render_terminal(
                 result.brief,
                 result.status,
                 width=width,
                 color=sys.stdout.isatty(),
-                paths=TerminalPaths(
-                    report=result.report_path,
-                    analysis_input=result.analysis_input_path,
-                ),
             )
         )
+    sys.stdout.write(
+        render_run_summary(summary, width=width, color=sys.stdout.isatty())
+    )
     raise SystemExit(result.exit_code)
 
 

@@ -365,6 +365,8 @@ class DailyBrief:
     # numbers, which remain the code's own deterministic output.
     no_trade: bool = False
     no_trade_reason: str | None = None
+    provider_name: str = "yfinance"
+    data_tier: str = "prototype"
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +402,8 @@ class DailyBriefContext:
     ftd_snapshot: FtdSnapshot | None = None
     portfolio_heat: PortfolioHeatResult | None = None
     max_portfolio_heat_pct: float = 6.0
+    provider_name: str = "yfinance"
+    data_tier: str = "prototype"
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +453,8 @@ def build_daily_brief(
         no_trade_reason=(
             context.analysis.no_trade_reason if context.analysis else None
         ),
+        provider_name=context.provider_name,
+        data_tier=context.data_tier,
     )
 
 

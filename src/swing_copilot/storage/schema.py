@@ -38,6 +38,7 @@ INIT_SCHEMA_STATEMENTS = (
         run_date        DATE NOT NULL,
         mode            VARCHAR NOT NULL CHECK (mode IN ('live', 'dry_run')),
         config_hash     VARCHAR NOT NULL,
+        metadata_json   JSON NOT NULL DEFAULT '{}',
         status          VARCHAR NOT NULL
             CHECK (status IN ('running','success','degraded','failed')),
         started_at      TIMESTAMPTZ NOT NULL,
@@ -251,4 +252,8 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_at TIMESTAMPTZ",
     "UPDATE positions SET exit_reason = 'unknown' "
     "WHERE status = 'closed' AND exit_reason IS NULL",
+    # I57: old databases gain the run-reconstruction metadata lazily. DuckDB
+    # cannot add a NOT NULL JSON column, so legacy rows retain NULL while new
+    # runs always write a canonical JSON object through `StateStore.start_run`.
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata_json JSON",
 )

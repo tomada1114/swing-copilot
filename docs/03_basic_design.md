@@ -185,7 +185,7 @@ sequenceDiagram
     participant FS as 当日のレポートディレクトリ
 
     Local->>D: uv run copilot-daily
-    D->>ST: runs初期化（run_id, run_date, config_hash）
+    D->>ST: runs初期化（run_id, run_date, 完全config_hash, metadata_json）
 
     D->>DP: (1) 株価更新: get_daily_bars(universe)
     DP-->>MS: write_bars()（既取得日はスキップ）
@@ -293,6 +293,8 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 4 | FRED API | 経済カレンダー・指標 | 公式REST API | APIキー（無料） | 明示的なSLAなし（実装時に要確認、常識的な間隔を空ける） |
 | － | Discord Webhook | 日次レポート通知（オプション機能、デフォルト無効） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
 
+現行の価格providerは`yfinance`であり、全runのdata tierは`prototype`である。`prototype`の最終CLIブリーフとMarkdownには「非公式データに基づく試作結果」を必ず表示する。本番tierはまだ実装していないため、起動モードの追加や曖昧な本番切替は行わない。
+
 ### 6.2 Claude Codeスキル境界（定性分析）
 
 定性分析はネットワーク越しのAPIではなく、**ローカルファイルを介したプロセス外境界**である。本プロセスからLLM APIを呼ばないため、APIキー・タイムアウト・リトライ・レート制限・従量課金はいずれも存在しない。
@@ -314,8 +316,8 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 ## 7. エラー処理・フェイルソフト方針
 
-- **フェイルソフトの原則（FR-12・NFR-04）**: ステップ(5)テキスト収集・(6)分析入力エクスポートが失敗しても、ステップ(8)は候補とリスクを含む縮退ブリーフを生成する。
-- **各ステップの結果記録**: `runs`に実行全体、`run_steps`に8ステップの成否・詳細・所要時間を記録する。(1)〜(4)の失敗は致命的終了とする。
+- **フェイルソフトの原則（FR-12・NFR-04）**: ステップ(5)テキスト収集・(6)分析入力エクスポートが失敗しても、ステップ(8)は候補とリスクを含む縮退ブリーフを生成する。通知、`latest.md`更新、`report_context.json`保存が失敗しても、run固有Markdownが残る限りは`DEGRADED`・終了コード0とし、成果物パスを運用サマリへ表示する。
+- **各ステップの結果記録**: `runs`に実行全体、`run_steps`に8ステップの成否・詳細・所要時間を記録する。(1)〜(4)、ブリーフ生成、またはrun固有Markdown保存の失敗は`FAILED`・非ゼロ終了とする。CLI終了時は一箇所にrun ID、status、exit code、provider/data tier、欠損source、成果物、次のread-only確認コマンドを表示する。
 - **冪等性と原子性**: 同じ評価対象日を再実行しても、bars=`(symbol,date)`、fundamentals=`accession_no`、signals=`(run_date,symbol,strategy_key,signal_name)`、text=`source_id`を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。CSV/Parquet/reportの置換は宛先と同じディレクトリに一意な一時ファイルを作り、成功時だけ置換する。書き込みまたは置換に失敗した場合は旧宛先を保ち、一時ファイルを必ず除去する。（**P7（スキル移行）での変更**: 以前はLLM成功レスポンスを`(model,prompt_hash,schema_version)`一致で再利用するキャッシュ規約を置いていたが、LLM API呼び出しの廃止に伴いキャッシュ機構ごと削除した。定性分析の再実行はスキル側の冪等な再入手順（既存の`analysis_result.json`を勝手に上書きしない、当日の`as_of`を持つ作業断片だけを流用する）が担う。）（**live検証時の訂正（2026-07-22）**: fundamentalsステップ（`pipeline/daily.py` 2番目のステップ）は例外で、`MarketStore.has_fundamentals_fetched_on()`により当日`fetched_at`済みの銘柄はEDGARへの個別ネットワーク取得のみをスキップする。ステップ自体・自然キーupsertロジックは無条件スキップせず毎回実行するため、上記原則には反しない。詳細は`docs/04_detailed_design.md` 3.21節）
 - **欠損検知・リトライ（NFR-04）**: DataProvider・EDGAR/Finnhub/FREDクライアント等、外部I/Oを伴うコンポーネントはtimeout、retry対象例外、総試行上限、backoffを明示する。接続・タイムアウト・HTTP 408/429/5xxだけを一時障害として最大3回（1秒、2秒）再試行し、その他の4xx、設定/検証/プログラミングエラーは即時に失敗させる。レート制御がある境界は各試行へ適用する。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し、後続処理は成功分のみで進める。
 - **断定的売買指示の禁止（CON-03）**: 分析結果スキーマは事実（`facts`）と解釈（`interpretation`）をフィールドレベルで分離する。スキルへの指示だけに依存せず、`copilot-ingest-analysis`（`analysis/validate.py`＋`analysis/safety.py`）が全ユーザー表示テキストを一元検査し、違反銘柄をレポートへ出さない。検証を通すための文言修正・再投入は規約違反であり、リトライしない（fail-closed）。

@@ -18,8 +18,9 @@ from swing_copilot.report.daily_brief import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from uuid import UUID
 
-    from swing_copilot.models import RunStatus
+    from swing_copilot.models import DataTier, RunStatus
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
         BriefPortfolioHeat,
@@ -37,6 +38,24 @@ class TerminalPaths:
 
     report: Path | None = None
     analysis_input: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalRunSummary:
+    """The single final operational summary emitted by `copilot-daily`."""
+
+    run_id: UUID
+    status: RunStatus
+    exit_code: int
+    provider_name: str
+    data_tier: DataTier
+    missing_sources: tuple[str, ...]
+    paths: TerminalPaths
+
+    @property
+    def next_command(self) -> str:
+        """Return the read-only follow-up command for this exact run."""
+        return f"uv run copilot-history run --run-id {self.run_id}"
 
 
 def render_terminal(
@@ -61,6 +80,8 @@ def render_terminal(
         f"Status: [bold]{status.value.upper()}[/bold]  "
         f"Candidates: {len(brief.candidates)}  Run: {brief.run_id}"
     )
+    if brief.data_tier == "prototype":
+        console.print("Data tier: prototype（非公式データに基づく試作結果）")
     if brief.no_trade:
         reason = f"（{brief.no_trade_reason}）" if brief.no_trade_reason else ""
         console.print(f"[bold]{NO_TRADE_MESSAGE}{reason}[/bold]")
@@ -133,11 +154,49 @@ def render_terminal(
         console.print("\n[bold]Warnings[/bold]")
         for notice in brief.notices:
             console.print(f"  - {notice}")
+    _render_paths(console, paths)
+    return buffer.getvalue().rstrip() + "\n"
+
+
+def render_run_summary(
+    summary: TerminalRunSummary, *, width: int = 120, color: bool = False
+) -> str:
+    """Render the end-of-run summary when brief construction failed."""
+    buffer = StringIO()
+    console = Console(
+        file=buffer,
+        width=width,
+        force_terminal=color,
+        color_system="standard" if color else None,
+        highlight=False,
+    )
+    _render_run_summary(console, summary)
+    return buffer.getvalue().rstrip() + "\n"
+
+
+def _render_run_summary(console: Console, summary: TerminalRunSummary) -> None:
+    """Print every operational hand-off field together, once and only once."""
+    missing_sources = ", ".join(summary.missing_sources) or "なし"
+    console.print("\n[bold]Run summary[/bold]")
+    console.print(f"  Run ID: {summary.run_id}")
+    console.print(f"  Status: {summary.status.value.upper()}")
+    console.print(f"  Exit code: {summary.exit_code}")
+    console.print(f"  Data: {summary.provider_name} / {summary.data_tier.value}")
+    console.print(f"  Missing sources: {missing_sources}")
+    if summary.paths.report is not None:
+        console.print(f"  詳細レポート: {summary.paths.report}")
+    if summary.paths.analysis_input is not None:
+        console.print(
+            f"  分析入力(analysis_input.json): {summary.paths.analysis_input}"
+        )
+    console.print(f"  Next: {summary.next_command}")
+
+
+def _render_paths(console: Console, paths: TerminalPaths | None) -> None:
     if paths is not None and paths.report is not None:
         console.print(f"\n詳細レポート: {paths.report}")
     if paths is not None and paths.analysis_input is not None:
         console.print(f"分析入力(analysis_input.json): {paths.analysis_input}")
-    return buffer.getvalue().rstrip() + "\n"
 
 
 def _render_candidate_details(console: Console, candidate: BriefCandidate) -> None:

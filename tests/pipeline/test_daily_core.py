@@ -6,6 +6,7 @@ tests/test_e2e_smoke.py.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
@@ -14,7 +15,11 @@ import pytest
 
 from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
-from swing_copilot.pipeline.daily import DailyDependencies, run_daily
+from swing_copilot.pipeline.daily import (
+    DailyDependencies,
+    _config_hash,
+    run_daily,
+)
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -266,6 +271,69 @@ class TestHappyPath:
                 [str(result.run_id)],
             ).fetchone()
         assert row == ("CASH_PRIORITY", "INSUFFICIENT")
+
+
+class TestRunFingerprintAndMetadata:
+    def test_fingerprint_is_canonical_and_covers_settings_strategy_and_key(self, deps):
+        canonical = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")
+        reordered = {
+            "strategies": {
+                "default": {
+                    "candidate_limit": 10,
+                    "signals_all": ["trend_sma"],
+                    "filters_all": ["volume_min"],
+                }
+            }
+        }
+        changed_strategy = {
+            "strategies": {
+                "default": {
+                    "filters_all": ["volume_min"],
+                    "signals_all": ["trend_sma"],
+                    "candidate_limit": 9,
+                }
+            }
+        }
+        changed_risk = deps.settings.risk.model_copy(
+            update={"max_trade_risk_pct": 0.02}
+        )
+        changed_settings = deps.settings.model_copy(update={"risk": changed_risk})
+
+        assert len(canonical) == 64
+        assert canonical == _config_hash(deps.settings, reordered, "default")
+        assert canonical != _config_hash(deps.settings, changed_strategy, "default")
+        assert canonical != _config_hash(changed_settings, STRATEGIES_CONFIG, "default")
+        assert canonical != _config_hash(
+            deps.settings, TWO_STRATEGIES_CONFIG, "growth_v2"
+        )
+
+    def test_run_persists_reconstructable_metadata(self, deps, state_store):
+        tracked_deps = replace(
+            deps,
+            universe_snapshot_date=date(2027, 2, 20),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), tracked_deps)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT config_hash, metadata_json FROM runs WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchone()
+        metadata = json.loads(row[1])
+        assert row[0] == _config_hash(
+            tracked_deps.settings,
+            tracked_deps.strategies_config,
+            tracked_deps.strategy_key,
+        )
+        assert metadata["schema_version"] == "run-metadata-v1"
+        assert metadata["app_version"]
+        assert metadata["provider"] == {
+            "name": "yfinance",
+            "data_tier": "prototype",
+        }
+        assert metadata["universe_snapshot"]["snapshot_date"] == "2027-02-20"
+        assert len(metadata["universe_snapshot"]["identity"]) == 64
 
 
 class TestIdempotency:

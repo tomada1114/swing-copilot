@@ -249,6 +249,110 @@ def test_settings_rejects_wrong_type_for_nested_field():
         Settings.model_validate({"technical_signals": {"trend": {"sma_short": "fast"}}})
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"universe": {"refresh_interval_days": 0}}, id="refresh-zero"),
+        pytest.param(
+            {"universe": {"refresh_interval_days": -1}}, id="refresh-negative"
+        ),
+        pytest.param(
+            {"fundamental_filters": {"min_profitable_quarters": 0}},
+            id="profitable-quarters-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"trend": {"sma_short": 0}}},
+            id="sma-short-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"trend": {"sma_long": -1}}},
+            id="sma-long-negative",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"rsi_period": 0}}},
+            id="rsi-period-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"volume": {"avg_volume_days": 0}}},
+            id="volume-window-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"volume": {"min_avg_volume": -1}}},
+            id="minimum-volume-negative",
+        ),
+        pytest.param({"schedule": {"timeout_minutes": 0}}, id="timeout-zero"),
+        pytest.param({"schedule": {"timeout_minutes": -1}}, id="timeout-negative"),
+    ],
+)
+def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
+    with pytest.raises(ValidationError):
+        Settings.model_validate(overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(
+            {"fundamental_filters": {"min_equity_ratio": -0.01}},
+            id="equity-ratio-negative",
+        ),
+        pytest.param(
+            {"fundamental_filters": {"min_equity_ratio": 1.01}},
+            id="equity-ratio-over-one",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"rsi_threshold": -0.01}}},
+            id="rsi-threshold-negative",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"rsi_threshold": 100.01}}},
+            id="rsi-threshold-over-one-hundred",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"sma_band_pct": -0.01}}},
+            id="sma-band-negative",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"sma_band_pct": 1.01}}},
+            id="sma-band-over-one",
+        ),
+    ],
+)
+def test_settings_rejects_out_of_range_screening_ratios_and_thresholds(overrides):
+    with pytest.raises(ValidationError):
+        Settings.model_validate(overrides)
+
+
+@pytest.mark.parametrize(
+    ("short_window", "long_window"),
+    [
+        pytest.param(50, 50, id="equal"),
+        pytest.param(200, 50, id="reversed"),
+    ],
+)
+def test_settings_requires_short_sma_to_precede_long_sma(short_window, long_window):
+    with pytest.raises(ValidationError, match="sma_short must be < sma_long"):
+        Settings.model_validate(
+            {
+                "technical_signals": {
+                    "trend": {
+                        "sma_short": short_window,
+                        "sma_long": long_window,
+                    }
+                }
+            }
+        )
+
+
+def test_settings_rejects_coercible_values_and_unknown_nested_keys():
+    with pytest.raises(ValidationError, match=r"technical_signals\.trend\.sma_short"):
+        Settings.model_validate({"technical_signals": {"trend": {"sma_short": 50.0}}})
+    with pytest.raises(ValidationError, match=r"risk\.max_position_pct"):
+        Settings.model_validate({"risk": {"max_position_pct": "0.1"}})
+    with pytest.raises(ValidationError, match=r"risk\.not_a_setting"):
+        Settings.model_validate({"risk": {"not_a_setting": 1}})
+
+
 def test_portfolio_heat_limit_defaults_to_six_percent():
     settings = load_settings("config/settings.yaml")
     assert settings.risk.max_portfolio_heat_pct == 6.0

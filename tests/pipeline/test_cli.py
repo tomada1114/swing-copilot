@@ -78,6 +78,36 @@ class TestParseArgs:
             "minervini_stage2"
         )
 
+    @pytest.mark.parametrize(
+        ("argv", "expected_limit"),
+        [
+            pytest.param([], None, id="unset"),
+            pytest.param(["--limit", "0"], 0, id="zero"),
+            pytest.param(["--limit", "1"], 1, id="one"),
+        ],
+    )
+    def test_limit_accepts_documented_candidate_scope_values(
+        self, argv, expected_limit
+    ):
+        assert _parse_args(argv).limit == expected_limit
+
+    def test_negative_limit_is_usage_error_before_composition(self, monkeypatch):
+        monkeypatch.setattr(
+            daily_module,
+            "load_settings",
+            lambda: pytest.fail("invalid CLI input must not load configuration"),
+        )
+        monkeypatch.setattr(
+            daily_module,
+            "_compose_dependencies",
+            lambda *_args: pytest.fail("invalid CLI input must not compose I/O"),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--limit", "-1"])
+
+        assert exc_info.value.code == 2
+
     def test_log_level_is_optional_and_restricted_to_supported_levels(self):
         assert _parse_args([]).log_level is None
         assert _parse_args(["--log-level", "WARNING"]).log_level == "WARNING"

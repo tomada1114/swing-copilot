@@ -615,6 +615,70 @@ class TestCorrelationWarnings:
 
         assert result[0].warnings[0].warning_type == "data_quality"
 
+    @pytest.mark.parametrize(
+        "duplicate_symbol",
+        [
+            pytest.param("AAPL", id="candidate-series"),
+            pytest.param("MSFT", id="held-series"),
+        ],
+    )
+    def test_duplicate_dates_produce_data_quality_warning_without_correlation(
+        self, settings, market_store, monkeypatch, duplicate_symbol
+    ):
+        def _bars(symbol: str) -> pd.DataFrame:
+            closes = [100.0 + index for index in range(70)]
+            start = AS_OF - timedelta(days=len(closes))
+            return pd.DataFrame(
+                [
+                    {
+                        "symbol": symbol,
+                        "date": start + timedelta(days=index),
+                        "open": close,
+                        "high": close + 1,
+                        "low": close - 1,
+                        "close": close,
+                        "volume": 1_000_000,
+                        "provider": "test",
+                        "fetched_at": pd.Timestamp("2027-01-01", tz="UTC"),
+                    }
+                    for index, close in enumerate(closes)
+                ]
+            )
+
+        bars_by_symbol = {"AAPL": _bars("AAPL"), "MSFT": _bars("MSFT")}
+        duplicate = bars_by_symbol[duplicate_symbol].iloc[[-1]].copy()
+        duplicate.loc[:, "close"] = 999.0
+        bars_by_symbol[duplicate_symbol] = pd.concat(
+            [bars_by_symbol[duplicate_symbol], duplicate], ignore_index=True
+        )
+
+        def _read_bars(symbols, start, end, as_of):
+            del start, end, as_of
+            return pd.concat(
+                [bars_by_symbol[symbol] for symbol in symbols], ignore_index=True
+            )
+
+        monkeypatch.setattr(market_store, "read_bars", _read_bars)
+        checker = RiskChecker(
+            settings,
+            (
+                _member("AAPL", "Technology"),
+                _member("MSFT", "Technology"),
+            ),
+            market_store,
+        )
+
+        result = checker.check(
+            [_candidate("AAPL")],
+            portfolio=[_position("MSFT")],
+            account_equity=1_000_000.0,
+        )
+
+        assert len(result[0].warnings) == 1
+        assert result[0].warnings[0].correlated_symbol == "MSFT"
+        assert result[0].warnings[0].warning_type == "data_quality"
+        assert pd.isna(result[0].warnings[0].correlation)
+
 
 def _checker_with_risk_overrides(settings, market_store, **overrides):
     universe = (_member("AAPL", "Information Technology"),)

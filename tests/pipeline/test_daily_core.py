@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pandas as pd
 import pytest
 
 from swing_copilot.data.base import BarFetchResult, FetchFailure
-from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
+from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
     _config_hash,
@@ -468,6 +469,39 @@ class TestSymbolLimit:
                 [str(result.run_id)],
             ).fetchall()
         assert rows == []
+
+    def test_zero_limit_keeps_open_holdings_in_the_fetch_scope(self, deps, state_store):
+        class RecordingDataProvider(FakeDataProvider):
+            def __init__(self, bars):
+                super().__init__(bars)
+                self.requested_symbols: list[tuple[str, ...]] = []
+
+            def get_daily_bars(self, symbols, start, end):
+                self.requested_symbols.append(tuple(symbols))
+                return super().get_daily_bars(symbols, start, end)
+
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol="AAPL",
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+                stop_price=95.0,
+            )
+        )
+        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
+        zero_limit_deps = replace(deps, data_provider=provider)
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=0), zero_limit_deps
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert "AAPL" in provider.requested_symbols[0]
+        assert "MSFT" not in provider.requested_symbols[0]
 
 
 class TestFundamentalsStepSkipped:

@@ -80,7 +80,6 @@ class DailyRunOptions:
     as_of: date | None = None
     is_dry_run: bool = False
     skip_text: bool = False
-    skip_llm: bool = False
     limit: int | None = None
     strategy_key: str = "default"
     log_level: str | None = None
@@ -96,3 +95,6 @@ class DailyRunResult:
     exit_code: int
     report_path: Path | None = None
     brief: DailyBrief | None = None
+    # Absolute path of this run's exported `analysis_input.json`, or `None`
+    # when there was nothing to analyze (no candidates or no collected text).
+    analysis_input_path: Path | None = None

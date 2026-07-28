@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 class FilingLookbackBounds:
     """Recency bounds for filing text collection (roadmap §5 P6-26).
 
-    Mirrors `settings.llm.filing_lookback_days`/`max_filings_per_symbol`,
+    Mirrors `settings.analysis.filing_lookback_days`/`max_filings_per_symbol`,
     grouped so `fetch_recent_filings_text()` stays under the project's
     5-parameter guideline.
     """
@@ -60,7 +60,7 @@ def fetch_recent_filings_text(
     structure that -- unlike news collection's own `since`/`max_items`
     bounds -- had no lower bound or count cap (roadmap §5 P6-26). `bounds`
     gives it the same shape as news collection:
-    `settings.llm.filing_lookback_days`/`max_filings_per_symbol`.
+    `settings.analysis.filing_lookback_days`/`max_filings_per_symbol`.
 
     Args:
         edgar_client: Client to fetch through.

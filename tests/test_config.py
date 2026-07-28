@@ -25,8 +25,6 @@ class TestLoadSettings:
         assert isinstance(settings, Settings)
         assert settings.universe.index == "sp500"
         assert settings.risk.max_position_pct == pytest.approx(0.10)
-        assert settings.llm.models.news_summary == "claude-haiku-4-5-20251001"
-        assert settings.llm.models.filing_analysis == "claude-haiku-4-5-20251001"
         assert settings.notification.enabled is False
 
     def test_missing_file_raises_config_error(self, tmp_path):
@@ -173,7 +171,6 @@ class TestLoadSecrets:
     def test_loads_without_dotenv_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         for key in (
-            "ANTHROPIC_API_KEY",
             "FINNHUB_API_KEY",
             "FRED_API_KEY",
             "DISCORD_WEBHOOK_URL",
@@ -185,13 +182,12 @@ class TestLoadSecrets:
         secrets = load_secrets()
 
         assert isinstance(secrets, Secrets)
-        assert secrets.anthropic_api_key is None
         assert secrets.finnhub_api_key is None
 
     def test_reads_environment_variables(self, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+        monkeypatch.setenv("FINNHUB_API_KEY", "finnhub-test-123")
         secrets = load_secrets()
-        assert secrets.anthropic_api_key == "sk-test-123"
+        assert secrets.finnhub_api_key == "finnhub-test-123"
 
 
 def _isolated_secrets(**overrides: str) -> Secrets:
@@ -210,18 +206,18 @@ class TestRequireSecrets:
         require_secrets(_isolated_secrets(), features=set())
 
     def test_missing_feature_secret_raises_config_error(self):
-        with pytest.raises(ConfigError, match="anthropic_api_key"):
-            require_secrets(_isolated_secrets(), features={"llm"})
+        with pytest.raises(ConfigError, match="finnhub_api_key"):
+            require_secrets(_isolated_secrets(), features={"finnhub"})
 
     def test_present_feature_secret_passes(self):
-        secrets = _isolated_secrets(anthropic_api_key="sk-test")
-        require_secrets(secrets, features={"llm"})
+        secrets = _isolated_secrets(finnhub_api_key="finnhub-test")
+        require_secrets(secrets, features={"finnhub"})
 
     def test_multiple_missing_secrets_all_reported(self):
         with pytest.raises(ConfigError) as exc_info:
-            require_secrets(_isolated_secrets(), features={"llm", "finnhub", "fred"})
+            require_secrets(_isolated_secrets(), features={"edgar", "finnhub", "fred"})
         message = str(exc_info.value)
-        assert "anthropic_api_key" in message
+        assert "edgar_identity" in message
         assert "finnhub_api_key" in message
         assert "fred_api_key" in message
 
@@ -237,7 +233,6 @@ class TestSecretsModel:
 
     def test_all_fields_default_to_none(self):
         secrets = _isolated_secrets()
-        assert secrets.anthropic_api_key is None
         assert secrets.finnhub_api_key is None
         assert secrets.fred_api_key is None
         assert secrets.discord_webhook_url is None
@@ -245,8 +240,8 @@ class TestSecretsModel:
         assert secrets.eodhd_api_key is None
 
     def test_blank_env_value_is_treated_as_unset(self):
-        secrets = _isolated_secrets(anthropic_api_key="   ")
-        assert secrets.anthropic_api_key is None
+        secrets = _isolated_secrets(finnhub_api_key="   ")
+        assert secrets.finnhub_api_key is None
 
 
 def test_settings_rejects_wrong_type_for_nested_field():
@@ -319,25 +314,28 @@ def test_settings_rejects_invalid_quantitative_thresholds(overrides):
         Settings.model_validate(overrides)
 
 
-def test_near_stale_threshold_days_cannot_exceed_cache_ttl_days():
-    # P6-27: `near_stale_threshold_days` counts down from `cache_ttl_days`;
-    # a threshold longer than the TTL itself is nonsensical (remaining TTL
-    # could never exceed it, so "near-stale" would be permanently true).
-    with pytest.raises(ValidationError, match="near_stale_threshold_days"):
-        Settings.model_validate(
-            {"llm": {"cache_ttl_days": 5, "near_stale_threshold_days": 10}}
-        )
-
-
-def test_near_stale_threshold_days_equal_to_cache_ttl_days_is_allowed():
-    settings = Settings.model_validate(
-        {"llm": {"cache_ttl_days": 5, "near_stale_threshold_days": 5}}
-    )
-    assert settings.llm.cache_ttl_days == 5
-    assert settings.llm.near_stale_threshold_days == 5
-
-
-def test_llm_cache_ttl_days_defaults_to_thirty():
+def test_analysis_config_has_documented_defaults():
+    # roadmap §5 P6-26: `analysis.*` replaced the old `llm.*` cache/cost
+    # section with the collection/export bounds handed to the qualitative
+    # analysis skill via `analysis_input.json`.
     settings = load_settings("config/settings.yaml")
-    assert settings.llm.cache_ttl_days == 30
-    assert settings.llm.near_stale_threshold_days == 2
+    assert settings.analysis.max_news_items_per_symbol == 20
+    assert settings.analysis.max_news_chars_per_item == 4000
+    assert settings.analysis.filing_chunk_chars == 30_000
+    assert settings.analysis.max_filing_chunks == 4
+    assert settings.analysis.filing_lookback_days == 90
+    assert settings.analysis.max_filings_per_symbol == 3
+
+
+def test_analysis_config_max_filing_chars_is_chunk_size_times_chunk_count():
+    settings = Settings.model_validate(
+        {"analysis": {"filing_chunk_chars": 1_000, "max_filing_chunks": 3}}
+    )
+    assert settings.analysis.max_filing_chars == 3_000
+
+
+def test_settings_no_longer_has_an_llm_or_budget_section():
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"llm": {"cache_ttl_days": 5}})
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"budget": {"monthly_cost_cap_usd": 10.0}})

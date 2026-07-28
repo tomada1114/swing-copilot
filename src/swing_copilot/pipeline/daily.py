@@ -1,14 +1,19 @@
 """Daily batch orchestrator, all eight steps (FR-12).
 
 Wires price update -> fundamentals update -> screening -> risk check ->
-text collection -> LLM analysis -> notify -> CLI/Markdown output with
+text collection -> analysis-input export -> notify -> CLI/Markdown output with
 explicit `as_of`/`run_id` semantics. Steps 1-4 are fatal on failure
 (screening cannot meaningfully proceed without them,
 `docs/03_basic_design.md` 7): any of them failing aborts the run
 (`runs.status=failed`, nonzero exit code) without touching steps 5-8.
-Steps 5 (text) and 6 (LLM) are fail-soft: their failure degrades the run
-(`runs.status=degraded`) but never aborts it. Notification is optional and
-the local output step always attempts to produce a screening-only brief.
+Steps 5 (text) and 6 (analysis export) are fail-soft: their failure degrades
+the run (`runs.status=degraded`) but never aborts it. Notification is optional
+and the local output step always attempts to produce a screening-only brief.
+
+Qualitative analysis itself is not performed here. Step 6 only exports
+`analysis_input.json`; a Claude Code skill reads it and `copilot-ingest-analysis`
+verifies the answer and re-renders the report. Reports produced by this module
+therefore always show the qualitative sections as pending.
 """
 
 from __future__ import annotations
@@ -25,10 +30,17 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from uuid import uuid4
 
 from rich.console import Console
 
+from swing_copilot.analysis.export import (
+    ExportCandidate,
+    ExportRequest,
+    TextExportLimits,
+    build_analysis_input,
+    write_analysis_input,
+)
+from swing_copilot.analysis.snapshot import ReportContext, write_report_context
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
     load_secrets,
@@ -40,24 +52,6 @@ from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.exceptions import ConfigError
-from swing_copilot.llm.client import LLMClient, LLMError
-from swing_copilot.llm.decision_context import (
-    format_market_regime,
-    format_performance_summary,
-    format_risk_constraints,
-    format_score_breakdown,
-)
-from swing_copilot.llm.filings_analysis import (
-    FilingAnalysisRequest,
-    FilingAnalysisResult,
-    analyze_filing,
-)
-from swing_copilot.llm.pricing import ModelPricing
-from swing_copilot.llm.summarize import (
-    NewsSummaryRequest,
-    NewsSummaryResult,
-    summarize_news,
-)
 from swing_copilot.models import (
     DailyRunOptions,
     DailyRunResult,
@@ -87,7 +81,7 @@ from swing_copilot.report.daily_brief import (
 )
 from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.markdown_report import write_markdown_report
-from swing_copilot.report.terminal_report import render_terminal
+from swing_copilot.report.terminal_report import TerminalPaths, render_terminal
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
     PortfolioHeatResult,
@@ -106,7 +100,6 @@ from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.llm_records import LLMCallRecord
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.calendar_fred import FredCalendarClient
@@ -131,13 +124,11 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     import pandas as pd
-    from pydantic import BaseModel
 
     from swing_copilot.clock import Clock
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
-    from swing_copilot.llm.client import AnalyzeRequest
     from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
@@ -160,7 +151,7 @@ _VISIBLE_PIPELINE_STEPS = (
     "3_screening",
     "4_risk",
     "5_text",
-    "6_llm",
+    "6_analysis_export",
     "7_notify",
     "8_output",
 )
@@ -206,18 +197,6 @@ class _CalendarClientLike(Protocol):
         # pragma: no cover
 
 
-class _LLMClientLike(Protocol):
-    """Structural stand-in for `llm.client.LLMClient`, for fake injection."""
-
-    def analyze(self, request: AnalyzeRequest) -> BaseModel:
-        """Call Claude and return schema-validated structured output."""
-        # pragma: no cover
-
-    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
-        """Return this request's most recent successful call's creation date."""
-        # pragma: no cover
-
-
 @dataclass(frozen=True, slots=True)
 class DailyDependencies:
     """Real collaborators `run_daily` composes together."""
@@ -237,7 +216,6 @@ class DailyDependencies:
     earnings_client: EarningsCalendarClient | None = None
     news_client: _NewsClientLike | None = None
     calendar_client: _CalendarClientLike | None = None
-    llm_client: _LLMClientLike | None = None
     notifier: Notifier | None = None
     provider_name: str = "yfinance"
     strategy_key: str = "default"
@@ -250,11 +228,12 @@ def _compute_performance_summary(
 ) -> PerformanceSummary | None:
     """P2-12 (REQ-003): compute P1-06's portfolio-wide summary once per run.
 
-    Called from step 6 (LLM) itself, inside its existing NFR-03 time-budget
-    gate -- not a new gate. Defensive: `PaperJournal.summarize_performance()`
-    reads real store/market data and could raise on an unexpected storage
-    failure; a failure here must degrade the (already fail-soft) LLM step by
-    omitting the performance block, never crash the whole run.
+    Called from step 6 (analysis export) itself, inside its existing NFR-03
+    time-budget gate -- not a new gate. Defensive:
+    `PaperJournal.summarize_performance()` reads real store/market data and
+    could raise on an unexpected storage failure; a failure here must degrade
+    the (already fail-soft) export step by omitting the performance block,
+    never crash the whole run.
 
     Args:
         deps: Run dependencies (`state_store`/`market_store`).
@@ -306,9 +285,7 @@ class _RunContext:
     ftd_snapshot: FtdSnapshot
     # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
     # screening-derived like the other fields -- computed once inside step 6
-    # (LLM) itself via `_compute_performance_summary()` -- but reusing this
-    # dataclass (`dataclasses.replace()`) avoids adding a 6th parameter to
-    # `_summarize_news_per_candidate()`/`_analyze_filings_per_candidate()`.
+    # (analysis export) itself via `_compute_performance_summary()`.
     performance_summary: PerformanceSummary | None = None
 
 
@@ -317,8 +294,9 @@ class _OutputContext:
     """Grouped inputs for the final local-output step."""
 
     run: _RunContext
-    news_summaries: list[NewsSummaryResult] | None
-    filing_analyses: list[FilingAnalysisResult] | None
+    # Set only when step 6 exported one; `_run_step_output` archives the
+    # matching `report_context.json` beside it so ingest can re-render.
+    analysis_input_path: Path | None
     signal_performance: tuple[SignalPerformanceRow, ...]
     notices: tuple[str, ...]
     status: RunStatus
@@ -369,7 +347,7 @@ def _select_symbols(
 def _text_target_symbols(
     held_symbols: frozenset[str], candidates: list[Candidate]
 ) -> list[str]:
-    """Text/LLM target symbols: held positions + today's candidates (`docs/04_detailed_design.md` 3.14).
+    """Text/analysis target symbols: held positions + today's candidates (`docs/04_detailed_design.md` 3.14).
 
     Held-first ordering so a symbol truncated by the NFR-03 cap is always a
     candidate-only one, never a position the account actually holds.
@@ -743,8 +721,8 @@ def _fetch_symbol_text_items(
                     _FILING_FORM_TYPES,
                     as_of,
                     FilingLookbackBounds(
-                        lookback_days=deps.settings.llm.filing_lookback_days,
-                        limit=deps.settings.llm.max_filings_per_symbol,
+                        lookback_days=deps.settings.analysis.filing_lookback_days,
+                        limit=deps.settings.analysis.max_filings_per_symbol,
                     ),
                 )
             )
@@ -843,236 +821,103 @@ def _run_step_text(
     return _text_step_outcome(items, failed_symbols, calendar_failed, len(symbols))
 
 
-class _CallLimitedLLMClient:
-    """Wraps an `_LLMClientLike`, capping total `.analyze()` calls per run.
+def _run_output_dir(deps: DailyDependencies, run_date: date) -> Path:
+    """The dated report directory every per-run artifact shares.
 
-    `max_llm_calls_per_run` (roadmap §5 P6-26) is a second, count-based
-    defense alongside `LLMClient.analyze()`'s own per-call monthly cost gate:
-    that gate only ever sees one call's own estimated cost, so an
-    unexpectedly large candidate/filing fan-out within a single run can
-    still exhaust the whole month's budget before the next run's gate would
-    ever see it. Calls beyond the cap never reach the wrapped client; they
-    are still audited with the existing "budget_skipped" status (no schema
-    change) so both defenses land in the same audit trail, distinguished by
-    `error_detail`.
+    Deliberately identical to `report/markdown_report.py`'s own dated
+    directory: `analysis_input.json`, `report_context.json`, and the Markdown
+    archive must sit together so the skill and `copilot-ingest-analysis` can
+    find each of them from any one of them.
     """
-
-    def __init__(
-        self, inner: _LLMClientLike, state_store: StateStore, max_calls: int
-    ) -> None:
-        self._inner = inner
-        self._state_store = state_store
-        self._max_calls = max_calls
-        self._calls_made = 0
-
-    def analyze(self, request: AnalyzeRequest) -> BaseModel:
-        if self._calls_made >= self._max_calls:
-            self._record_skip(request)
-            msg = f"max_llm_calls_per_run cap ({self._max_calls}) reached for this run"
-            raise LLMError(msg)
-        self._calls_made += 1
-        return self._inner.analyze(request)
-
-    def get_cached_at(self, request: AnalyzeRequest) -> date | None:
-        """Pass through: a pure cache lookup, never counted against the call cap."""
-        return self._inner.get_cached_at(request)
-
-    def _record_skip(self, request: AnalyzeRequest) -> None:
-        prompt = f"SYSTEM:\n{request.system_prompt}\n\nUSER:\n{request.prompt}"
-        detail = f"max_llm_calls_per_run cap ({self._max_calls}) reached for this run"
-        self._state_store.record_llm_call(
-            LLMCallRecord(
-                call_id=uuid4(),
-                run_id=request.run_id,
-                model=request.model,
-                schema_name=request.schema.__name__,
-                schema_version=request.schema_version,
-                prompt_text=prompt,
-                prompt_hash=hashlib.sha256(prompt.encode()).hexdigest(),
-                source_ids=request.source_ids,
-                status="budget_skipped",
-                input_tokens=0,
-                output_tokens=0,
-                input_price_per_mtok=0.0,
-                output_price_per_mtok=0.0,
-                cost_usd=0.0,
-                error_detail=detail,
-            )
-        )
+    return Path(deps.output_dir) / run_date.isoformat()
 
 
-def _run_step_llm(
+def _run_step_analysis_export(
     deps: DailyDependencies,
     ctx: _RunContext,
     text_items: list[TextItem] | None,
     *,
-    skip: bool,
     include_decision_history: bool,
-) -> tuple[
-    _StepOutcome, list[NewsSummaryResult] | None, list[FilingAnalysisResult] | None
-]:
-    llm_client = deps.llm_client
-    if skip:
-        return _StepOutcome(True, "skipped: --skip-llm", is_skipped=True), None, None
-    if llm_client is None:
+) -> tuple[_StepOutcome, Path | None]:
+    """Export `analysis_input.json` for the qualitative-analysis skill.
+
+    No model is called here, so this step is cheap and unconditional -- it is
+    skipped only when there is genuinely nothing to analyze. `include_decision_history`
+    carries the existing point-in-time invariant: prior human decisions are
+    injected only for a live run of the current day, never for a `--dry-run`
+    or an `--as-of` replay.
+
+    Args:
+        deps: Run dependencies.
+        ctx: Screening/risk state for this run.
+        text_items: Step 5's collected text, or `None` if it produced none.
+        include_decision_history: Whether prior decisions may be injected.
+
+    Returns:
+        The step outcome and, on success, the exported file's absolute path.
+    """
+    if not ctx.candidates:
         return (
-            _StepOutcome(True, "skipped: no LLM client configured", is_skipped=True),
-            None,
+            _StepOutcome(True, "skipped: no candidates to analyze", is_skipped=True),
             None,
         )
     if text_items is None:
         return (
             _StepOutcome(True, "skipped: step 5 produced no text", is_skipped=True),
             None,
-            None,
         )
 
-    # P2-12 (REQ-003): computed once per run, inside this step's existing
-    # NFR-03 time-budget gate (reused, not a new gate) -- portfolio-wide, so
-    # it is not recomputed per candidate below.
     ctx = replace(
         ctx, performance_summary=_compute_performance_summary(deps, ctx.run_date)
     )
-
-    # P6-26: one counter shared by both per-candidate loops below, so the cap
-    # is truly per-run (news + filing analyses together), not per-loop.
-    call_limited_client = _CallLimitedLLMClient(
-        llm_client, deps.state_store, deps.settings.llm.max_llm_calls_per_run
-    )
-    news_summaries, failed_news_symbols = _summarize_news_per_candidate(
-        call_limited_client, deps, ctx, text_items, include_decision_history
-    )
-    filing_analyses, failed_filing_symbols = _analyze_filings_per_candidate(
-        call_limited_client, deps, ctx, text_items, include_decision_history
-    )
-    failed_symbols = sorted({*failed_news_symbols, *failed_filing_symbols})
-
-    if not failed_symbols:
-        return _StepOutcome(True), news_summaries, filing_analyses
-    if news_summaries or filing_analyses:
-        return (
-            _StepOutcome(False, f"failed symbols: {failed_symbols}"),
-            news_summaries,
-            filing_analyses,
+    try:
+        payload = build_analysis_input(
+            _export_request(
+                deps, ctx, text_items, include_decision_history=include_decision_history
+            )
         )
-    return (
-        _StepOutcome(
-            False, f"LLM analysis failed for every candidate: {failed_symbols}"
-        ),
-        None,
-        None,
-    )
+        path = write_analysis_input(payload, _run_output_dir(deps, ctx.run_date))
+    except Exception as exc:
+        # Fail-soft like every other step here: an export problem (disk, or
+        # unexpectedly unserializable state) degrades the run and still lets
+        # step 8 produce a screening-only report.
+        logger.exception("analysis input export failed")
+        return _StepOutcome(False, f"analysis input export failed: {exc}"), None
+    logger.info("analysis input exported: %s", path)
+    return _StepOutcome(True, f"exported {path}"), path
 
 
-def _decision_context_blocks(
-    candidate: Candidate,
-    risk_by_symbol: dict[str, RiskAssessment],
-    performance_summary: PerformanceSummary | None,
-) -> str:
-    """P2-12 (REQ-001/002/003): one candidate's score/risk/performance blocks.
+def _export_request(
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    text_items: list[TextItem],
+    *,
+    include_decision_history: bool,
+) -> ExportRequest:
+    """Group one run's export inputs, one `ExportCandidate` per candidate.
 
     `risk_by_symbol[candidate.symbol]` is a plain (not `.get()`) lookup:
-    `RiskChecker.check()` guarantees one `RiskAssessment` per candidate, same
-    order as `candidates` (`risk/checks.py`), so `ctx.risk_assessments`
-    always covers every `ctx.candidates` entry -- the same invariant
-    `_run_step_risk()` relies on to zip them together.
+    `RiskChecker.check()` guarantees one `RiskAssessment` per candidate, in
+    the same order as `candidates` (`risk/checks.py`), so `ctx.risk_assessments`
+    always covers every `ctx.candidates` entry.
     """
-    return "".join(
-        (
-            format_score_breakdown(candidate),
-            format_risk_constraints(risk_by_symbol[candidate.symbol]),
-            format_performance_summary(performance_summary),
-        )
-    )
-
-
-def _summarize_news_per_candidate(
-    llm_client: _LLMClientLike,
-    deps: DailyDependencies,
-    ctx: _RunContext,
-    text_items: list[TextItem],
-    include_decision_history: bool,
-) -> tuple[list[NewsSummaryResult], list[str]]:
-    summaries = []
-    failed_symbols = []
     risk_by_symbol = {
         assessment.symbol: assessment for assessment in ctx.risk_assessments
     }
-    for candidate in ctx.candidates:
-        news_items = tuple(
-            item
-            for item in text_items
-            if item.symbol == candidate.symbol and item.source_type == "news"
-        )
-        if not news_items:
-            continue
-        request = NewsSummaryRequest(
-            run_id=ctx.run_id,
-            symbol=candidate.symbol,
-            period=f"{ctx.run_date - timedelta(days=_TEXT_LOOKBACK_DAYS)}..{ctx.run_date}",
-            news_items=news_items,
-            model=deps.settings.llm.models.news_summary,
-            max_tokens=deps.settings.llm.max_tokens,
-            schema_version=deps.settings.llm.schema_version,
-            max_items=deps.settings.llm.max_news_items_per_symbol,
-            max_chars_per_item=deps.settings.llm.max_news_chars_per_item,
-            decision_history=tuple(
-                deps.state_store.get_decision_history(
-                    candidate.symbol,
-                    deps.strategy_key,
-                    ctx.run_date,
-                    _DECISION_HISTORY_LIMIT,
-                )
-            )
-            if include_decision_history
-            else (),
-            decision_context_blocks=_decision_context_blocks(
-                candidate, risk_by_symbol, ctx.performance_summary
-            ),
-            market_regime=format_market_regime(
-                ctx.regime_snapshot, ctx.exposure_decision
-            ),
-            as_of=ctx.run_date,
-            cache_ttl_days=deps.settings.llm.cache_ttl_days,
-            near_stale_threshold_days=deps.settings.llm.near_stale_threshold_days,
-        )
-        try:
-            summaries.append(summarize_news(llm_client, request))
-        except Exception:
-            failed_symbols.append(candidate.symbol)
-    return summaries, failed_symbols
-
-
-def _analyze_filings_per_candidate(
-    llm_client: _LLMClientLike,
-    deps: DailyDependencies,
-    ctx: _RunContext,
-    text_items: list[TextItem],
-    include_decision_history: bool,
-) -> tuple[list[FilingAnalysisResult], list[str]]:
-    analyses = []
-    failed_symbols = []
-    risk_by_symbol = {
-        assessment.symbol: assessment for assessment in ctx.risk_assessments
-    }
-    for candidate in ctx.candidates:
-        filing_items = [
-            item
-            for item in text_items
-            if item.symbol == candidate.symbol and item.source_type == "filing"
-        ]
-        for filing_item in filing_items:
-            filing_type = (filing_item.title or "unknown").split(" - ")[0]
-            request = FilingAnalysisRequest(
-                run_id=ctx.run_id,
-                symbol=candidate.symbol,
-                filing_type=filing_type,
-                filing_text=filing_item,
-                model=deps.settings.llm.models.filing_analysis,
-                max_tokens=deps.settings.llm.max_tokens,
-                schema_version=deps.settings.llm.schema_version,
-                chunk_chars=deps.settings.llm.filing_chunk_chars,
-                max_chunks=deps.settings.llm.max_filing_chunks,
+    analysis_config = deps.settings.analysis
+    return ExportRequest(
+        as_of=ctx.run_date,
+        generated_at=deps.clock.now(),
+        regime_snapshot=ctx.regime_snapshot,
+        exposure_decision=ctx.exposure_decision,
+        performance_summary=ctx.performance_summary,
+        candidates=tuple(
+            ExportCandidate(
+                candidate=candidate,
+                risk_assessment=risk_by_symbol[candidate.symbol],
+                text_items=tuple(
+                    item for item in text_items if item.symbol == candidate.symbol
+                ),
                 decision_history=tuple(
                     deps.state_store.get_decision_history(
                         candidate.symbol,
@@ -1083,21 +928,15 @@ def _analyze_filings_per_candidate(
                 )
                 if include_decision_history
                 else (),
-                decision_context_blocks=_decision_context_blocks(
-                    candidate, risk_by_symbol, ctx.performance_summary
-                ),
-                market_regime=format_market_regime(
-                    ctx.regime_snapshot, ctx.exposure_decision
-                ),
-                as_of=ctx.run_date,
-                cache_ttl_days=deps.settings.llm.cache_ttl_days,
-                near_stale_threshold_days=deps.settings.llm.near_stale_threshold_days,
             )
-            try:
-                analyses.append(analyze_filing(llm_client, request))
-            except Exception:
-                failed_symbols.append(candidate.symbol)
-    return analyses, failed_symbols
+            for candidate in ctx.candidates
+        ),
+        limits=TextExportLimits(
+            max_news_items=analysis_config.max_news_items_per_symbol,
+            max_news_chars=analysis_config.max_news_chars_per_item,
+            max_filing_chars=analysis_config.max_filing_chars,
+        ),
+    )
 
 
 def _run_step_postmortem(
@@ -1185,8 +1024,7 @@ def _run_step_output(
         universe=deps.universe,
         candidates=output.run.candidates,
         risk_assessments=output.run.risk_assessments,
-        news_summaries=output.news_summaries,
-        filing_analyses=output.filing_analyses,
+        analysis=None,
         strategy_key=deps.strategy_key,
         rejections=output.run.rejections,
         notices=output.notices,
@@ -1208,6 +1046,18 @@ def _run_step_output(
         report_path = write_markdown_report(brief, output.status, deps.output_dir)
     except Exception as exc:
         return _StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
+    if output.analysis_input_path is not None:
+        try:
+            write_report_context(
+                ReportContext(brief, output.status, Path(deps.output_dir)),
+                _run_output_dir(deps, output.run.run_date),
+            )
+        except Exception as exc:
+            return (
+                _StepOutcome(False, f"report context archive failed: {exc}"),
+                report_path,
+                brief,
+            )
     return _StepOutcome(True), report_path, brief
 
 
@@ -1451,9 +1301,10 @@ def _run_soft_steps(
 ) -> DailyRunResult:
     """Run fail-soft local/optional steps after the fatal steps.
 
-    Fail-soft MAE/MFE, text/LLM/postmortem, notification, then local output.
+    Fail-soft MAE/MFE, text/analysis-export/postmortem, notification, then
+    local output.
 
-    NFR-03 time-budget policy: steps 5 (text), 6 (LLM), postmortem, and 7
+    NFR-03 time-budget policy: steps 5 (text), 6 (analysis export), postmortem, and 7
     (Discord notify) are skipped outright once `deps.monotonic() >=
     deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME` (`is_skipped=True`
     but `success=False`) -- a *degrading* skip, distinct from the ordinary
@@ -1477,24 +1328,19 @@ def _run_soft_steps(
 
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
-        logger.warning("step 6_llm skipped: time budget exceeded")
-        llm_outcome, news_summaries, filing_analyses = (
-            _TIME_BUDGET_STEP_OUTCOME,
-            None,
-            None,
-        )
+        logger.warning("step 6_analysis_export skipped: time budget exceeded")
+        export_outcome, analysis_input_path = _TIME_BUDGET_STEP_OUTCOME, None
     else:
-        logger.debug("step 6_llm starting")
-        _step_started(deps, "6_llm")
-        llm_outcome, news_summaries, filing_analyses = _run_step_llm(
+        logger.debug("step 6_analysis_export starting")
+        _step_started(deps, "6_analysis_export")
+        export_outcome, analysis_input_path = _run_step_analysis_export(
             deps,
             ctx,
             text_items,
-            skip=options.skip_llm,
             include_decision_history=(not options.is_dry_run and options.as_of is None),
         )
-    _record_step(deps, ctx.run_id, "6_llm", llm_outcome, started_at)
-    degraded = degraded or not llm_outcome.success
+    _record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
+    degraded = degraded or not export_outcome.success
 
     started_at = time.perf_counter()
     signal_performance: tuple[SignalPerformanceRow, ...]
@@ -1534,7 +1380,7 @@ def _run_soft_steps(
         for label, outcome in (
             ("MAE/MFE", excursion_outcome),
             ("text", text_outcome),
-            ("LLM", llm_outcome),
+            ("analysis export", export_outcome),
             ("postmortem", postmortem_outcome),
             ("notification", notify_outcome),
         )
@@ -1548,8 +1394,7 @@ def _run_soft_steps(
         deps,
         _OutputContext(
             run=ctx,
-            news_summaries=news_summaries,
-            filing_analyses=filing_analyses,
+            analysis_input_path=analysis_input_path,
             signal_performance=signal_performance,
             notices=notices,
             status=status_before_output,
@@ -1568,6 +1413,7 @@ def _run_soft_steps(
         exit_code=0,
         report_path=report_path,
         brief=brief,
+        analysis_input_path=analysis_input_path,
     )
 
 
@@ -1576,7 +1422,6 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser.add_argument("--as-of", type=date.fromisoformat, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-text", action="store_true")
-    parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--strategy", default="default")
     parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
@@ -1585,7 +1430,6 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         as_of=args.as_of,
         is_dry_run=args.dry_run,
         skip_text=args.skip_text,
-        skip_llm=args.skip_llm,
         limit=args.limit,
         strategy_key=args.strategy,
         log_level=args.log_level,
@@ -1596,8 +1440,6 @@ def _required_features(options: DailyRunOptions, settings: Settings) -> set[str]
     features = {"edgar"}
     if not options.skip_text:
         features |= {"finnhub", "fred"}
-    if not options.skip_llm:
-        features.add("llm")
     if settings.notification.enabled:
         features.add("discord")
     return features
@@ -1651,16 +1493,6 @@ def _compose_dependencies(
         if secrets.fred_api_key and not options.skip_text
         else None
     )
-    llm_client = (
-        LLMClient(
-            secrets.anthropic_api_key,
-            state_store,
-            ModelPricing(),
-            _monthly_budget_cap(settings),
-        )
-        if secrets.anthropic_api_key and not options.skip_llm
-        else None
-    )
     notifier = (
         DiscordNotifier(secrets.discord_webhook_url)
         if settings.notification.enabled and secrets.discord_webhook_url
@@ -1679,16 +1511,11 @@ def _compose_dependencies(
         earnings_client=earnings_client,
         news_client=news_client,
         calendar_client=calendar_client,
-        llm_client=llm_client,
         notifier=notifier,
         output_dir=output_dir,
         strategy_key=options.strategy_key,
         progress=ProgressReporter(Console(stderr=True)),
     )
-
-
-def _monthly_budget_cap(settings: Settings) -> float:
-    return settings.budget.monthly_cap_usd_prototype
 
 
 class _SecretRedactionFilter(logging.Filter):
@@ -1764,7 +1591,6 @@ def _configure_logging(secrets: Secrets, *, level: str | None = None) -> None:
         (
             secrets.finnhub_api_key,
             secrets.fred_api_key,
-            secrets.anthropic_api_key,
             secrets.discord_webhook_url,
         )
     )
@@ -1792,7 +1618,10 @@ def main(argv: list[str] | None = None) -> None:
                 result.status,
                 width=width,
                 color=sys.stdout.isatty(),
-                report_path=result.report_path,
+                paths=TerminalPaths(
+                    report=result.report_path,
+                    analysis_input=result.analysis_input_path,
+                ),
             )
         )
     raise SystemExit(result.exit_code)

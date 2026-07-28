@@ -10,11 +10,22 @@ from uuid import uuid4
 import pandas as pd
 import pytest
 
-from swing_copilot.llm.filings_analysis import FilingAnalysisResult
-from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
-from swing_copilot.llm.summarize import NewsSummaryResult
+from swing_copilot.analysis.schemas import (
+    FilingAnalysis,
+    NewsSummary,
+    ScreeningAssessment,
+    SourcedFact,
+    Verdict,
+    VerdictReason,
+)
+from swing_copilot.analysis.validate import (
+    ResolvedFiling,
+    SymbolOutcome,
+    ValidatedAnalysis,
+)
 from swing_copilot.models import RunMode
 from swing_copilot.report.daily_brief import (
+    PENDING_ANALYSIS_MESSAGE,
     BriefRejectionCount,
     BriefRisk,
     DailyBriefContext,
@@ -40,6 +51,11 @@ if TYPE_CHECKING:
     from swing_copilot.storage.state_store import StateStore
 
 AS_OF = date(2026, 7, 22)
+
+SOURCE_URLS = {
+    "news:1": "https://example.com/news:1",
+    "filing:1": "https://example.com/filing:1",
+}
 
 
 class FakeMarketStore:
@@ -85,17 +101,64 @@ class FakeStateStore:
         self._decision_history = list(decision_history)
         self.decision_history_calls: list[tuple[str, str, date, int]] = []
 
-    def get_source_urls(self, source_ids):
-        return {
-            source_id: f"https://example.com/{source_id}" for source_id in source_ids
-        }
-
     def get_decision_history(self, symbol, strategy_key, before_date, limit):
         self.decision_history_calls.append((symbol, strategy_key, before_date, limit))
         return self._decision_history
 
 
-def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefContext:
+def _validated_analysis(
+    *, filings: tuple[ResolvedFiling, ...] | None = None
+) -> ValidatedAnalysis:
+    if filings is None:
+        filings = (
+            ResolvedFiling(
+                form_type="10-Q",
+                filed_at=date(2026, 7, 21),
+                analysis=FilingAnalysis(
+                    source_id="filing:1",
+                    facts=[
+                        SourcedFact(text="FCF was positive", source_ids=["filing:1"])
+                    ],
+                    interpretation=["Cash generation appears stable"],
+                    red_flags=["Margin pressure"],
+                    yoy_changes=[],
+                ),
+            ),
+        )
+    outcome = SymbolOutcome(
+        symbol="AAPL",
+        news_summary=NewsSummary(
+            facts=[SourcedFact(text="Revenue grew", source_ids=["news:1"])],
+            interpretation=["Growth may continue", "Demand remains uncertain"],
+            risk_flags=["Valuation risk"],
+        ),
+        filings=filings,
+        screening_assessment=ScreeningAssessment(
+            summary="Growth may continue",
+            strengths=["Trend intact"],
+            concerns=["Extended from the 50-day"],
+        ),
+        verdict=Verdict(
+            recommendation="proceed",
+            reasons=[
+                VerdictReason(
+                    text="No contradicting disclosure", source_ids=["filing:1"]
+                )
+            ],
+        ),
+    )
+    return ValidatedAnalysis(
+        as_of=AS_OF,
+        no_trade=False,
+        no_trade_reason=None,
+        outcomes=(outcome,),
+        source_urls=SOURCE_URLS,
+    )
+
+
+def _context(
+    *, with_analysis: bool = True, with_risk: bool = True
+) -> DailyBriefContext:
     candidate = Candidate(
         symbol="AAPL",
         as_of=AS_OF,
@@ -126,49 +189,7 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
         if with_risk
         else []
     )
-    news = (
-        [
-            NewsSummaryResult(
-                summary=NewsSummary(
-                    symbol="AAPL",
-                    period="test",
-                    facts=[
-                        SourcedFact(statement="Revenue grew", source_ids=["news:1"])
-                    ],
-                    interpretation=["Growth may continue", "Demand remains uncertain"],
-                    sentiment=1,
-                    risk_flags=["Valuation risk"],
-                    sources=["https://example.com/news:1"],
-                    catalyst_quality="none",
-                    catalyst_quality_source_ids=["news:1"],
-                )
-            )
-        ]
-        if with_llm
-        else None
-    )
-    filing = (
-        [
-            FilingAnalysisResult(
-                analysis=FilingAnalysis(
-                    symbol="AAPL",
-                    filing_type="10-Q",
-                    facts=[
-                        SourcedFact(
-                            statement="FCF was positive", source_ids=["filing:1"]
-                        )
-                    ],
-                    interpretation=["Cash generation appears stable"],
-                    red_flags=["Margin pressure"],
-                    yoy_changes=[],
-                    guidance_direction="neutral",
-                ),
-                filed_at=date(2026, 7, 21),
-            )
-        ]
-        if with_llm
-        else None
-    )
+    analysis = _validated_analysis() if with_analysis else None
     return DailyBriefContext(
         run_id=uuid4(),
         run_date=AS_OF,
@@ -176,8 +197,7 @@ def _context(*, with_llm: bool = True, with_risk: bool = True) -> DailyBriefCont
         universe=(UniverseMember("AAPL", "Apple Inc.", "Technology", "AAPL"),),
         candidates=[candidate],
         risk_assessments=risks,
-        news_summaries=news,
-        filing_analyses=filing,
+        analysis=analysis,
         strategy_key="default",
         notices=("calendar unavailable",),
     )
@@ -199,9 +219,9 @@ def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:
     assert candidate.signals == ("SMA200上抜け", "custom")
     assert candidate.fundamentals.per == "55.0x"
     assert candidate.risk.warnings == ("MSFTとの相関 0.81",)
-    assert candidate.llm.conclusion == "Growth may continue"
-    assert candidate.llm.facts == ("Revenue grew", "FCF was positive")
-    assert {source.source_id for source in candidate.llm.sources} == {
+    assert candidate.analysis.conclusion == "Growth may continue"
+    assert candidate.analysis.facts == ("Revenue grew", "FCF was positive")
+    assert {source.source_id for source in candidate.analysis.sources} == {
         "news:1",
         "filing:1",
     }
@@ -238,7 +258,7 @@ def test_missing_score_fields_produce_none() -> None:
 
 def test_missing_data_produces_explicit_fallbacks() -> None:
     brief = build_daily_brief(
-        _context(with_llm=False, with_risk=False),
+        _context(with_analysis=False, with_risk=False),
         cast("MarketStore", FakeMarketStore(with_data=False)),
         cast("StateStore", FakeStateStore()),
     )
@@ -248,8 +268,8 @@ def test_missing_data_produces_explicit_fallbacks() -> None:
     assert candidate.pct_change is None
     assert candidate.fundamentals.per == "N/A"
     assert candidate.risk.status == "not_calculable"
-    assert candidate.llm.degraded is True
-    assert "取得できませんでした" in candidate.llm.conclusion
+    assert candidate.analysis.degraded is True
+    assert candidate.analysis.conclusion == PENDING_ANALYSIS_MESSAGE
 
 
 def test_rejection_counts_are_tallied_by_reason_code_alphabetically() -> None:
@@ -461,7 +481,7 @@ class TestPastDecisions:
         state_store = FakeStateStore(decision_history=history)
 
         brief = build_daily_brief(
-            _context(with_llm=False),
+            _context(with_analysis=False),
             cast("MarketStore", FakeMarketStore()),
             cast("StateStore", state_store),
         )
@@ -478,7 +498,7 @@ class TestPastDecisions:
 
     def test_zero_past_decisions_produces_empty_tuple_without_error(self) -> None:
         brief = build_daily_brief(
-            _context(with_llm=False),
+            _context(with_analysis=False),
             cast("MarketStore", FakeMarketStore()),
             cast("StateStore", FakeStateStore()),
         )
@@ -511,7 +531,7 @@ class TestPastDecisions:
             )
 
         brief = build_daily_brief(
-            _context(with_llm=False),
+            _context(with_analysis=False),
             cast("MarketStore", FakeMarketStore()),
             state_store,
         )
@@ -539,22 +559,25 @@ class TestMultipleFilingAnalysesPerCandidate:
         self,
     ) -> None:
         context = _context()
-        second_filing = FilingAnalysisResult(
+        analysis = context.analysis
+        assert analysis is not None
+        first_filing = analysis.outcomes[0].filings[0]
+        second_filing = ResolvedFiling(
+            form_type="8-K",
+            filed_at=date(2026, 7, 20),
             analysis=FilingAnalysis(
-                symbol="AAPL",
-                filing_type="8-K",
-                facts=[
-                    SourcedFact(statement="Guidance raised", source_ids=["filing:2"])
-                ],
+                source_id="filing:2",
+                facts=[SourcedFact(text="Guidance raised", source_ids=["filing:2"])],
                 interpretation=["Guidance raise may indicate confidence"],
                 red_flags=[],
                 yoy_changes=[],
-                guidance_direction="positive",
             ),
-            filed_at=date(2026, 7, 20),
+        )
+        updated_outcome = replace(
+            analysis.outcomes[0], filings=(first_filing, second_filing)
         )
         context = replace(
-            context, filing_analyses=[*(context.filing_analyses or []), second_filing]
+            context, analysis=replace(analysis, outcomes=(updated_outcome,))
         )
 
         brief = build_daily_brief(
@@ -563,7 +586,7 @@ class TestMultipleFilingAnalysesPerCandidate:
             cast("StateStore", FakeStateStore()),
         )
 
-        filings = brief.candidates[0].llm.filings
+        filings = brief.candidates[0].analysis.filings
         assert len(filings) == 2
         assert {f.filing_type for f in filings} == {"10-Q", "8-K"}
         by_type = {f.filing_type: f for f in filings}
@@ -573,103 +596,13 @@ class TestMultipleFilingAnalysesPerCandidate:
         assert by_type["8-K"].facts == ("Guidance raised",)
         # The flat aggregate fields still span every filing (unchanged
         # semantics), now including the previously-dropped second filing.
-        assert "Guidance raised" in brief.candidates[0].llm.facts
+        assert "Guidance raised" in brief.candidates[0].analysis.facts
 
     def test_no_filings_produces_an_empty_filings_tuple(self) -> None:
         brief = build_daily_brief(
-            _context(with_llm=False),
+            _context(with_analysis=False),
             cast("MarketStore", FakeMarketStore()),
             cast("StateStore", FakeStateStore()),
         )
 
-        assert brief.candidates[0].llm.filings == ()
-
-
-class TestCatalystQualityDisplay:
-    """P2-12/P6-27 (REQ-006/007): catalyst_quality reaches the report, display-only."""
-
-    def test_catalyst_quality_and_its_sources_are_mapped_from_the_news_summary(
-        self,
-    ) -> None:
-        context = _context()
-        news_result = (context.news_summaries or [])[0]
-        upgraded_summary = news_result.summary.model_copy(
-            update={
-                "catalyst_quality": "high",
-                "catalyst_quality_source_ids": ["news:1"],
-            }
-        )
-        context = replace(
-            context,
-            news_summaries=[replace(news_result, summary=upgraded_summary)],
-        )
-
-        brief = build_daily_brief(
-            context,
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        llm = brief.candidates[0].llm
-        assert llm.catalyst_quality == "high"
-        assert {s.source_id for s in llm.catalyst_quality_sources} == {"news:1"}
-
-    def test_catalyst_quality_is_none_without_a_news_summary(self) -> None:
-        context = _context()
-        context = replace(context, news_summaries=None)
-
-        brief = build_daily_brief(
-            context,
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        llm = brief.candidates[0].llm
-        assert llm.catalyst_quality is None
-        assert llm.catalyst_quality_sources == ()
-
-
-class TestNearStaleWarningDisplay:
-    """P6-27: `is_near_stale` flows from the LLM result wrappers into `BriefLlm`."""
-
-    def test_news_near_stale_flag_reaches_the_brief(self) -> None:
-        context = _context()
-        news_result = (context.news_summaries or [])[0]
-        context = replace(
-            context, news_summaries=[replace(news_result, is_near_stale=True)]
-        )
-
-        brief = build_daily_brief(
-            context,
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        assert brief.candidates[0].llm.is_news_near_stale is True
-
-    def test_filing_near_stale_flag_reaches_the_matching_filing_brief(self) -> None:
-        context = _context()
-        filing_result = (context.filing_analyses or [])[0]
-        context = replace(
-            context,
-            filing_analyses=[replace(filing_result, is_near_stale=True)],
-        )
-
-        brief = build_daily_brief(
-            context,
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        assert brief.candidates[0].llm.filings[0].is_near_stale is True
-
-    def test_not_near_stale_by_default(self) -> None:
-        brief = build_daily_brief(
-            _context(),
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        llm = brief.candidates[0].llm
-        assert llm.is_news_near_stale is False
-        assert llm.filings[0].is_near_stale is False
+        assert brief.candidates[0].analysis.filings == ()

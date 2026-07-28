@@ -1,6 +1,6 @@
 """Paper-trading journal writes, split out of `state_store.py` (FR-11, CON-04).
 
-Same extraction pattern as `audit_records.py`/`llm_records.py`/
+Same extraction pattern as `audit_records.py`/
 `text_records.py`. `trades_journal.journal_id` is a synthetic primary key,
 but the business natural key `paper/journal.py` upserts on is
 `(run_id, symbol, strategy_key)` — the table's actual `UNIQUE` constraint
@@ -38,7 +38,7 @@ class TradeDecisionRecord:
 
 @dataclass(frozen=True, slots=True)
 class DecisionHistoryEntry:
-    """Prior live decision safe to include in a later live LLM request."""
+    """Prior live decision safe to include in a later analysis export."""
 
     run_id: UUID
     run_date: date

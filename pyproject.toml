@@ -32,7 +32,6 @@ dependencies = [
     "pyarrow>=17.0",
     "edgartools>=3.0",
     "httpx>=0.27",
-    "anthropic>=0.100",
     "rich>=14.0",
 ]
 
@@ -41,6 +40,7 @@ copilot-daily = "swing_copilot.pipeline.daily:main"
 copilot-decision = "swing_copilot.paper.cli:main"
 copilot-history = "swing_copilot.report.history_cli:main"
 copilot-backtest = "swing_copilot.backtest.cli:main"
+copilot-ingest-analysis = "swing_copilot.analysis.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"
@@ -149,6 +149,11 @@ allowed-confusables = ["（", "）"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic evaluates annotations at runtime, so names used only in a model's
+# field annotations must stay as real imports, not TYPE_CHECKING-only ones.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [

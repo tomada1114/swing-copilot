@@ -48,7 +48,6 @@ _TABLES = (
     "positions",
     "trades_journal",
     "text_items",
-    "llm_calls",
 )
 
 

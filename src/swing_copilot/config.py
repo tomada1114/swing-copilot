@@ -24,7 +24,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from swing_copilot.exceptions import ConfigError
 
 FEATURE_SECRET_ATTRS: dict[str, str] = {
-    "llm": "anthropic_api_key",
     "finnhub": "finnhub_api_key",
     "fred": "fred_api_key",
     "discord": "discord_webhook_url",
@@ -38,7 +37,6 @@ class Secrets(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    anthropic_api_key: str | None = None
     finnhub_api_key: str | None = None
     fred_api_key: str | None = None
     discord_webhook_url: str | None = None
@@ -46,7 +44,6 @@ class Secrets(BaseSettings):
     eodhd_api_key: str | None = None  # unused until the P4 EODHD provider
 
     @field_validator(
-        "anthropic_api_key",
         "finnhub_api_key",
         "fred_api_key",
         "discord_webhook_url",
@@ -290,66 +287,32 @@ class BacktestConfig(_StrictModel):
         return self
 
 
-class LLMModelSelection(_StrictModel):
-    """`llm.models.*` in `settings.yaml`. Model IDs are never hardcoded elsewhere."""
+class AnalysisConfig(_StrictModel):
+    """`analysis.*` in `settings.yaml`.
 
-    news_summary: str = "claude-haiku-4-5-20251001"
-    filing_analysis: str = "claude-haiku-4-5-20251001"
+    Bounds on the untrusted text handed to the qualitative-analysis skill via
+    `analysis_input.json`. These replace the old `llm.*` section: the API
+    caller is gone, but the collection and export limits it defined are still
+    what keeps one run's exported text bounded (roadmap §5 P6-26).
+    """
 
-
-class LLMConfig(_StrictModel):
-    """`llm.*` in `settings.yaml`."""
-
-    models: LLMModelSelection = LLMModelSelection()
-    max_tokens: int = 2048
-    # Bumped 1 -> 2 for P2-12: `NewsSummary` gained two new REQUIRED fields
-    # (`catalyst_quality`/`catalyst_quality_source_ids`). A cache row written
-    # under the old schema would otherwise reach an uncaught
-    # `pydantic.ValidationError` on `model_validate_json` (missing required
-    # fields); bumping the version makes old rows a plain cache miss instead.
-    schema_version: int = 2
-    max_news_items_per_symbol: int = 20
-    max_news_chars_per_item: int = 4000
-    filing_chunk_chars: int = 30_000
-    max_filing_chunks: int = 4
-    # roadmap §5 P2-12: cache "near-stale" warning threshold, in days of TTL
-    # remaining (as_of basis, REQ-030/040), used with `cache_ttl_days` below by
-    # `llm/decision_context.py::is_cache_near_stale()`.
-    near_stale_threshold_days: int = 2
-    # roadmap §5 P6-27: the cache-TTL concept `near_stale_threshold_days`
-    # counts down from. No real Anthropic-side cache expiry exists (a cached
-    # `llm_calls` row is reused indefinitely by natural key) -- this is a
-    # code-owned "treat this analysis as due for a refresh after N days"
-    # horizon, wired into `pipeline/daily.py`'s LLM step and surfaced as a
-    # report warning via `LLMClient.get_cached_at()` (30, 要検証).
-    cache_ttl_days: int = 30
-    # roadmap §5 P6-26: filing text collection previously had no lower bound
-    # or count cap (unlike news' `max_news_items_per_symbol`), fetching every
-    # filing ever submitted for a symbol. These two bound
-    # `text/edgar_filings.py::fetch_recent_filings_text()`'s recency window
-    # and per-symbol count, symmetric with the news-side limit.
+    max_news_items_per_symbol: int = Field(default=20, ge=1)
+    max_news_chars_per_item: int = Field(default=4000, ge=1)
+    # Per-filing export budget is `filing_chunk_chars * max_filing_chunks`;
+    # the two are kept separate because they came from, and remain comparable
+    # to, the previous chunked-analysis bounds.
+    filing_chunk_chars: int = Field(default=30_000, ge=1)
+    max_filing_chunks: int = Field(default=4, ge=1)
+    # Filing *collection* recency bound and per-symbol count cap, applied in
+    # `text/edgar_filings.py::fetch_recent_filings_text()` -- symmetric with
+    # the news-side limit above (roadmap §5 P6-26).
     filing_lookback_days: int = Field(default=90, ge=1)
     max_filings_per_symbol: int = Field(default=3, ge=1)
-    # roadmap §5 P6-26: a per-run ceiling on total `LLMClient.analyze()`
-    # calls, enforced in `pipeline/daily.py::_run_step_llm()`. A second,
-    # count-based defense alongside the per-call monthly cost gate -- it
-    # bounds an unexpectedly large candidate/filing fan-out within one run,
-    # independent of that run's estimated per-call cost (200, 要検証).
-    max_llm_calls_per_run: int = Field(default=200, ge=1)
 
-    @model_validator(mode="after")
-    def _validate_near_stale_threshold(self) -> LLMConfig:
-        if self.near_stale_threshold_days > self.cache_ttl_days:
-            msg = "near_stale_threshold_days must be <= cache_ttl_days"
-            raise ValueError(msg)
-        return self
-
-
-class BudgetConfig(_StrictModel):
-    """`budget.*` in `settings.yaml` (NFR-01)."""
-
-    monthly_cap_usd_prototype: float = 5
-    monthly_cap_usd_production: float = 25
+    @property
+    def max_filing_chars(self) -> int:
+        """Total characters of one filing's text exported for analysis."""
+        return self.filing_chunk_chars * self.max_filing_chunks
 
 
 class ScheduleConfig(_StrictModel):
@@ -426,8 +389,7 @@ class Settings(_StrictModel):
     fundamental_filters: FundamentalFilterConfig = FundamentalFilterConfig()
     technical_signals: TechnicalSignalConfig = TechnicalSignalConfig()
     backtest: BacktestConfig = BacktestConfig()
-    llm: LLMConfig = LLMConfig()
-    budget: BudgetConfig = BudgetConfig()
+    analysis: AnalysisConfig = AnalysisConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     notification: NotificationConfig = NotificationConfig()
     postmortem: PostmortemConfig = PostmortemConfig()
@@ -572,7 +534,7 @@ def require_secrets(secrets: Secrets, features: set[str]) -> None:
     Args:
         secrets: The loaded secrets to check.
         features: Feature keys to validate (see `FEATURE_SECRET_ATTRS`), e.g.
-            `{"llm", "finnhub"}`.
+            `{"finnhub", "fred"}`.
 
     Raises:
         ConfigError: `features` contains an unknown key, or one or more

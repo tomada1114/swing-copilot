@@ -1,14 +1,14 @@
 """Fail-soft boundary tests for pipeline/daily.py (FR-12, `docs/03_basic_design.md` 7).
 
-Text collection (5) and LLM analysis (6) failures degrade the run but never
-abort it: notification (7) and local output (8) still run when applicable.
+Text collection (5) and analysis-input export (6) failures degrade the run but
+never abort it: notification (7) and local output (8) still run when applicable.
 complete. Market/store/screening (1-4) failures are fatal, exit nonzero, and
 never corrupt state for a subsequent successful rerun.
 """
 
 from __future__ import annotations
 
-import re
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -20,9 +20,8 @@ import pytest
 if TYPE_CHECKING:
     from uuid import UUID
 
+from swing_copilot.analysis.export import ANALYSIS_INPUT_FILENAME
 from swing_copilot.data.base import BarFetchResult
-from swing_copilot.llm.client import BudgetExceededError
-from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline import daily as daily_module
@@ -97,16 +96,6 @@ class FakeNewsClient:
         ]
 
 
-class ExplodingLLMClient:
-    def analyze(self, request):
-        del request
-        msg = "Claude API unreachable"
-        raise RuntimeError(msg)
-
-    def get_cached_at(self, request):
-        del request
-
-
 class ExplodingCalendarClient:
     def fetch_calendar_events(self, start, end):
         del start, end
@@ -120,7 +109,7 @@ class ExplodingPostmortemStateStore(StateStore):
     `run_postmortem_step` reaches `state_store.database` before any of its
     own history-query calls; overriding just that property simulates a
     genuine unexpected connectivity failure at that seam, without disturbing
-    any other step's use of this same store (screening/risk/text/LLM all
+    any other step's use of this same store (screening/risk/text/export all
     keep working normally against the real underlying `Database`).
     """
 
@@ -136,7 +125,8 @@ class ExplodingPerformanceSummaryStateStore(StateStore):
     P2-12: `PaperJournal.summarize_performance()` reaches this method first;
     overriding just it simulates an unexpected storage failure at that one
     seam, proving `_compute_performance_summary()`'s defensive try/except
-    degrades gracefully (LLM step still succeeds) rather than crashing the run.
+    degrades gracefully (the export step still succeeds) rather than crashing
+    the run.
     """
 
     def get_closed_positions_with_strategy(self, is_paper=True, as_of=None):
@@ -168,84 +158,6 @@ class PartiallyFailingNewsClient:
                 fetched_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
             )
         ]
-
-
-class PartiallyFailingLLMClient:
-    """Raises `BudgetExceededError` for one candidate only; a real fake for the rest."""
-
-    def __init__(self, failing_symbol: str):
-        self._failing_symbol = failing_symbol
-
-    def analyze(self, request):
-        match = re.search(r"対象銘柄: (\S+)", request.prompt)
-        symbol = match.group(1) if match else "UNKNOWN"
-        if symbol == self._failing_symbol:
-            msg = "Monthly LLM budget cap would be exceeded"
-            raise BudgetExceededError(msg)
-        if request.schema is NewsSummary:
-            return NewsSummary(
-                symbol=symbol,
-                period="test-period",
-                facts=[
-                    SourcedFact(
-                        statement="Fake fact.", source_ids=list(request.source_ids)
-                    )
-                ],
-                interpretation=["May indicate continued stability."],
-                sentiment=1,
-                risk_flags=[],
-                sources=["https://example.com"],
-                catalyst_quality="none",
-                catalyst_quality_source_ids=list(request.source_ids),
-            )
-        return FilingAnalysis(
-            symbol=symbol,
-            filing_type="10-Q",
-            facts=[
-                SourcedFact(
-                    statement="Fake filing fact.", source_ids=list(request.source_ids)
-                )
-            ],
-            interpretation=["May suggest steady operations."],
-            red_flags=[],
-            yoy_changes=[],
-            guidance_direction="neutral",
-        )
-
-    def get_cached_at(self, request):
-        del request
-
-
-class CapturingLLMClient:
-    """A real fake that records every `AnalyzeRequest` it was called with.
-
-    P2-12: used to assert on prompt *content* (decision-context blocks),
-    mirroring `tests/test_e2e_smoke.py::FakeLLMClient`'s pattern.
-    """
-
-    def __init__(self):
-        self.requests = []
-
-    def analyze(self, request):
-        self.requests.append(request)
-        match = re.search(r"対象銘柄: (\S+)", request.prompt)
-        symbol = match.group(1) if match else "UNKNOWN"
-        return NewsSummary(
-            symbol=symbol,
-            period="test-period",
-            facts=[
-                SourcedFact(statement="Fake fact.", source_ids=list(request.source_ids))
-            ],
-            interpretation=["May indicate continued stability."],
-            sentiment=1,
-            risk_flags=[],
-            sources=["https://example.com"],
-            catalyst_quality="none",
-            catalyst_quality_source_ids=list(request.source_ids),
-        )
-
-    def get_cached_at(self, request):
-        del request
 
 
 class FailingNotifier:
@@ -345,7 +257,9 @@ class TestTextCollectionFailureDegrades:
         assert result.report_path is not None
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "5_text") == "failed"
-        assert _step_status(state_store, result.run_id, "6_llm") == "skipped"
+        assert (
+            _step_status(state_store, result.run_id, "6_analysis_export") == "skipped"
+        )
         assert _step_status(state_store, result.run_id, "8_output") == "success"
 
     def test_degraded_report_shows_the_screening_only_fallback_message(self, base_deps):
@@ -355,7 +269,7 @@ class TestTextCollectionFailureDegrades:
 
         assert result.report_path is not None
         markdown = result.report_path.read_text(encoding="utf-8")
-        assert "本日はニュース・開示分析を取得できませんでした" in markdown
+        assert "分析待ち（swing-daily スキルで分析を実行してください）" in markdown
         assert "## Candidates" in markdown
 
 
@@ -426,13 +340,16 @@ class TestTextStepDetailMessagesAreTruthful:
         )
 
 
-class TestLLMAnalysisFailureDegrades:
-    def test_llm_failure_degrades_but_still_completes_the_run(
-        self, base_deps, state_store
+class TestAnalysisExportFailureDegrades:
+    def test_export_write_failure_degrades_but_still_completes_the_run(
+        self, base_deps, state_store, monkeypatch
     ):
-        deps = replace(
-            base_deps, news_client=FakeNewsClient(), llm_client=ExplodingLLMClient()
-        )
+        def _raise(*_args, **_kwargs):
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(daily_module, "write_analysis_input", _raise)
+        deps = replace(base_deps, news_client=FakeNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -440,8 +357,23 @@ class TestLLMAnalysisFailureDegrades:
         assert result.exit_code == 0
         assert result.report_path is not None
         assert result.report_path.is_file()
-        assert _step_status(state_store, result.run_id, "6_llm") == "failed"
+        assert result.analysis_input_path is None
+        assert _step_status(state_store, result.run_id, "6_analysis_export") == "failed"
         assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+    def test_no_candidates_skips_the_export_without_degrading(
+        self, base_deps, state_store, settings
+    ):
+        object.__setattr__(settings.technical_signals.volume, "min_avg_volume", 10**12)
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.analysis_input_path is None
+        assert (
+            _step_status(state_store, result.run_id, "6_analysis_export") == "skipped"
+        )
 
 
 class TestPostmortemFailureDegrades:
@@ -521,8 +453,10 @@ class TestMixedOutcomeTextStepPreservesSuccesses:
         assert result.report_path is not None
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "5_text") == "failed"
-        # step 6 still skips: no llm_client configured on base_deps.
-        assert _step_status(state_store, result.run_id, "6_llm") == "skipped"
+        # Step 6 still exports: partial text is still worth analyzing.
+        assert (
+            _step_status(state_store, result.run_id, "6_analysis_export") == "success"
+        )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
             rows = conn.execute(
@@ -532,88 +466,24 @@ class TestMixedOutcomeTextStepPreservesSuccesses:
         assert {row[0] for row in rows} == {"AAPL"}
 
 
-class TestMixedOutcomeLLMStepPreservesSuccesses:
-    def test_one_candidates_budget_error_keeps_the_other_candidates_summary(
+class TestPartialTextStillExportsEveryCandidate:
+    def test_symbol_without_news_is_still_exported_for_screening_assessment(
         self, base_deps, state_store
     ):
-        deps = replace(
-            base_deps,
-            news_client=FakeNewsClient(),
-            llm_client=PartiallyFailingLLMClient("MSFT"),
-        )
+        deps = replace(base_deps, news_client=PartiallyFailingNewsClient("MSFT"))
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
-        assert result.status == RunStatus.DEGRADED
-        assert result.exit_code == 0
-        assert result.report_path is not None
-        assert result.report_path.is_file()
-        assert _step_status(state_store, result.run_id, "6_llm") == "failed"
-        assert _step_status(state_store, result.run_id, "8_output") == "success"
-
-        markdown = result.report_path.read_text(encoding="utf-8")
-        # AAPL's summary survived MSFT's mid-loop BudgetExceededError instead
-        # of being discarded along with it.
-        assert "May indicate continued stability." in markdown
-        # Not the total-failure fallback: this is a partial, per-candidate
-        # degradation, not "no LLM output produced at all".
-        assert "本日はニュース・開示分析を取得できませんでした" not in markdown
-
-
-class TestLLMCallLimitPerRun:
-    """P6-26: `max_llm_calls_per_run` is a second, count-based defense.
-
-    Independent of the per-call monthly cost gate, a run-level counter
-    (`pipeline/daily.py::_CallLimitedLLMClient`) caps total `.analyze()`
-    calls so an unexpectedly large candidate/filing fan-out cannot spend an
-    unbounded amount within one run before the next run's budget gate would
-    ever see it.
-    """
-
-    def test_calls_beyond_the_cap_are_skipped_and_audited(
-        self, base_deps, state_store, settings
-    ):
-        object.__setattr__(settings.llm, "max_llm_calls_per_run", 1)
-        llm_client = CapturingLLMClient()
-        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        # Both AAPL and MSFT have news to summarize (2 candidates -> 2
-        # would-be calls), but the cap only lets the first one through.
-        assert len(llm_client.requests) == 1
-        assert result.status == RunStatus.DEGRADED
-        assert result.exit_code == 0
-        assert _step_status(state_store, result.run_id, "6_llm") == "failed"
-
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            rows = conn.execute(
-                "SELECT status, error_detail FROM llm_calls ORDER BY created_at"
-            ).fetchall()
-        statuses = [row[0] for row in rows]
-        assert statuses.count("budget_skipped") == 1
-        skipped_detail = next(
-            detail for status, detail in rows if status == "budget_skipped"
-        )
-        assert "max_llm_calls_per_run" in skipped_detail
-
-    def test_a_high_enough_cap_lets_every_candidate_through(
-        self, base_deps, state_store, settings
-    ):
-        object.__setattr__(settings.llm, "max_llm_calls_per_run", 200)
-        llm_client = CapturingLLMClient()
-        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        assert len(llm_client.requests) == 2
-        assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            statuses = [
-                row[0]
-                for row in conn.execute("SELECT status FROM llm_calls").fetchall()
-            ]
-        assert "budget_skipped" not in statuses
+        assert _step_status(state_store, result.run_id, "5_text") == "failed"
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        by_symbol = {item["symbol"]: item for item in payload["candidates"]}
+        # Both candidates are exported; MSFT simply carries no news.
+        assert set(by_symbol) == {"AAPL", "MSFT"}
+        assert by_symbol["MSFT"]["news"] == []
+        assert [item["source_id"] for item in by_symbol["AAPL"]["news"]] == [
+            "news:AAPL"
+        ]
 
 
 class TestHeldSymbolGetsTextCoverage:
@@ -746,10 +616,15 @@ class TestScreeningFailureIsFatalAndRerunnable:
         assert retried.run_id != failed.run_id
 
 
-class TestPerformanceSummaryReachesLLMPrompt:
+class TestPerformanceSummaryReachesAnalysisInput:
     """P2-12 (REQ-003): P1-06's PaperJournal.summarize_performance() wiring."""
 
-    def test_closed_paper_trade_performance_reaches_the_news_prompt(
+    @staticmethod
+    def _exported(result):
+        assert result.analysis_input_path is not None
+        return json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+
+    def test_closed_paper_trade_performance_reaches_the_exported_context(
         self, base_deps, state_store
     ):
         position = Position(
@@ -766,34 +641,24 @@ class TestPerformanceSummaryReachesLLMPrompt:
         PaperJournal(state_store).close_position(
             position.position_id, AS_OF - timedelta(days=5), 110.0, "target"
         )
-        llm_client = CapturingLLMClient()
-        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+        deps = replace(base_deps, news_client=FakeNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        assert llm_client.requests
-        assert any(
-            "<performance_summary>" in request.prompt for request in llm_client.requests
-        )
-        assert any(
-            "クローズ済み取引数: 1" in request.prompt for request in llm_client.requests
-        )
+        performance = self._exported(result)["context"]["performance_summary"]
+        assert "<performance_summary>" in performance
+        assert "クローズ済み取引数: 1" in performance
 
     def test_no_closed_trades_yet_omits_the_performance_block_without_failing(
         self, base_deps
     ):
-        llm_client = CapturingLLMClient()
-        deps = replace(base_deps, news_client=FakeNewsClient(), llm_client=llm_client)
+        deps = replace(base_deps, news_client=FakeNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        assert llm_client.requests
-        assert all(
-            "<performance_summary>" not in request.prompt
-            for request in llm_client.requests
-        )
+        assert self._exported(result)["context"]["performance_summary"] is None
 
     def test_summarize_performance_failure_degrades_gracefully_not_fatally(
         self, base_deps, tmp_path
@@ -801,24 +666,28 @@ class TestPerformanceSummaryReachesLLMPrompt:
         exploding_state_store = ExplodingPerformanceSummaryStateStore(
             Database(tmp_path / "copilot.duckdb")
         )
-        llm_client = CapturingLLMClient()
         deps = replace(
             base_deps,
             state_store=exploding_state_store,
             news_client=FakeNewsClient(),
-            llm_client=llm_client,
         )
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         # The performance-summary lookup failure is swallowed by
-        # `_compute_performance_summary()`'s own try/except: it never
-        # reaches a per-candidate `summarize_news`/`analyze_filing` call, so
-        # the LLM step itself still succeeds (unlike a real per-candidate
-        # LLM failure, which would degrade the run).
+        # `_compute_performance_summary()`'s own try/except, so the export
+        # step still succeeds -- it just omits the performance block.
         assert result.status == RunStatus.SUCCESS
-        assert llm_client.requests
-        assert all(
-            "<performance_summary>" not in request.prompt
-            for request in llm_client.requests
+        assert self._exported(result)["context"]["performance_summary"] is None
+
+    def test_exported_file_lands_beside_the_markdown_report(self, base_deps, tmp_path):
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert (
+            result.analysis_input_path
+            == (
+                tmp_path / "reports" / AS_OF.isoformat() / ANALYSIS_INPUT_FILENAME
+            ).resolve()
         )

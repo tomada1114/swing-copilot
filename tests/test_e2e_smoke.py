@@ -1,14 +1,18 @@
 """Fully offline five-symbol E2E smoke test for all eight daily-batch steps (FR-12).
 
-Every external port (`DataProvider`, text clients, `EdgarClient`, LLM client,
-`Notifier`, `Clock`) is a fake — no real network/API call anywhere, matching
-every other test module's pattern in this repo (the autouse socket guard in
+Every external port (`DataProvider`, text clients, `EdgarClient`, `Notifier`,
+`Clock`) is a fake — no real network/API call anywhere, matching every other
+test module's pattern in this repo (the autouse socket guard in
 `tests/conftest.py` would fail the test immediately if one slipped through).
+
+Qualitative analysis itself is not performed by `copilot-daily` (it exports
+`analysis_input.json` for the `swing-daily` skill and stops); this suite
+therefore asserts on the *exported* analysis input, not on any LLM prompt.
 """
 
 from __future__ import annotations
 
-import re
+import json
 from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
@@ -16,10 +20,12 @@ import pytest
 
 from swing_copilot.config import load_settings
 from swing_copilot.data.base import BarFetchResult
-from swing_copilot.llm.schemas import FilingAnalysis, NewsSummary, SourcedFact
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
-from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
+from swing_copilot.report.daily_brief import (
+    MARKET_STRIP_SYMBOLS,
+    PENDING_ANALYSIS_MESSAGE,
+)
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -130,48 +136,6 @@ class FakeCalendarClient:
         return []
 
 
-class FakeLLMClient:
-    def __init__(self):
-        self.requests = []
-
-    def analyze(self, request):
-        self.requests.append(request)
-        match = re.search(r"対象銘柄: (\S+)", request.prompt)
-        symbol = match.group(1) if match else "UNKNOWN"
-        if request.schema is NewsSummary:
-            return NewsSummary(
-                symbol=symbol,
-                period="test-period",
-                facts=[
-                    SourcedFact(
-                        statement="Fake fact.", source_ids=list(request.source_ids)
-                    )
-                ],
-                interpretation=["May indicate continued stability."],
-                sentiment=1,
-                risk_flags=[],
-                sources=["https://example.com"],
-                catalyst_quality="none",
-                catalyst_quality_source_ids=list(request.source_ids),
-            )
-        return FilingAnalysis(
-            symbol=symbol,
-            filing_type="10-Q",
-            facts=[
-                SourcedFact(
-                    statement="Fake filing fact.", source_ids=list(request.source_ids)
-                )
-            ],
-            interpretation=["May suggest steady operations."],
-            red_flags=[],
-            yoy_changes=[],
-            guidance_direction="neutral",
-        )
-
-    def get_cached_at(self, request):
-        del request
-
-
 class FakeNotifier:
     def __init__(self):
         self.calls = []
@@ -233,7 +197,6 @@ def deps(tmp_path):
         edgar_client=FakeEdgarClient(),
         news_client=FakeNewsClient(),
         calendar_client=FakeCalendarClient(),
-        llm_client=FakeLLMClient(),
         notifier=FakeNotifier(),
         output_dir=str(tmp_path / "reports"),
     )
@@ -263,7 +226,7 @@ class TestFiveSymbolEndToEnd:
             "3_screening",
             "4_risk",
             "5_text",
-            "6_llm",
+            "6_analysis_export",
             "7_notify",
             "8_output",
             "mae_mfe",
@@ -271,14 +234,42 @@ class TestFiveSymbolEndToEnd:
         ]
         assert all(status == "success" for _step, status in steps)
 
-    def test_markdown_contains_every_candidate_and_llm_content(self, deps):
+    def test_markdown_contains_every_candidate_and_the_pending_analysis_placeholder(
+        self, deps
+    ):
+        # `copilot-daily` never performs qualitative analysis itself, so its
+        # own report always shows the pending-analysis placeholder -- the
+        # `swing-daily` skill and `copilot-ingest-analysis` fill it in later.
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.report_path is not None
         markdown = result.report_path.read_text(encoding="utf-8")
         for symbol in SYMBOLS:
             assert f"## {symbol}" in markdown
-        assert "May indicate continued stability." in markdown
+        assert f"- 定性: {PENDING_ANALYSIS_MESSAGE}" in markdown
+
+    def test_analysis_input_is_exported_with_expected_content(self, deps):
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.analysis_input_path is not None
+        assert result.analysis_input_path.is_file()
+
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        assert payload["schema_version"] == "analysis-input-v1"
+        assert payload["as_of"] == AS_OF.isoformat()
+        assert payload["context"]["market_regime"] is not None
+
+        by_symbol = {item["symbol"]: item for item in payload["candidates"]}
+        assert set(by_symbol) == set(SYMBOLS)
+        for symbol, candidate in by_symbol.items():
+            assert "<score_breakdown>" in candidate["score_breakdown"]
+            assert "<risk_constraints>" in candidate["risk_constraints"]
+            news_ids = {item["source_id"] for item in candidate["news"]}
+            assert news_ids == {f"news:{symbol}"}
+            filing_ids = {item["source_id"] for item in candidate["filings"]}
+            assert filing_ids == {f"edgar:{symbol}"}
+            assert candidate["filings"][0]["form_type"] == "10-Q"
 
     def test_price_step_also_populates_the_market_strip(self, deps):
         # The market strip's symbols (SPY/QQQ/^VIX/^TNX) are never part of
@@ -351,16 +342,14 @@ class TestFiveSymbolEndToEnd:
             )
         )
 
-        run_daily(DailyRunOptions(), deps)
+        result = run_daily(DailyRunOptions(), deps)
 
-        aapl_requests = [
-            request
-            for request in deps.llm_client.requests
-            if "対象銘柄: AAPL" in request.prompt
-        ]
-        assert aapl_requests
-        assert any("<decision_history>" in request.prompt for request in aapl_requests)
-        assert any("相関が高かった" in request.prompt for request in aapl_requests)
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
+        assert aapl["decision_history"] is not None
+        assert "<decision_history>" in aapl["decision_history"]
+        assert "相関が高かった" in aapl["decision_history"]
 
     def test_explicit_as_of_run_does_not_include_decision_history(self, deps):
         prior_id = deps.state_store.start_run(
@@ -391,10 +380,9 @@ class TestFiveSymbolEndToEnd:
             )
         )
 
-        run_daily(DailyRunOptions(as_of=AS_OF), deps)
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
-        assert deps.llm_client.requests
-        assert all(
-            "<decision_history>" not in request.prompt
-            for request in deps.llm_client.requests
-        )
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
+        assert aapl["decision_history"] is None

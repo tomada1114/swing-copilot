@@ -11,17 +11,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from pydantic import TypeAdapter, ValidationError
 
 from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.models import RunStatus
-from swing_copilot.report import daily_brief as _brief_module
 from swing_copilot.report.daily_brief import DailyBrief
 
 if TYPE_CHECKING:
@@ -30,25 +27,9 @@ if TYPE_CHECKING:
 REPORT_CONTEXT_FILENAME = "report_context.json"
 CONTEXT_SCHEMA_VERSION = "report-context-v1"
 
-# `report/daily_brief.py` uses postponed annotations and keeps `date`/
-# `datetime`/`UUID` in a `TYPE_CHECKING` block, since that module has no
-# runtime use for them beyond type hints. Pydantic, however, evaluates a
-# dataclass's annotation strings against its *defining* module's globals, so
-# it cannot build a `DailyBrief` adapter while those three names are absent
-# from that namespace.
-#
-# Binding them there from here resolves the adapter at the single point that
-# needs it, while leaving `report/daily_brief.py`'s own import list
-# untouched. The bound objects are exactly what the annotations already
-# denote, so nothing else about the module changes.
-_BRIEF_TYPE_NAMESPACE = {
-    "date": date,
-    "datetime": datetime,
-    "UUID": UUID,
-}
-for _name, _type in _BRIEF_TYPE_NAMESPACE.items():
-    setattr(_brief_module, _name, _type)
-
+# Pydantic evaluates a dataclass's annotation strings against its *defining*
+# module's globals, so `report/daily_brief.py` imports `date`/`datetime`/`UUID`
+# at runtime for this adapter's benefit.
 _BRIEF_ADAPTER: TypeAdapter[DailyBrief] = TypeAdapter(DailyBrief)
 
 
@@ -113,12 +94,13 @@ def read_report_context(path: Path) -> ReportContext:
     try:
         status = RunStatus(payload["status"])
         brief = _BRIEF_ADAPTER.validate_python(payload["brief"])
+        # Required, not defaulted: silently falling back to the process CWD
+        # would rewrite the report somewhere other than the run's archive.
+        output_dir = Path(str(payload["output_dir"]))
     except (KeyError, ValueError, ValidationError) as exc:
         msg = f"Report context failed validation: {path}\n{exc}"
         raise AnalysisIngestError(msg) from exc
-    return ReportContext(
-        brief=brief, status=status, output_dir=Path(str(payload.get("output_dir", ".")))
-    )
+    return ReportContext(brief=brief, status=status, output_dir=output_dir)
 
 
 def _read_payload(path: Path) -> dict[str, Any]:

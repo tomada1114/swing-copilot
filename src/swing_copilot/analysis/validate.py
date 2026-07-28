@@ -86,8 +86,10 @@ class ValidatedAnalysis:
     no_trade: bool
     no_trade_reason: str | None
     outcomes: tuple[SymbolOutcome, ...]
-    #: `source_id` -> URL, taken from the *input* file so the report never has
-    #: to trust a skill-supplied link (and ingest never touches the database).
+    #: `source_id` -> URL for every citable ID (per-symbol news/filings plus
+    #: the run-wide calendar events), taken from the *input* file so the report
+    #: never has to trust a skill-supplied link (and ingest never touches the
+    #: database).
     source_urls: Mapping[str, str]
 
     def for_symbol(self, symbol: str) -> SymbolOutcome | None:
@@ -302,7 +304,12 @@ def _verified_no_trade_reason(reason: str | None) -> str | None:
 
 
 def _source_urls(analysis_input: AnalysisInput) -> dict[str, str]:
-    urls: dict[str, str] = {}
+    # Calendar events first: their IDs are citable by *every* symbol
+    # (`_provenance_error`), so omitting them here would leave a legitimately
+    # cited source rendering as a bare ID instead of a link.
+    urls: dict[str, str] = {
+        event.source_id: event.url for event in analysis_input.context.calendar_events
+    }
     for candidate in analysis_input.candidates:
         for item in candidate.news:
             urls[item.source_id] = item.url

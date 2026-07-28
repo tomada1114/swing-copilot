@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import Any
 
 import pytest
 
@@ -198,57 +199,123 @@ class TestProvenance:
         assert "edgar:unknown" in error
 
 
+_VIOLATION = "今すぐ買うべき。"
+
+
+def _news(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"facts": [], "interpretation": [], "risk_flags": []}
+    payload.update(overrides)
+    return payload
+
+
+def _filing(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source_id": FILING_ID,
+        "facts": [],
+        "interpretation": [],
+        "red_flags": [],
+        "yoy_changes": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _assessment(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "summary": "中立な評価。",
+        "strengths": [],
+        "concerns": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
 class TestCon03:
+    # One case per free-text field `validate._display_texts()` yields. Deleting
+    # any single `yield` there must fail exactly one of these.
     @pytest.mark.parametrize(
-        ("field", "value"),
+        "override",
         [
-            (
-                "news_summary",
+            pytest.param(
                 {
-                    "facts": [{"text": "今すぐ買うべき。", "source_ids": [NEWS_ID]}],
-                    "interpretation": [],
-                    "risk_flags": [],
+                    "news_summary": _news(
+                        facts=[{"text": _VIOLATION, "source_ids": [NEWS_ID]}]
+                    )
                 },
+                id="news.facts.text",
             ),
-            (
-                "screening_assessment",
-                {"summary": "強く推奨できる構成。", "strengths": [], "concerns": []},
+            pytest.param(
+                {"news_summary": _news(interpretation=[_VIOLATION])},
+                id="news.interpretation",
             ),
-            (
-                "verdict",
+            pytest.param(
+                {"news_summary": _news(risk_flags=[_VIOLATION])},
+                id="news.risk_flags",
+            ),
+            pytest.param(
                 {
-                    "recommendation": "proceed",
-                    "reasons": [{"text": "buy now", "source_ids": []}],
+                    "filing_analyses": [
+                        _filing(facts=[{"text": _VIOLATION, "source_ids": [FILING_ID]}])
+                    ]
                 },
+                id="filing.facts.text",
+            ),
+            pytest.param(
+                {"filing_analyses": [_filing(interpretation=[_VIOLATION])]},
+                id="filing.interpretation",
+            ),
+            pytest.param(
+                {"filing_analyses": [_filing(red_flags=[_VIOLATION])]},
+                id="filing.red_flags",
+            ),
+            pytest.param(
+                {"filing_analyses": [_filing(yoy_changes=[_VIOLATION])]},
+                id="filing.yoy_changes",
+            ),
+            pytest.param(
+                {"screening_assessment": _assessment(summary=_VIOLATION)},
+                id="screening_assessment.summary",
+            ),
+            pytest.param(
+                {"screening_assessment": _assessment(strengths=[_VIOLATION])},
+                id="screening_assessment.strengths",
+            ),
+            pytest.param(
+                {"screening_assessment": _assessment(concerns=[_VIOLATION])},
+                id="screening_assessment.concerns",
+            ),
+            pytest.param(
+                {
+                    "verdict": {
+                        "recommendation": "proceed",
+                        "reasons": [{"text": _VIOLATION, "source_ids": []}],
+                    }
+                },
+                id="verdict.reasons.text",
             ),
         ],
     )
     def test_a_violation_in_any_displayed_field_withholds_the_symbol(
         self,
         write_documents,
-        field,
-        value,
+        override,
     ):
-        validated = _validated(
-            write_documents, symbols=[symbol_payload(**{field: value})]
-        )
+        validated = _validated(write_documents, symbols=[symbol_payload(**override)])
 
         outcome = validated.outcomes[0]
         assert outcome.error is not None
         assert "CON-03 violation" in outcome.error
+        # Withholding is total: no field of a failing symbol may survive.
+        assert outcome.news_summary is None
+        assert outcome.filings == ()
         assert outcome.screening_assessment is None
+        assert outcome.verdict is None
 
-    def test_a_violation_in_a_filing_field_withholds_the_symbol(self, write_documents):
+    def test_a_behavioral_violation_in_a_filing_field_withholds_the_symbol(
+        self, write_documents
+    ):
         payload = symbol_payload(
-            filing_analyses=[
-                {
-                    "source_id": FILING_ID,
-                    "facts": [],
-                    "interpretation": [],
-                    "red_flags": ["投資家心理が悪化している。"],
-                    "yoy_changes": [],
-                }
-            ]
+            filing_analyses=[_filing(red_flags=["投資家心理が悪化している。"])]
         )
 
         validated = _validated(write_documents, symbols=[payload])
@@ -343,10 +410,36 @@ class TestResolvedMetadata:
     def test_source_urls_come_from_the_input_document(self, write_documents):
         validated = _validated(write_documents)
 
+        # Calendar events are citable by every symbol, so their URLs must be
+        # resolvable too -- otherwise a legitimately cited macro event renders
+        # as a bare source ID instead of a link.
         assert validated.source_urls == {
             NEWS_ID: "https://example.com/news",
             FILING_ID: "https://example.com/filing",
+            CALENDAR_ID: "https://fred.stlouisfed.org/release?rid=1",
         }
+
+    def test_a_fact_citing_a_calendar_event_resolves_to_its_url(self, write_documents):
+        payload = symbol_payload(
+            news_summary={
+                "facts": [
+                    {
+                        "text": "雇用統計が as_of 直後に予定されている。",
+                        "source_ids": [CALENDAR_ID],
+                    }
+                ],
+                "interpretation": [],
+                "risk_flags": [],
+            }
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        assert validated.outcomes[0].error is None
+        assert (
+            validated.source_urls[CALENDAR_ID]
+            == "https://fred.stlouisfed.org/release?rid=1"
+        )
 
 
 class TestInputLoading:

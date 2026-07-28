@@ -218,6 +218,20 @@ class TestReadFailures:
         with pytest.raises(AnalysisIngestError, match="failed validation"):
             read_report_context(path)
 
+    def test_a_missing_output_dir_is_a_hard_failure(self, tmp_path):
+        # Defaulting to the CWD would silently rewrite the report outside the
+        # run's own archive directory.
+        path = write_report_context(
+            ReportContext(_populated_brief(), RunStatus.SUCCESS, Path("reports")),
+            tmp_path,
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        del payload["output_dir"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(AnalysisIngestError, match="failed validation"):
+            read_report_context(path)
+
     def test_a_corrupt_brief_is_a_hard_failure(self, tmp_path):
         path = tmp_path / REPORT_CONTEXT_FILENAME
         path.write_text(

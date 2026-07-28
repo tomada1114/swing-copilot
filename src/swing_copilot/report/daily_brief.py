@@ -4,13 +4,18 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import timedelta
+
+# `date`/`datetime`/`UUID` are imported at runtime, not under TYPE_CHECKING:
+# `analysis/snapshot.py` builds a pydantic `TypeAdapter(DailyBrief)` to archive
+# and reload this module's dataclasses, and pydantic resolves their annotation
+# strings against *this* module's globals. Hiding these three names would make
+# that adapter unbuildable.
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
+from uuid import UUID  # noqa: TC003
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from datetime import date, datetime
-    from uuid import UUID
 
     from swing_copilot.analysis.schemas import SourcedFact
     from swing_copilot.analysis.validate import (
@@ -703,10 +708,10 @@ def build_analysis_brief(
         return BriefAnalysis(True, MISSING_ANALYSIS_MESSAGE)
     if outcome.error is not None:
         return BriefAnalysis(True, WITHHELD_ANALYSIS_MESSAGE)
-    return _verifiedbuild_analysis_brief(outcome, analysis.source_urls)
+    return _build_verified_analysis_brief(outcome, analysis.source_urls)
 
 
-def _verifiedbuild_analysis_brief(
+def _build_verified_analysis_brief(
     outcome: SymbolOutcome, urls: Mapping[str, str]
 ) -> BriefAnalysis:
     news = outcome.news_summary

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Protocol
 import edgar
 
 from swing_copilot.clock import SystemClock
+from swing_copilot.retry import retry_external_call
 from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.text.base import TextItem
 
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
 _FUNDAMENTALS_FORMS = ("10-K", "10-Q")
 _FINANCIAL_TAXONOMY_PREFIX = "us-gaap:"
 _MIN_REQUEST_INTERVAL_SECONDS = 0.1  # 10 requests/second cap
-_RETRY_DELAYS_SECONDS = (1.0, 2.0)  # 3 total attempts
 _DEFAULT_FUNDAMENTALS_LOOKBACK_DAYS = 400  # SEC filing lookback window; owned independently of pipeline/daily.py's price-history lookback
 _SEC_ARCHIVE_URL = "https://www.sec.gov/Archives/edgar"
 
@@ -308,14 +308,11 @@ class EdgarClient:
 
     def _with_retries[T](self, operation: Callable[[], T]) -> T:
         """Run one EDGAR boundary operation with a bounded retry policy."""
-        for delay in _RETRY_DELAYS_SECONDS:
-            self._throttle()
-            try:
-                return operation()
-            except Exception:
-                self._sleep_fn(delay)
-        self._throttle()
-        return operation()
+        return retry_external_call(
+            operation,
+            before_attempt=self._throttle,
+            sleep_fn=self._sleep_fn,
+        )
 
     def fetch_fundamentals(
         self,

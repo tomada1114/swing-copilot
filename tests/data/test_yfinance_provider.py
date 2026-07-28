@@ -72,12 +72,17 @@ class TestGetDailyBars:
         assert failures["DELISTED"].retryable is False
         assert set(result.bars["symbol"]) == {"AAPL"}
 
-    def test_download_exception_marks_all_symbols_retryable_failure(self):
-        def _boom(*_args, **_kwargs):
-            msg = "network unreachable"
-            raise RuntimeError(msg)
+    def test_transport_exception_retries_to_the_attempt_limit(self):
+        calls = 0
+        sleeps: list[float] = []
 
-        provider = YFinanceProvider(download_fn=_boom)
+        def _boom(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            msg = "network unreachable"
+            raise ConnectionError(msg)
+
+        provider = YFinanceProvider(download_fn=_boom, sleep_fn=sleeps.append)
         result = provider.get_daily_bars(
             ["AAPL", "MSFT"], date(2026, 7, 15), date(2026, 7, 18)
         )
@@ -85,6 +90,72 @@ class TestGetDailyBars:
         assert result.bars.empty
         assert {failure.symbol for failure in result.failures} == {"AAPL", "MSFT"}
         assert all(failure.retryable for failure in result.failures)
+        assert calls == 3
+        assert sleeps == [1.0, 2.0]
+
+    def test_partial_batch_retry_keeps_successful_symbols_out_of_second_call(self):
+        dates = ["2026-07-15"]
+        aapl = _frame(
+            {
+                ("Open", "AAPL"): [10.0],
+                ("High", "AAPL"): [10.5],
+                ("Low", "AAPL"): [9.5],
+                ("Close", "AAPL"): [10.2],
+                ("Volume", "AAPL"): [1000],
+            },
+            dates,
+        )
+        msft = _frame(
+            {
+                ("Open", "MSFT"): [20.0],
+                ("High", "MSFT"): [20.5],
+                ("Low", "MSFT"): [19.5],
+                ("Close", "MSFT"): [20.2],
+                ("Volume", "MSFT"): [2000],
+            },
+            dates,
+        )
+        requested_symbols: list[list[str]] = []
+
+        def _download(symbols, **_kwargs):
+            requested_symbols.append(symbols)
+            return aapl if symbols == ["AAPL", "MSFT"] else msft
+
+        provider = YFinanceProvider(download_fn=_download, sleep_fn=lambda _delay: None)
+        result = provider.get_daily_bars(
+            ["AAPL", "MSFT"], date(2026, 7, 15), date(2026, 7, 18)
+        )
+
+        assert requested_symbols == [["AAPL", "MSFT"], ["MSFT"]]
+        assert set(result.bars["symbol"]) == {"AAPL", "MSFT"}
+        assert result.failures == ()
+
+    def test_validation_exception_is_not_retried(self):
+        calls = 0
+
+        def _invalid(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            msg = "invalid ticker argument"
+            raise ValueError(msg)
+
+        provider = YFinanceProvider(download_fn=_invalid, sleep_fn=lambda _delay: None)
+        result = provider.get_daily_bars(["AAPL"], date(2026, 7, 15), date(2026, 7, 18))
+
+        assert calls == 1
+        assert result.failures[0].retryable is False
+
+    def test_passes_explicit_timeout_to_every_download_attempt(self):
+        timeouts: list[object] = []
+
+        def _download(*_args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return pd.DataFrame()
+
+        provider = YFinanceProvider(download_fn=_download, sleep_fn=lambda _delay: None)
+        provider.get_daily_bars(["AAPL"], date(2026, 7, 15), date(2026, 7, 18))
+
+        assert timeouts == [10, 10, 10]
 
     def test_real_download_fn_default_is_yfinance_download(self):
 

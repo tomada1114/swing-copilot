@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import httpx
 
 from swing_copilot.clock import SystemClock
+from swing_copilot.retry import retry_external_call
 from swing_copilot.text.base import TextItem
 
 if TYPE_CHECKING:
@@ -84,15 +85,16 @@ class FinnhubNewsClient:
         Returns:
             News items normalized to `TextItem` (`source_type="news"`).
         """
-        self._throttle()
-        raw_items = self._http_get(
-            FINNHUB_NEWS_URL,
-            {
-                "symbol": symbol,
-                "from": since.isoformat(),
-                "to": as_of.isoformat(),
-                "token": self._api_key,
-            },
+        params = {
+            "symbol": symbol,
+            "from": since.isoformat(),
+            "to": as_of.isoformat(),
+            "token": self._api_key,
+        }
+        raw_items = retry_external_call(
+            lambda: self._http_get(FINNHUB_NEWS_URL, params),
+            before_attempt=self._throttle,
+            sleep_fn=self._sleep_fn,
         )
         fetched_at = self._date_clock.now()
         return [

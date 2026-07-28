@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 import httpx
@@ -184,6 +185,40 @@ class TestGetSp500Universe:
         )
 
         assert result == refreshed
+
+    def test_snapshot_replace_failure_preserves_previous_file_and_cleans_temp(
+        self, tmp_path, monkeypatch
+    ):
+        snapshot_path = tmp_path / "universe_snapshot.csv"
+        cached = _members(("AAPL", "Apple Inc.", "Information Technology", "AAPL"))
+        get_sp500_universe(
+            AS_OF,
+            options=UniverseFetchOptions(
+                snapshot_path=snapshot_path, fetch_fn=lambda: cached
+            ),
+        )
+        previous_bytes = snapshot_path.read_bytes()
+        refreshed = _members(
+            ("MSFT", "Microsoft Corp.", "Information Technology", "MSFT")
+        )
+
+        def _boom(_source, _destination):
+            msg = "replace failed"
+            raise OSError(msg)
+
+        monkeypatch.setattr(Path, "replace", _boom)
+
+        with pytest.raises(OSError, match="replace failed"):
+            get_sp500_universe(
+                AS_OF,
+                force_refresh=True,
+                options=UniverseFetchOptions(
+                    snapshot_path=snapshot_path, fetch_fn=lambda: refreshed
+                ),
+            )
+
+        assert snapshot_path.read_bytes() == previous_bytes
+        assert list(tmp_path.glob(".universe_snapshot.csv.*.tmp")) == []
 
     def test_falls_back_to_snapshot_when_fetch_fails(self, tmp_path):
         snapshot_path = tmp_path / "universe_snapshot.csv"
@@ -571,13 +606,9 @@ class TestFetchFromWikipedia:
         assert user_agent.startswith("swing-copilot/")
         assert "github.com/tomada1114/swing-copilot" in user_agent
 
-    def test_retries_with_backoff_then_propagates_after_persistent_403(
-        self, monkeypatch
-    ):
+    def test_does_not_retry_non_transient_403(self, monkeypatch):
         calls: list[_RecordedCall] = []
-        responses: list[httpx.Response | Exception] = [
-            _status_error_response(403) for _ in range(3)
-        ]
+        responses: list[httpx.Response | Exception] = [_status_error_response(403)]
         monkeypatch.setattr(
             "swing_copilot.universe.httpx.get",
             _fake_httpx_get(calls, responses),
@@ -587,8 +618,8 @@ class TestFetchFromWikipedia:
         with pytest.raises(httpx.HTTPStatusError):
             fetch_from_wikipedia(sleep_fn=sleeps.append)
 
-        assert len(calls) == 3
-        assert sleeps == [1.0, 2.0]
+        assert len(calls) == 1
+        assert sleeps == []
 
     def test_retries_transient_failure_then_succeeds(self, monkeypatch):
         table = pd.DataFrame(
@@ -600,7 +631,7 @@ class TestFetchFromWikipedia:
         )
         calls: list[_RecordedCall] = []
         responses: list[httpx.Response | Exception] = [
-            _status_error_response(403),
+            _status_error_response(503),
             _ok_response(),
         ]
         monkeypatch.setattr(

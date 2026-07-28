@@ -180,8 +180,8 @@ def require_secrets(secrets: Secrets, features: set[str]) -> None:
 > （Wikimedia UAポリシーに沿った`"swing-copilot/<version> (https://github.com/
 > tomada1114/swing-copilot)"`形式のUser-Agent、`timeout=10.0`、
 > `follow_redirects=True`）に変更し、`data/edgar.py`の`_with_retries`と
-> 同じ固定バックオフ（`_RETRY_DELAYS_SECONDS = (1.0, 2.0)`、計3回試行、
-> 最終試行は無防備で例外を伝播）で`httpx.HTTPError`のみをリトライする。
+> 共通の固定バックオフ（1秒、2秒、計3回試行）で、接続・タイムアウト、
+> HTTP 408/429/5xxだけをリトライする。その他の4xxは即時に伝播する。
 > 取得したHTMLは`io.StringIO`経由で従来どおり`pd.read_html`へ渡すため、
 > テーブルのパース・列名仕様（本節および3.2節末尾の記載）は変更ない。
 > パース/バリデーション失敗はリトライ対象外のまま。
@@ -286,7 +286,7 @@ class YFinanceProvider(DataProvider):
         """
 ```
 
-**エラー処理**: yfinanceは非公式ラッパーでありSLAがない。1回の一括取得を基本とし、失敗銘柄だけを上限付きで再試行する。固定sleepはテスト困難なため、待機戦略とclockを注入してユニットテスト可能にする。
+**エラー処理**: yfinanceは非公式ラッパーでありSLAがない。各`download`呼び出しには`timeout=10`を渡し、接続・タイムアウト・HTTP 408/429/5xxまたはプロバイダ応答で欠けた銘柄だけを、固定バックオフ1秒・2秒で最大3回まで再試行する。すでに取得できた銘柄を再送しない。その他の例外は非retryableな`FetchFailure`として返す。固定sleepはテスト困難なため、待機関数を注入してユニットテスト可能にする。
 
 ### 3.5 EODHD対応（P4）
 
@@ -321,7 +321,7 @@ class EdgarClient:
 ```
 
 **依存**: `edgartools`
-**エラー処理**: EDGAR境界の一時障害は合計3試行（既定backoff 1秒、2秒）までとし、各試行前に10リクエスト/秒制限を適用する。fake clock/sleepで「一時失敗後成功」「3回で停止」「全試行がthrottle対象」を検証する。設定・入力検証エラーはretryしない。銘柄単位で取得失敗した場合はスキップしログ記録、バッチは継続する。
+**エラー処理**: EDGAR境界の接続・タイムアウト・HTTP 408/429/5xxは合計3試行（既定backoff 1秒、2秒）までとし、各試行前に10リクエスト/秒制限を適用する。その他の4xx、設定・入力検証エラーはretryしない。fake clock/sleepで「一時失敗後成功」「3回で停止」「全試行がthrottle対象」を検証する。銘柄単位で取得失敗した場合はスキップしログ記録、バッチは継続する。
 
 **P6-26実装時追記（roadmap §5 P6-26）**: `fetch_filing_texts(symbol, form_types, *, as_of, since=None, limit=None)`に`since`/`limit`を追加した。従来は`as_of`（point-in-time上限）のみで下限も件数上限もなく、返却順も外部`get_filings()`の順そのまま——`fetch_fundamentals()`が`filed_at`で明示ソートしているのと非対称だった。`since`（`filed_at >= since`、inclusive下限）と`limit`（最大件数）で絞り込んだ後、常に`filed_at`降順でソートしてから`limit`を適用するため、「直近N件」の意味が外部ライブラリの返却順に左右されない。呼び出し元`text/edgar_filings.py::fetch_recent_filings_text()`は`FilingLookbackBounds(lookback_days, limit)`（`settings.analysis.filing_lookback_days`/`max_filings_per_symbol`、既定90日・3件。P7で`settings.llm.*`から移設）から`since = as_of - lookback_days`を計算して渡す。`fetch_recent_filings()`（`FilingRef`を返す方、`pipeline/daily.py`からは未使用）は本Issueのスコープ外のため変更していない。
 
@@ -360,7 +360,7 @@ class MarketStore:
         """DuckDB接続を返す（screening/backtestからの直接SQL利用向け）。"""
 ```
 
-複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。Parquetはdestinationと同じdirectoryへtemp fileを書き、成功時だけ`os.replace()`する。書き込み/replace失敗時は従来partitionを保持し、tempをcleanupする。
+複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。ParquetとCSVはdestinationと同じdirectoryへ一意なtemp fileを書き、成功時だけ原子的に置換する。書き込み/replace失敗時は従来destinationを保持し、tempをcleanupする。
 
 ### 3.8 `storage/state_store.py`
 
@@ -715,7 +715,7 @@ def fetch_calendar_events(start: "date", end: "date") -> list["CalendarEvent"]:
     """FRED APIから経済指標カレンダーを取得する。"""
 ```
 
-**エラー処理**: いずれも銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)は`skipped`、(7)(8)は縮退版で継続する（FR-12）。
+**エラー処理**: Finnhubニュース、FRED、EDGAR境界は接続・タイムアウト・HTTP 408/429/5xxだけを固定バックオフ1秒・2秒で最大3回まで再試行する。Finnhubの60コール/分制限とEDGARの10リクエスト/秒制限は各試行前に適用する。その他の4xxとパース・検証エラーは即時に伝播する。銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)は`skipped`、(7)(8)は縮退版で継続する（FR-12）。
 
 **P6-26実装時追記（roadmap §5 P6-26）**: 実際の`fetch_recent_filings_text(edgar_client, symbol, form_types, as_of, bounds: FilingLookbackBounds)`は、上記の擬似シグネチャに`bounds`（`lookback_days`/`limit`をまとめたfrozen dataclass。5引数ガイドライン順守のためグルーピング）を追加している。`since = as_of - bounds.lookback_days`を計算し`data/edgar.py::EdgarClient.fetch_filing_texts()`へ`since`/`limit`として渡す。`pipeline/daily.py::_fetch_symbol_text_items()`は`settings.analysis.filing_lookback_days`/`max_filings_per_symbol`（既定90日・3件、ニュース側`max_news_items_per_symbol`と対称。P7で`settings.llm.*`から移設）から`FilingLookbackBounds`を組み立てて呼び出す。
 

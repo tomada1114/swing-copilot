@@ -10,6 +10,7 @@ rather than trusting yfinance's own end-date handling.
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -17,12 +18,15 @@ import pandas as pd
 import yfinance as yf
 
 from swing_copilot.data.base import BARS_COLUMNS, BarFetchResult, FetchFailure
+from swing_copilot.retry import RETRY_DELAYS_SECONDS, is_retryable_external_error
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import date
 
 _REQUIRED_FIELDS = ("Open", "High", "Low", "Close", "Volume")
 _LATEST_BAR_LOOKBACK_DAYS = 10
+_REQUEST_TIMEOUT_SECONDS = 10
 
 
 class _DownloadFn(Protocol):
@@ -96,14 +100,21 @@ def _normalize(
 class YFinanceProvider:
     """Prototype `DataProvider` backed by `yfinance.download` (CON-02)."""
 
-    def __init__(self, download_fn: _DownloadFn = yf.download) -> None:
+    def __init__(
+        self,
+        download_fn: _DownloadFn = yf.download,
+        *,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
         """Create a provider.
 
         Args:
             download_fn: Injectable stand-in for `yfinance.download`, used by
                 tests to avoid real network calls.
+            sleep_fn: Injectable delay function used between retry attempts.
         """
         self._download_fn = download_fn
+        self._sleep_fn = sleep_fn
 
     def get_daily_bars(
         self, symbols: list[str], start: date, end: date
@@ -112,23 +123,62 @@ class YFinanceProvider:
         if not symbols:
             return BarFetchResult(bars=_empty_bars_frame(), failures=())
 
-        try:
-            raw = self._download_fn(
-                symbols,
-                start=start,
-                end=end,
-                auto_adjust=True,
-                multi_level_index=True,
-                progress=False,
-            )
-        except Exception as exc:
-            failures = tuple(
-                FetchFailure(symbol=symbol, reason=str(exc), retryable=True)
-                for symbol in symbols
-            )
-            return BarFetchResult(bars=_empty_bars_frame(), failures=failures)
+        remaining_symbols = list(symbols)
+        bars: list[pd.DataFrame] = []
+        failures_by_symbol: dict[str, FetchFailure] = {}
 
-        return _normalize(raw, symbols, start, end)
+        for delay in (*RETRY_DELAYS_SECONDS, None):
+            try:
+                raw = self._download_fn(
+                    remaining_symbols,
+                    start=start,
+                    end=end,
+                    auto_adjust=True,
+                    multi_level_index=True,
+                    progress=False,
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                retryable = is_retryable_external_error(exc)
+                result = BarFetchResult(
+                    bars=_empty_bars_frame(),
+                    failures=tuple(
+                        FetchFailure(
+                            symbol=symbol,
+                            reason=str(exc),
+                            retryable=retryable,
+                        )
+                        for symbol in remaining_symbols
+                    ),
+                )
+            else:
+                result = _normalize(raw, remaining_symbols, start, end)
+
+            if not result.bars.empty:
+                bars.append(result.bars)
+            failed_symbols = {failure.symbol for failure in result.failures}
+            for failure in result.failures:
+                failures_by_symbol[failure.symbol] = failure
+            for symbol in set(remaining_symbols) - failed_symbols:
+                failures_by_symbol.pop(symbol, None)
+
+            retryable_symbols = [
+                failure.symbol for failure in result.failures if failure.retryable
+            ]
+            if not retryable_symbols or delay is None:
+                break
+            remaining_symbols = retryable_symbols
+            self._sleep_fn(delay)
+
+        merged_bars = (
+            pd.concat(bars, ignore_index=True) if bars else _empty_bars_frame()
+        )
+        failures = tuple(
+            failures_by_symbol[symbol]
+            for symbol in symbols
+            if symbol in failures_by_symbol
+        )
+        return BarFetchResult(bars=merged_bars, failures=failures)
 
     def get_latest_bars(self, symbols: list[str], as_of: date) -> BarFetchResult:
         """See `DataProvider.get_latest_bars`."""

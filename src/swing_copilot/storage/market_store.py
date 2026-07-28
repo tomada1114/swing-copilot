@@ -14,6 +14,7 @@ which loosely paraphrases the key as `(symbol, fiscal_period)`).
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -170,9 +171,18 @@ class MarketStore:
         combined = combined.drop_duplicates(subset=["symbol", "date"], keep="last")
         combined = combined.sort_values(["symbol", "date"]).reset_index(drop=True)
 
-        tmp_file = partition_dir / ".data.parquet.tmp"
-        combined.to_parquet(tmp_file, index=False)
-        tmp_file.replace(partition_file)
+        with tempfile.NamedTemporaryFile(
+            dir=partition_dir,
+            prefix=".data.parquet.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_file = Path(handle.name)
+        try:
+            combined.to_parquet(tmp_file, index=False)
+            tmp_file.replace(partition_file)
+        finally:
+            tmp_file.unlink(missing_ok=True)
 
     def read_bars(
         self, symbols: list[str], start: date, end: date, as_of: date

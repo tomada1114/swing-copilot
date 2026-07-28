@@ -613,6 +613,27 @@ class TestRetries:
         assert calls == 3
         assert sleeps == [1.0, 2.0]
 
+    def test_does_not_retry_validation_error(self):
+        calls = 0
+
+        def invalid_request(_symbol: str) -> FakeCompany:
+            nonlocal calls
+            calls += 1
+            msg = "invalid accession"
+            raise ValueError(msg)
+
+        sleeps: list[float] = []
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=invalid_request,
+            sleep_fn=sleeps.append,
+        )
+
+        with pytest.raises(ValueError, match="invalid accession"):
+            client.fetch_fundamentals("AAPL", datetime(2026, 7, 20, tzinfo=UTC))
+        assert calls == 1
+        assert sleeps == []
+
 
 class TestFetchFilingTexts:
     def test_returns_one_text_item_per_filing(self):

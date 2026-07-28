@@ -7,6 +7,14 @@
   Issue 単位で `docs/03_basic_design.md` / `docs/04_detailed_design.md` /
   `docs/reference.md` へ反映し、本書は履歴として残す（AGENTS.md の正本優先則に従う）。
 
+> **現況注記（P7 スキル移行後）**: P2-12 / P3-15 / P6-26 / P6-27 は完了記録として
+> そのまま残すが、これらが対象としていた Anthropic API 直呼びの `llm/` パッケージ、
+> `llm_calls` テーブル、月次予算ゲート、応答キャッシュと near-stale 警告は、
+> P7（§5 末尾）で機構ごと削除されている。設計の現況は
+> `docs/03_basic_design.md` 6.2 節と `docs/04_detailed_design.md` 3.15〜3.17 節を
+> 正とすること。以降の本文で「LLM」と書かれている箇所は、現行では
+> 「Claude Code スキルによる定性分析」と読み替える。
+
 ## 1. 背景と診断
 
 swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fail-soft・原子的書き込み）
@@ -39,9 +47,11 @@ Markdown が `reports/` に原子的に残るため「実行結果の永続化�
 3. **既存不変条件の堅持**: as-of 境界（inclusive）、Clock 注入、オフラインテスト
    （socket guard）、1論理書き込み=1トランザクション、原子的置換、CON-03、
    provenance（source_ids）は全 Issue に適用される。
-4. **判断はコード、叙述は LLM**: ゲート・スコア・却下判定は決定論的コードのみが行う。
-   LLM は根拠の説明・定性文脈の付加に限定し、コードの定量判定を上書きしない。
+4. **判断はコード、叙述はスキル分析**: ゲート・スコア・却下判定は決定論的コードのみが
+   行う。定性分析は根拠の説明・定性文脈の付加に限定し、コードの定量判定を上書きしない。
    定性と定量が矛盾する場合は保守側を採択し両論併記する。
+   （P7 移行前は「叙述は LLM」と表記していた。担い手が Anthropic API から
+   Claude Code スキルへ変わっただけで、原則そのものは不変である。）
 5. **落選にも根拠**: 候補に「なぜ載ったか」だけでなく「なぜ載らなかったか」を
    理由コード付きで永続化する。
 
@@ -58,6 +68,7 @@ Markdown が `reports/` に原子的に残るため「実行結果の永続化�
 | P4 口座レベルリスク規律 | ポートフォリオヒート、決算近接、サーキットブレーカー、MAE/MFE | 候補単体→口座全体への守りの拡張 |
 | P5 シグナル拡充（検証済み導入） | Minervini、決算後スコア、実行状態分類、VCP | P2 の装置で裏取りしながら追加 |
 | P6 実運用ギャップ修正 | 実 API 動作確認で発見したリグレッション・境界欠落・会計/表示バグの修正 | P1〜P5 を「テストが通る」から「毎日回る」へ |
+| P7 定性分析のスキル移行 | LLM API 統合の全廃、`analysis/` 境界の新設、Claude Code スキルによる定性分析と `copilot-ingest-analysis` での検証 | 叙述の担い手を API 課金・予算ゲート・キャッシュなしで持てるようにする |
 
 実施順序は P1 → P2 → P3 → P4 → P5 を基本とするが、フェーズ内は並列可能、
 P3/P4 は P2 完了を待たず着手可能（P5 のみ P2 完了が前提）。
@@ -101,7 +112,8 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
   - スコアと内訳（component ごとの値×重み）を DuckDB に永続化し、
     terminal / markdown にスコア内訳列を表示する。
   - 既定重みは出典なしの初期値であり (要検証)。P2-10 感応度グリッドの検証対象。
-- **動作確認**: `uv run copilot-daily --as-of <直近営業日> --dry-run --skip-text --skip-llm --limit 20`
+- **動作確認**: `uv run copilot-daily --as-of <直近営業日> --dry-run --skip-text --limit 20`
+  （`--skip-llm` は P7 で廃止）
   → terminal 出力に `score` 列とスコア内訳、markdown に内訳テーブルが出ること。
   重み合計 ≠1.0 の strategies.yaml で起動し fail-fast のエラーメッセージを確認。
 - **Not in scope**: 新シグナル追加（P5）、レジーム項のスコア組み込み（P3-14）
@@ -290,6 +302,10 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 
 ### P2-12 【並列可/worktree:p2-llm】llm - 分析コンテキストと出力スキーマの判断根拠強化
 
+> **現況（P7）**: 完了済み。`llm/decision_context.py` の整形純関数は
+> `analysis/context.py` へ移設され現役だが、`catalyst_quality` と
+> キャッシュ near-stale 警告は P7 で廃止された。
+
 - **目的**: LLM 出力の曖昧語を減らし、根拠の構造化と定量/定性の役割分担を明確化する。
 - **スコープ**: `llm/decision_context.py`, `llm/schemas.py`, `llm/summarize.py`,
   `llm/filings_analysis.py`
@@ -366,6 +382,11 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **依存**: P3-13、P1-03（理由コード表示の枠組み）
 
 ### P3-15 【依存あり/worktree:p3-regime】llm - レジームコンテキスト注入と整合性自己点検
+
+> **現況（P7）**: 完了済み。`format_market_regime()` は `analysis/context.py` に
+> 残り、注入先が「API の system フィールド」から
+> 「`analysis_input.json` の run 単位 `context` フィールド」へ変わった。
+> 未信頼テキストと分離するという不変条件は維持されている。
 
 - **目的**: 個別銘柄分析が地合いと矛盾したまま出力されるのを防ぐ。
 - **スコープ**: `llm/decision_context.py`, `llm/summarize.py`
@@ -618,6 +639,11 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
 
 ### P6-26 【最優先/worktree:p6-llm】llm/storage/data - LLM 予算会計の実支出化と開示取得の境界設定
 
+> **現況（P7）**: 完了済みだが、予算会計・月次上限ゲート・`max_llm_calls_per_run`
+> は LLM API 呼び出しの廃止に伴い削除された。生き残ったのは開示取得の境界設定
+> （`filing_lookback_days` / `max_filings_per_symbol`）で、`settings.llm.*` から
+> `settings.analysis.*` へ移設されている。
+
 - **目的**: NFR-01 の月次予算上限を「実支出に対する保証」にする。
   1回の実行で予算を溶かす構造を止める。
 - **スコープ**: `llm/client.py`, `storage/llm_records.py`, `config.py`,
@@ -650,6 +676,11 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
 - **依存**: なし
 
 ### P6-27 【依存あり/worktree:p6-llm】llm/report - 開示分析の provenance 修正とレポート反映・P2-12 残件
+
+> **現況（P7）**: 完了済み。「本文に source_id を明記する」原則と
+> 「同一銘柄の全開示を個別に描画する」修正は新しいスキル契約へ引き継がれた
+> （`analysis/schemas.py::FilingAnalysis`、`BriefFilingAnalysis`）。
+> `catalyst_quality` の表示接続と near-stale 警告は廃止された。
 
 - **目的**: 実効成功率 0% の開示分析を機能させ、生成した分析を捨てない。
 - **スコープ**: `llm/filings_analysis.py`, `report/daily_brief.py`,
@@ -692,14 +723,57 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
 - **Not in scope**: レポートのレイアウト変更・新節の追加
 - **依存**: なし
 
-### P6-29 【後続検討】screening/llm - catalyst_quality のランキング統合検討
+### P6-29 【obsolete】screening/llm - catalyst_quality のランキング統合検討
 
-- **目的**: 表示接続（P6-27）の先にある「定性シグナルを定量ランキングに
+> **obsolete（P7）**: `catalyst_quality` フィールド自体が P7 のスキル移行で
+> 廃止されたため、本 Issue は検討対象を失った。改修原則 4（判断はコード、
+> 叙述はスキル分析）は維持されており、定性シグナルを定量ランキングへ
+> 組み込まないという結論も変わらない。将来 `analysis/schemas.py` に
+> 同等の任意フィールドを復活させる場合は、新しい Issue を起こす。
+
+- **目的（当時）**: 表示接続（P6-27）の先にある「定性シグナルを定量ランキングに
   組み込むか」の設計判断を行う。
-- **実装しない**。改修原則 4（判断はコード、叙述は LLM。LLM はコードの定量判定を
-  上書きしない）との整合が論点であり、検討結果（採否と理由）を本 Issue に
-  記録して閉じる。採用する場合は別 Issue を起こす。
+- **実装しない**。改修原則 4 との整合が論点であり、検討結果（採否と理由）を
+  本 Issue に記録して閉じる。
 - **依存**: P6-27
+
+### P7: 定性分析の Claude Code スキル移行（2026-07-28）
+
+- **目的**: Anthropic API 直呼びの LLM 統合を全廃し、定性分析を Claude Code
+  スキルへ移す。判断はコード・叙述はスキル分析という原則を、API 課金・
+  予算ゲート・キャッシュという運用負債なしで成立させる。
+- **スコープ**: `analysis/`（新設）, `pipeline/daily.py`, `report/daily_brief.py`,
+  `report/terminal_report.py`, `report/markdown_report.py`, `config.py`,
+  `storage/`, `.claude/skills/swing-daily`（`analyze-news` / `analyze-filings` /
+  `interpret-screening`）
+- **実施内容**:
+  - `llm/` パッケージ・`storage/llm_records.py`・`llm_calls` テーブル・
+    `anthropic` 依存・`LLMConfig`/`BudgetConfig`/`ANTHROPIC_API_KEY`・
+    月次予算・実行単位の呼び出し上限・応答キャッシュ / near-stale 機構を削除。
+  - 日次バッチのステップ 6 を `6_llm` から `6_analysis_export` へ。候補と
+    テキストがあれば `analysis_input.json`（strict スキーマ）を日付付き
+    レポートディレクトリへ原子的に書き出す。あわせて `report_context.json`
+    （`DailyBrief` のスナップショット、schema `report-context-v1`）を保存。
+  - 新 CLI `copilot-ingest-analysis` が strict スキーマ検証・provenance 検証
+    （`source_ids` ⊆ 入力、facts 非空）・CON-03 機械検査（旧 `llm/safety.py` の
+    純関数を `analysis/safety.py` へ移設）を行い、違反銘柄は fail-closed で
+    縮退表示（リトライなし）。レポートを再描画する。
+  - 銘柄ごとの verdict（`proceed` / `skip`）と run 単位の `no_trade` 表示を追加。
+    スクリーニングの決定論的結果は不変。
+  - 旧 `llm.*` セクションのテキスト境界設定を `analysis.*` へ移設。
+- **意図的な仕様変更**: `catalyst_quality`（REQ-006/007 の触媒の質表示）と
+  `guidance_direction` は新契約に含めず廃止した。いずれも表示専用で
+  ランキング・リスク判定に接続されておらず、必要になれば
+  `analysis/schemas.py` の任意フィールドとして復活できる。
+- **監査証跡**: `llm_calls` に代わり、レポートディレクトリの
+  `analysis_input.json` / `analysis_result.json` / `report_context.json` が
+  そのまま監査アーティファクトになる（NFR-05）。
+- **動作確認**: `uv run copilot-daily --dry-run --limit 20` で
+  `analysis_input.json` が出力されること。`swing-daily` スキルを実行し
+  `uv run copilot-ingest-analysis <dir>` がレポートを再描画すること。
+  provenance 違反・CON-03 違反を含む `analysis_result.json` で、当該銘柄だけが
+  「検証不合格のため非表示」になり他の銘柄が巻き込まれないこと。
+- **依存**: P6-26 / P6-27（同じ境界を扱うため、両者の完了後に実施）
 
 ## 6. 知見の出典と信頼性
 

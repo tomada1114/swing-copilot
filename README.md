@@ -5,10 +5,16 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A decision-support batch pipeline for US equity swing/position trading. It
-screens the S&P 500 universe, checks risk parameters, summarizes news and
-filings with an LLM, prints a readable terminal brief, and archives Markdown —
-all run locally. It never places orders; the human always makes the final
-buy/sell decision (see `docs/01_requirements.md`).
+screens the S&P 500 universe, checks risk parameters, collects news and filing
+text, prints a readable terminal brief, and archives Markdown — all run
+locally. It never places orders; the human always makes the final buy/sell
+decision (see `docs/01_requirements.md`).
+
+Qualitative analysis of that news and filing text is done by Claude Code
+skills, not by this process: `copilot-daily` exports `analysis_input.json`
+beside the day's report, the `swing-daily` skill analyzes it, and
+`copilot-ingest-analysis` machine-verifies the answer (schema, source
+provenance, CON-03) before re-rendering the report.
 
 ## Quickstart
 

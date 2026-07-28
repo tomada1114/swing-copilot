@@ -4,9 +4,10 @@
 
 `swing-copilot` is a local Python batch application for US-equity decision
 support. It collects point-in-time market/fundamental/text data, screens a
-configured strategy, checks portfolio risk, optionally asks an LLM for sourced
-analysis, and produces reports. It never places orders; a human makes every
-buy/sell decision.
+configured strategy, checks portfolio risk, exports a strict analysis-input
+document for Claude Code skills to interpret, ingests their sourced answer, and
+produces reports. It never calls a model API itself, and it never places
+orders; a human makes every buy/sell decision.
 
 The project uses Python 3.12+, uv, hatchling, a strict `src/` layout, ruff,
 mypy strict, pytest, DuckDB, and Parquet.
@@ -42,7 +43,7 @@ src/swing_copilot/
 ├── screening/           # Pure indicators, filters, signals, ranking
 ├── risk/                # Position sizing, concentration, correlation
 ├── backtest/            # Deterministic point-in-time simulator
-├── llm/                 # Gateway, schemas, provenance, safety checks
+├── analysis/            # Skill boundary: export, strict schemas, provenance, safety
 ├── storage/             # DuckDB/Parquet repositories and transactions
 └── pipeline/            # Composition root and imperative orchestration
 ```
@@ -107,7 +108,7 @@ the divergence, and update the stale canonical source or request a decision.
   Reject unknown fields/keys, empty required signals, invalid limits, and ranking
   rules that violate deterministic ordering.
 
-### External boundaries and LLM safety
+### External boundaries and skill-based analysis safety
 
 - External calls have explicit timeouts, bounded retryable exceptions, total
   attempt ceilings, and deterministic backoff tests. Rate limiting applies to
@@ -115,22 +116,27 @@ the divergence, and update the stale canonical source or request a decision.
 - The default pytest suite is offline. The autouse socket guard must remain in
   place; inject fakes at external ports. Live checks are separately marked and
   never part of the offline success sentinel.
-- Keep LLM system instructions and user/untrusted content in separate API
-  fields. Delimit and escape untrusted news/filing content; hash the complete
-  system+user prompt for caching and audit.
-- Every fact has a non-empty, non-blank `source_ids` list that is a subset of
-  the supplied IDs. Revalidate cached output against the current request.
-- Enforce CON-03 centrally before caching or rendering every user-visible LLM
-  text field. Prompt instructions alone are insufficient; violations degrade
-  safely without a retry.
-- Never log secrets. Redact prompt, response, exception, and audit fields.
+- Qualitative analysis runs in a Claude Code skill, never inside this process.
+  The pipeline exports `analysis_input.json` and ingests `analysis_result.json`
+  via `copilot-ingest-analysis`; both directions parse under strict
+  (`extra="forbid"`) schemas, so an invented or renamed field fails loudly
+  instead of being silently dropped.
+- Nothing a skill writes is trusted. Every fact has a non-empty, non-blank
+  `source_ids` list proven to be a subset of the IDs supplied for that symbol,
+  and code-owned metadata (form type, filing date, source URL) is resolved from
+  the exported input rather than echoed back from the result. Deterministic
+  screening, sizing, and ranking values are never rewritten by an analysis.
+- Enforce CON-03 centrally at ingest, over every user-visible text field,
+  before anything reaches a report. Skill instructions alone are insufficient;
+  a violating symbol is withheld fail-closed, per symbol, with no retry.
+- Never log secrets. Redact exception and audit fields.
 
 ## Test and Review Discipline
 
 - Test behavior and contracts, including happy path, boundaries, partial
   failure, rollback, recovery, and cache reuse. Coverage is a floor, not proof.
 - Calling a fake/mock can be asserted when the call itself is the contract,
-  such as retry/rate limits, budget skips, or proving no network/API call.
+  such as retry/rate limits, skipped steps, or proving no network/API call.
 - Keep implementation, its regression test, and required canonical-doc update
   in the same logical commit.
 - Before completion, inspect changed paths and apply the matching review:
@@ -138,7 +144,7 @@ the divergence, and update the stale canonical source or request a decision.
   - `data/**` or `text/**`: as-of boundary, timeout/retry/rate limit, offline test
   - `risk/**`: date alignment, minimum sample, NaN/constant inputs
   - `backtest/**`: no look-ahead, both-side costs, exact final equity
-  - `llm/**`: provenance, cache revalidation, CON-03, prompt separation/redaction
+  - `analysis/**`: strict schema boundary, provenance, CON-03, fail-closed withholding
   - config/pipeline: fail-fast validation, fatal/fail-soft boundary, rerun safety
 
 ## Language and Scope

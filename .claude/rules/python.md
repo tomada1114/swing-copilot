@@ -66,8 +66,12 @@ paths:
 - External adapters define timeout, retryable exception types, total attempts,
   backoff, and rate limiting. Do not catch `Exception` as a retry policy unless
   the boundary contract explicitly requires every exception to be retryable
-- Separate LLM system instructions from user/untrusted data at the API boundary;
-  centralize provenance, output-policy checks, caching, and audit redaction
+- Qualitative analysis happens in Claude Code skills, not in this process. The
+  `analysis/` boundary exports and ingests JSON under strict (`extra="forbid"`)
+  pydantic schemas; treat skill output as untrusted
+- Centralize provenance (`source_ids` ⊆ the IDs supplied for that symbol) and
+  CON-03 output-policy checks in `analysis/validate.py`, before anything is
+  rendered. Withhold a failing symbol fail-closed, without retrying
 
 ## Constants and Naming
 

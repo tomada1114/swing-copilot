@@ -25,6 +25,7 @@ from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     AnalysisContextBlocks,
     AnalysisInput,
+    CalendarEventInput,
     CandidateInput,
     FilingInput,
     NewsInput,
@@ -49,16 +50,20 @@ _UNKNOWN_FORM_TYPE = "unknown"
 
 @dataclass(frozen=True, slots=True)
 class TextExportLimits:
-    """Per-symbol bounds on how much untrusted text is exported.
+    """Bounds on how much untrusted text is exported (per-symbol or run-wide).
 
     Mirrors `settings.analysis.*`. These bound the exported file's size (and
     therefore the reading cost on the skill side); the collection-time bounds
     that decide *which* filings exist at all live in `text/edgar_filings.py`.
+    `max_calendar_*` bound `context.calendar_events`, which is run-wide rather
+    than per-candidate.
     """
 
     max_news_items: int
     max_news_chars: int
     max_filing_chars: int
+    max_calendar_events: int
+    max_calendar_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +89,10 @@ class ExportRequest:
     performance_summary: PerformanceSummary | None
     candidates: tuple[ExportCandidate, ...]
     limits: TextExportLimits
+    # Run-wide macro/economic-calendar `TextItem`s (`symbol is None`), disjoint
+    # from every `ExportCandidate.text_items`. Defaults to empty so callers
+    # without a calendar source (or existing tests) need not pass it.
+    calendar_events: tuple[TextItem, ...] = ()
 
 
 def build_analysis_input(request: ExportRequest) -> AnalysisInput:
@@ -108,6 +117,9 @@ def build_analysis_input(request: ExportRequest) -> AnalysisInput:
         context=AnalysisContextBlocks(
             market_regime=market_regime or None,
             performance_summary=performance or None,
+            calendar_events=_calendar_event_inputs(
+                request.calendar_events, request.limits
+            ),
         ),
         candidates=[
             _candidate_input(item, request.limits) for item in request.candidates
@@ -214,6 +226,33 @@ def _filing_inputs(
             url=item.source_url,
         )
         for item in filings
+    ]
+
+
+def _calendar_event_inputs(
+    calendar_items: Sequence[TextItem], limits: TextExportLimits
+) -> list[CalendarEventInput]:
+    """Newest-first calendar/macro events, capped in count and per-item length.
+
+    Run-wide, not per-candidate: filtered defensively by `source_type` here,
+    mirroring `_news_inputs()`/`_filing_inputs()`, even though callers are
+    expected to pass only calendar-typed items.
+    """
+    events = sorted(
+        (item for item in calendar_items if item.source_type == "calendar"),
+        key=lambda item: (item.published_at, item.source_id),
+        reverse=True,
+    )
+    return [
+        CalendarEventInput(
+            source_id=item.source_id,
+            published_at=item.published_at,
+            title=item.title,
+            summary=item.content_text[: limits.max_calendar_chars],
+            url=item.source_url,
+            provider=_provider(item.source_id),
+        )
+        for item in events[: limits.max_calendar_events]
     ]
 
 

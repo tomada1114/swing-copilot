@@ -154,8 +154,11 @@ def validate_analysis(
         raise AnalysisIngestError(msg)
 
     candidates = {item.symbol: item for item in analysis_input.candidates}
+    calendar_ids = frozenset(
+        item.source_id for item in analysis_input.context.calendar_events
+    )
     outcomes = tuple(
-        _verify_symbol(analysis, candidates.get(analysis.symbol))
+        _verify_symbol(analysis, candidates.get(analysis.symbol), calendar_ids)
         for analysis in result.symbols
     )
     return ValidatedAnalysis(
@@ -186,12 +189,14 @@ def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
 
 
 def _verify_symbol(
-    analysis: SymbolAnalysis, candidate: CandidateInput | None
+    analysis: SymbolAnalysis,
+    candidate: CandidateInput | None,
+    calendar_ids: frozenset[str],
 ) -> SymbolOutcome:
     """Apply the per-symbol provenance and CON-03 rules, fail-closed."""
     if candidate is None:
         return _withheld(analysis.symbol, "symbol is absent from analysis_input.json")
-    error = _provenance_error(analysis, candidate)
+    error = _provenance_error(analysis, candidate, calendar_ids)
     if error is None:
         try:
             check_display_texts(_display_texts(analysis))
@@ -226,12 +231,21 @@ def _withheld(symbol: str, reason: str) -> SymbolOutcome:
 
 
 def _provenance_error(
-    analysis: SymbolAnalysis, candidate: CandidateInput
+    analysis: SymbolAnalysis,
+    candidate: CandidateInput,
+    calendar_ids: frozenset[str],
 ) -> str | None:
-    """Return why provenance fails for this symbol, or `None` if it holds."""
-    known = {item.source_id for item in candidate.news} | {
-        item.source_id for item in candidate.filings
-    }
+    """Return why provenance fails for this symbol, or `None` if it holds.
+
+    `calendar_ids` (`analysis_input.context.calendar_events`) is run-wide, not
+    per-symbol -- every symbol's analysis may cite any of them, unlike
+    news/filing IDs which must belong to that symbol's own candidate.
+    """
+    known = (
+        {item.source_id for item in candidate.news}
+        | {item.source_id for item in candidate.filings}
+        | calendar_ids
+    )
     cited = set(_cited_source_ids(analysis))
     unknown = sorted(cited - known)
     if unknown:

@@ -29,7 +29,13 @@ from swing_copilot.text.base import TextItem
 
 AS_OF = date(2027, 3, 1)
 GENERATED_AT = datetime(2027, 3, 1, 12, tzinfo=UTC)
-LIMITS = TextExportLimits(max_news_items=2, max_news_chars=20, max_filing_chars=15)
+LIMITS = TextExportLimits(
+    max_news_items=2,
+    max_news_chars=20,
+    max_filing_chars=15,
+    max_calendar_events=2,
+    max_calendar_chars=20,
+)
 
 
 def _snapshot() -> RegimeSnapshot:
@@ -88,7 +94,23 @@ def _filing(source_id: str = "edgar:1", title: str | None = "10-Q - Apple") -> T
     )
 
 
-def _request(*text_items: TextItem) -> ExportRequest:
+def _calendar_event(source_id: str, day: int, body: str = "C" * 100) -> TextItem:
+    stamp = datetime(2027, 2, day, tzinfo=UTC)
+    return TextItem(
+        source_id=source_id,
+        symbol=None,
+        source_type="calendar",
+        published_at=stamp,
+        title="FOMC meeting",
+        source_url=f"https://example.com/{source_id}",
+        content_text=body,
+        fetched_at=stamp,
+    )
+
+
+def _request(
+    *text_items: TextItem, calendar_events: tuple[TextItem, ...] = ()
+) -> ExportRequest:
     candidate = ExportCandidate(
         candidate=Candidate(
             symbol="AAPL",
@@ -121,6 +143,7 @@ def _request(*text_items: TextItem) -> ExportRequest:
         performance_summary=None,
         candidates=(candidate,),
         limits=LIMITS,
+        calendar_events=calendar_events,
     )
 
 
@@ -189,6 +212,55 @@ class TestBuildAnalysisInput:
 
         assert payload.context.performance_summary is None
         assert payload.context.market_regime is not None
+
+    def test_no_calendar_items_exports_an_empty_list(self):
+        payload = build_analysis_input(_request())
+
+        assert payload.context.calendar_events == []
+
+
+class TestCalendarEvents:
+    def test_calendar_events_are_newest_first_and_capped_by_count(self):
+        payload = build_analysis_input(
+            _request(
+                calendar_events=(
+                    _calendar_event("fred:1", 20),
+                    _calendar_event("fred:2", 25),
+                    _calendar_event("fred:3", 28),
+                )
+            )
+        )
+
+        assert [item.source_id for item in payload.context.calendar_events] == [
+            "fred:3",
+            "fred:2",
+        ]
+
+    def test_calendar_event_bodies_are_truncated_to_the_export_budget(self):
+        payload = build_analysis_input(
+            _request(calendar_events=(_calendar_event("fred:1", 20),))
+        )
+
+        assert (
+            len(payload.context.calendar_events[0].summary) == LIMITS.max_calendar_chars
+        )
+
+    def test_the_provider_is_derived_from_the_source_id_prefix(self):
+        payload = build_analysis_input(
+            _request(calendar_events=(_calendar_event("fred:1", 20),))
+        )
+
+        assert payload.context.calendar_events[0].provider == "fred"
+
+    def test_a_calendar_item_never_appears_on_any_candidate(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 20), calendar_events=(_calendar_event("fred:1", 20),)
+            )
+        )
+
+        assert payload.candidates[0].news[0].source_id == "finnhub:1"
+        assert len(payload.candidates[0].news) == 1
 
 
 class TestAtomicWrite:

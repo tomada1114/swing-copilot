@@ -76,7 +76,12 @@
   "generated_at": "...",
   "context": {
     "market_regime": "...",          // 整形済みテキストブロック or null
-    "performance_summary": "..."     // 同上
+    "performance_summary": "...",    // 同上
+    "calendar_events": [             // run単位のマクロ/経済カレンダーイベント。symbolを持たず、
+                                      //   どの銘柄からも source_id 引用可（news/filings とは別集合）
+      { "source_id": "fred:...", "published_at": "...", "title": "...",
+        "summary": "...", "url": "...", "provider": "..." }
+    ]
   },
   "candidates": [
     {
@@ -144,16 +149,18 @@
 
 - `news_summary` / `filing_analyses` は該当テキストが無ければ `null` / `[]`。
 - `screening_assessment` と `verdict` は **全銘柄必須**。
-- `facts[].source_ids` は **非空**、かつ入力の該当銘柄の `source_id` 集合の部分集合。
-- `verdict.reasons[].source_ids`: ニュース／開示に基づく理由は該当 `source_id` を
-  必ず引用。スコア等の決定論的入力のみに基づく理由は空リスト可。
+- `facts[].source_ids` は **非空**、かつ入力の該当銘柄の `source_id` 集合
+  （＋ `context.calendar_events` の ID。これは全銘柄共通で引用可）の部分集合。
+- `verdict.reasons[].source_ids`: ニュース／開示／`context.calendar_events`に基づく
+  理由は該当 `source_id` を必ず引用。スコア等の決定論的入力のみに基づく理由は空リスト可。
 - `no_trade` は全銘柄 skip などの場合に統括が `true` にできる。`true` なら
   `no_trade_reason` に理由を書く（CON-03 検査対象）。
 
 ## ingest の検証規則【固定】
 
 1. スキーマ strict 検証（未知フィールド拒否）。壊れた JSON / `as_of` 不一致は hard fail。
-2. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id` の部分集合。
+2. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id`、または
+   `context.calendar_events` の `source_id`（全銘柄共通で引用可）の部分集合。
    `facts` の `source_ids` は非空。
 3. CON-03 機械検査を、ユーザー表示される全テキストフィールドに適用
    （`facts[].text`, `interpretation`, `risk_flags`, `red_flags`, `yoy_changes`,

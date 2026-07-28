@@ -298,21 +298,22 @@ class AnalysisConfig(_StrictModel):
 
     max_news_items_per_symbol: int = Field(default=20, ge=1)
     max_news_chars_per_item: int = Field(default=4000, ge=1)
-    # Per-filing export budget is `filing_chunk_chars * max_filing_chunks`;
-    # the two are kept separate because they came from, and remain comparable
-    # to, the previous chunked-analysis bounds.
-    filing_chunk_chars: int = Field(default=30_000, ge=1)
-    max_filing_chunks: int = Field(default=4, ge=1)
+    # Total characters of one filing's text exported for analysis. Formerly
+    # derived as `filing_chunk_chars * max_filing_chunks` from the previous
+    # chunked-analysis bounds; consolidated into a single setting since
+    # nothing chunks filings for separate calls anymore (the skill reads one
+    # filing's export in a single context).
+    max_filing_chars: int = Field(default=120_000, ge=1)
     # Filing *collection* recency bound and per-symbol count cap, applied in
     # `text/edgar_filings.py::fetch_recent_filings_text()` -- symmetric with
     # the news-side limit above (roadmap §5 P6-26).
     filing_lookback_days: int = Field(default=90, ge=1)
     max_filings_per_symbol: int = Field(default=3, ge=1)
-
-    @property
-    def max_filing_chars(self) -> int:
-        """Total characters of one filing's text exported for analysis."""
-        return self.filing_chunk_chars * self.max_filing_chunks
+    # Bounds on the run-wide macro/economic-calendar events surfaced in
+    # `context.calendar_events` (not per-symbol: a calendar event isn't tied
+    # to any one candidate).
+    max_calendar_events: int = Field(default=20, ge=1)
+    max_calendar_chars_per_item: int = Field(default=2000, ge=1)
 
 
 class ScheduleConfig(_StrictModel):

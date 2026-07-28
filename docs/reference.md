@@ -65,14 +65,18 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `analysis_input.json`（schema `analysis-input-v1`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
-開示は`filing_chunk_chars × max_filing_chunks`文字までに切り詰める。
+開示は`max_filing_chars`文字までに切り詰める。
 ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
-どの候補にも等しく必要だからである。
+どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの
+`TextItem`（`source_type="calendar"`）はどの候補にも属さないため、run単位の
+`context.calendar_events`として`max_calendar_events`件・各
+`max_calendar_chars_per_item`文字までに切り詰めて別出しする。
 
 `analysis/validate.py`はスキルが書いた`analysis_result.json`
 （schema `analysis-result-v1`）を検証する。銘柄ごとに、(1) strictスキーマ
 （`extra="forbid"`）で解析できること、(2) 引用された`source_id`がすべて当該銘柄に
-ついて実際に供給したものであり、各`SourcedFact`が1件以上引用していること、
+ついて実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄
+からも引用可）であり、各`SourcedFact`が1件以上引用していること、
 (3) 表示テキストが`analysis/safety.py`のCON-03検査を通ること、を確かめる。
 (2)(3)の違反は**銘柄単位のfail-closed**で、当該銘柄の定性セクションを保留
 （`SymbolOutcome.error`を設定し他フィールドを空に）してログへ残すだけで、

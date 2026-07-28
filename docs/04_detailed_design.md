@@ -747,8 +747,11 @@ class CandidateInput(_StrictModel):
     news: list[NewsInput]
     filings: list[FilingInput]
 
+class CalendarEventInput(_StrictModel):
+    """source_id / published_at / title / summary / url / provider（symbolを持たない）"""
+
 class AnalysisContextBlocks(_StrictModel):
-    """run単位の文脈: market_regime / performance_summary"""
+    """run単位の文脈: market_regime / performance_summary / calendar_events"""
 
 class AnalysisInput(_StrictModel):
     schema_version: Literal["analysis-input-v1"]
@@ -801,6 +804,8 @@ class AnalysisResult(_StrictModel):
 
 `FilingAnalysis`が書類種別・提出日を持たないのは意図的である。これらはコードが所有する`TextItem`のメタデータであり、スキルに正確にエコーバックさせるのではなく`analysis/validate.py`が`analysis_input.json`から解決する。`VerdictReason.source_ids`だけが空を許すのは、スコアやサイジング制約のようにコード自身が計算した決定論的入力にのみ基づく理由には、引用すべきニュース/開示ソースが存在しないためである。
 
+`context.calendar_events`（`CalendarEventInput`のリスト）は、`text/`が収集したマクロ／経済カレンダーイベント（`TextItem.symbol is None`。例: FREDの経済指標発表日）を運搬する。候補ごとの`news`/`filings`とは異なりrun単位の文脈であり、どの銘柄の分析からも引用できる。`analysis/validate.py`のprovenance検査は、当該銘柄の`news`/`filings`のIDに加えて`context.calendar_events`の全IDを、どの銘柄についても許容集合へ含める（他銘柄の`news`/`filings`のIDは引き続き拒否する）。
+
 **設計原則（CON-03）**: `facts`と`interpretation`の分離だけでは根拠のない主張を防げないため、各factに入力ソースIDを必須化し、レポートから原文へ辿れるようにする。「買うべき」「売るべき」等の命令形はスキル規約で禁止したうえで、`analysis/validate.py`が`facts`、`interpretation`、`risk_flags`、`red_flags`、`yoy_changes`、`screening_assessment`、`verdict.reasons`のすべてを機械検査する。違反した銘柄は再試行せず、当該銘柄の定性セクションを非表示にして縮退させる。
 
 ### 3.16 `analysis/context.py` / `analysis/export.py`（FR-08）
@@ -818,7 +823,8 @@ def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str: .
 # analysis/export.py
 @dataclass(frozen=True, slots=True)
 class TextExportLimits:
-    """max_news_items / max_news_chars / max_filing_chars"""
+    """max_news_items / max_news_chars / max_filing_chars /
+    max_calendar_events / max_calendar_chars"""
 
 @dataclass(frozen=True, slots=True)
 class ExportCandidate:
@@ -826,7 +832,8 @@ class ExportCandidate:
 
 @dataclass(frozen=True, slots=True)
 class ExportRequest:
-    """as_of / generated_at / regime / exposure / performance / candidates / limits"""
+    """as_of / generated_at / regime / exposure / performance / candidates /
+    limits / calendar_events（run単位のcalendar TextItem。既定は空）"""
 
 def build_analysis_input(request: ExportRequest) -> AnalysisInput: ...
 def write_analysis_input(payload: AnalysisInput, output_dir: str | Path) -> Path: ...
@@ -838,7 +845,9 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 **レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・判断履歴は候補ごとの`news`/`filings`/`decision_history`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
 
-**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは公開日時の新しい順に`max_news_items`件・各`max_news_chars`文字まで、開示は`max_filing_chars`（`filing_chunk_chars × max_filing_chunks`）文字までに切り詰める。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴はdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。
+**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは公開日時の新しい順に`max_news_items`件・各`max_news_chars`文字まで、開示は`max_filing_chars`文字までに切り詰める。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴はdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。
+
+**calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 
 ### 3.17 `analysis/validate.py` / `analysis/safety.py` / `analysis/snapshot.py` / `analysis/cli.py`（FR-08、CON-03、NFR-05）
 
@@ -880,7 +889,7 @@ def ingest(analysis_input_path: Path, result_path: Path, context_path: Path) -> 
 def main(argv: list[str] | None = None) -> None: ...
 ```
 
-**検証の3段（銘柄単位）**: (1) strictスキーマで解析できること、(2) 引用された`source_id`がすべて当該銘柄について実際に供給したものであり、各factが1件以上引用していること、(3) ユーザー表示テキストがCON-03に違反しないこと。(2)(3)は**銘柄単位でfail-closed**とし、違反銘柄の定性セクションを保留（`SymbolOutcome.error`を設定し、他の全フィールドを空に）してログへ記録するだけで、リトライしない。`SymbolOutcome`は`error`が非`None`のとき必ず全分析フィールドが空になるため、呼び出し側がフラグの確認を忘れて保留内容を誤って描画することがない。
+**検証の3段（銘柄単位）**: (1) strictスキーマで解析できること、(2) 引用された`source_id`がすべて当該銘柄について実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄からも引用可）であり、各factが1件以上引用していること、(3) ユーザー表示テキストがCON-03に違反しないこと。(2)(3)は**銘柄単位でfail-closed**とし、違反銘柄の定性セクションを保留（`SymbolOutcome.error`を設定し、他の全フィールドを空に）してログへ記録するだけで、リトライしない。`SymbolOutcome`は`error`が非`None`のとき必ず全分析フィールドが空になるため、呼び出し側がフラグの確認を忘れて保留内容を誤って描画することがない。
 
 **hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、および`result.as_of`が`analysis_input.as_of`と食い違う場合は`AnalysisIngestError`でrun全体を失敗させる。別の取引日を記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
 
@@ -1580,10 +1589,11 @@ analysis:
   # トークン上限・予算上限はLLM API呼び出しごと廃止）。
   max_news_items_per_symbol: 20    # 1銘柄あたりのニュース件数（新しい順）
   max_news_chars_per_item: 4000    # 1記事あたりのエクスポート文字数
-  filing_chunk_chars: 30000        # 1開示あたりのエクスポート上限 =
-  max_filing_chunks: 4             #   filing_chunk_chars × max_filing_chunks
+  max_filing_chars: 120000         # 1開示あたりのエクスポート上限（文字数）
   filing_lookback_days: 90         # 開示「収集」の遡及日数（roadmap §5 P6-26）
   max_filings_per_symbol: 3        # 1銘柄あたりの開示件数（同上）
+  max_calendar_events: 20          # context.calendar_eventsに載せるrun単位の件数上限
+  max_calendar_chars_per_item: 2000  # 1イベントあたりのエクスポート文字数
 
 schedule:
   timeout_minutes: 35              # NFR-03（ローカル手動実行時の所要時間上限）
@@ -1679,7 +1689,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 - 定量シグナルと矛盾する定性解釈は保守側を採用し、矛盾自体を両論併記する。スコア・順位・株数・リスク判定は再計算も上書きもしない。
 - 検証で縮退が出ても、文言を書き換えて再投入しない（fail-closedが仕様）。スキーマ不一致によるhard failのみ、フィールド名の誤りを直しての再実行を許す。
 
-**長文の扱い（固定）**: EDGARから抽出した本文は`analysis.filing_chunk_chars × analysis.max_filing_chunks`文字まで、ニュースは公開日時の新しい順に`analysis.max_news_items_per_symbol`件・各`analysis.max_news_chars_per_item`文字までを`analysis_input.json`へ載せる。切り捨てが発生した場合はスキル側が「全文未分析」である旨を`red_flags`とレポートへ明示する。旧実装のようにチャンクごとの個別API呼び出しと結果マージは行わない——スキルは1銘柄分の開示を1つのコンテキストで読む。
+**長文の扱い（固定）**: EDGARから抽出した本文は`analysis.max_filing_chars`文字まで、ニュースは公開日時の新しい順に`analysis.max_news_items_per_symbol`件・各`analysis.max_news_chars_per_item`文字までを`analysis_input.json`へ載せる。切り捨てが発生した場合はスキル側が「全文未分析」である旨を`red_flags`とレポートへ明示する。旧実装のようにチャンクごとの個別API呼び出しと結果マージは行わない——スキルは1銘柄分の開示を1つのコンテキストで読む。マクロ／経済カレンダーイベントは公開日時の新しい順に`analysis.max_calendar_events`件・各`analysis.max_calendar_chars_per_item`文字まで`context.calendar_events`へ載る（run単位で全銘柄に共通）。
 
 ---
 

@@ -8,8 +8,10 @@ from pydantic import ValidationError
 from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
+    AnalysisContextBlocks,
     AnalysisInput,
     AnalysisResult,
+    CalendarEventInput,
     SourcedFact,
     SymbolAnalysis,
     Verdict,
@@ -103,3 +105,25 @@ class TestInputRoundTrip:
     def test_a_generated_input_reparses_unchanged(self):
         parsed = AnalysisInput.model_validate(input_payload())
         assert AnalysisInput.model_validate(parsed.model_dump(mode="json")) == parsed
+
+
+class TestCalendarEventsContext:
+    def test_calendar_events_default_to_an_empty_list(self):
+        context = AnalysisContextBlocks.model_validate(
+            {"market_regime": None, "performance_summary": None}
+        )
+        assert context.calendar_events == []
+
+    def test_an_unknown_calendar_event_field_is_rejected(self):
+        with pytest.raises(ValidationError, match="unexpected"):
+            CalendarEventInput.model_validate(
+                {
+                    "source_id": "fred:1",
+                    "published_at": "2027-03-05T00:00:00Z",
+                    "title": "Employment Situation",
+                    "summary": "Employment Situation",
+                    "url": "https://example.com",
+                    "provider": "fred",
+                    "unexpected": "field",
+                }
+            )

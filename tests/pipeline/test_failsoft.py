@@ -103,6 +103,26 @@ class ExplodingCalendarClient:
         raise RuntimeError(msg)
 
 
+class FakeCalendarClient:
+    """Returns one symbol-less macro event, mirroring `FredCalendarClient`."""
+
+    def fetch_calendar_events(self, start, end):
+        del end
+        stamp = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
+        return [
+            TextItem(
+                source_id="fred:1:2027-03-05",
+                symbol=None,
+                source_type="calendar",
+                published_at=stamp,
+                title="Employment Situation",
+                source_url="https://fred.stlouisfed.org/release?rid=1",
+                content_text="Employment Situation",
+                fetched_at=stamp,
+            )
+        ]
+
+
 class ExplodingPostmortemStateStore(StateStore):
     """A real `StateStore`, except reading `.database` always raises.
 
@@ -614,6 +634,46 @@ class TestScreeningFailureIsFatalAndRerunnable:
 
         assert retried.status == RunStatus.SUCCESS
         assert retried.run_id != failed.run_id
+
+
+class TestCalendarEventsReachAnalysisInput:
+    """Symbol-less calendar `TextItem`s reach `context.calendar_events`.
+
+    Never any candidate: they are collected but never attached to a symbol's
+    `news`/`filings` since `TextItem.symbol` is `None`.
+    """
+
+    @staticmethod
+    def _exported(result):
+        assert result.analysis_input_path is not None
+        return json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+
+    def test_a_collected_calendar_event_reaches_the_run_wide_context(self, base_deps):
+        deps = replace(
+            base_deps,
+            news_client=FakeNewsClient(),
+            calendar_client=FakeCalendarClient(),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        payload = self._exported(result)
+        calendar_events = payload["context"]["calendar_events"]
+        assert [item["source_id"] for item in calendar_events] == ["fred:1:2027-03-05"]
+        # Never attached to any candidate: it has no symbol to match.
+        for candidate in payload["candidates"]:
+            assert "fred:1:2027-03-05" not in [
+                item["source_id"] for item in candidate["news"]
+            ]
+
+    def test_no_calendar_client_exports_an_empty_calendar_events_list(self, base_deps):
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert self._exported(result)["context"]["calendar_events"] == []
 
 
 class TestPerformanceSummaryReachesAnalysisInput:

@@ -37,8 +37,9 @@ description: >
 
 ## 手順
 
-1. 入力 JSON を読み、`context.market_regime` / `context.performance_summary` を
-   把握する（当日の市場環境の前提になる）。
+1. 入力 JSON を読み、`context.market_regime` / `context.performance_summary` /
+   `context.calendar_events`（マクロ／経済カレンダーイベント）を把握する
+   （当日の市場環境の前提になる）。
 2. 銘柄ごとに `score_breakdown`, `risk_constraints`, あれば `decision_history`
    を読む。
 3. 次の 3 点を書く。
@@ -62,6 +63,9 @@ description: >
 - **断定的売買指示・命令形を出さない（AC3・AC4）。** 懸念は懸念として書き、行動を指示しない。
 - **根拠なき心理診断を書かない（AC5）。**
 - `screening_assessment` は **全銘柄必須**。news/filings が空の銘柄でも必ず書く。
+- `context.calendar_events`（マクロイベント）は懸念の根拠として利用可。`concerns`は
+  `source_ids`フィールドを持たないため、引用する場合はイベントの`source_id`を本文中に
+  明記する（例:「(source_id: fred:...) の指標発表を控える」）。
 - ここで書く内容は決定論的入力に基づくため `source_ids` を持たない
   （`screening_assessment` に provenance フィールドは無い・AC10）。テキスト由来の主張を
   混ぜたくなったら、それはニュース／開示分析側の担当（AC11）。

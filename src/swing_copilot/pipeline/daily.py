@@ -900,6 +900,10 @@ def _export_request(
     `RiskChecker.check()` guarantees one `RiskAssessment` per candidate, in
     the same order as `candidates` (`risk/checks.py`), so `ctx.risk_assessments`
     always covers every `ctx.candidates` entry.
+
+    Calendar/macro `TextItem`s (`symbol is None`) never match any candidate's
+    filter below, so they are collected separately as `ExportRequest.calendar_events`
+    -- run-wide context every candidate's analysis may cite (`analysis/validate.py`).
     """
     risk_by_symbol = {
         assessment.symbol: assessment for assessment in ctx.risk_assessments
@@ -935,6 +939,11 @@ def _export_request(
             max_news_items=analysis_config.max_news_items_per_symbol,
             max_news_chars=analysis_config.max_news_chars_per_item,
             max_filing_chars=analysis_config.max_filing_chars,
+            max_calendar_events=analysis_config.max_calendar_events,
+            max_calendar_chars=analysis_config.max_calendar_chars_per_item,
+        ),
+        calendar_events=tuple(
+            item for item in text_items if item.source_type == "calendar"
         ),
     )
 

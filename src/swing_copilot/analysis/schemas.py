@@ -72,11 +72,28 @@ class CandidateInput(_StrictModel):
     filings: list[FilingInput]
 
 
+class CalendarEventInput(_StrictModel):
+    """One collected macro/economic-calendar event, not tied to any symbol.
+
+    Unlike `NewsInput`/`FilingInput`, this is run-wide context (`TextItem.symbol`
+    is `None` for a calendar event): any candidate's analysis may cite it, so
+    `validate.py` admits these `source_id`s for every symbol rather than just one.
+    """
+
+    source_id: SourceId
+    published_at: datetime
+    title: str | None
+    summary: str
+    url: str
+    provider: str
+
+
 class AnalysisContextBlocks(_StrictModel):
     """Run-wide (not per-candidate) deterministic context blocks."""
 
     market_regime: str | None
     performance_summary: str | None
+    calendar_events: list[CalendarEventInput] = []
 
 
 class AnalysisInput(_StrictModel):

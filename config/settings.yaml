@@ -82,12 +82,15 @@ analysis:
   # swing-daily skill (docs/06_reliability_roadmap.md §5 P6-26).
   max_news_items_per_symbol: 20
   max_news_chars_per_item: 4000
-  # Per-filing export budget = filing_chunk_chars * max_filing_chunks.
-  filing_chunk_chars: 30000
-  max_filing_chunks: 4
+  # Per-filing export budget (single setting; formerly filing_chunk_chars *
+  # max_filing_chunks).
+  max_filing_chars: 120000
   # Filing collection recency bound (days) and per-symbol count cap.
   filing_lookback_days: 90
   max_filings_per_symbol: 3
+  # Run-wide macro/economic-calendar events surfaced in context.calendar_events.
+  max_calendar_events: 20
+  max_calendar_chars_per_item: 2000
 
 schedule:
   timeout_minutes: 35

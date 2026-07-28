@@ -14,6 +14,7 @@ from swing_copilot.analysis.validate import (
     validate_analysis,
 )
 from tests.analysis.conftest import (
+    CALENDAR_ID,
     FILING_ID,
     NEWS_ID,
     input_payload,
@@ -114,6 +115,65 @@ class TestProvenance:
         validated = _validated(write_documents, symbols=[payload])
 
         assert validated.outcomes[0].error is None
+
+    def test_a_verdict_reason_citing_a_calendar_event_is_accepted(
+        self, write_documents
+    ):
+        # CALENDAR_ID is run-wide context (context.calendar_events), not tied
+        # to any one symbol's candidate, so any symbol may cite it.
+        payload = symbol_payload(
+            verdict={
+                "recommendation": "skip",
+                "reasons": [
+                    {"text": "Macro event risk nearby.", "source_ids": [CALENDAR_ID]}
+                ],
+            }
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        assert validated.outcomes[0].error is None
+
+    def test_another_symbols_news_id_is_still_rejected(self, write_documents):
+        base_candidate = input_payload()["candidates"][0]
+        other_candidate = {
+            "symbol": "MSFT",
+            "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
+            "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
+            "decision_history": None,
+            "news": [
+                {
+                    "source_id": "finnhub:msft-1",
+                    "published_at": "2027-02-28T00:00:00+00:00",
+                    "headline": "MSFT news",
+                    "summary": "MSFT unrelated news.",
+                    "url": "https://example.com/msft-news",
+                    "provider": "finnhub",
+                }
+            ],
+            "filings": [],
+        }
+        custom_input = input_payload(candidates=[base_candidate, other_candidate])
+        payload = symbol_payload(
+            news_summary={
+                "facts": [
+                    {"text": "Borrowed from MSFT.", "source_ids": ["finnhub:msft-1"]}
+                ],
+                "interpretation": [],
+                "risk_flags": [],
+            }
+        )
+
+        input_path, result_path = write_documents(
+            custom_input, result_payload(symbols=[payload])
+        )
+        validated = validate_analysis(
+            load_analysis_input(input_path), load_analysis_result(result_path)
+        )
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is not None
+        assert "finnhub:msft-1" in outcome.error
 
     def test_a_filing_analysis_for_an_unsupplied_filing_withholds_the_symbol(
         self,

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 AS_OF = date(2027, 3, 1)
 NEWS_ID = "finnhub:1"
 FILING_ID = "edgar:0000320193-27-000001"
+CALENDAR_ID = "fred:1:2027-03-05"
 
 
 def input_payload(**overrides: Any) -> dict[str, Any]:
@@ -31,6 +32,16 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
         "context": {
             "market_regime": "<market_regime>\n</market_regime>\n",
             "performance_summary": None,
+            "calendar_events": [
+                {
+                    "source_id": CALENDAR_ID,
+                    "published_at": datetime(2027, 3, 5, tzinfo=UTC).isoformat(),
+                    "title": "Employment Situation",
+                    "summary": "Employment Situation",
+                    "url": "https://fred.stlouisfed.org/release?rid=1",
+                    "provider": "fred",
+                }
+            ],
         },
         "candidates": [
             {

@@ -161,6 +161,9 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
   スコアや順位を否定するものではない
 - `reasons[].text` には根拠を書き、ニュース／開示由来なら該当 `source_ids` を必ず引用。
   スコア等の決定論的入力のみに基づく理由は `source_ids: []` でよい
+- `context.calendar_events`（マクロ／経済カレンダーイベント）も verdict 理由の根拠に
+  できる。引用する場合は該当イベントの `source_id` を `reasons[].source_ids` に含める
+  （run単位の文脈のため、全銘柄が共通して引用可）
 - 全銘柄が `skip`、または市場環境（`context.market_regime`）から当日の新規エントリーを
   推奨しないと判断した場合は `no_trade: true` とし、`no_trade_reason` に理由を書く
 - 最終判断は人間。verdict は指示ではなく推奨として書く（命令形・断定的売買指示は禁止）

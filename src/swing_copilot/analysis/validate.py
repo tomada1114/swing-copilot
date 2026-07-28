@@ -21,6 +21,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
 
 #: Rendered in place of a symbol's qualitative section when verification fails.
 WITHHELD_MESSAGE = "検証不合格のため非表示"
@@ -156,8 +159,8 @@ def validate_analysis(
         rendered, plus the run-level no-trade flag.
 
     Raises:
-        AnalysisIngestError: `result.as_of` disagrees with the input's
-            `as_of`, meaning the two documents describe different trading days.
+        AnalysisIngestError: The result's `as_of` or symbol set disagrees with
+            the input, so the documents cannot safely describe one analysis.
     """
     if result.as_of != analysis_input.as_of:
         msg = (
@@ -166,6 +169,7 @@ def validate_analysis(
         )
         raise AnalysisIngestError(msg)
 
+    _verify_complete_symbol_coverage(analysis_input, result)
     candidates = {item.symbol: item for item in analysis_input.candidates}
     calendar_ids = frozenset(
         item.source_id for item in analysis_input.context.calendar_events
@@ -286,6 +290,29 @@ def _withheld(symbol: str, reason: str) -> SymbolOutcome:
     return SymbolOutcome(symbol=symbol, error=reason)
 
 
+def _verify_complete_symbol_coverage(
+    analysis_input: AnalysisInput, result: AnalysisResult
+) -> None:
+    """Require the result to explicitly cover every exported candidate.
+
+    A missing analysis is indistinguishable from an accidental omission at the
+    trust boundary, so partial results are intentionally not supported.
+    """
+    candidate_symbols = frozenset(
+        candidate.symbol for candidate in analysis_input.candidates
+    )
+    result_symbols = frozenset(symbol.symbol for symbol in result.symbols)
+    if candidate_symbols == result_symbols:
+        return
+    missing = sorted(candidate_symbols - result_symbols)
+    unexpected = sorted(result_symbols - candidate_symbols)
+    msg = (
+        "analysis_result symbols must exactly match analysis_input candidates: "
+        f"missing={missing}, unexpected={unexpected}"
+    )
+    raise AnalysisIngestError(msg)
+
+
 def _provenance_error(
     analysis: SymbolAnalysis,
     candidate: CandidateInput,
@@ -359,14 +386,22 @@ def _verified_no_trade_reason(reason: str | None) -> str | None:
 
 def _source_urls(analysis_input: AnalysisInput) -> dict[str, str]:
     # Calendar events first: their IDs are citable by *every* symbol
-    # (`_provenance_error`), so omitting them here would leave a legitimately
-    # cited source rendering as a bare ID instead of a link.
-    urls: dict[str, str] = {
-        event.source_id: event.url for event in analysis_input.context.calendar_events
-    }
+    # (`_provenance_error`). Only safe URLs are retained; renderer attribution
+    # is omitted when the archived input has no linkable URL.
+    urls: dict[str, str] = {}
+    for event in analysis_input.context.calendar_events:
+        _add_safe_source_url(urls, event.source_id, event.url)
     for candidate in analysis_input.candidates:
         for item in candidate.news:
-            urls[item.source_id] = item.url
+            _add_safe_source_url(urls, item.source_id, item.url)
         for filing in candidate.filings:
-            urls[filing.source_id] = filing.url
+            _add_safe_source_url(urls, filing.source_id, filing.url)
     return urls
+
+
+def _add_safe_source_url(urls: dict[str, str], source_id: str, raw_url: str) -> None:
+    """Add only a web URL that is safe for the report renderer to link."""
+    url = raw_url.strip()
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() in _ALLOWED_SOURCE_URL_SCHEMES and parsed.hostname:
+        urls[source_id] = url

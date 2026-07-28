@@ -58,6 +58,57 @@ class TestRunIdentity:
             AnalysisInput.model_validate(payload)
 
 
+class TestUniqueAnalysisEntities:
+    def test_duplicate_candidate_symbols_are_rejected(self):
+        candidate = input_payload()["candidates"][0]
+        payload = input_payload(candidates=[candidate, dict(candidate)])
+
+        with pytest.raises(ValidationError, match="candidate symbols must be unique"):
+            AnalysisInput.model_validate(payload)
+
+    def test_duplicate_source_ids_within_a_candidate_are_rejected(self):
+        candidate = input_payload()["candidates"][0]
+        candidate["filings"][0]["source_id"] = NEWS_ID
+        payload = input_payload(candidates=[candidate])
+
+        with pytest.raises(
+            ValidationError, match="candidate source_ids must be unique"
+        ):
+            AnalysisInput.model_validate(payload)
+
+    def test_duplicate_result_symbols_are_rejected(self):
+        payload = result_payload(symbols=[symbol_payload(), symbol_payload()])
+
+        with pytest.raises(ValidationError, match="result symbols must be unique"):
+            AnalysisResult.model_validate(payload)
+
+
+class TestNoTradeContract:
+    @pytest.mark.parametrize(
+        ("no_trade", "reason", "is_valid"),
+        [
+            pytest.param(True, "市場環境が不安定。", True, id="true-with-reason"),
+            pytest.param(True, None, False, id="true-without-reason"),
+            pytest.param(False, None, True, id="false-without-reason"),
+            pytest.param(False, "市場環境が不安定。", False, id="false-with-reason"),
+        ],
+    )
+    def test_no_trade_reason_is_bound_to_the_flag(self, no_trade, reason, is_valid):
+        payload = result_payload(no_trade=no_trade, no_trade_reason=reason)
+
+        if is_valid:
+            assert AnalysisResult.model_validate(payload).no_trade is no_trade
+        else:
+            with pytest.raises(ValidationError, match="no_trade_reason"):
+                AnalysisResult.model_validate(payload)
+
+    def test_no_trade_reason_must_not_be_blank(self):
+        with pytest.raises(ValidationError, match="no_trade_reason"):
+            AnalysisResult.model_validate(
+                result_payload(no_trade=True, no_trade_reason="   ")
+            )
+
+
 class TestUnknownFieldsAreRejected:
     def test_unknown_top_level_result_field_is_rejected(self):
         with pytest.raises(ValidationError, match="confidence"):

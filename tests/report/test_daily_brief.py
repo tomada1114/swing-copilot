@@ -28,7 +28,9 @@ from swing_copilot.report.daily_brief import (
     PENDING_ANALYSIS_MESSAGE,
     BriefRejectionCount,
     BriefRisk,
+    BriefSource,
     DailyBriefContext,
+    _sources_for_ids,
     build_daily_brief,
     format_sizing,
 )
@@ -56,6 +58,14 @@ SOURCE_URLS = {
     "news:1": "https://example.com/news:1",
     "filing:1": "https://example.com/filing:1",
 }
+
+
+def test_source_without_a_permitted_url_is_not_attributed() -> None:
+    sources = _sources_for_ids(
+        ["safe", "not-linkable"], {"safe": "https://example.com/safe"}
+    )
+
+    assert sources == (BriefSource("safe", "https://example.com/safe"),)
 
 
 class FakeMarketStore:

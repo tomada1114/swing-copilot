@@ -48,7 +48,8 @@ _HIDDEN_SIGNALS = frozenset({"volume_min"})
 #: Shown by `copilot-daily` itself: the deterministic pipeline is complete but
 #: nobody has run the qualitative analysis skill over its exported input yet.
 PENDING_ANALYSIS_MESSAGE = "分析待ち（swing-daily スキルで分析を実行してください）"
-#: Shown after ingest for a candidate the analysis never covered.
+#: Defensive fallback for a hand-constructed analysis that lacks a candidate.
+#: A successfully ingested result always has complete symbol coverage.
 MISSING_ANALYSIS_MESSAGE = "定性分析なし"
 #: Shown after ingest for a candidate whose analysis failed verification.
 WITHHELD_ANALYSIS_MESSAGE = "検証不合格のため非表示"
@@ -704,8 +705,8 @@ def build_analysis_brief(
 
     Every unhappy path collapses to `degraded=True` with an explanatory
     `conclusion` rather than a partially rendered section: analysis not run
-    yet (`analysis is None`), the symbol never analyzed, or the symbol's
-    analysis withheld by `analysis/validate.py`.
+    yet (`analysis is None`), a defensive hand-constructed analysis lacks the
+    symbol, or the symbol's analysis is withheld by `analysis/validate.py`.
     """
     if analysis is None:
         return BriefAnalysis(True, PENDING_ANALYSIS_MESSAGE)
@@ -801,6 +802,7 @@ def _sources_for_ids(
     """
     unique_ids = list(dict.fromkeys(source_ids))
     return tuple(
-        BriefSource(source_id, urls.get(source_id, source_id))
+        BriefSource(source_id, url)
         for source_id in unique_ids
+        if (url := urls.get(source_id)) is not None
     )

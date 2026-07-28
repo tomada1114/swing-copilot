@@ -10,6 +10,7 @@ degrades that symbol's qualitative section without a retry
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 from swing_copilot.exceptions import SwingCopilotError
@@ -72,9 +73,47 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
     "売り推奨",
 )
 
+# CON-03 needs to catch equivalent commands even when a particular wording was
+# not added to `FORBIDDEN_PHRASES`. The patterns deliberately remain small and
+# auditable; they are a safety boundary, not a general natural-language parser.
+_JAPANESE_TRADE_IMPERATIVE_PATTERN = re.compile(
+    r"(?:"
+    r"買(?:うべき|いなさい|ってください|え(?:[。!?]|$))|"
+    r"売(?:るべき|りなさい|ってください|れ(?:[。!?]|$))|"
+    r"(?:購入|売却|エントリー)(?:す?べき|してください|せよ|しろ|なさい)|"
+    r"ポジションを閉じ(?:るべき|なさい|てください|よ)"
+    r")"
+)
+_ENGLISH_TRADE_OBLIGATION_PATTERN = re.compile(
+    r"\b(?:you\s+)?(?:should|must|need\s+to|have\s+to)\s+"
+    r"(?:buy|sell|purchase|enter|exit|close(?:\s+(?:the\s+)?position)?)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_TRADE_COMMAND_PATTERN = re.compile(
+    r"\b(?:please\s+)?"
+    r"(?:buy|sell|purchase|enter|exit|close(?:\s+(?:the\s+)?position)?)"
+    r"(?:\s+\S+){0,4}\s+(?:now|immediately)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_DIRECT_TRADE_COMMAND_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:buy|sell|purchase|enter|exit|close(?:\s+(?:the\s+)?position)?)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_NEGATED_TRADE_COMMAND_PATTERN = re.compile(
+    r"\b(?:do\s+not|don't)\s+"
+    r"(?:buy|sell|purchase|enter|exit|close(?:\s+(?:the\s+)?position)?)\b",
+    re.IGNORECASE,
+)
+
 
 class ForbiddenLanguageError(SwingCopilotError):
     """Raised when skill output contains prohibited imperative trading language."""
+
+
+def _normalized_text(text: str) -> str:
+    """Normalize compatibility characters before every textual safety check."""
+    return unicodedata.normalize("NFKC", text)
 
 
 def check_no_imperative_language(texts: Iterable[str]) -> None:
@@ -87,11 +126,21 @@ def check_no_imperative_language(texts: Iterable[str]) -> None:
         ForbiddenLanguageError: A forbidden phrase was found.
     """
     for text in texts:
-        lowered = text.lower()
+        normalized = _normalized_text(text)
+        lowered = normalized.lower()
         for phrase in FORBIDDEN_PHRASES:
             if phrase.lower() in lowered:
                 msg = f"Output contains forbidden imperative language: {phrase!r}"
                 raise ForbiddenLanguageError(msg)
+        if (
+            _JAPANESE_TRADE_IMPERATIVE_PATTERN.search(normalized)
+            or _ENGLISH_TRADE_OBLIGATION_PATTERN.search(normalized)
+            or _ENGLISH_TRADE_COMMAND_PATTERN.search(normalized)
+            or _ENGLISH_DIRECT_TRADE_COMMAND_PATTERN.search(normalized)
+            or _ENGLISH_NEGATED_TRADE_COMMAND_PATTERN.search(normalized)
+        ):
+            msg = "Output contains forbidden imperative language"
+            raise ForbiddenLanguageError(msg)
 
 
 def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
@@ -113,18 +162,19 @@ def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
             without the required hedge + numeric-evidence co-occurrence.
     """
     for text in texts:
-        lowered = text.lower()
+        normalized = _normalized_text(text)
+        lowered = normalized.lower()
         has_keyword = any(
             keyword.lower() in lowered for keyword in _BEHAVIORAL_KEYWORDS
         )
         if not has_keyword:
             continue
         has_evidence = (
-            _PERCENTAGE_PATTERN.search(text)
-            and _ACTUAL_PATTERN.search(text)
-            and _PLAN_PATTERN.search(text)
+            _PERCENTAGE_PATTERN.search(normalized)
+            and _ACTUAL_PATTERN.search(normalized)
+            and _PLAN_PATTERN.search(normalized)
         )
-        if _HEDGE_PATTERN.search(text) and has_evidence:
+        if _HEDGE_PATTERN.search(normalized) and has_evidence:
             continue
         msg = f"Output contains an unevidenced behavioral/psychological claim: {text!r}"
         raise ForbiddenLanguageError(msg)

@@ -173,18 +173,24 @@ class TestIngestRewritesTheReport:
         assert "今すぐ買うべき局面。" not in markdown
         assert "定性: 懸念なし" not in markdown
 
-    def test_a_symbol_missing_from_the_result_is_marked_as_unanalyzed(
+    def test_a_symbol_missing_from_the_result_preserves_existing_reports(
         self,
         write_documents,
         archived_context,
+        tmp_path,
     ):
         input_path, result_path = write_documents(None, result_payload(symbols=[]))
+        report_path = tmp_path / "reports" / AS_OF.isoformat() / f"{RUN_ID}.md"
+        latest_path = tmp_path / "reports" / "latest.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_bytes(b"previous report")
+        latest_path.write_bytes(b"previous latest")
 
-        markdown = ingest(input_path, result_path, archived_context).read_text(
-            encoding="utf-8"
-        )
+        with pytest.raises(AnalysisIngestError, match=r"missing.*AAPL"):
+            ingest(input_path, result_path, archived_context)
 
-        assert "定性分析なし" in markdown
+        assert report_path.read_bytes() == b"previous report"
+        assert latest_path.read_bytes() == b"previous latest"
 
 
 class TestArtifactIdentity:

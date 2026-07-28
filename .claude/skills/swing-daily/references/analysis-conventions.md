@@ -44,13 +44,16 @@
 
 ### AC3: 断定的売買指示の禁止
 
-以下のような表現を、どのテキストフィールドにも書かない（機械検査あり）。
+以下のような表現を、どのテキストフィールドにも書かない（機械検査あり）。検査は
+Unicode NFKC 正規化後に行うため、全角英数などで表記を変えても回避できない。
 
 - 日本語: 買うべき / 売るべき / 今すぐ買う / 今すぐ売る / 買いです / 売りです /
   強く推奨 / 購入すべき / 売却すべき / 購入してください / 売却してください /
-  買い推奨 / 売り推奨
+  買い推奨 / 売り推奨 / 購入せよ / エントリーしてください /
+  ポジションを閉じなさい
 - 英語: you should buy / you should sell / buy now / sell now / must buy /
-  must sell / recommend buying / recommend selling / strong buy / strong sell
+  must sell / recommend buying / recommend selling / strong buy / strong sell /
+  please sell immediately
 
 このリストは **例示であって網羅ではない**。禁止フレーズ表の正本は ingest 側の
 CON-03 検査モジュール（`src/swing_copilot/analysis/` 配下）。表に載っていなくても、
@@ -59,7 +62,8 @@ CON-03 検査モジュール（`src/swing_copilot/analysis/` 配下）。表に�
 ### AC4: 命令形の禁止
 
 「〜せよ」「〜しなさい」「〜してください」といった、読者への行動指示の命令形を
-使わない。書くのは観察と条件付きの解釈まで。
+使わない。引用・否定の文脈で禁止表現を使う場合も、機械検査は安全側で違反として
+扱うため、その表現自体を出力しない。書くのは観察と条件付きの解釈まで。
 
 - NG: 「決算前にポジションを閉じてください」
 - OK: 「決算発表が as_of の 2 営業日後に予定されており、イベントリスクが高い期間にあたる」

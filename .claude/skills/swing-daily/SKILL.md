@@ -176,6 +176,8 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 - `run_id`、`as_of`、`strategy_key`、`input_digest`は input から**逐語コピー**する
 - `schema_version` は `analysis-result-v2`
 - `screening_assessment` と `verdict` は**全銘柄必須**
+- `symbols[].symbol` は重複させず、input の `candidates[].symbol` と**完全一致**させる
+- `no_trade: true` なら非空白の `no_trade_reason` を書き、`false` なら必ず `null` にする
 - 出力先は `<WORKDIR>/analysis_result.json`（`analysis_input.json` と同じディレクトリ）
 - input に無い symbol を追加しない。input にある symbol を落とさない
 - `analysis_work/` 由来の`run_id` / `as_of` / `input_digest` / `ac_check`を result へ持ち込まない（未知フィールドは hard fail）

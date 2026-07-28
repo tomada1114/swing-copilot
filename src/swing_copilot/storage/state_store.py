@@ -11,6 +11,7 @@ creation.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -28,7 +29,7 @@ from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_ST
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date, datetime
     from pathlib import Path
     from uuid import UUID
@@ -102,13 +103,23 @@ class StateStore:
         """Persist this run's deterministic SPY/QQQ FTD state changes."""
         ftd_records.record_ftd_history(self._database, run_id, snapshot)
 
-    def start_run(self, run_date: date, mode: RunMode, config_hash: str) -> UUID:
+    def start_run(
+        self,
+        run_date: date,
+        mode: RunMode,
+        config_hash: str,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> UUID:
         """Start a new run and record it as `running`.
 
         Args:
             run_date: Evaluation market date for this run.
             mode: Whether this run is `live` or `dry_run`.
-            config_hash: Hash of the effective configuration, for audit.
+            config_hash: Full SHA-256 fingerprint of the effective configuration.
+            metadata: Canonical, non-secret run metadata needed to reconstruct
+                the provider, data tier, universe snapshot, and schema/app
+                versions. `None` exists only for legacy callers/tests.
 
         Returns:
             The newly generated `run_id`.
@@ -118,10 +129,21 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id, run_date, mode, config_hash, status, started_at
-                ) VALUES (?, ?, ?, ?, 'running', now())
+                    run_id, run_date, mode, config_hash, metadata_json, status, started_at
+                ) VALUES (?, ?, ?, ?, ?, 'running', now())
                 """,
-                [str(run_id), run_date, mode.value, config_hash],
+                [
+                    str(run_id),
+                    run_date,
+                    mode.value,
+                    config_hash,
+                    json.dumps(
+                        metadata if metadata is not None else {},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ],
             )
         return run_id
 

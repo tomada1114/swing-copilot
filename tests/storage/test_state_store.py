@@ -65,6 +65,20 @@ _PRE_P1_06_POSITIONS_TABLE = """
     )
 """
 
+_PRE_I57_RUNS_TABLE = """
+    CREATE TABLE IF NOT EXISTS runs (
+        run_id          UUID PRIMARY KEY,
+        run_date        DATE NOT NULL,
+        mode            VARCHAR NOT NULL,
+        config_hash     VARCHAR NOT NULL,
+        status          VARCHAR NOT NULL,
+        started_at      TIMESTAMPTZ NOT NULL,
+        completed_at    TIMESTAMPTZ,
+        report_path     VARCHAR,
+        error_summary   VARCHAR
+    )
+"""
+
 
 class TestInitSchema:
     def test_is_idempotent(self, state_store):
@@ -208,6 +222,27 @@ class TestInitSchema:
                 ],
             )
 
+    def test_init_schema_adds_run_metadata_to_a_pre_i57_database(self, tmp_path):
+        database = Database(tmp_path / "pre_i57.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_I57_RUNS_TABLE)
+
+        store = StateStore(database)
+        store.init_schema()
+        run_id = store.start_run(
+            date(2026, 7, 20),
+            RunMode.LIVE,
+            "a" * 64,
+            metadata={"schema_version": "run-metadata-v1"},
+        )
+
+        with database.connect() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert row is not None
+        assert json.loads(row[0]) == {"schema_version": "run-metadata-v1"}
+
 
 class TestRunLifecycle:
     def test_start_run_returns_unique_ids_for_same_run_date(self, state_store):
@@ -230,6 +265,23 @@ class TestRunLifecycle:
         assert row[0] == "success"
         assert row[1] == str(report_path)
         assert row[2] is not None
+
+    def test_start_run_persists_canonical_reconstruction_metadata(self, state_store):
+        metadata = {
+            "provider": {"data_tier": "prototype", "name": "yfinance"},
+            "schema_version": "run-metadata-v1",
+        }
+        run_id = state_store.start_run(
+            date(2026, 7, 20), RunMode.DRY_RUN, "b" * 64, metadata=metadata
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT config_hash, metadata_json FROM runs WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row[0] == "b" * 64
+        assert json.loads(row[1]) == metadata
 
     def test_failed_run_can_be_recovered_by_a_new_run(self, state_store):
         failed_run = state_store.start_run(date(2026, 7, 20), RunMode.DRY_RUN, "hash-a")

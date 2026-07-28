@@ -374,8 +374,8 @@ class StateStore:
     def init_schema(self) -> None:
         """未作成のテーブルをDDL（本書4章）に従い作成する（既存テーブルには影響しない）。"""
 
-    def start_run(self, run_date: date, mode: RunMode, config_hash: str) -> UUID:
-        """一意なrun_idを発行してrunsへ記録する。"""
+    def start_run(self, run_date: date, mode: RunMode, config_hash: str, *, metadata: Mapping[str, object] | None = None) -> UUID:
+        """一意なrun_id、完全SHA-256指紋、再構成metadataをrunsへ記録する。"""
 
     def record_run_step(self, run_id: UUID, step: str, status: StepStatus, detail: str | None, duration_s: float) -> None:
         """(run_id, step)をupsertする。"""
@@ -1122,11 +1122,17 @@ class PerformanceSummary:
 ### 3.21 `pipeline/daily.py`（FR-12）
 
 `run_daily()`は`(options, deps)`の2引数を取り、`DailyDependencies`が
-実アダプタまたはfakeを運ぶcomposition rootとなる。固定8ステップのうち
-ステップ1〜4の失敗だけを致命的エラー（非ゼロ終了）とし、ステップ5〜8
-（テキスト、分析入力エクスポート、通知、出力）は`RunStatus.DEGRADED`へ縮退して
-終了コード0を保つ。主表示はステップ8でstdoutへ出す。併せて同じ`DailyBrief`から
-Markdownを原子保存し、ブラウザ自動起動は行わない。
+実アダプタまたはfakeを運ぶcomposition rootとなる。開始時に検証済み`Settings`、
+選択`StrategySpec`、`strategy_key`のcanonical JSONから完全SHA-256指紋を作り、
+provider名/data tier、実効ユニバースのsnapshot日・identity、アプリ版・metadata
+schema版とともに`runs`へ保存する。固定8ステップのうちステップ1〜4、ブリーフ生成、
+またはrun固有Markdown保存の失敗は`FAILED`・非ゼロ終了とする。一方、テキスト、
+分析入力エクスポート、通知、`latest.md`更新、`report_context.json`保存の失敗は、
+run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする。主表示はステップ8
+でstdoutへ出し、終了時の運用サマリにはrun ID、status、exit code、provider/data tier、
+欠損source、成果物パス、`uv run copilot-history run --run-id <UUID>`を一箇所に表示する。
+`prototype` data tier（現行`yfinance`）のCLIブリーフとMarkdownには非公式データに
+基づく試作結果であることを明示する。ブラウザ自動起動は行わない。
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
@@ -1212,7 +1218,7 @@ def run_daily(
     CLIのdry_run=Trueでも実プロバイダへの接続を許すが、DB/出力先を分離し通知を抑止する。
     offline E2Eではfixture/fake providerを注入し、実ネットワークを禁止する。
     skip_textはP1段階での動作確認用フラグ。
-    戻り値: DailyRunResult.exit_code（0=成功/縮退成功、非ゼロ=ステップ1-4の致命的失敗）。
+    戻り値: DailyRunResult.exit_code（0=成功/成果物を残した縮退成功、非ゼロ=ステップ1-4、ブリーフ、またはrun固有Markdownの失敗）。
     CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--limit N] [--strategy KEY]`
     （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ）
     （`--strategy`の既定は`default`。`strategies.yaml`にないキーは外部I/O前に利用可能なキー一覧を含む設定エラーでfail-fastする。）
@@ -1318,6 +1324,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_date        DATE NOT NULL,
     mode            VARCHAR NOT NULL CHECK (mode IN ('live', 'dry_run')),
     config_hash     VARCHAR NOT NULL,
+    metadata_json   JSON NOT NULL DEFAULT '{}',
     status          VARCHAR NOT NULL CHECK (status IN ('running','success','degraded','failed')),
     started_at      TIMESTAMPTZ NOT NULL,
     completed_at    TIMESTAMPTZ,
@@ -1421,6 +1428,8 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     PRIMARY KEY (run_id, symbol)
 );
 ```
+
+`config_hash`は短縮値ではなく、検証済みSettings・選択StrategySpec・strategy keyのcanonical JSONから得る完全SHA-256である。`metadata_json`は`run-metadata-v1`として、provider名、data tier、実効ユニバースのsnapshot日とidentity、アプリ版を保存する。既存DuckDBは`ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata_json JSON`で加算移行し、旧rowのNULLを歴史的な欠損として許容する。新規runは常にcanonical JSON objectを書く。
 
 P1-03より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かない（既存テーブル形状に対してno-op）ため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS ...`で追加列を後付けする。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK/NOT NULL制約付与を未サポートのため、この経路で追加された列はアプリケーション側でのみ整合性が保証される（既存DBをALTER経由でアップグレードした場合、`CREATE TABLE`側のCHECK制約はDB層では効かない）。
 

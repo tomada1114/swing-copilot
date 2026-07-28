@@ -9,7 +9,7 @@ from uuid import UUID
 
 import pytest
 
-from swing_copilot.models import RunStatus
+from swing_copilot.models import DataTier, RunStatus
 from swing_copilot.report.daily_brief import (
     BriefAnalysis,
     BriefCandidate,
@@ -28,7 +28,12 @@ from swing_copilot.report.daily_brief import (
     SignalPerformanceRow,
 )
 from swing_copilot.report.markdown_report import render_markdown, write_markdown_report
-from swing_copilot.report.terminal_report import TerminalPaths, render_terminal
+from swing_copilot.report.terminal_report import (
+    TerminalPaths,
+    TerminalRunSummary,
+    render_run_summary,
+    render_terminal,
+)
 
 RUN_ID = UUID("11111111-2222-3333-4444-555555555555")
 
@@ -803,6 +808,41 @@ def test_markdown_is_written_per_run_and_latest_is_replaced(tmp_path: Path) -> N
     assert (tmp_path / "latest.md").read_text(encoding="utf-8") == path.read_text(
         encoding="utf-8"
     )
+
+
+def test_prototype_data_tier_is_disclosed_in_terminal_and_markdown() -> None:
+    terminal = render_terminal(_brief(), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "Data tier: prototype（非公式データに基づく試作結果）" in terminal
+    assert "Data provider: `yfinance`" in markdown
+    assert "Data tier: `prototype`（非公式データに基づく試作結果）" in markdown
+
+
+def test_run_summary_contains_every_operational_handoff_field() -> None:
+    summary = TerminalRunSummary(
+        run_id=RUN_ID,
+        status=RunStatus.DEGRADED,
+        exit_code=0,
+        provider_name="yfinance",
+        data_tier=DataTier.PROTOTYPE,
+        missing_sources=("text",),
+        paths=TerminalPaths(
+            report=Path("reports/2026-07-22/run.md"),
+            analysis_input=Path("reports/2026-07-22/analysis_input.json"),
+        ),
+    )
+
+    output = render_run_summary(summary, width=200)
+
+    assert "Run ID: 11111111-2222-3333-4444-555555555555" in output
+    assert "Status: DEGRADED" in output
+    assert "Exit code: 0" in output
+    assert "Data: yfinance / prototype" in output
+    assert "Missing sources: text" in output
+    assert "詳細レポート: reports/2026-07-22/run.md" in output
+    assert "analysis_input.json" in output
+    assert "uv run copilot-history run --run-id" in output
 
 
 def test_latest_replace_failure_preserves_previous_latest_and_cleans_temp(

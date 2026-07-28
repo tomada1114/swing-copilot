@@ -230,7 +230,7 @@ Part1調査の結論として、本システムは意思決定支援ツールと
 
 **NFR-05 監査性**
 - 説明: 全実行・ステップ・候補・リスク評価・定性分析の入出力・人間の判断を記録し、特定の`run_id`のレポート入力を後から再構成可能な状態を保つ。
-- 受け入れ基準: DuckDBのスキーマに、実行・ステップ・シグナル/候補・リスク評価・収集テキスト・人間の判断それぞれに対応するテーブルが存在する。定性分析の監査証跡は`reports/<run_date>/<run_id>/`に残る`analysis_input.json`（分析へ渡した入力そのもの）・`analysis_result.json`（スキルの回答そのもの）・`report_context.json`（再描画に使ったブリーフのスナップショット）の3ファイルが担う。3文書は`run_id`、`as_of`、`strategy_key`、入力のcanonical JSONから計算した完全SHA-256 digestで束縛し、いずれかが不一致なら既存レポートを変更せずhard failする。任意の`run_id`のバッチ実行結果を、記録された入力参照と出力から再構成できることをテストで確認できる。
+- 受け入れ基準: DuckDBのスキーマに、実行・ステップ・シグナル/候補・リスク評価・収集テキスト・人間の判断それぞれに対応するテーブルが存在する。`runs.config_hash`は検証済み`Settings`・選択した`StrategySpec`・`strategy_key`のcanonical JSON全体から算出する完全SHA-256指紋とし、同じ行の`metadata_json`にはprovider名、data tier、実効ユニバースのsnapshot日・identity、アプリ版・メタデータschema版を秘密情報なしで保存する。定性分析の監査証跡は`reports/<run_date>/<run_id>/`に残る`analysis_input.json`（分析へ渡した入力そのもの）・`analysis_result.json`（スキルの回答そのもの）・`report_context.json`（再描画に使ったブリーフのスナップショット）の3ファイルが担う。3文書は`run_id`、`as_of`、`strategy_key`、入力のcanonical JSONから計算した完全SHA-256 digestで束縛し、いずれかが不一致なら既存レポートを変更せずhard failする。任意の`run_id`のバッチ実行結果を、記録された入力参照と出力から再構成できることをテストで確認できる。
 
 > **P7（スキル移行）での変更**: 旧NFR-05が定性分析の証跡としていた`llm_calls`テーブル（プロンプト全文・トークン数・コスト・レスポンスJSON）は、LLM API呼び出しの廃止に伴い削除した。証跡は上記のJSONアーティファクトへ置き換わっている。
 

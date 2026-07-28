@@ -42,6 +42,12 @@ class RunStatus(Enum):
     FAILED = "failed"
 
 
+class DataTier(Enum):
+    """Trust tier of the market-data basis used for one run."""
+
+    PROTOTYPE = "prototype"
+
+
 class StepStatus(Enum):
     """Status of a single ``run_steps`` row."""
 
@@ -98,3 +104,8 @@ class DailyRunResult:
     # Absolute path of this run's exported `analysis_input.json`, or `None`
     # when there was nothing to analyze (no candidates or no collected text).
     analysis_input_path: Path | None = None
+    provider_name: str = "yfinance"
+    data_tier: DataTier = DataTier.PROTOTYPE
+    # Source boundaries that could not provide data for this run. This is
+    # presentation/audit metadata only; per-step details remain in `run_steps`.
+    missing_sources: tuple[str, ...] = ()

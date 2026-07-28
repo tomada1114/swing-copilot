@@ -26,6 +26,10 @@ from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
+from swing_copilot.report.markdown_report import (
+    LatestMarkdownUpdateError,
+    write_markdown_report,
+)
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -581,6 +585,84 @@ class TestNotifyFailureDegrades:
         assert result.report_path.is_file()
         assert _step_status(state_store, result.run_id, "7_notify") == "failed"
         assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+
+class TestOutputFailureContract:
+    def test_brief_construction_failure_is_failed_with_nonzero_exit(
+        self, base_deps, state_store, monkeypatch
+    ):
+        def _raise(*_args, **_kwargs):
+            msg = "brief data is unavailable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "build_daily_brief", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status is RunStatus.FAILED
+        assert result.exit_code == 1
+        assert result.brief is None
+        assert result.report_path is None
+        assert _step_status(state_store, result.run_id, "8_output") == "failed"
+
+    def test_run_archive_failure_is_failed_with_nonzero_exit(
+        self, base_deps, state_store, monkeypatch
+    ):
+        def _raise(*_args, **_kwargs):
+            msg = "archive disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(daily_module, "write_markdown_report", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status is RunStatus.FAILED
+        assert result.exit_code == 1
+        assert result.brief is not None
+        assert result.report_path is None
+        assert _step_status(state_store, result.run_id, "8_output") == "failed"
+
+    def test_latest_failure_degrades_and_keeps_run_archive(
+        self, base_deps, state_store, monkeypatch
+    ):
+        original_write = write_markdown_report
+
+        def _write_archive_then_fail_latest(*args, **kwargs):
+            report_path = original_write(*args, **kwargs)
+            raise LatestMarkdownUpdateError(
+                report_path, OSError("latest replacement failed")
+            )
+
+        monkeypatch.setattr(
+            daily_module, "write_markdown_report", _write_archive_then_fail_latest
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status is RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "8_output") == "failed"
+
+    def test_report_context_failure_degrades_and_keeps_run_archive(
+        self, base_deps, state_store, monkeypatch
+    ):
+        def _raise(*_args, **_kwargs):
+            msg = "context disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(daily_module, "write_report_context", _raise)
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status is RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert result.analysis_input_path is not None
+        assert _step_status(state_store, result.run_id, "8_output") == "failed"
 
 
 class TestDryRunSuppressesNotification:

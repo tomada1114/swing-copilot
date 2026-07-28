@@ -10,7 +10,6 @@ from uuid import UUID
 import pytest
 
 from swing_copilot.models import RunStatus
-from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefAnalysis,
     BriefCandidate,
@@ -26,6 +25,7 @@ from swing_copilot.report.daily_brief import (
     BriefRisk,
     BriefSource,
     DailyBrief,
+    SignalPerformanceRow,
 )
 from swing_copilot.report.markdown_report import render_markdown, write_markdown_report
 from swing_copilot.report.terminal_report import TerminalPaths, render_terminal

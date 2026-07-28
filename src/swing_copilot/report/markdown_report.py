@@ -13,11 +13,11 @@ from swing_copilot.report.daily_brief import (
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
-    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
         BriefPortfolioHeat,
         DailyBrief,
+        SignalPerformanceRow,
     )
     from swing_copilot.storage.paper_records import TradeDecisionRecord
 

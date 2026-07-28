@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.paper.journal import PerformanceSummary
-    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
+    from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord

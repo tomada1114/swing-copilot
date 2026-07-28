@@ -18,7 +18,6 @@ from swing_copilot.analysis.snapshot import (
 )
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.models import RunStatus
-from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
     BriefAnalysis,
     BriefCandidate,
@@ -34,6 +33,7 @@ from swing_copilot.report.daily_brief import (
     BriefRisk,
     BriefSource,
     DailyBrief,
+    SignalPerformanceRow,
 )
 
 RUN_ID = UUID("11111111-2222-3333-4444-555555555555")

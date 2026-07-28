@@ -21,7 +21,6 @@ from pydantic import TypeAdapter, ValidationError
 from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.models import RunStatus
-from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report import daily_brief as _brief_module
 from swing_copilot.report.daily_brief import DailyBrief
 
@@ -31,23 +30,21 @@ if TYPE_CHECKING:
 REPORT_CONTEXT_FILENAME = "report_context.json"
 CONTEXT_SCHEMA_VERSION = "report-context-v1"
 
-# `report/daily_brief.py` uses postponed annotations and deliberately keeps
-# `date`/`datetime`/`UUID`/`SignalPerformanceRow` in a `TYPE_CHECKING` block --
-# in particular so `report/` carries no runtime dependency on `pipeline/`.
-# Pydantic, however, evaluates a dataclass's annotation strings against its
-# *defining* module's globals, so it cannot build a `DailyBrief` adapter while
-# those four names are absent from that namespace.
+# `report/daily_brief.py` uses postponed annotations and keeps `date`/
+# `datetime`/`UUID` in a `TYPE_CHECKING` block, since that module has no
+# runtime use for them beyond type hints. Pydantic, however, evaluates a
+# dataclass's annotation strings against its *defining* module's globals, so
+# it cannot build a `DailyBrief` adapter while those three names are absent
+# from that namespace.
 #
-# Binding them there from here -- `analysis/`, which legitimately depends on
-# both `report/` and `pipeline/` -- resolves the adapter at the single point
-# that needs it while leaving `report/`'s own import list untouched. The bound
-# objects are exactly what the annotations already denote, so nothing else
-# about the module changes.
+# Binding them there from here resolves the adapter at the single point that
+# needs it, while leaving `report/daily_brief.py`'s own import list
+# untouched. The bound objects are exactly what the annotations already
+# denote, so nothing else about the module changes.
 _BRIEF_TYPE_NAMESPACE = {
     "date": date,
     "datetime": datetime,
     "UUID": UUID,
-    "SignalPerformanceRow": SignalPerformanceRow,
 }
 for _name, _type in _BRIEF_TYPE_NAMESPACE.items():
     setattr(_brief_module, _name, _type)

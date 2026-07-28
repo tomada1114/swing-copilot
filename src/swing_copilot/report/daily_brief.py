@@ -18,7 +18,6 @@ if TYPE_CHECKING:
         SymbolOutcome,
         ValidatedAnalysis,
     )
-    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
@@ -316,6 +315,27 @@ class BriefRejectionCount:
 
     reason_code: str
     count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SignalPerformanceRow:
+    """One signal's weighted hit-rate stats for the markdown aggregation (REQ-005/REQ-008).
+
+    `true_positive_count`/`false_positive_count`/`neutral_count` are RAW
+    (unweighted) occurrence tallies -- the issue's "TP/FP/NEUTRAL件数" reads
+    as a literal count column, distinct from `hit_rate`, which alone is
+    horizon-weighted. `n` is also raw and includes NEUTRAL occurrences: the
+    issue's own "n=15" preliminary-sample example counts every occurrence of
+    a signal, not just its TP/FP ones.
+    """
+
+    signal_name: str
+    true_positive_count: int
+    false_positive_count: int
+    neutral_count: int
+    hit_rate: float | None
+    n: int
+    is_preliminary: bool
 
 
 @dataclass(frozen=True, slots=True)

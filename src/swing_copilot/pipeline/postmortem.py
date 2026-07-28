@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from swing_copilot.report.daily_brief import SignalPerformanceRow
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.history_queries import (
     get_run_by_date,
@@ -88,27 +89,6 @@ def classify_forward_return(
     if forward_return_pct < -severe_threshold_pct:
         return FALSE_POSITIVE_SEVERE
     return FALSE_POSITIVE_MILD
-
-
-@dataclass(frozen=True, slots=True)
-class SignalPerformanceRow:
-    """One signal's weighted hit-rate stats for the markdown aggregation (REQ-005/REQ-008).
-
-    `true_positive_count`/`false_positive_count`/`neutral_count` are RAW
-    (unweighted) occurrence tallies -- the issue's "TP/FP/NEUTRAL件数" reads
-    as a literal count column, distinct from `hit_rate`, which alone is
-    horizon-weighted. `n` is also raw and includes NEUTRAL occurrences: the
-    issue's own "n=15" preliminary-sample example counts every occurrence of
-    a signal, not just its TP/FP ones.
-    """
-
-    signal_name: str
-    true_positive_count: int
-    false_positive_count: int
-    neutral_count: int
-    hit_rate: float | None
-    n: int
-    is_preliminary: bool
 
 
 @dataclass(slots=True)

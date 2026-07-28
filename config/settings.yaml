@@ -1,6 +1,6 @@
 universe:
   index: "sp500"
-  refresh_interval_days: 7
+  refresh_interval_days: 7 # >= 1
   snapshot_path: "config/universe_snapshot.csv"
   manual_include: [] # ticker symbols to force-include
   manual_exclude: [] # ticker symbols to force-exclude
@@ -23,21 +23,21 @@ risk:
   wide_stop_threshold_pct: 10.0 # % of entry price; WIDE_STOP warning above this (要検証)
 
 fundamental_filters:
-  min_profitable_quarters: 4 # net_income > 0 for the last N quarters
+  min_profitable_quarters: 4 # >= 1; net_income > 0 for the last N quarters
   require_positive_fcf: true
-  min_equity_ratio: 0.30
+  min_equity_ratio: 0.30 # fraction in [0, 1]
 
 technical_signals:
   trend:
-    sma_short: 50
-    sma_long: 200
+    sma_short: 50 # >= 1 and strictly less than sma_long
+    sma_long: 200 # >= 1
   pullback:
-    rsi_period: 14
-    rsi_threshold: 45
-    sma_band_pct: 0.03
+    rsi_period: 14 # >= 1
+    rsi_threshold: 45 # closed interval [0, 100]
+    sma_band_pct: 0.03 # fraction in [0, 1]
   volume:
-    avg_volume_days: 20
-    min_avg_volume: 1000000
+    avg_volume_days: 20 # >= 1
+    min_avg_volume: 1000000 # >= 0
   minervini:
     # roadmap §5 P5-21; RS threshold and weights are 要検証.
     sma200_rising_days: 22
@@ -93,7 +93,7 @@ analysis:
   max_calendar_chars_per_item: 2000
 
 schedule:
-  timeout_minutes: 35
+  timeout_minutes: 35 # >= 1
 
 notification:
   enabled: false # Discord notification is opt-in; set DISCORD_WEBHOOK_URL to use it

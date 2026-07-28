@@ -1220,7 +1220,7 @@ def run_daily(
     skip_textはP1段階での動作確認用フラグ。
     戻り値: DailyRunResult.exit_code（0=成功/成果物を残した縮退成功、非ゼロ=ステップ1-4、ブリーフ、またはrun固有Markdownの失敗）。
     CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--limit N] [--strategy KEY]`
-    （`--limit N`: ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ）
+    （`--limit N`: 非負整数。ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ。0は保有銘柄だけを維持し、負数はusage error）
     （`--strategy`の既定は`default`。`strategies.yaml`にないキーは外部I/O前に利用可能なキー一覧を含む設定エラーでfail-fastする。）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
@@ -1646,6 +1646,12 @@ notification:
   enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する
 
 ```
+
+#### 検証契約
+
+`settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
+
+`copilot-daily --limit N`の`N`は非負整数である。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄だけを価格取得・リスク監視の対象に残す。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 

@@ -1651,12 +1651,26 @@ def _missing_sources(
     )
 
 
+def _non_negative_int(raw_value: str) -> int:
+    """Parse a CLI count without admitting Python's negative slicing semantics."""
+    value = int(raw_value)
+    if value < 0:
+        msg = "must be greater than or equal to 0"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser = argparse.ArgumentParser(prog="copilot-daily")
     parser.add_argument("--as-of", type=date.fromisoformat, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-text", action="store_true")
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--limit",
+        type=_non_negative_int,
+        default=None,
+        help="screen at most this many universe symbols; 0 keeps only open holdings",
+    )
     parser.add_argument("--strategy", default="default")
     parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
     args = parser.parse_args(argv)

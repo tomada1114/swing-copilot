@@ -67,14 +67,14 @@ class Secrets(BaseSettings):
 class _StrictModel(BaseModel):
     """Base for settings.yaml sections: reject unknown keys (fail fast)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class UniverseConfig(_StrictModel):
     """`universe.*` in `settings.yaml`."""
 
     index: str = "sp500"
-    refresh_interval_days: int = 7
+    refresh_interval_days: int = Field(default=7, ge=1)
     snapshot_path: str = "config/universe_snapshot.csv"
     manual_include: list[str] = []
     manual_exclude: list[str] = []
@@ -119,31 +119,38 @@ class RiskConfig(_StrictModel):
 class FundamentalFilterConfig(_StrictModel):
     """`fundamental_filters.*` in `settings.yaml`."""
 
-    min_profitable_quarters: int = 4
+    min_profitable_quarters: int = Field(default=4, ge=1)
     require_positive_fcf: bool = True
-    min_equity_ratio: float = 0.30
+    min_equity_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
 
 
 class TrendSignalConfig(_StrictModel):
     """`technical_signals.trend.*` in `settings.yaml`."""
 
-    sma_short: int = 50
-    sma_long: int = 200
+    sma_short: int = Field(default=50, ge=1)
+    sma_long: int = Field(default=200, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_window_order(self) -> TrendSignalConfig:
+        if self.sma_short >= self.sma_long:
+            msg = "sma_short must be < sma_long"
+            raise ValueError(msg)
+        return self
 
 
 class PullbackSignalConfig(_StrictModel):
     """`technical_signals.pullback.*` in `settings.yaml`."""
 
-    rsi_period: int = 14
-    rsi_threshold: float = 45
-    sma_band_pct: float = 0.03
+    rsi_period: int = Field(default=14, ge=1)
+    rsi_threshold: float = Field(default=45.0, ge=0.0, le=100.0)
+    sma_band_pct: float = Field(default=0.03, ge=0.0, le=1.0)
 
 
 class VolumeFilterConfig(_StrictModel):
     """`technical_signals.volume.*` in `settings.yaml`."""
 
-    avg_volume_days: int = 20
-    min_avg_volume: int = 1_000_000
+    avg_volume_days: int = Field(default=20, ge=1)
+    min_avg_volume: int = Field(default=1_000_000, ge=0)
 
 
 class MinerviniSignalConfig(_StrictModel):
@@ -319,7 +326,7 @@ class AnalysisConfig(_StrictModel):
 class ScheduleConfig(_StrictModel):
     """`schedule.*` in `settings.yaml` (NFR-03)."""
 
-    timeout_minutes: int = 35
+    timeout_minutes: int = Field(default=35, ge=1)
 
 
 class NotificationConfig(_StrictModel):
@@ -429,8 +436,10 @@ class StrategySpec(_StrictModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    filters_all: tuple[str, ...]
-    signals_all: tuple[str, ...]
+    # YAML sequences deserialize as lists. Keep scalar values strict while
+    # accepting that serialization boundary for this immutable tuple API.
+    filters_all: tuple[str, ...] = Field(strict=False)
+    signals_all: tuple[str, ...] = Field(strict=False)
     candidate_limit: int = Field(gt=0, le=10)
     ranking: RankingConfig = RankingConfig()
     minervini: MinerviniStrategyConfig | None = None

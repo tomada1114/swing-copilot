@@ -29,11 +29,13 @@ from swing_copilot.analysis.schemas import (
     CandidateInput,
     FilingInput,
     NewsInput,
+    canonical_json_digest,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date, datetime
+    from uuid import UUID
 
     from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.regime.exposure import ExposureDecision
@@ -83,6 +85,8 @@ class ExportRequest:
     """Everything `build_analysis_input()` needs, grouped to stay under 3 args."""
 
     as_of: date
+    run_id: UUID
+    strategy_key: str
     generated_at: datetime
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
@@ -110,20 +114,28 @@ def build_analysis_input(request: ExportRequest) -> AnalysisInput:
         request.regime_snapshot, request.exposure_decision
     )
     performance = format_performance_summary(request.performance_summary)
-    return AnalysisInput(
-        schema_version=INPUT_SCHEMA_VERSION,
-        as_of=request.as_of,
-        generated_at=request.generated_at,
-        context=AnalysisContextBlocks(
-            market_regime=market_regime or None,
-            performance_summary=performance or None,
-            calendar_events=_calendar_event_inputs(
-                request.calendar_events, request.limits
+    context = AnalysisContextBlocks(
+        market_regime=market_regime or None,
+        performance_summary=performance or None,
+        calendar_events=_calendar_event_inputs(request.calendar_events, request.limits),
+    )
+    candidates = [_candidate_input(item, request.limits) for item in request.candidates]
+    unsigned_payload: dict[str, object] = {
+        "schema_version": INPUT_SCHEMA_VERSION,
+        "run_id": str(request.run_id),
+        "as_of": request.as_of.isoformat(),
+        "strategy_key": request.strategy_key,
+        "generated_at": request.generated_at.isoformat(),
+        "context": context.model_dump(mode="json"),
+        "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+    }
+    return AnalysisInput.model_validate(
+        {
+            **unsigned_payload,
+            "input_digest": canonical_json_digest(
+                unsigned_payload, excluded_field="input_digest"
             ),
-        ),
-        candidates=[
-            _candidate_input(item, request.limits) for item in request.candidates
-        ],
+        }
     )
 
 

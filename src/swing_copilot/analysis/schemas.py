@@ -15,16 +15,59 @@ a rendered statement traceable.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+import hashlib
+import json
+from datetime import UTC, date, datetime
 from typing import Annotated, Final, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v1"]] = "analysis-input-v1"
-RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v1"]] = "analysis-result-v1"
+INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v2"]] = "analysis-input-v2"
+RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v2"]] = "analysis-result-v2"
 
 SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Sha256Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_DATETIME_FIELD_NAMES = frozenset({"generated_at", "published_at", "filed_at"})
+
+
+def canonical_json_digest(payload: dict[str, object], *, excluded_field: str) -> str:
+    """Return the full SHA-256 for canonical JSON excluding one digest field.
+
+    The artifact carrying a digest cannot include that digest in its own hash.
+    All other fields are serialized with stable key ordering, compact separators,
+    and UTF-8 so independently produced documents bind to the same bytes.
+    """
+    canonical_payload = _canonicalize_for_digest(
+        {key: value for key, value in payload.items() if key != excluded_field}
+    )
+    canonical = json.dumps(
+        canonical_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _canonicalize_for_digest(value: object, field_name: str | None = None) -> object:
+    """Normalize schema datetime values before canonical JSON serialization."""
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_for_digest(nested, key) for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_canonicalize_for_digest(item) for item in value]
+    if field_name in _DATETIME_FIELD_NAMES and isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return parsed.isoformat()
+    return value
 
 
 class _StrictModel(BaseModel):
@@ -99,11 +142,28 @@ class AnalysisContextBlocks(_StrictModel):
 class AnalysisInput(_StrictModel):
     """`analysis_input.json`: everything a skill needs, and nothing it must fetch."""
 
-    schema_version: Literal["analysis-input-v1"]
+    schema_version: Literal["analysis-input-v2"]
+    run_id: UUID
     as_of: date
+    strategy_key: NonBlankText
+    input_digest: Sha256Digest
     generated_at: datetime
     context: AnalysisContextBlocks
     candidates: list[CandidateInput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _verify_input_digest(cls, value: object) -> object:
+        """Reject a document whose declared digest is not its canonical input."""
+        if not isinstance(value, dict):
+            return value
+        actual = value.get("input_digest")
+        if isinstance(actual, str) and actual != canonical_json_digest(
+            value, excluded_field="input_digest"
+        ):
+            msg = "input_digest does not match canonical analysis input JSON"
+            raise ValueError(msg)
+        return value
 
 
 class SourcedFact(_StrictModel):
@@ -176,8 +236,11 @@ class SymbolAnalysis(_StrictModel):
 class AnalysisResult(_StrictModel):
     """`analysis_result.json`: the skill's answer, before any machine checks."""
 
-    schema_version: Literal["analysis-result-v1"]
+    schema_version: Literal["analysis-result-v2"]
+    run_id: UUID
     as_of: date
+    strategy_key: NonBlankText
+    input_digest: Sha256Digest
     generated_by: str
     symbols: list[SymbolAnalysis] = []
     no_trade: bool = False

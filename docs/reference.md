@@ -62,7 +62,7 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
 （`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・P1-06実現損益
 サマリ・市場レジーム・過去判断）と、ステップ5で収集済みの未信頼テキストを
-`analysis_input.json`（schema `analysis-input-v1`）へまとめ、宛先と同じディレクトリの
+`reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v2`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
 開示は`max_filing_chars`文字までに切り詰める。
@@ -73,7 +73,8 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `max_calendar_chars_per_item`文字までに切り詰めて別出しする。
 
 `analysis/validate.py`はスキルが書いた`analysis_result.json`
-（schema `analysis-result-v1`）を検証する。銘柄ごとに、(1) strictスキーマ
+（schema `analysis-result-v2`）を検証する。ingestはまず3文書の`run_id`、`as_of`、
+`strategy_key`、完全なinput digestを照合し、不一致なら既存reportと`latest.md`を変更せずhard failする。銘柄ごとに、(1) strictスキーマ
 （`extra="forbid"`）で解析できること、(2) 引用された`source_id`がすべて当該銘柄に
 ついて実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄
 からも引用可）であり、各`SourcedFact`が1件以上引用していること、
@@ -91,7 +92,7 @@ run全体のhard failとする——別の取引日を記述しているかも�
 
 `analysis/cli.py`（`copilot-ingest-analysis`）はネットワークにも接続せず、
 スクリーニング・リスク・ランキングを再計算しない。日次runが
-`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v1`、
+`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v2`、
 表示非依存の`DailyBrief`のスナップショット）を読み直し、候補ごとの定性欄と
 run単位の`no_trade`/`no_trade_reason`だけを差し替えて同じMarkdownを再生成する。
 スコア・サイジング・実行状態・落選・レジームは無変更で持ち越す。
@@ -103,7 +104,7 @@ run単位の`no_trade`/`no_trade_reason`だけを差し替えて同じMarkdown�
 **何も描画しない**——沈黙が「懸念なし」と読まれてはならないためである。
 verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`✓ 定性: 懸念なし`を出す。
 
-`reports/<run_date>/`に残る`analysis_input.json`・`analysis_result.json`・
+`reports/<run_date>/<run_id>/`に残る`analysis_input.json`・`analysis_result.json`・
 `report_context.json`の3ファイルが、そのままNFR-05の監査証跡になる。
 
 > **P7（スキル移行）で廃止**: Anthropic API直呼びのLLM統合（`llm/`パッケージ、

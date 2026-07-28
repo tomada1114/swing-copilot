@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from datetime import date
     from pathlib import Path
+    from uuid import UUID
 
     from swing_copilot.analysis.schemas import (
         CandidateInput,
@@ -50,6 +51,16 @@ WITHHELD_MESSAGE = "検証不合格のため非表示"
 
 class AnalysisIngestError(SwingCopilotError):
     """Raised when an analysis document cannot be read at all (hard failure)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactIdentity:
+    """Identity fields read from the report-context envelope."""
+
+    run_id: UUID
+    as_of: date
+    strategy_key: str
+    input_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +181,49 @@ def validate_analysis(
         outcomes=outcomes,
         source_urls=_source_urls(analysis_input),
     )
+
+
+def validate_artifact_identity(
+    analysis_input: AnalysisInput,
+    result: AnalysisResult,
+    context: ArtifactIdentity,
+) -> None:
+    """Hard-fail when the three artifacts do not describe one exact run.
+
+    This is intentionally separate from per-symbol provenance/safety checks:
+    an identity mismatch makes the entire report unsafe to rewrite, whereas a
+    bad symbol can be withheld without affecting siblings.
+    """
+    checks = (
+        ("analysis_result run_id", result.run_id, analysis_input.run_id),
+        ("report_context run_id", context.run_id, analysis_input.run_id),
+        ("analysis_result as_of", result.as_of, analysis_input.as_of),
+        ("report_context as_of", context.as_of, analysis_input.as_of),
+        (
+            "analysis_result strategy_key",
+            result.strategy_key,
+            analysis_input.strategy_key,
+        ),
+        (
+            "report_context strategy_key",
+            context.strategy_key,
+            analysis_input.strategy_key,
+        ),
+        (
+            "analysis_result input_digest",
+            result.input_digest,
+            analysis_input.input_digest,
+        ),
+        (
+            "report_context input_digest",
+            context.input_digest,
+            analysis_input.input_digest,
+        ),
+    )
+    for document_field, actual, expected in checks:
+        if actual != expected:
+            msg = f"{document_field} {actual!s} does not match analysis_input"
+            raise AnalysisIngestError(msg)
 
 
 def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:

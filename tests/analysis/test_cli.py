@@ -6,18 +6,26 @@ import json
 import socket
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import pytest
 
 from swing_copilot.analysis.cli import ingest, main
+from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.analysis.snapshot import ReportContext, write_report_context
+from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
     PENDING_ANALYSIS_MESSAGE,
     BriefAnalysis,
 )
-from tests.analysis.conftest import AS_OF, result_payload, symbol_payload
+from tests.analysis.conftest import (
+    AS_OF,
+    RUN_ID,
+    result_payload,
+    symbol_payload,
+)
 from tests.analysis.test_snapshot import _populated_brief
 
 if TYPE_CHECKING:
@@ -26,13 +34,13 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def report_dir(tmp_path: Path) -> Path:
-    return tmp_path / "reports" / AS_OF.isoformat()
+    return tmp_path / "reports" / AS_OF.isoformat() / RUN_ID
 
 
 @pytest.fixture
 def archived_context(tmp_path: Path, report_dir: Path) -> Path:
     """A daily-run report context whose candidate is still pending analysis."""
-    brief = _populated_brief()
+    brief = replace(_populated_brief(), run_id=UUID(RUN_ID))
     pending = replace(
         brief,
         candidates=(
@@ -45,7 +53,14 @@ def archived_context(tmp_path: Path, report_dir: Path) -> Path:
         no_trade_reason=None,
     )
     return write_report_context(
-        ReportContext(pending, RunStatus.SUCCESS, tmp_path / "reports"), report_dir
+        ReportContext(
+            pending,
+            RunStatus.SUCCESS,
+            tmp_path / "reports",
+            "default",
+            result_payload()["input_digest"],
+        ),
+        report_dir,
     )
 
 
@@ -170,6 +185,125 @@ class TestIngestRewritesTheReport:
         )
 
         assert "定性分析なし" in markdown
+
+
+class TestArtifactIdentity:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("run_id", "123e4567-e89b-12d3-a456-426614174999"),
+            pytest.param("as_of", "2027-03-02"),
+            pytest.param("strategy_key", "another-strategy"),
+            pytest.param("input_digest", "b" * 64),
+        ],
+    )
+    def test_result_identity_mismatch_preserves_existing_reports(
+        self,
+        write_documents,
+        archived_context,
+        tmp_path,
+        field,
+        value,
+    ):
+        input_path, result_path = write_documents(
+            None, result_payload(**{field: value})
+        )
+        report_path = tmp_path / "reports" / AS_OF.isoformat() / f"{RUN_ID}.md"
+        latest_path = tmp_path / "reports" / "latest.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_bytes(b"previous report")
+        latest_path.write_bytes(b"previous latest")
+        artifacts_before = tuple(
+            path.read_bytes() for path in (input_path, result_path, archived_context)
+        )
+
+        with pytest.raises(AnalysisIngestError, match=field):
+            ingest(input_path, result_path, archived_context)
+
+        assert report_path.read_bytes() == b"previous report"
+        assert latest_path.read_bytes() == b"previous latest"
+        assert (
+            tuple(
+                path.read_bytes()
+                for path in (input_path, result_path, archived_context)
+            )
+            == artifacts_before
+        )
+
+    def test_context_identity_mismatch_preserves_existing_reports(
+        self,
+        write_documents,
+        archived_context,
+        tmp_path,
+    ):
+        input_path, result_path = write_documents()
+        context_payload = json.loads(archived_context.read_text(encoding="utf-8"))
+        context_payload["strategy_key"] = "another-strategy"
+        context_payload["context_digest"] = canonical_json_digest(
+            context_payload, excluded_field="context_digest"
+        )
+        archived_context.write_text(json.dumps(context_payload), encoding="utf-8")
+        report_path = tmp_path / "reports" / AS_OF.isoformat() / f"{RUN_ID}.md"
+        latest_path = tmp_path / "reports" / "latest.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_bytes(b"previous report")
+        latest_path.write_bytes(b"previous latest")
+        artifacts_before = tuple(
+            path.read_bytes() for path in (input_path, result_path, archived_context)
+        )
+
+        with pytest.raises(AnalysisIngestError, match="report_context strategy_key"):
+            ingest(input_path, result_path, archived_context)
+
+        assert report_path.read_bytes() == b"previous report"
+        assert latest_path.read_bytes() == b"previous latest"
+        assert (
+            tuple(
+                path.read_bytes()
+                for path in (input_path, result_path, archived_context)
+            )
+            == artifacts_before
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("run_id", "123e4567-e89b-12d3-a456-426614174999"),
+            pytest.param("as_of", "2027-03-02"),
+            pytest.param("strategy_key", "another-strategy"),
+            pytest.param("input_digest", "b" * 64),
+        ],
+    )
+    def test_context_identity_mismatch_for_every_field_hard_fails_before_write(
+        self,
+        write_documents,
+        archived_context,
+        tmp_path,
+        field,
+        value,
+    ):
+        input_path, result_path = write_documents()
+        context_payload = json.loads(archived_context.read_text(encoding="utf-8"))
+        context_payload[field] = value
+        if field == "run_id":
+            context_payload["brief"]["run_id"] = value
+        if field == "as_of":
+            context_payload["brief"]["run_date"] = value
+        context_payload["context_digest"] = canonical_json_digest(
+            context_payload, excluded_field="context_digest"
+        )
+        archived_context.write_text(json.dumps(context_payload), encoding="utf-8")
+        report_path = tmp_path / "reports" / AS_OF.isoformat() / f"{RUN_ID}.md"
+        latest_path = tmp_path / "reports" / "latest.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_bytes(b"previous report")
+        latest_path.write_bytes(b"previous latest")
+
+        with pytest.raises(AnalysisIngestError, match=f"report_context {field}"):
+            ingest(input_path, result_path, archived_context)
+
+        assert report_path.read_bytes() == b"previous report"
+        assert latest_path.read_bytes() == b"previous latest"
 
 
 class TestIngestIsOffline:

@@ -26,9 +26,9 @@
 
 ## ファイル配置【固定】
 
-- `analysis_input.json` / `analysis_result.json` は当日のレポート出力先
-  ディレクトリ（Markdown レポートと同じ場所）に置く。以下このディレクトリを
-  `<WORKDIR>` と呼ぶ。
+- `analysis_input.json` / `analysis_result.json` / `report_context.json` は
+  `reports/<run_date>/<run_id>/` に置く。この run 専用ディレクトリを以下
+  `<WORKDIR>` と呼ぶ。Markdown は従来どおり`reports/<run_date>/<run_id>.md`に残る。
 - `copilot-daily` は終了時に `analysis_input.json` の絶対パスをターミナルに出力する。
 - 専門家サブエージェントの中間成果物は `<WORKDIR>/analysis_work/` に置く。
 
@@ -40,7 +40,7 @@
 │   ├── filings-<SYMBOL>.json
 │   └── screening-<SYMBOL>.json
 ├── analysis_result.json         ← swing-daily が断片をマージして生成
-└── <当日の Markdown レポート>    ← copilot-ingest-analysis が再描画
+└── report_context.json           ← copilot-daily が生成（読み取り専用）
 ```
 
 ## analysis_work 断片【命名・形式固定】
@@ -52,7 +52,9 @@
 
 ```jsonc
 {
-  "as_of": "2026-07-27",        // 入力の as_of をそのままコピー（再入判定に使う）
+  "run_id": "...",              // 入力の run_id を逐語コピー
+  "as_of": "2026-07-27",        // 入力の as_of を逐語コピー
+  "input_digest": "...",        // 入力の完全 SHA-256 を逐語コピー
   "symbol": "AAPL",
   "ac_check": "AC1-AC15 違反なし",   // または懸念のある AC 番号と一言
   "news_summary": { }           // 担当に応じて news_summary / filing_analyses /
@@ -60,7 +62,7 @@
 }
 ```
 
-- `as_of` / `ac_check` は**作業用メタデータ**。統括はマージ時にこれらを捨て、
+- `run_id` / `as_of` / `input_digest` / `ac_check` は**作業用メタデータ**。統括はマージ時にこれらを捨て、
   ペイロードキー（`news_summary` / `filing_analyses` / `screening_assessment`）
   だけを `analysis_result.json` に載せる。ingest は strict 検証（未知フィールド拒否）
   なので、混入すると hard fail する。
@@ -71,8 +73,11 @@
 
 ```jsonc
 {
-  "schema_version": "analysis-input-v1",
+  "schema_version": "analysis-input-v2",
+  "run_id": "11111111-2222-3333-4444-555555555555",
   "as_of": "2026-07-27",
+  "strategy_key": "default",
+  "input_digest": "<64 lowercase hexadecimal SHA-256 characters>",
   "generated_at": "...",
   "context": {
     "market_regime": "...",          // 整形済みテキストブロック or null
@@ -109,8 +114,11 @@
 
 ```jsonc
 {
-  "schema_version": "analysis-result-v1",
+  "schema_version": "analysis-result-v2",
+  "run_id": "11111111-2222-3333-4444-555555555555", // input を逐語コピー
   "as_of": "2026-07-27",             // input と一致必須（不一致は hard fail）
+  "strategy_key": "default",          // input を逐語コピー
+  "input_digest": "<input の値を逐語コピー>",
   "generated_by": "swing-daily skill",
   "symbols": [
     {
@@ -148,6 +156,9 @@
 ### 記入ルール
 
 - `news_summary` / `filing_analyses` は該当テキストが無ければ `null` / `[]`。
+- `run_id`、`as_of`、`strategy_key`、`input_digest`は`analysis_input.json`から逐語コピーする。
+  `input_digest`は入力本体の canonical JSON（キーソート、UTF-8、安定した日時表現）から
+  Python が計算した完全 SHA-256 であり、短縮・再計算・書き換えをしない。
 - `screening_assessment` と `verdict` は **全銘柄必須**。
 - `facts[].source_ids` は **非空**、かつ入力の該当銘柄の `source_id` 集合
   （＋ `context.calendar_events` の ID。これは全銘柄共通で引用可）の部分集合。
@@ -158,7 +169,8 @@
 
 ## ingest の検証規則【固定】
 
-1. スキーマ strict 検証（未知フィールド拒否）。壊れた JSON / `as_of` 不一致は hard fail。
+1. 3文書の strict schema と digest を検証し、`run_id`、`as_of`、`strategy_key`、
+   `input_digest`が完全一致しなければ hard fail。report と `latest.md` は書き換えない。
 2. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id`、または
    `context.calendar_events` の `source_id`（全銘柄共通で引用可）の部分集合。
    `facts` の `source_ids` は非空。

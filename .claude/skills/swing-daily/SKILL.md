@@ -49,10 +49,10 @@ description: >
    - ユーザーが明示的に再実行・やり直しを求めていなければ **上書きしない**。
      既存の verdict を要約して報告し、再実行するか確認する
    - 再実行を求められている場合のみ、以降のステップで上書きしてよい
-2. `<WORKDIR>/analysis_work/` が存在する場合、各断片の `as_of` を読む:
-   - `as_of` が `analysis_input.json` の `as_of` と**一致**し、JSON として妥当で、
+2. `<WORKDIR>/analysis_work/` が存在する場合、各断片の `run_id`、`as_of`、`input_digest` を読む:
+   - 3値すべてが `analysis_input.json` と**一致**し、JSON として妥当で、
      ペイロードキーがある → その銘柄 × 専門家は **再分析せず流用**する
-   - `as_of` が**不一致**（前日以前の残骸）→ そのファイルを削除して再分析対象にする
+   - いずれかが**不一致**（別run・前日以前の残骸）→ そのファイルを削除して再分析対象にする
    - JSON として壊れている、ペイロードキーが無い、`symbol` がファイル名と
      食い違う → 削除して再分析対象にする
 3. `analysis_input.json` の `candidates[].symbol` に無い銘柄の断片は削除する。
@@ -72,8 +72,8 @@ uv run copilot-daily <ユーザー指定の引数>
 - 候補ゼロ、または `analysis_input.json` がエクスポートされなかった場合は、
   そこで終了し「本日は分析対象なし」とパイプラインの要約を報告する。Step 2 以降に進まない。
 
-`analysis_input.json` を読み、`as_of` と `candidates[].symbol` の一覧を控える。
-`as_of` は後段で result に転記する（不一致は hard fail）。
+`analysis_input.json` を読み、`run_id`、`as_of`、`strategy_key`、`input_digest`と
+`candidates[].symbol`の一覧を控える。4値は後段で result に逐語転記する（不一致は hard fail）。
 
 `<WORKDIR>` が Step 0 の時点で不明だった場合は、ここで **Step 0 の確認を実施**する。
 
@@ -110,7 +110,7 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 
 ## Step 3: 断片のマージ
 
-`<WORKDIR>/analysis_work/` を列挙し、当日の `as_of` を持つ断片をすべて読む
+`<WORKDIR>/analysis_work/` を列挙し、同一の`run_id`・`as_of`・`input_digest`を持つ断片をすべて読む
 （Step 0 で流用した断片を含む）。
 
 - 期待する組がすべて揃っているか確認する。欠けている組があれば、その専門家を
@@ -173,12 +173,12 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 `src/swing_copilot/analysis/schemas.py` を読んで最新のフィールド名を確認したうえで、
 [references/output-schema.md](references/output-schema.md) の形で JSON を組み立てる。
 
-- `as_of` は input と**完全一致**させる
-- `schema_version` は `analysis-result-v1`
+- `run_id`、`as_of`、`strategy_key`、`input_digest`は input から**逐語コピー**する
+- `schema_version` は `analysis-result-v2`
 - `screening_assessment` と `verdict` は**全銘柄必須**
 - 出力先は `<WORKDIR>/analysis_result.json`（`analysis_input.json` と同じディレクトリ）
 - input に無い symbol を追加しない。input にある symbol を落とさない
-- `analysis_work/` 由来の `as_of` / `ac_check` を持ち込まない（未知フィールドは hard fail）
+- `analysis_work/` 由来の`run_id` / `as_of` / `input_digest` / `ac_check`を result へ持ち込まない（未知フィールドは hard fail）
 
 書き出したら JSON として妥当かを確認する。
 

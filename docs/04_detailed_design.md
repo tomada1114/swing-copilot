@@ -718,8 +718,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-INPUT_SCHEMA_VERSION = "analysis-input-v1"
-RESULT_SCHEMA_VERSION = "analysis-result-v1"
+INPUT_SCHEMA_VERSION = "analysis-input-v2"
+RESULT_SCHEMA_VERSION = "analysis-result-v2"
 
 SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -754,8 +754,11 @@ class AnalysisContextBlocks(_StrictModel):
     """run単位の文脈: market_regime / performance_summary / calendar_events"""
 
 class AnalysisInput(_StrictModel):
-    schema_version: Literal["analysis-input-v1"]
+    schema_version: Literal["analysis-input-v2"]
+    run_id: UUID
     as_of: date
+    strategy_key: NonBlankText
+    input_digest: Sha256Digest
     generated_at: datetime
     context: AnalysisContextBlocks
     candidates: list[CandidateInput]
@@ -791,8 +794,11 @@ class SymbolAnalysis(_StrictModel):
     verdict: Verdict                            # 全銘柄必須
 
 class AnalysisResult(_StrictModel):
-    schema_version: Literal["analysis-result-v1"]
+    schema_version: Literal["analysis-result-v2"]
+    run_id: UUID
     as_of: date
+    strategy_key: NonBlankText
+    input_digest: Sha256Digest
     generated_by: str
     symbols: list[SymbolAnalysis] = []
     no_trade: bool = False
@@ -803,6 +809,8 @@ class AnalysisResult(_StrictModel):
 `src/swing_copilot/analysis/schemas.py`。）
 
 `FilingAnalysis`が書類種別・提出日を持たないのは意図的である。これらはコードが所有する`TextItem`のメタデータであり、スキルに正確にエコーバックさせるのではなく`analysis/validate.py`が`analysis_input.json`から解決する。`VerdictReason.source_ids`だけが空を許すのは、スコアやサイジング制約のようにコード自身が計算した決定論的入力にのみ基づく理由には、引用すべきニュース/開示ソースが存在しないためである。
+
+`input_digest`は入力JSONから自身を除いたcanonical JSON（キーソート、UTF-8、安定した日時表現）の完全SHA-256である。resultはこの値を逐語コピーし、contextは同じ値と自身の`context_digest`を保持する。ingestは3文書の`run_id`、`as_of`、`strategy_key`、`input_digest`をレポート書換え前に照合する。旧v1成果物は新規runに混在させず、推測で復元しない。
 
 `context.calendar_events`（`CalendarEventInput`のリスト）は、`text/`が収集したマクロ／経済カレンダーイベント（`TextItem.symbol is None`。例: FREDの経済指標発表日）を運搬する。候補ごとの`news`/`filings`とは異なりrun単位の文脈であり、どの銘柄の分析からも引用できる。`analysis/validate.py`のprovenance検査は、当該銘柄の`news`/`filings`のIDに加えて`context.calendar_events`の全IDを、どの銘柄についても許容集合へ含める（他銘柄の`news`/`filings`のIDは引き続き拒否する）。
 
@@ -880,7 +888,7 @@ def validate_analysis(analysis_input: AnalysisInput, result: AnalysisResult) -> 
 
 # analysis/snapshot.py
 REPORT_CONTEXT_FILENAME = "report_context.json"
-CONTEXT_SCHEMA_VERSION = "report-context-v1"
+CONTEXT_SCHEMA_VERSION = "report-context-v2"
 def write_report_context(context: ReportContext, destination_dir: Path) -> Path: ...
 def read_report_context(path: Path) -> ReportContext: ...
 
@@ -891,7 +899,7 @@ def main(argv: list[str] | None = None) -> None: ...
 
 **検証の3段（銘柄単位）**: (1) strictスキーマで解析できること、(2) 引用された`source_id`がすべて当該銘柄について実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄からも引用可）であり、各factが1件以上引用していること、(3) ユーザー表示テキストがCON-03に違反しないこと。(2)(3)は**銘柄単位でfail-closed**とし、違反銘柄の定性セクションを保留（`SymbolOutcome.error`を設定し、他の全フィールドを空に）してログへ記録するだけで、リトライしない。`SymbolOutcome`は`error`が非`None`のとき必ず全分析フィールドが空になるため、呼び出し側がフラグの確認を忘れて保留内容を誤って描画することがない。
 
-**hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、および`result.as_of`が`analysis_input.as_of`と食い違う場合は`AnalysisIngestError`でrun全体を失敗させる。別の取引日を記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
+**hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、入力/文脈digest不正、または3文書の`run_id`・`as_of`・`strategy_key`・`input_digest`が食い違う場合は、レポート・`latest.md`・既存3成果物を変更せず`AnalysisIngestError`でrun全体を失敗させる。別のrunを記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
 
 **コード所有メタデータの解決**: 書類種別・提出日は`analysis_input.json`の`FilingInput`から、ソースURLは`ValidatedAnalysis.source_urls`（入力側のnews/filing URL）から解決する。レポートはスキルが申告したリンクを一切信頼せず、ingestはこの解決のためにデータベースへ触れない。
 

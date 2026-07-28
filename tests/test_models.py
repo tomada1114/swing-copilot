@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import date
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -81,7 +82,6 @@ class TestDailyRunOptions:
         assert options.as_of is None
         assert options.is_dry_run is False
         assert options.skip_text is False
-        assert options.skip_llm is False
         assert options.limit is None
         assert options.log_level is None
 
@@ -90,7 +90,6 @@ class TestDailyRunOptions:
             as_of=date(2026, 7, 20),
             is_dry_run=True,
             skip_text=True,
-            skip_llm=True,
             limit=5,
             log_level="ERROR",
         )
@@ -113,3 +112,16 @@ class TestDailyRunResult:
         assert result.run_id == run_id
         assert result.exit_code == 0
         assert result.status is RunStatus.SUCCESS
+        assert result.analysis_input_path is None
+
+    def test_analysis_input_path_defaults_to_none_and_can_be_set(self):
+        run_id = uuid4()
+        path = Path("reports/2026-07-20/analysis_input.json")
+        result = DailyRunResult(
+            run_id=run_id,
+            run_date=date(2026, 7, 20),
+            status=RunStatus.SUCCESS,
+            exit_code=0,
+            analysis_input_path=path,
+        )
+        assert result.analysis_input_path == path

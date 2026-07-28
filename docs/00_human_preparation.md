@@ -17,10 +17,10 @@
 
 ### P0: プロジェクト開始前に完了させる項目
 
-- [ ] **1. Anthropic APIキー取得**
-  - 手順概要: platform.claude.com でアカウント作成→課金設定（クレジットカード登録）→APIキー発行→使用上限アラートの設定（推奨）。
-  - 所要時間目安: 20分
-  - 完了確認方法: 発行された `ANTHROPIC_API_KEY` を手元に控えている。ダッシュボード上で使用上限アラートが設定済みであることを確認できる。
+- [ ] **1. Claude Code 実行環境の確認**
+  - 手順概要: 定性分析（ニュース解釈・開示解釈・スクリーニング評価）はPythonからLLM APIを呼ばず、`.claude/skills/swing-daily`系のClaude Codeスキルとして実行する。そのためAnthropic APIキーの取得・課金設定は不要で、代わりに手元のClaude Codeが起動でき、本リポジトリのスキルを読める状態であることだけを確認する。
+  - 所要時間目安: 5分
+  - 完了確認方法: `claude`（Claude Code）が起動し、`.claude/skills/`配下のスキルが一覧に出ることを確認できる。`ANTHROPIC_API_KEY`は本プロジェクトでは使用しない。
 
 - [ ] **2. Finnhub 無料APIキー取得**
   - 手順概要: finnhub.io でアカウント登録→無料枠（60コール/分）のAPIキーを発行。
@@ -38,7 +38,7 @@
   - 完了確認方法: （使う場合）発行された Webhook URL（`DISCORD_WEBHOOK_URL`）を手元に控えている。テスト送信でメッセージがチャンネルに届くことを確認できる。
 
 - [ ] **5. uv本体・既存リポジトリの確認と `.env` 作成**
-  - 手順概要: `uv --version` でuv本体を確認する。プロジェクトは既に`/Users/masuyama/ghq/github.com/tomada1114/swing-copilot`へuv-templateから作成され、Git初期化と設計文書のコミットまで完了しているため、テンプレートの再コピーや`git init`は行わない。プロジェクト直下に `.env` を作成し `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY` を記載する（`DISCORD_WEBHOOK_URL` は項目4で通知を使う場合のみ）。`.env` が `.gitignore` 対象であることを確認する。
+  - 手順概要: `uv --version` でuv本体を確認する。プロジェクトは既に`/Users/masuyama/ghq/github.com/tomada1114/swing-copilot`へuv-templateから作成され、Git初期化と設計文書のコミットまで完了しているため、テンプレートの再コピーや`git init`は行わない。プロジェクト直下に `.env` を作成し `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY` を記載する（`DISCORD_WEBHOOK_URL` は項目4で通知を使う場合のみ）。`.env` が `.gitignore` 対象であることを確認する。
   - 所要時間目安: 20分
   - 完了確認方法: `uv --version` と既存リポジトリ内の`just lint`/`just test`が実行できる。`.env` に必要な値が記載され、`git check-ignore .env`で追跡対象外と確認できる。値そのものはログへ出さない。
 
@@ -53,9 +53,9 @@
   - 完了確認方法: 米国株の発注が可能な口座が既にあることを確認済み。
 
 - [ ] **10. 予算承認**
-  - 手順概要: 試作期（P1〜P2）は月$5以内（LLM費のみ）、本番運用（P3〜）は月$25以内という上限をあらかじめ承認する。拡張時のFMP（$59/月）利用は任意判断であることを確認する。LLMモデルはデフォルトでニュース要約・決算書解釈とも最安のHaikuを使用する構成のため上限内に収まりやすい（決算書解釈の精度を優先してSonnet等へ切り替える場合はコストが上がる点に留意する）。
+  - 手順概要: 定性分析をClaude Codeスキルへ移行したため、本システム自体のLLM従量課金は発生しない（既存のClaude Codeサブスクリプションの範囲内で実行する）。残る外部費用はデータ取得のみで、P1〜P3は$0構成（yfinance・EDGAR・Finnhub無料枠・FRED）、P4でEODHD（$19.99/月）へ切り替える場合のみ月$25以内という上限をあらかじめ承認する。拡張時のFMP（$59/月）利用は任意判断であることを確認する。
   - 所要時間目安: 5分
-  - 完了確認方法: 上記の予算上限に同意している。
+  - 完了確認方法: 上記の費用構成と上限に同意している。
 
 ### P3開始前に完了させる項目
 

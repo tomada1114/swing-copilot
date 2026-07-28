@@ -1,9 +1,10 @@
 """Post-output CON-03 guard: reject imperative buy/sell language (FR-08, CON-03).
 
-Prompt instructions alone cannot guarantee the model won't slip into giving
-trading advice, so every parsed `NewsSummary`/`FilingAnalysis` is checked here
-after the fact; a violation degrades that analysis to a failure without a
-retry (`docs/04_detailed_design.md` 3.15).
+Skill instructions alone cannot guarantee a model won't slip into giving
+trading advice, so every user-visible free-text field of a parsed
+`AnalysisResult` is checked here before it can reach a report. A violation
+degrades that symbol's qualitative section without a retry
+(`analysis/validate.py`).
 """
 
 from __future__ import annotations
@@ -16,13 +17,11 @@ from swing_copilot.exceptions import SwingCopilotError
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from pydantic import BaseModel
-
-# P2-12 REQ-009/021: a small, documented (not exhaustive) list of Japanese/
-# English keywords asserting an investor/management psychological or
-# behavioral state. Presence alone isn't forbidden -- only when it isn't
-# paired with concrete actual-vs-planned numeric evidence in the same text
-# (see `_HEDGE_PATTERN`/`_NUMERIC_EVIDENCE_PATTERN` below).
+# REQ-009/021: a small, documented (not exhaustive) list of Japanese/English
+# keywords asserting an investor/management psychological or behavioral state.
+# Presence alone isn't forbidden -- only when it isn't paired with concrete
+# actual-vs-planned numeric evidence in the same text (see `_HEDGE_PATTERN`/
+# `_NUMERIC_EVIDENCE_PATTERN` below).
 _BEHAVIORAL_KEYWORDS: tuple[str, ...] = (
     "動揺",
     "パニック",
@@ -32,9 +31,15 @@ _BEHAVIORAL_KEYWORDS: tuple[str, ...] = (
     "investor sentiment",
     "management is anxious",
 )
-# A hedge phrase ("〜の可能性" / "possible"/"possibly") permitted only when
-# co-occurring with concrete evidence in the same text (below).
-_HEDGE_PATTERN = re.compile(r"可能性|possibly|possible", re.IGNORECASE)
+# A hedge phrase, permitted only when co-occurring with concrete evidence in
+# the same text (below). Kept in sync with the hedge expressions AC12 of
+# `.claude/skills/swing-daily/references/analysis-conventions.md` tells the
+# skill to use: a writer who follows the documented conventions must not be
+# withheld for picking one documented hedge over another.
+_HEDGE_PATTERN = re.compile(
+    r"可能性|考えられる|示唆|と読める|入力の範囲では|possibly|possible",
+    re.IGNORECASE,
+)
 # Concrete actual-vs-planned numeric discrepancy requires all three signals
 # in the same text: a percentage, an actual marker, and a plan marker.
 _PERCENTAGE_PATTERN = re.compile(r"\d+(\.\d+)?\s*%")
@@ -69,14 +74,14 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
 
 
 class ForbiddenLanguageError(SwingCopilotError):
-    """Raised when model output contains prohibited imperative trading language."""
+    """Raised when skill output contains prohibited imperative trading language."""
 
 
 def check_no_imperative_language(texts: Iterable[str]) -> None:
     """Raise if any text contains a forbidden imperative buy/sell phrase.
 
     Args:
-        texts: Free-text fields from a parsed `NewsSummary`/`FilingAnalysis`.
+        texts: Free-text fields from a parsed `AnalysisResult`.
 
     Raises:
         ForbiddenLanguageError: A forbidden phrase was found.
@@ -92,7 +97,7 @@ def check_no_imperative_language(texts: Iterable[str]) -> None:
 def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
     """Raise if a bare psychological/behavioral diagnosis lacks paired evidence.
 
-    P2-12 (REQ-009/REQ-021): "〜の可能性(possible pattern)" language describing
+    REQ-009/REQ-021: "〜の可能性(possible pattern)" language describing
     investor/management behavior is only permitted when the same statement
     carries a concrete actual-vs-planned numeric discrepancy (a hedge phrase
     co-occurring with a percentage or an 実績/計画/予想/actual/planned marker
@@ -101,7 +106,7 @@ def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
     diagnosis and is forbidden.
 
     Args:
-        texts: Free-text fields from a parsed `NewsSummary`/`FilingAnalysis`.
+        texts: Free-text fields from a parsed `AnalysisResult`.
 
     Raises:
         ForbiddenLanguageError: A behavioral/psychological keyword appears
@@ -125,21 +130,16 @@ def check_no_unevidenced_behavioral_claims(texts: Iterable[str]) -> None:
         raise ForbiddenLanguageError(msg)
 
 
-def check_structured_output(parsed: BaseModel) -> None:
-    """Check every user-visible free-text field in a supported LLM schema.
+def check_display_texts(texts: Iterable[str]) -> None:
+    """Apply every CON-03 check to one collection of user-visible strings.
 
     Args:
-        parsed: Parsed `NewsSummary` or `FilingAnalysis` output.
+        texts: Every free-text field that would be rendered for this symbol.
 
     Raises:
         ForbiddenLanguageError: A prohibited phrase, or an unevidenced
             behavioral/psychological claim, appears in any checked field.
     """
-    texts: list[str] = []
-    facts = getattr(parsed, "facts", ())
-    texts.extend(fact.statement for fact in facts)
-    for field_name in ("interpretation", "risk_flags", "red_flags", "yoy_changes"):
-        values = getattr(parsed, field_name, ())
-        texts.extend(value for value in values if isinstance(value, str))
-    check_no_imperative_language(texts)
-    check_no_unevidenced_behavioral_claims(texts)
+    materialized = list(texts)
+    check_no_imperative_language(materialized)
+    check_no_unevidenced_behavioral_claims(materialized)

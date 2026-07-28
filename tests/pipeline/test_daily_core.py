@@ -221,7 +221,7 @@ class TestHappyPath:
             "3_screening",
             "4_risk",
             "5_text",
-            "6_llm",
+            "6_analysis_export",
             "7_notify",
             "8_output",
             "mae_mfe",
@@ -760,7 +760,7 @@ class TestTimeoutBudget:
                 ).fetchall()
             )
         assert rows["5_text"] == "skipped"
-        assert rows["6_llm"] == "skipped"
+        assert rows["6_analysis_export"] == "skipped"
         assert rows["7_notify"] == "skipped"
         assert rows["8_output"] == "success"
 

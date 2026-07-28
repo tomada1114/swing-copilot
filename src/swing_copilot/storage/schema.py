@@ -181,27 +181,6 @@ INIT_SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS llm_calls (
-        call_id         UUID PRIMARY KEY,
-        run_id          UUID NOT NULL,
-        model           VARCHAR NOT NULL,
-        schema_name     VARCHAR NOT NULL,
-        schema_version  INTEGER NOT NULL,
-        prompt_text     VARCHAR NOT NULL,
-        prompt_hash     VARCHAR NOT NULL,
-        source_ids      VARCHAR[] NOT NULL,
-        status          VARCHAR NOT NULL CHECK(status IN ('success','failed','budget_skipped')),
-        input_tokens    INTEGER NOT NULL,
-        output_tokens   INTEGER NOT NULL,
-        input_price_per_mtok   DOUBLE NOT NULL,
-        output_price_per_mtok  DOUBLE NOT NULL,
-        cost_usd        DOUBLE NOT NULL,
-        response_json   JSON,
-        error_detail    VARCHAR,
-        created_at      TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS signal_outcomes (
         run_id             UUID NOT NULL,
         symbol             VARCHAR NOT NULL,

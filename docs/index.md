@@ -1,9 +1,10 @@
 # swing-copilot
 
 A decision-support batch pipeline for US equity swing/position trading. It
-screens the S&P 500 universe, checks risk parameters, summarizes news and
-filings with an LLM, prints a terminal brief, and archives generated Markdown.
-It never places orders — the human always makes the final buy/sell decision.
+screens the S&P 500 universe, checks risk parameters, exports the collected
+news and filings for a Claude Code skill to interpret, prints a terminal brief,
+and archives generated Markdown. It never places orders — the human always
+makes the final buy/sell decision.
 
 ## Quick Example
 

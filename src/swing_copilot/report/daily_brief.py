@@ -4,18 +4,25 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import timedelta
+
+# `date`/`datetime`/`UUID` are imported at runtime, not under TYPE_CHECKING:
+# `analysis/snapshot.py` builds a pydantic `TypeAdapter(DailyBrief)` to archive
+# and reload this module's dataclasses, and pydantic resolves their annotation
+# strings against *this* module's globals. Hiding these three names would make
+# that adapter unbuildable.
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
+from uuid import UUID  # noqa: TC003
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from datetime import date, datetime
-    from uuid import UUID
 
-    from swing_copilot.llm.filings_analysis import FilingAnalysisResult
-    from swing_copilot.llm.schemas import SourcedFact
-    from swing_copilot.llm.summarize import NewsSummaryResult
-    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
+    from swing_copilot.analysis.schemas import SourcedFact
+    from swing_copilot.analysis.validate import (
+        ResolvedFiling,
+        SymbolOutcome,
+        ValidatedAnalysis,
+    )
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
@@ -38,10 +45,17 @@ _SIGNAL_LABELS = {
     "vcp_breakout": "VCP",
 }
 _HIDDEN_SIGNALS = frozenset({"volume_min"})
-_DEGRADED_LLM_MESSAGE = "本日はニュース・開示分析を取得できませんでした"
-_NEUTRAL_LLM_MESSAGE = "ニュース・開示分析からの追加情報は今回ありません"
+#: Shown by `copilot-daily` itself: the deterministic pipeline is complete but
+#: nobody has run the qualitative analysis skill over its exported input yet.
+PENDING_ANALYSIS_MESSAGE = "分析待ち（swing-daily スキルで分析を実行してください）"
+#: Shown after ingest for a candidate the analysis never covered.
+MISSING_ANALYSIS_MESSAGE = "定性分析なし"
+#: Shown after ingest for a candidate whose analysis failed verification.
+WITHHELD_ANALYSIS_MESSAGE = "検証不合格のため非表示"
+_NEUTRAL_ANALYSIS_MESSAGE = "定性分析からの追加情報は今回ありません"
+NO_TRADE_MESSAGE = "本日は取引なし（定性判断）"
 # REQ-008: "直近3件" -- mirrors `pipeline/daily.py`'s `_DECISION_HISTORY_LIMIT`
-# (same value, used for the LLM prompt's decision history), kept as an
+# (same value, used for the exported decision-history block), kept as an
 # independent constant here since `report/` must not depend on `pipeline/`.
 _PAST_DECISIONS_LIMIT = 3
 
@@ -108,7 +122,7 @@ class BriefPortfolioHeat:
 
 @dataclass(frozen=True, slots=True)
 class BriefSource:
-    """Stable source reference for one or more LLM facts."""
+    """Stable source reference for one or more analysis facts."""
 
     source_id: str
     url: str
@@ -116,13 +130,12 @@ class BriefSource:
 
 @dataclass(frozen=True, slots=True)
 class BriefFilingAnalysis:
-    """One filing's analysis with code-owned identifying metadata (P6-27).
+    """One filing's analysis with code-owned identifying metadata.
 
     `filing_type`/`filed_at` let the report distinguish which of a symbol's
-    (potentially several) filing analyses a fact/interpretation came from
-    -- previously only the first filing analysis per symbol was shown at
-    all. `is_near_stale` surfaces `LLMClient.get_cached_at()`'s freshness
-    check as a report warning.
+    (potentially several) filing analyses a fact/interpretation came from.
+    Both are resolved from the exported `analysis_input.json` entry, never
+    echoed back by the analysis itself.
     """
 
     filing_type: str
@@ -131,29 +144,32 @@ class BriefFilingAnalysis:
     interpretation: tuple[str, ...] = ()
     red_flags: tuple[str, ...] = ()
     yoy_changes: tuple[str, ...] = ()
-    guidance_direction: str = "not_disclosed"
     sources: tuple[BriefSource, ...] = ()
-    is_near_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class BriefLlm:
-    """Compact LLM analysis for one candidate."""
+class BriefAnalysis:
+    """Compact qualitative analysis for one candidate.
+
+    `degraded` means there is nothing verified to show -- analysis not run
+    yet, not produced for this symbol, or withheld because it failed
+    verification -- and `conclusion` then carries the reason. The
+    deterministic screening figures beside it are never affected either way.
+    """
 
     degraded: bool
     conclusion: str
     facts: tuple[str, ...] = ()
     risk_flags: tuple[str, ...] = ()
     sources: tuple[BriefSource, ...] = ()
-    # P6-27: every filing analysis for this candidate (previously only the
-    # first was ever shown), each individually identified by type/filed_at.
+    # Every filing analysis for this candidate, individually identified.
     filings: tuple[BriefFilingAnalysis, ...] = ()
-    # P2-12 (REQ-006/007): display-only -- never feeds ranking/judgment logic
-    # ("判断はコード、叙述はLLM"). `None` when no news summary is available.
-    catalyst_quality: str | None = None
-    catalyst_quality_sources: tuple[BriefSource, ...] = ()
-    # P6-27: whether the news summary came from a near-stale cached response.
-    is_news_near_stale: bool = False
+    # Qualitative go/no-go: `"proceed"`, `"skip"`, or `None` when unavailable.
+    # Display-only -- it never edits scores, sizing, or ranking.
+    verdict: str | None = None
+    verdict_summary: str | None = None
+    strengths: tuple[str, ...] = ()
+    concerns: tuple[str, ...] = ()
 
 
 _CONSTRAINT_LABELS = {
@@ -226,6 +242,31 @@ def format_sizing(risk: BriefRisk) -> str:
     return f"{risk.max_shares}株"
 
 
+def format_verdict(analysis: BriefAnalysis) -> str | None:
+    """Render the qualitative verdict line shared by both report renderers.
+
+    Returns `None` (render nothing) when there is no verified verdict, so a
+    pending or withheld analysis never implies "懸念なし". The line sits
+    beside, and never rewrites, the deterministic screening figures.
+
+    Args:
+        analysis: The candidate's qualitative analysis section.
+
+    Returns:
+        `"⚠ 定性: 見送り推奨（…）"`, `"✓ 定性: 懸念なし"`, or `None`.
+    """
+    if analysis.degraded or analysis.verdict is None:
+        return None
+    if analysis.verdict == "skip":
+        reason = (
+            f"（{analysis.verdict_summary}）"
+            if analysis.verdict_summary
+            else "（理由の記載なし）"
+        )
+        return f"⚠ 定性: 見送り推奨{reason}"
+    return "✓ 定性: 懸念なし"
+
+
 @dataclass(frozen=True, slots=True)
 class BriefFundamentals:
     """Human-readable point-in-time fundamental values."""
@@ -264,7 +305,7 @@ class BriefCandidate:
     signals: tuple[str, ...]
     fundamentals: BriefFundamentals
     risk: BriefRisk
-    llm: BriefLlm
+    analysis: BriefAnalysis
     # REQ-008: newest-first, at most `_PAST_DECISIONS_LIMIT` entries -- see
     # `_candidate_brief`. Defaults to `()` for markdown/terminal-only tests
     # that don't exercise this section.
@@ -279,6 +320,27 @@ class BriefRejectionCount:
 
     reason_code: str
     count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SignalPerformanceRow:
+    """One signal's weighted hit-rate stats for the markdown aggregation (REQ-005/REQ-008).
+
+    `true_positive_count`/`false_positive_count`/`neutral_count` are RAW
+    (unweighted) occurrence tallies -- the issue's "TP/FP/NEUTRAL件数" reads
+    as a literal count column, distinct from `hit_rate`, which alone is
+    horizon-weighted. `n` is also raw and includes NEUTRAL occurrences: the
+    issue's own "n=15" preliminary-sample example counts every occurrence of
+    a signal, not just its TP/FP ones.
+    """
+
+    signal_name: str
+    true_positive_count: int
+    false_positive_count: int
+    neutral_count: int
+    hit_rate: float | None
+    n: int
+    is_preliminary: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +360,11 @@ class DailyBrief:
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
     signal_performance: tuple[SignalPerformanceRow, ...] = ()
+    # Run-level qualitative stand-down, set only by an ingested analysis. It
+    # is displayed before anything else and never suppresses the screening
+    # numbers, which remain the code's own deterministic output.
+    no_trade: bool = False
+    no_trade_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,8 +377,9 @@ class DailyBriefContext:
     universe: tuple[UniverseMember, ...]
     candidates: list[Candidate]
     risk_assessments: list[RiskAssessment]
-    news_summaries: list[NewsSummaryResult] | None
-    filing_analyses: list[FilingAnalysisResult] | None
+    # Verified skill output, or `None` for a plain `copilot-daily` run whose
+    # qualitative sections are still pending analysis.
+    analysis: ValidatedAnalysis | None
     # REQ-008: the single strategy this run screened with, used to scope
     # `state_store.get_decision_history()` per candidate -- today's `Candidate`
     # objects don't carry a per-candidate strategy_key (one run == one strategy).
@@ -377,6 +445,10 @@ def build_daily_brief(
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
+        no_trade=context.analysis.no_trade if context.analysis else False,
+        no_trade_reason=(
+            context.analysis.no_trade_reason if context.analysis else None
+        ),
     )
 
 
@@ -506,12 +578,7 @@ def _candidate_brief(
             context.brief.max_trade_risk_pct,
             context.brief.max_position_pct,
         ),
-        llm=_llm_brief(
-            candidate.symbol,
-            context.brief.news_summaries,
-            context.brief.filing_analyses,
-            state_store,
-        ),
+        analysis=build_analysis_brief(candidate.symbol, context.brief.analysis),
         past_decisions=_past_decisions(candidate.symbol, context.brief, state_store),
         execution_state=candidate.execution_state,
         execution_distance=candidate.execution_distance,
@@ -624,83 +691,109 @@ def _risk_brief(
     )
 
 
-def _llm_brief(
-    symbol: str,
-    news_results: list[NewsSummaryResult] | None,
-    filing_results: list[FilingAnalysisResult] | None,
-    state_store: StateStore,
-) -> BriefLlm:
-    if news_results is None and filing_results is None:
-        return BriefLlm(True, _DEGRADED_LLM_MESSAGE)
-    news_result = next(
-        (item for item in news_results or [] if item.summary.symbol == symbol), None
-    )
-    matching_filings = [
-        item for item in filing_results or [] if item.analysis.symbol == symbol
-    ]
-    if news_result is None and not matching_filings:
-        return BriefLlm(True, _NEUTRAL_LLM_MESSAGE)
-    news = news_result.summary if news_result else None
-    filing_analyses = [item.analysis for item in matching_filings]
+def build_analysis_brief(
+    symbol: str, analysis: ValidatedAnalysis | None
+) -> BriefAnalysis:
+    """Map one symbol's verified analysis into presentation data, fail-closed.
+
+    Every unhappy path collapses to `degraded=True` with an explanatory
+    `conclusion` rather than a partially rendered section: analysis not run
+    yet (`analysis is None`), the symbol never analyzed, or the symbol's
+    analysis withheld by `analysis/validate.py`.
+    """
+    if analysis is None:
+        return BriefAnalysis(True, PENDING_ANALYSIS_MESSAGE)
+    outcome = analysis.for_symbol(symbol)
+    if outcome is None:
+        return BriefAnalysis(True, MISSING_ANALYSIS_MESSAGE)
+    if outcome.error is not None:
+        return BriefAnalysis(True, WITHHELD_ANALYSIS_MESSAGE)
+    return _build_verified_analysis_brief(outcome, analysis.source_urls)
+
+
+def _build_verified_analysis_brief(
+    outcome: SymbolOutcome, urls: Mapping[str, str]
+) -> BriefAnalysis:
+    news = outcome.news_summary
+    assessment = outcome.screening_assessment
     facts = (
-        *tuple(news.facts if news else []),
-        *(fact for analysis in filing_analyses for fact in analysis.facts),
-    )
-    interpretations = (
-        *tuple(news.interpretation if news else []),
-        *(text for analysis in filing_analyses for text in analysis.interpretation),
+        *tuple(news.facts if news else ()),
+        *(fact for filing in outcome.filings for fact in filing.analysis.facts),
     )
     flags = (
-        *tuple(news.risk_flags if news else []),
-        *(flag for analysis in filing_analyses for flag in analysis.red_flags),
+        *tuple(news.risk_flags if news else ()),
+        *(flag for filing in outcome.filings for flag in filing.analysis.red_flags),
     )
-    return BriefLlm(
+    return BriefAnalysis(
         degraded=False,
-        conclusion=interpretations[0] if interpretations else _NEUTRAL_LLM_MESSAGE,
-        facts=tuple(fact.statement for fact in facts),
+        conclusion=_conclusion(outcome),
+        facts=tuple(fact.text for fact in facts),
         risk_flags=flags,
-        sources=_sources(facts, state_store),
-        filings=tuple(_filing_brief(item, state_store) for item in matching_filings),
-        catalyst_quality=news.catalyst_quality if news else None,
-        catalyst_quality_sources=(
-            _sources_for_ids(news.catalyst_quality_source_ids, state_store)
-            if news
-            else ()
-        ),
-        is_news_near_stale=news_result.is_near_stale if news_result else False,
+        sources=_sources(facts, urls),
+        filings=tuple(_filing_brief(filing, urls) for filing in outcome.filings),
+        verdict=outcome.verdict.recommendation if outcome.verdict else None,
+        verdict_summary=_verdict_summary(outcome),
+        strengths=tuple(assessment.strengths) if assessment else (),
+        concerns=tuple(assessment.concerns) if assessment else (),
     )
+
+
+def _conclusion(outcome: SymbolOutcome) -> str:
+    """Prefer the screening assessment; fall back to the first interpretation."""
+    if outcome.screening_assessment is not None:
+        summary = outcome.screening_assessment.summary.strip()
+        if summary:
+            return summary
+    interpretations = (
+        *tuple(outcome.news_summary.interpretation if outcome.news_summary else ()),
+        *(
+            text
+            for filing in outcome.filings
+            for text in filing.analysis.interpretation
+        ),
+    )
+    return interpretations[0] if interpretations else _NEUTRAL_ANALYSIS_MESSAGE
+
+
+def _verdict_summary(outcome: SymbolOutcome) -> str | None:
+    """The leading verdict reason, used as the inline "（理由要約）"."""
+    if outcome.verdict is None or not outcome.verdict.reasons:
+        return None
+    return outcome.verdict.reasons[0].text
 
 
 def _filing_brief(
-    result: FilingAnalysisResult, state_store: StateStore
+    filing: ResolvedFiling, urls: Mapping[str, str]
 ) -> BriefFilingAnalysis:
-    analysis = result.analysis
+    analysis = filing.analysis
     facts = tuple(analysis.facts)
     return BriefFilingAnalysis(
-        filing_type=analysis.filing_type,
-        filed_at=result.filed_at,
-        facts=tuple(fact.statement for fact in facts),
+        filing_type=filing.form_type,
+        filed_at=filing.filed_at,
+        facts=tuple(fact.text for fact in facts),
         interpretation=tuple(analysis.interpretation),
         red_flags=tuple(analysis.red_flags),
         yoy_changes=tuple(analysis.yoy_changes),
-        guidance_direction=analysis.guidance_direction,
-        sources=_sources(facts, state_store),
-        is_near_stale=result.is_near_stale,
+        sources=_sources(facts, urls),
     )
 
 
 def _sources(
-    facts: Sequence[SourcedFact], state_store: StateStore
+    facts: Sequence[SourcedFact], urls: Mapping[str, str]
 ) -> tuple[BriefSource, ...]:
     source_ids = [source_id for fact in facts for source_id in fact.source_ids]
-    return _sources_for_ids(source_ids, state_store)
+    return _sources_for_ids(source_ids, urls)
 
 
 def _sources_for_ids(
-    source_ids: Sequence[str], state_store: StateStore
+    source_ids: Sequence[str], urls: Mapping[str, str]
 ) -> tuple[BriefSource, ...]:
+    """Resolve cited IDs to links using the exported input's own URLs.
+
+    Deliberately not a database read: ingest must work from the archived JSON
+    alone, and a URL the pipeline itself collected is the only trustworthy one.
+    """
     unique_ids = list(dict.fromkeys(source_ids))
-    urls = state_store.get_source_urls(unique_ids)
     return tuple(
         BriefSource(source_id, urls.get(source_id, source_id))
         for source_id in unique_ids

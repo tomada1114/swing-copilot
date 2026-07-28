@@ -30,7 +30,7 @@ paths:
 - **Batch atomicity**: inject failure after an earlier row succeeds and assert full rollback/recovery
 - **Aligned series**: mismatched dates, duplicates, insufficient overlap, and constant values
 - **Exact accounting**: hand-calculate entry/exit costs and final liquidation equity
-- **Cache safety**: revalidate cached provenance and policy constraints, not only fresh responses
+- **Reused artifacts**: validate provenance and policy constraints on reused/loaded artifacts, not only freshly produced ones
 
 ## Error and Exception Testing
 
@@ -97,8 +97,10 @@ paths:
   rollback, previous-file preservation, and rerun after failure
 - External adapter tests cover retryable and non-retryable failures, exact total
   attempts/backoff, timeout, and throttling on every attempt using fake time
-- LLM tests cover non-empty/known source IDs, cache revalidation, every
-  user-visible free-text field for CON-03, system/user prompt separation,
-  delimiter escaping, full-prompt cache hashing, and audit/exception redaction
+- Analysis-boundary tests cover strict (`extra="forbid"`) schema rejection in
+  both directions, non-empty source IDs proven to be a subset of the exported
+  input, CON-03 checks over every user-visible free-text field, per-symbol
+  fail-closed withholding without retry, and hard-fail boundaries (broken
+  JSON, `as_of` mismatch, unknown symbol)
 - Backtest tests use exact arithmetic for adverse slippage and commission on
   entry and every exit path, including forced liquidation

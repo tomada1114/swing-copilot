@@ -77,41 +77,20 @@ backtest:
   slippage_pct: 0.001
   benchmark: "SPY"
 
-llm:
-  models:
-    news_summary: "claude-haiku-4-5-20251001"
-    filing_analysis: "claude-haiku-4-5-20251001"
-  max_tokens: 2048
-  # Bumped 1 -> 2 for P2-12: NewsSummary gained required catalyst_quality /
-  # catalyst_quality_source_ids fields; old cached rows must miss, not
-  # ValidationError, on model_validate_json (docs/06_reliability_roadmap.md §5 P2-12).
-  schema_version: 2
+analysis:
+  # Bounds on the untrusted text exported to analysis_input.json for the
+  # swing-daily skill (docs/06_reliability_roadmap.md §5 P6-26).
   max_news_items_per_symbol: 20
   max_news_chars_per_item: 4000
-  filing_chunk_chars: 30000
-  max_filing_chunks: 4
-  # roadmap §5 P2-12: cache "near-stale" warning threshold in days of TTL
-  # remaining (as_of basis; see llm/decision_context.py::is_cache_near_stale()
-  # and cache_ttl_days below). Wired into pipeline/daily.py's LLM step
-  # (roadmap §5 P6-27) via LLMClient.get_cached_at().
-  near_stale_threshold_days: 2
-  # roadmap §5 P6-27: code-owned cache-TTL horizon near_stale_threshold_days
-  # counts down from (no real Anthropic-side cache expiry exists; a cached
-  # llm_calls row is reused indefinitely by natural key). 要検証.
-  cache_ttl_days: 30
-  # docs/06_reliability_roadmap.md §5 P6-26: filing text collection recency
-  # bound (days) and per-symbol count cap, symmetric with
-  # max_news_items_per_symbol above -- previously unbounded (every filing
-  # ever submitted for a symbol).
+  # Per-filing export budget (single setting; formerly filing_chunk_chars *
+  # max_filing_chunks).
+  max_filing_chars: 120000
+  # Filing collection recency bound (days) and per-symbol count cap.
   filing_lookback_days: 90
   max_filings_per_symbol: 3
-  # docs/06_reliability_roadmap.md §5 P6-26: per-run ceiling on total Claude
-  # API calls (second defense alongside the monthly cost gate; 要検証).
-  max_llm_calls_per_run: 200
-
-budget:
-  monthly_cap_usd_prototype: 5
-  monthly_cap_usd_production: 25
+  # Run-wide macro/economic-calendar events surfaced in context.calendar_events.
+  max_calendar_events: 20
+  max_calendar_chars_per_item: 2000
 
 schedule:
   timeout_minutes: 35

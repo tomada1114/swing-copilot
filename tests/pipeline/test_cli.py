@@ -28,6 +28,7 @@ from swing_copilot.pipeline.daily import (
     _required_features,
     main,
 )
+from swing_copilot.report.terminal_report import TerminalPaths
 from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.universe import UniverseMember
 
@@ -56,7 +57,6 @@ class TestParseArgs:
                 "2026-07-20",
                 "--dry-run",
                 "--skip-text",
-                "--skip-llm",
                 "--limit",
                 "5",
                 "--log-level",
@@ -68,7 +68,6 @@ class TestParseArgs:
             as_of=date(2026, 7, 20),
             is_dry_run=True,
             skip_text=True,
-            skip_llm=True,
             limit=5,
             log_level="DEBUG",
         )
@@ -87,26 +86,19 @@ class TestParseArgs:
 
 
 class TestRequiredFeatures:
-    def test_full_run_requires_edgar_finnhub_fred_and_llm(self):
+    def test_full_run_requires_edgar_finnhub_and_fred(self):
         settings = load_settings("config/settings.yaml")
 
         features = _required_features(DailyRunOptions(), settings)
 
-        assert features == {"edgar", "finnhub", "fred", "llm"}
+        assert features == {"edgar", "finnhub", "fred"}
 
     def test_skip_text_drops_finnhub_and_fred(self):
         settings = load_settings("config/settings.yaml")
 
         features = _required_features(DailyRunOptions(skip_text=True), settings)
 
-        assert features == {"edgar", "llm"}
-
-    def test_skip_llm_drops_llm(self):
-        settings = load_settings("config/settings.yaml")
-
-        features = _required_features(DailyRunOptions(skip_llm=True), settings)
-
-        assert features == {"edgar", "finnhub", "fred"}
+        assert features == {"edgar"}
 
     def test_notification_enabled_adds_discord(self):
         settings = load_settings("config/settings.yaml")
@@ -165,11 +157,9 @@ class TestComposeDependencies:
         strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="edgar_identity"):
-            _compose_dependencies(
-                DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
-            )
+            _compose_dependencies(DailyRunOptions(skip_text=True), settings, strategies)
 
-    def test_skip_text_and_skip_llm_leaves_those_clients_none(self, monkeypatch):
+    def test_skip_text_leaves_text_and_calendar_clients_none(self, monkeypatch):
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
@@ -179,7 +169,7 @@ class TestComposeDependencies:
         strategies = load_strategies("config/strategies.yaml")
 
         deps = _compose_dependencies(
-            DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
+            DailyRunOptions(skip_text=True), settings, strategies
         )
 
         assert isinstance(deps, DailyDependencies)
@@ -187,7 +177,6 @@ class TestComposeDependencies:
         assert deps.news_client is None
         assert deps.earnings_client is None
         assert deps.calendar_client is None
-        assert deps.llm_client is None
         assert deps.notifier is None
 
     def test_configured_secrets_wire_up_the_matching_clients(self, monkeypatch):
@@ -198,7 +187,6 @@ class TestComposeDependencies:
                 edgar_identity="Test test@example.com",
                 finnhub_api_key="finnhub-key",
                 fred_api_key="fred-key",
-                anthropic_api_key="sk-test",
             ),
         )
         settings = load_settings("config/settings.yaml")
@@ -209,7 +197,6 @@ class TestComposeDependencies:
         assert deps.news_client is not None
         assert deps.earnings_client is not None
         assert deps.calendar_client is not None
-        assert deps.llm_client is not None
 
     def test_notification_enabled_without_webhook_is_a_fail_fast_config_error(
         self, monkeypatch
@@ -227,9 +214,7 @@ class TestComposeDependencies:
         strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="discord_webhook_url"):
-            _compose_dependencies(
-                DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
-            )
+            _compose_dependencies(DailyRunOptions(skip_text=True), settings, strategies)
 
     def test_dry_run_composes_an_isolated_db_and_report_dir(
         self, monkeypatch, tmp_path
@@ -244,7 +229,7 @@ class TestComposeDependencies:
         monkeypatch.chdir(tmp_path)
 
         deps = _compose_dependencies(
-            DailyRunOptions(is_dry_run=True, skip_text=True, skip_llm=True),
+            DailyRunOptions(is_dry_run=True, skip_text=True),
             settings,
             strategies,
         )
@@ -267,7 +252,7 @@ class TestComposeDependencies:
         monkeypatch.chdir(tmp_path)
 
         deps = _compose_dependencies(
-            DailyRunOptions(skip_text=True, skip_llm=True), settings, strategies
+            DailyRunOptions(skip_text=True), settings, strategies
         )
 
         assert deps.output_dir == "reports"
@@ -322,6 +307,7 @@ class TestMain:
     def test_renders_brief_with_report_path(self, monkeypatch, capsys):
         brief = object()
         report_path = Path("reports/2026-07-22/report.md")
+        analysis_input_path = Path("reports/2026-07-22/analysis_input.json")
         calls = {}
 
         monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
@@ -338,6 +324,7 @@ class TestMain:
                 brief=brief,
                 status=RunStatus.SUCCESS,
                 report_path=report_path,
+                analysis_input_path=analysis_input_path,
             ),
         )
 
@@ -355,7 +342,13 @@ class TestMain:
         assert calls["render"] == (
             brief,
             RunStatus.SUCCESS,
-            {"width": 120, "color": False, "report_path": report_path},
+            {
+                "width": 120,
+                "color": False,
+                "paths": TerminalPaths(
+                    report=report_path, analysis_input=analysis_input_path
+                ),
+            },
         )
 
 
@@ -412,7 +405,6 @@ class TestConfigureLoggingRedactsSecrets:
         secrets = _isolated_secrets(
             finnhub_api_key="finnhub-sekrit123",
             fred_api_key="fred-sekrit456",
-            anthropic_api_key="sk-ant-sekrit789",
             discord_webhook_url="https://discord.com/api/webhooks/sekrit-hook",
         )
         _configure_logging(secrets)

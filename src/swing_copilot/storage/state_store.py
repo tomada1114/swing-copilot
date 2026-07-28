@@ -3,10 +3,10 @@
 `StateStore` owns every DuckDB table that is not bars/fundamentals (those
 belong to `MarketStore`): universe history, run/step tracking, signals,
 candidates, risk assessments, positions, the paper-trading journal, text
-items, and LLM call audit records. `init_schema()` creates the full DDL from
-`docs/04_detailed_design.md` 4.2 up front — later checklist items (screening,
-risk, LLM, paper trading) add the write methods for their own tables as they
-land, without re-touching schema creation.
+items. `init_schema()` creates the full DDL from `docs/04_detailed_design.md`
+4.2 up front — later checklist items (screening, risk, paper trading) add the
+write methods for their own tables as they land, without re-touching schema
+creation.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from swing_copilot.storage import (
     earnings_records,
     exposure_records,
     ftd_records,
-    llm_records,
     paper_records,
     regime_records,
     text_records,
@@ -46,7 +45,6 @@ if TYPE_CHECKING:
         SignalOutcomeRecord,
     )
     from swing_copilot.storage.database import Database
-    from swing_copilot.storage.llm_records import LLMCallRecord
     from swing_copilot.storage.paper_records import TradeDecisionRecord
     from swing_copilot.text.base import TextItem
 
@@ -446,7 +444,7 @@ class StateStore:
     def get_decision_history(
         self, symbol: str, strategy_key: str, before_date: date, limit: int
     ) -> list[paper_records.DecisionHistoryEntry]:
-        """Return bounded prior live decisions for point-in-time LLM context."""
+        """Return bounded prior live decisions for point-in-time analysis use."""
         return paper_records.get_decision_history(
             self._database, symbol, strategy_key, before_date, limit
         )
@@ -630,52 +628,6 @@ class StateStore:
             self._database, run_id, horizon_days, outcomes
         )
 
-    def record_llm_call(self, call: LLMCallRecord) -> None:
-        """Append one LLM call's audit record.
-
-        Args:
-            call: The call to record.
-        """
-        llm_records.record_llm_call(self._database, call)
-
-    def get_cached_llm_response(
-        self, model: str, prompt_hash: str, schema_version: int
-    ) -> str | None:
-        """Return the most recent successful response for this natural key.
-
-        Args:
-            model: Model ID the original call used.
-            prompt_hash: Hash of the original prompt text.
-            schema_version: Schema version the original call used.
-
-        Returns:
-            The cached `response_json`, or `None` if no successful call matches.
-        """
-        return llm_records.get_cached_response(
-            self._database, model, prompt_hash, schema_version
-        )
-
-    def get_cached_llm_response_created_at(
-        self, model: str, prompt_hash: str, schema_version: int
-    ) -> date | None:
-        """Return the most recent successful call's creation date for this natural key.
-
-        Purely additive companion to `get_cached_llm_response()` (P6-27
-        near-stale wiring): see `llm_records.get_cached_response_created_at()`.
-
-        Args:
-            model: Model ID the original call used.
-            prompt_hash: Hash of the original prompt text.
-            schema_version: Schema version the original call used.
-
-        Returns:
-            The cached response's `created_at` date, or `None` if no
-            successful call matches.
-        """
-        return llm_records.get_cached_response_created_at(
-            self._database, model, prompt_hash, schema_version
-        )
-
     def record_text_items(self, items: Sequence[TextItem]) -> None:
         """Persist collected text items, upserted by `source_id`.
 
@@ -688,20 +640,9 @@ class StateStore:
         """Resolve known `source_ids` to their `source_url`.
 
         Args:
-            source_ids: Source IDs to resolve (e.g. an LLM fact's `source_ids`).
+            source_ids: Source IDs to resolve (e.g. an analysis fact's IDs).
 
         Returns:
             A mapping for every `source_id` with a recorded text item.
         """
         return text_records.get_source_urls(self._database, source_ids)
-
-    def get_monthly_llm_cost(self, as_of: date) -> float:
-        """Return realized LLM cost for `as_of`'s calendar month.
-
-        Args:
-            as_of: Any date within the month to total.
-
-        Returns:
-            Total realized cost in USD for that calendar month.
-        """
-        return llm_records.get_monthly_cost(self._database, as_of)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -9,7 +10,11 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from swing_copilot.report.daily_brief import format_sizing
+from swing_copilot.report.daily_brief import (
+    NO_TRADE_MESSAGE,
+    format_sizing,
+    format_verdict,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -22,13 +27,25 @@ if TYPE_CHECKING:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalPaths:
+    """Filesystem locations echoed at the end of the terminal summary.
+
+    `analysis_input` is printed verbatim so the `swing-daily` skill can pick
+    the exported analysis input up from the terminal output.
+    """
+
+    report: Path | None = None
+    analysis_input: Path | None = None
+
+
 def render_terminal(
     brief: DailyBrief,
     status: RunStatus,
     *,
     width: int = 120,
     color: bool = False,
-    report_path: Path | None = None,
+    paths: TerminalPaths | None = None,
 ) -> str:
     """Render a compact summary suitable for stdout and snapshots."""
     buffer = StringIO()
@@ -44,6 +61,9 @@ def render_terminal(
         f"Status: [bold]{status.value.upper()}[/bold]  "
         f"Candidates: {len(brief.candidates)}  Run: {brief.run_id}"
     )
+    if brief.no_trade:
+        reason = f"（{brief.no_trade_reason}）" if brief.no_trade_reason else ""
+        console.print(f"[bold]{NO_TRADE_MESSAGE}{reason}[/bold]")
     market = "  ".join(
         f"{item.label} {_number(item.value)} ({_percent(item.pct_change)})"
         for item in brief.market
@@ -113,35 +133,32 @@ def render_terminal(
         console.print("\n[bold]Warnings[/bold]")
         for notice in brief.notices:
             console.print(f"  - {notice}")
-    if report_path is not None:
-        console.print(f"\n詳細レポート: {report_path}")
+    if paths is not None and paths.report is not None:
+        console.print(f"\n詳細レポート: {paths.report}")
+    if paths is not None and paths.analysis_input is not None:
+        console.print(f"分析入力(analysis_input.json): {paths.analysis_input}")
     return buffer.getvalue().rstrip() + "\n"
 
 
 def _render_candidate_details(console: Console, candidate: BriefCandidate) -> None:
     console.print(f"\n[bold]{candidate.symbol}[/bold]")
-    console.print(f"  LLM: {candidate.llm.conclusion}")
+    console.print(f"  定性: {candidate.analysis.conclusion}")
+    verdict_line = format_verdict(candidate.analysis)
+    if verdict_line is not None:
+        console.print(f"  {verdict_line}")
+    for concern in candidate.analysis.concerns:
+        console.print(f"  懸念: {concern}")
     for warning in (*candidate.risk.warnings, *candidate.risk.sizing_warnings):
         console.print(f"  Risk: {warning}")
-    if candidate.llm.sources:
+    if candidate.analysis.sources:
         console.print(
             "  Sources: "
-            + ", ".join(source.source_id for source in candidate.llm.sources)
+            + ", ".join(source.source_id for source in candidate.analysis.sources)
         )
-    # P6-27: identify each filing analysis (previously only the first one
-    # per symbol ever reached the report at all).
-    for filing in candidate.llm.filings:
+    for filing in candidate.analysis.filings:
         console.print(
             f"  Filing [{filing.filing_type} {filing.filed_at.isoformat()}]: "
             f"{filing.interpretation[0] if filing.interpretation else '-'}"
-        )
-    if candidate.llm.catalyst_quality is not None:
-        console.print(f"  Catalyst quality: {candidate.llm.catalyst_quality}")
-    if candidate.llm.is_news_near_stale or any(
-        filing.is_near_stale for filing in candidate.llm.filings
-    ):
-        console.print(
-            "  Warning: LLM分析キャッシュがTTL間近です。再実行を検討してください。"
         )
 
 

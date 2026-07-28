@@ -10,14 +10,13 @@ from uuid import UUID
 import pytest
 
 from swing_copilot.models import RunStatus
-from swing_copilot.pipeline.postmortem import SignalPerformanceRow
 from swing_copilot.report.daily_brief import (
+    BriefAnalysis,
     BriefCandidate,
     BriefCircuitBreaker,
     BriefExposure,
     BriefFilingAnalysis,
     BriefFundamentals,
-    BriefLlm,
     BriefMarketItem,
     BriefPastDecision,
     BriefPortfolioHeat,
@@ -26,9 +25,10 @@ from swing_copilot.report.daily_brief import (
     BriefRisk,
     BriefSource,
     DailyBrief,
+    SignalPerformanceRow,
 )
 from swing_copilot.report.markdown_report import render_markdown, write_markdown_report
-from swing_copilot.report.terminal_report import render_terminal
+from swing_copilot.report.terminal_report import TerminalPaths, render_terminal
 
 RUN_ID = UUID("11111111-2222-3333-4444-555555555555")
 
@@ -63,7 +63,7 @@ def _brief() -> DailyBrief:
                     reasons=(),
                     warnings=("AMDとの相関 0.82",),
                 ),
-                llm=BriefLlm(
+                analysis=BriefAnalysis(
                     degraded=False,
                     conclusion="業績見通しは維持されているが規制リスクが残る",
                     facts=("売上高は前年同期比で増加した",),
@@ -82,9 +82,9 @@ def _brief_with_sizing(risk: BriefRisk) -> DailyBrief:
     return replace(base, candidates=(candidate,))
 
 
-def _brief_with_llm(llm: BriefLlm) -> DailyBrief:
+def _brief_with_analysis(analysis: BriefAnalysis) -> DailyBrief:
     base = _brief()
-    candidate = replace(base.candidates[0], llm=llm)
+    candidate = replace(base.candidates[0], analysis=analysis)
     return replace(base, candidates=(candidate,))
 
 
@@ -398,7 +398,7 @@ def test_terminal_output_is_a_compact_decision_brief() -> None:
         RunStatus.DEGRADED,
         width=120,
         color=False,
-        report_path=report_path,
+        paths=TerminalPaths(report=report_path),
     )
 
     assert "Swing Copilot" in output
@@ -424,6 +424,26 @@ def test_terminal_output_is_a_compact_decision_brief() -> None:
     assert "<html" not in output
 
 
+def test_terminal_shows_analysis_input_path_when_provided() -> None:
+    report_path = Path("reports/2026-07-22/report.md")
+    analysis_input_path = Path("reports/2026-07-22/analysis_input.json")
+    output = render_terminal(
+        _brief(),
+        RunStatus.SUCCESS,
+        width=120,
+        paths=TerminalPaths(report=report_path, analysis_input=analysis_input_path),
+    )
+
+    assert f"詳細レポート: {report_path}" in output
+    assert f"分析入力(analysis_input.json): {analysis_input_path}" in output
+
+
+def test_terminal_omits_analysis_input_path_when_absent() -> None:
+    output = render_terminal(_brief(), RunStatus.SUCCESS, width=120)
+
+    assert "analysis_input.json" not in output
+
+
 def test_markdown_contains_auditable_details_and_source_urls() -> None:
     output = render_markdown(_brief(), RunStatus.SUCCESS)
 
@@ -438,7 +458,7 @@ def test_markdown_contains_auditable_details_and_source_urls() -> None:
     assert "本レポートは情報提供のみを目的とし、投資助言ではありません" in output
 
 
-def _llm_with_filing(**overrides: object) -> BriefLlm:
+def _analysis_with_filing(**overrides: object) -> BriefAnalysis:
     filing = BriefFilingAnalysis(
         filing_type="10-Q",
         filed_at=date(2026, 7, 21),
@@ -446,10 +466,9 @@ def _llm_with_filing(**overrides: object) -> BriefLlm:
         interpretation=("Growth appears steady",),
         red_flags=(),
         yoy_changes=(),
-        guidance_direction="positive",
         sources=(BriefSource("filing:1", "https://example.com/filing/1"),),
     )
-    base = BriefLlm(
+    base = BriefAnalysis(
         degraded=False,
         conclusion="conclusion",
         filings=(filing,),
@@ -461,70 +480,140 @@ def test_terminal_shows_each_filing_analysis_with_type_and_filed_date() -> None:
     # P6-27: previously only the first filing analysis per symbol ever
     # reached the report; now each is individually identified.
     output = render_terminal(
-        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS, width=200
+        _brief_with_analysis(_analysis_with_filing()), RunStatus.SUCCESS, width=200
     )
 
     assert "Filing [10-Q 2026-07-21]: Growth appears steady" in output
 
 
 def test_markdown_shows_each_filing_analysis_in_its_own_labeled_section() -> None:
-    output = render_markdown(_brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS)
+    output = render_markdown(
+        _brief_with_analysis(_analysis_with_filing()), RunStatus.SUCCESS
+    )
 
     assert "### 開示分析: 10-Q (2026-07-21)" in output
     assert "Revenue up 10%" in output
-    assert "Guidance direction: positive" in output
     assert "[filing:1](https://example.com/filing/1)" in output
 
 
-def test_terminal_and_markdown_show_catalyst_quality_display_only() -> None:
-    llm = replace(_llm_with_filing(), catalyst_quality="high")
-
-    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
-
-    assert "Catalyst quality: high" in terminal
-    assert "Catalyst quality: high" in markdown
-
-
-def test_terminal_and_markdown_omit_catalyst_quality_when_absent() -> None:
-    output_terminal = render_terminal(_brief(), RunStatus.SUCCESS, width=200)
-    output_markdown = render_markdown(_brief(), RunStatus.SUCCESS)
-
-    assert "Catalyst quality" not in output_terminal
-    assert "Catalyst quality" not in output_markdown
-
-
-def test_terminal_and_markdown_show_a_near_stale_warning_for_news() -> None:
-    llm = replace(_llm_with_filing(), is_news_near_stale=True)
-
-    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
-
-    assert "TTL" in terminal
-    assert "ニュース分析のキャッシュがTTL間近です" in markdown
-
-
-def test_terminal_and_markdown_show_a_near_stale_warning_for_a_filing() -> None:
-    stale_filing = replace(_llm_with_filing().filings[0], is_near_stale=True)
-    llm = replace(_llm_with_filing(), filings=(stale_filing,))
-
-    terminal = render_terminal(_brief_with_llm(llm), RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(_brief_with_llm(llm), RunStatus.SUCCESS)
-
-    assert "TTL" in terminal
-    assert "このキャッシュ済み分析はTTL間近です" in markdown
-
-
-def test_terminal_and_markdown_omit_near_stale_warning_when_fresh() -> None:
-    output_terminal = render_terminal(
-        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS, width=200
-    )
-    output_markdown = render_markdown(
-        _brief_with_llm(_llm_with_filing()), RunStatus.SUCCESS
+def test_terminal_and_markdown_show_verdict_skip_line_with_reason() -> None:
+    analysis = replace(
+        _analysis_with_filing(), verdict="skip", verdict_summary="規制リスクが高い"
     )
 
-    assert "TTL" not in output_terminal
-    assert "TTL" not in output_markdown
+    terminal = render_terminal(
+        _brief_with_analysis(analysis), RunStatus.SUCCESS, width=200
+    )
+    markdown = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+    assert "⚠ 定性: 見送り推奨（規制リスクが高い）" in terminal
+    assert "⚠ 定性: 見送り推奨（規制リスクが高い）" in markdown
+
+
+def test_terminal_and_markdown_show_verdict_proceed_line() -> None:
+    analysis = replace(_analysis_with_filing(), verdict="proceed")
+
+    terminal = render_terminal(
+        _brief_with_analysis(analysis), RunStatus.SUCCESS, width=200
+    )
+    markdown = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+    assert "✓ 定性: 懸念なし" in terminal
+    assert "✓ 定性: 懸念なし" in markdown
+
+
+def test_terminal_and_markdown_omit_verdict_line_when_analysis_degraded() -> None:
+    # A pending/withheld analysis must never imply "懸念なし".
+    analysis = replace(_analysis_with_filing(), degraded=True, verdict="proceed")
+
+    terminal = render_terminal(
+        _brief_with_analysis(analysis), RunStatus.SUCCESS, width=200
+    )
+    markdown = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+    assert "懸念なし" not in terminal
+    assert "懸念なし" not in markdown
+
+
+def test_terminal_and_markdown_omit_verdict_line_when_absent() -> None:
+    terminal = render_terminal(
+        _brief_with_analysis(_analysis_with_filing()), RunStatus.SUCCESS, width=200
+    )
+    markdown = render_markdown(
+        _brief_with_analysis(_analysis_with_filing()), RunStatus.SUCCESS
+    )
+
+    assert "定性:" in terminal
+    assert "懸念なし" not in terminal
+    assert "見送り推奨" not in terminal
+    assert "懸念なし" not in markdown
+    assert "見送り推奨" not in markdown
+
+
+def test_terminal_shows_each_concern_line() -> None:
+    analysis = replace(_analysis_with_filing(), concerns=("規制強化の兆し", "在庫増加"))
+
+    output = render_terminal(
+        _brief_with_analysis(analysis), RunStatus.SUCCESS, width=200
+    )
+
+    assert "懸念: 規制強化の兆し" in output
+    assert "懸念: 在庫増加" in output
+
+
+def test_markdown_shows_qualitative_assessment_section_with_strengths_and_concerns() -> (
+    None
+):
+    analysis = replace(
+        _analysis_with_filing(),
+        strengths=("トレンド継続",),
+        concerns=("バリュエーション高め",),
+    )
+
+    output = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+    assert "### 定性評価" in output
+    assert "- 強み: トレンド継続" in output
+    assert "- 懸念: バリュエーション高め" in output
+
+
+def test_markdown_omits_qualitative_assessment_section_when_empty() -> None:
+    output = render_markdown(
+        _brief_with_analysis(_analysis_with_filing()), RunStatus.SUCCESS
+    )
+
+    assert "### 定性評価" not in output
+
+
+def test_markdown_shows_qualitative_risk_flags_heading_not_the_old_llm_heading() -> (
+    None
+):
+    analysis = replace(_analysis_with_filing(), risk_flags=("規制環境の不確実性",))
+
+    output = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+    assert "### 定性リスクフラグ" in output
+    assert "LLM risk flags" not in output
+
+
+def test_terminal_and_markdown_show_no_trade_banner_near_the_top() -> None:
+    brief = replace(_brief(), no_trade=True, no_trade_reason="市場環境が悪化")
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    assert "本日は取引なし（定性判断）（市場環境が悪化）" in terminal
+    assert terminal.index("本日は取引なし") < terminal.index("銘柄")
+    assert "> **本日は取引なし（定性判断）**（市場環境が悪化）" in markdown
+    assert markdown.index("本日は取引なし") < markdown.index("## Candidates")
+
+
+def test_terminal_and_markdown_omit_no_trade_banner_by_default() -> None:
+    terminal = render_terminal(_brief(), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    assert "本日は取引なし" not in terminal
+    assert "本日は取引なし" not in markdown
 
 
 def test_terminal_shows_score_column_without_breakdown() -> None:

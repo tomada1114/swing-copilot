@@ -1,10 +1,10 @@
 """Text item persistence and source-URL resolution, split out of `state_store.py`.
 
-Same extraction pattern as `audit_records.py`/`llm_records.py`: plain functions
+Same extraction pattern as `audit_records.py`: plain functions
 taking `Database` directly, so `StateStore` stays the single public entry
 point while its own module stays under the project's 300-line guideline.
 Persisting collected text (FR-07 adapters' in-memory `TextItem`s) lets the
-report resolve an LLM fact's `source_ids` back to a clickable URL
+report resolve an analysis fact's `source_ids` back to a clickable URL
 (`docs/05_ui_design.md` 7.5) without the report module depending on any
 text-source adapter directly.
 """

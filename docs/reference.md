@@ -53,62 +53,60 @@ correction-upsertする。当日バー欠損は0扱いせず、過去の極値�
 絶対額より大きいときだけ、利確時期またはストップ/エントリーに関する
 可能性表現の注記を返す。
 
-## LLM予算会計と開示取得の境界（NFR-01、roadmap §5 P6-26）
+## 定性分析の境界（`analysis/`、FR-08・CON-03）
 
-`llm/client.py`の`LLMClient.analyze()`は、応答受信後の検証失敗
-（`SchemaValidationError`/`ForbiddenLanguageError`）や`stop_reason=="refusal"`
-でも、Anthropic側が既に課金した`response.usage`由来の実トークン数・実コストを
-`llm_calls`へ記録する（`status`は`"failed"`のまま）。SDK呼び出し自体が例外を
-送出した場合のみ応答が存在しないため0のまま記録する。
-`storage/llm_records.py::get_monthly_cost()`はこの実コストを`status`を問わず
-全行合算するため、NFR-01の月次予算上限は「実際に課金された金額」に対する
-保証になる（以前は`status='success'`のみ合算しており、失敗呼び出しの実消費が
-ゲートから見えなかった）。予算ゲートの事前概算に使う文字/トークン比
-（`_CHARS_PER_TOKEN_ESTIMATE`）は日本語主体プロンプトの実測値`2.0`を使う。
+定性分析はこのプロセスの中では行わない。`swing_copilot.analysis`は、日次バッチと
+Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイルを介した境界**
+であり、モデルAPIを一切呼ばない。
 
-開示取得（`data/edgar.py::EdgarClient.fetch_filing_texts()`）は
-`settings.llm.filing_lookback_days`（既定90日）・`max_filings_per_symbol`
-（既定3件、ニュース側`max_news_items_per_symbol`と対称）で絞り込み、
-`filed_at`降順に決定的ソートしてから件数上限を適用する。加えて
-`settings.llm.max_llm_calls_per_run`（既定200）が1回の実行内の総LLM呼び出し数を
-上限し、超過分は実API呼び出しへ到達させず`"budget_skipped"`として監査記録する
-（月次予算ゲートとは独立した第二防御）。
+`analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
+（`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・P1-06実現損益
+サマリ・市場レジーム・過去判断）と、ステップ5で収集済みの未信頼テキストを
+`analysis_input.json`（schema `analysis-input-v1`）へまとめ、宛先と同じディレクトリの
+一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
+`settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
+開示は`max_filing_chars`文字までに切り詰める。
+ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
+どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの
+`TextItem`（`source_type="calendar"`）はどの候補にも属さないため、run単位の
+`context.calendar_events`として`max_calendar_events`件・各
+`max_calendar_chars_per_item`文字までに切り詰めて別出しする。
 
-## 開示分析のprovenance修正・レポート反映・near-stale警告（roadmap §5 P2-12/P6-27）
+`analysis/validate.py`はスキルが書いた`analysis_result.json`
+（schema `analysis-result-v1`）を検証する。銘柄ごとに、(1) strictスキーマ
+（`extra="forbid"`）で解析できること、(2) 引用された`source_id`がすべて当該銘柄に
+ついて実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄
+からも引用可）であり、各`SourcedFact`が1件以上引用していること、
+(3) 表示テキストが`analysis/safety.py`のCON-03検査を通ること、を確かめる。
+(2)(3)の違反は**銘柄単位のfail-closed**で、当該銘柄の定性セクションを保留
+（`SymbolOutcome.error`を設定し他フィールドを空に）してログへ残すだけで、
+リトライしない。文書が読めない・JSONでない・`as_of`が入力と食い違う場合だけは
+run全体のhard failとする——別の取引日を記述しているかもしれないファイルに
+「安全な部分読み込み」は存在しないためである。
 
-実API検証で、開示分析263件中262件がprovenance検証で失敗していた
-（唯一の「成功」もfactsが空）。`llm/filings_analysis.py`のユーザープロンプトが
-`source_id`をモデルへ一切明示していなかったため、モデルが引用すべきIDを
-知らずに文字列を捏造し、`llm/client.py::_validate_source_ids()`が
-`SchemaValidationError`でfail-closedにしていたことが原因だった。ニュース側
-`llm/summarize.py::_format_news_item()`と同様、ユーザープロンプト本文へ
-`source_id: {chunk_source_id}`を明記するよう修正した。プロンプト変更で
-`prompt_hash`が変わるため既存キャッシュ行は自然に無効化される。
+書類種別・提出日・ソースURLはコードが所有するメタデータとして
+`analysis_input.json`から解決し、スキルの申告値を採用しない。
 
-`report/daily_brief.py::_llm_brief()`は同一銘柄の最初の開示分析だけを
-採用していたため、2件目以降の開示（例: 10-Qに続く8-K）が黙って
-レポートから欠落していた。`analyze_filing()`/`summarize_news()`は
-`llm/filings_analysis.py::FilingAnalysisResult`/
-`llm/summarize.py::NewsSummaryResult`（分析本体 + 提出日等のメタデータ +
-`is_near_stale`）を返すようになり、`DailyBriefContext.filing_analyses`は
-当該銘柄の全開示分析を保持する。`BriefLlm.filings`（新規）が
-`BriefFilingAnalysis`（書類種別・提出日・facts等・`is_near_stale`）の
-tupleとして各開示を個別に描画し、terminal/markdownとも「どの開示に基づく
-分析か」を識別できる見出しを出す。
+## `copilot-ingest-analysis`とレポート再描画
 
-`NewsSummary.catalyst_quality`/`catalyst_quality_source_ids`
-（roadmap §5 P2-12で追加、これまでprovenance検証にしか使われていなかった）
-は`BriefLlm.catalyst_quality`/`catalyst_quality_sources`として
-terminal/markdownへ表示専用で接続された。ランキング・判定ロジックには
-一切接続しない（改修原則4「判断はコード、叙述はLLM」）。
+`analysis/cli.py`（`copilot-ingest-analysis`）はネットワークにも接続せず、
+スクリーニング・リスク・ランキングを再計算しない。日次runが
+`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v1`、
+表示非依存の`DailyBrief`のスナップショット）を読み直し、候補ごとの定性欄と
+run単位の`no_trade`/`no_trade_reason`だけを差し替えて同じMarkdownを再生成する。
+スコア・サイジング・実行状態・落選・レジームは無変更で持ち越す。
 
-`llm/decision_context.py::is_cache_near_stale()`（roadmap §5 P2-12で
-メカニズムのみ実装、TTL概念が存在せず未配線だった）を本番経路へ配線した。
-`settings.llm.cache_ttl_days`（既定30日、要検証）を新設し、
-`near_stale_threshold_days`（既定2日）が数える対象とした
-（`near_stale_threshold_days <= cache_ttl_days`を`LLMConfig`で検証）。
-`LLMClient.get_cached_at()`（新規、`analyze()`のシグネチャ/挙動は不変の
-純粋加算メソッド）がキャッシュ済み応答の作成日を返し、
-`summarize_news()`/`analyze_filing()`が実行のas_of（`ctx.run_date`、
-壁時計不使用）と突き合わせて`is_near_stale`を判定する。TTL残り日数が
-`near_stale_threshold_days`以下ならレポートに再実行を促す警告を表示する。
+`report/daily_brief.py::build_analysis_brief()`は不合格経路をすべて
+`degraded=True`＋説明文へ畳む: 分析未実施は「分析待ち」、当該銘柄が分析対象外なら
+「定性分析なし」、検証で保留された銘柄は「検証不合格のため非表示」。
+`format_verdict()`は`degraded`または`verdict`が`None`のとき`None`を返して
+**何も描画しない**——沈黙が「懸念なし」と読まれてはならないためである。
+verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`✓ 定性: 懸念なし`を出す。
+
+`reports/<run_date>/`に残る`analysis_input.json`・`analysis_result.json`・
+`report_context.json`の3ファイルが、そのままNFR-05の監査証跡になる。
+
+> **P7（スキル移行）で廃止**: Anthropic API直呼びのLLM統合（`llm/`パッケージ、
+> `llm_calls`テーブル、月次予算ゲート・実行単位の呼び出し上限、応答キャッシュと
+> near-stale警告）はすべて削除した。表示専用だった`catalyst_quality`と
+> `guidance_direction`も新しい分析契約には含まれない。

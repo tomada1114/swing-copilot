@@ -5,15 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from swing_copilot.report.daily_brief import format_sizing
+from swing_copilot.report.daily_brief import (
+    NO_TRADE_MESSAGE,
+    format_sizing,
+    format_verdict,
+)
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
-    from swing_copilot.pipeline.postmortem import SignalPerformanceRow
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
         BriefPortfolioHeat,
         DailyBrief,
+        SignalPerformanceRow,
     )
     from swing_copilot.storage.paper_records import TradeDecisionRecord
 
@@ -33,11 +37,18 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         f"- Run ID: `{brief.run_id}`",
         f"- Generated at: `{brief.generated_at.isoformat()}`",
         "",
-        "## Market",
-        "",
-        "| Symbol | Value | Change |",
-        "|---|---:|---:|",
     ]
+    if brief.no_trade:
+        reason = f"（{brief.no_trade_reason}）" if brief.no_trade_reason else ""
+        lines.extend([f"> **{NO_TRADE_MESSAGE}**{reason}", ""])
+    lines.extend(
+        [
+            "## Market",
+            "",
+            "| Symbol | Value | Change |",
+            "|---|---:|---:|",
+        ]
+    )
     lines.extend(
         f"| {item.label} | {_number(item.value)} | {_percent(item.pct_change)} |"
         for item in brief.market
@@ -249,12 +260,17 @@ def _candidate_row(candidate: BriefCandidate) -> str:
 
 
 def _candidate_section(candidate: BriefCandidate) -> list[str]:
+    analysis = candidate.analysis
+    verdict_line = format_verdict(analysis)
     lines = [
         "",
         f"## {candidate.symbol}",
         "",
         f"- Company: {candidate.company_name or 'N/A'}",
-        f"- LLM: {candidate.llm.conclusion}",
+        f"- 定性: {analysis.conclusion}",
+        # Placed directly under the conclusion it qualifies, and only when a
+        # verified verdict exists -- silence must never read as "懸念なし".
+        *([f"- {verdict_line}"] if verdict_line is not None else []),
         f"- Fundamentals: PER {candidate.fundamentals.per}, FCF {candidate.fundamentals.fcf}, "
         f"Equity ratio {candidate.fundamentals.equity_ratio}, EPS {candidate.fundamentals.eps}",
     ]
@@ -262,39 +278,47 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
     lines.extend(_score_breakdown_section(candidate))
-    if candidate.llm.catalyst_quality is not None:
-        # P2-12 (REQ-006/007): display-only, never feeds ranking/judgment.
-        lines.append(f"- Catalyst quality: {candidate.llm.catalyst_quality}")
-    if candidate.llm.is_news_near_stale:
-        lines.append(
-            "- Warning: ニュース分析のキャッシュがTTL間近です。再実行を検討してください。"
-        )
-    if candidate.llm.facts:
+    lines.extend(_screening_assessment_section(candidate))
+    if analysis.facts:
         lines.extend(["", "### Facts", ""])
-        lines.extend(f"- {fact}" for fact in candidate.llm.facts)
-    if candidate.llm.risk_flags:
-        lines.extend(["", "### LLM risk flags", ""])
-        lines.extend(f"- {flag}" for flag in candidate.llm.risk_flags)
-    if candidate.llm.sources:
+        lines.extend(f"- {fact}" for fact in analysis.facts)
+    if analysis.risk_flags:
+        lines.extend(["", "### 定性リスクフラグ", ""])
+        lines.extend(f"- {flag}" for flag in analysis.risk_flags)
+    if analysis.sources:
         lines.extend(["", "### Sources", ""])
         lines.extend(
-            f"- [{source.source_id}]({source.url})" for source in candidate.llm.sources
+            f"- [{source.source_id}]({source.url})" for source in analysis.sources
         )
     lines.extend(_filing_analysis_sections(candidate))
     lines.extend(_past_decisions_section(candidate))
     return lines
 
 
-def _filing_analysis_sections(candidate: BriefCandidate) -> list[str]:
-    """P6-27: one identified subsection per filing analysis (type + filed date).
+def _screening_assessment_section(candidate: BriefCandidate) -> list[str]:
+    """Strengths/concerns from the qualitative screening assessment.
 
-    Previously only the first filing analysis per symbol reached the report
-    at all (`report/daily_brief.py::_llm_brief()`'s old `next(...)` lookup);
-    now every filing analysis for this candidate is shown, individually
-    labeled so which disclosure a fact/interpretation came from is clear.
+    Omitted entirely when the analysis is pending or withheld, matching this
+    file's style for optional per-candidate subsections.
+    """
+    analysis = candidate.analysis
+    if not analysis.strengths and not analysis.concerns:
+        return []
+    lines = ["", "### 定性評価", ""]
+    lines.extend(f"- 強み: {item}" for item in analysis.strengths)
+    lines.extend(f"- 懸念: {item}" for item in analysis.concerns)
+    return lines
+
+
+def _filing_analysis_sections(candidate: BriefCandidate) -> list[str]:
+    """One identified subsection per filing analysis (form type + filed date).
+
+    Every filing analysis for this candidate is shown, individually labeled so
+    which disclosure a fact/interpretation came from is clear. Both labels are
+    code-owned metadata resolved from `analysis_input.json`.
     """
     lines: list[str] = []
-    for filing in candidate.llm.filings:
+    for filing in candidate.analysis.filings:
         lines.extend(
             [
                 "",
@@ -302,11 +326,6 @@ def _filing_analysis_sections(candidate: BriefCandidate) -> list[str]:
                 "",
             ]
         )
-        if filing.is_near_stale:
-            lines.append(
-                "_警告: このキャッシュ済み分析はTTL間近です。再実行を検討してください。_"
-            )
-        lines.append(f"- Guidance direction: {filing.guidance_direction}")
         lines.extend(f"- Fact: {fact}" for fact in filing.facts)
         lines.extend(f"- Interpretation: {text}" for text in filing.interpretation)
         lines.extend(f"- Red flag: {flag}" for flag in filing.red_flags)
@@ -321,7 +340,7 @@ def _past_decisions_section(candidate: BriefCandidate) -> list[str]:
     """REQ-008: 過去判断 subsection.
 
     Omitted entirely (no heading) when empty, matching this file's
-    established style for optional per-candidate subsections (Facts/LLM
+    established style for optional per-candidate subsections (Facts/定性
     risk flags/Sources above).
     """
     if not candidate.past_decisions:

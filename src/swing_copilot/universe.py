@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import io
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ import pandas as pd
 
 from swing_copilot import __version__
 from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.retry import retry_external_call
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -31,7 +33,6 @@ if TYPE_CHECKING:
 WIKIPEDIA_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 DEFAULT_SNAPSHOT_PATH = Path("config/universe_snapshot.csv")
 _SNAPSHOT_FIELDS = ("symbol", "company_name", "gics_sector", "source_symbol")
-_RETRY_DELAYS_SECONDS = (1.0, 2.0)  # 3 total attempts, mirrors data/edgar.py
 _WIKIPEDIA_USER_AGENT = (
     f"swing-copilot/{__version__} (https://github.com/tomada1114/swing-copilot)"
 )
@@ -99,19 +100,17 @@ def _get_wikipedia_page() -> str:
 
 
 def _fetch_wikipedia_html(sleep_fn: Callable[[float], None]) -> str:
-    """Fetch the constituents page HTML with bounded retry on transport errors.
+    """Fetch the constituents page HTML with bounded retry on transient errors.
 
-    Retries `httpx.HTTPError` (connection failures and non-2xx statuses,
-    including the 403 above) with a fixed backoff, mirroring
-    `data/edgar.py`'s `_with_retries`. The final attempt is unguarded so a
-    persistent failure propagates to the caller.
+    Only transport errors and HTTP 408, 429, and 5xx responses are retried
+    with fixed backoff. The final attempt is unguarded so a persistent failure
+    propagates to the caller.
     """
-    for delay in _RETRY_DELAYS_SECONDS:
-        try:
-            return _get_wikipedia_page()
-        except httpx.HTTPError:
-            sleep_fn(delay)
-    return _get_wikipedia_page()
+    return retry_external_call(
+        _get_wikipedia_page,
+        before_attempt=lambda: None,
+        sleep_fn=sleep_fn,
+    )
 
 
 def fetch_from_wikipedia(
@@ -148,12 +147,25 @@ def _read_snapshot(snapshot_path: Path) -> list[UniverseMember] | None:
 
 def _write_snapshot(snapshot_path: Path, members: Sequence[UniverseMember]) -> None:
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = snapshot_path.with_name(snapshot_path.name + ".tmp")
-    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=_SNAPSHOT_FIELDS)
-        writer.writeheader()
-        writer.writerows(dataclasses.asdict(member) for member in members)
-    tmp_path.replace(snapshot_path)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=snapshot_path.parent,
+            prefix=f".{snapshot_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=_SNAPSHOT_FIELDS)
+            writer.writeheader()
+            writer.writerows(dataclasses.asdict(member) for member in members)
+        tmp_path.replace(snapshot_path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _fetch_and_write_snapshot(options: UniverseFetchOptions) -> list[UniverseMember]:

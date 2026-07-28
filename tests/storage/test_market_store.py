@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -100,6 +101,28 @@ class TestWriteAndReadBars:
         )
         assert len(result) == 1
         assert result.iloc[0]["close"] == pytest.approx(11.5)
+
+    def test_replace_failure_preserves_partition_and_cleans_unique_temp(
+        self, market_store: MarketStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        initial = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        corrected = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 11.5, 1000)])
+        market_store.write_bars(initial)
+        partition_dir = market_store.parquet_root / "year=2026"
+        partition_file = partition_dir / "data.parquet"
+        previous_bytes = partition_file.read_bytes()
+
+        def _boom(_source, _destination):
+            msg = "replace failed"
+            raise OSError(msg)
+
+        monkeypatch.setattr(Path, "replace", _boom)
+
+        with pytest.raises(OSError, match="replace failed"):
+            market_store.write_bars(corrected)
+
+        assert partition_file.read_bytes() == previous_bytes
+        assert list(partition_dir.glob(".data.parquet.*.tmp")) == []
 
     def test_as_of_excludes_future_dated_bars(self, market_store):
         market_store.write_bars(

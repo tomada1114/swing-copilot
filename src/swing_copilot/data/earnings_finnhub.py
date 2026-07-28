@@ -11,6 +11,7 @@ import httpx
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.data.earnings import EarningsEvent
+from swing_copilot.retry import retry_external_call
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,10 +20,6 @@ if TYPE_CHECKING:
 
 FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings"
 _MIN_REQUEST_INTERVAL_SECONDS = 1.0
-_MAX_ATTEMPTS = 3
-_BACKOFF_BASE_SECONDS = 1.0
-_HTTP_TOO_MANY_REQUESTS = 429
-_HTTP_SERVER_ERROR_START = 500
 
 
 class _HttpGet(Protocol):
@@ -36,13 +33,6 @@ def _real_http_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
     response.raise_for_status()
     result: dict[str, Any] = response.json()
     return result
-
-
-def _is_retryable_status(error: httpx.HTTPStatusError) -> bool:
-    return (
-        error.response.status_code == _HTTP_TOO_MANY_REQUESTS
-        or error.response.status_code >= _HTTP_SERVER_ERROR_START
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,21 +90,11 @@ class FinnhubEarningsClient:
             "to": end.isoformat(),
             "token": self._api_key,
         }
-        payload: dict[str, Any] | None = None
-        for attempt in range(_MAX_ATTEMPTS):
-            self._throttle()
-            try:
-                payload = self._http_get(FINNHUB_EARNINGS_URL, params)
-                break
-            except httpx.HTTPStatusError as exc:
-                if not _is_retryable_status(exc) or attempt == _MAX_ATTEMPTS - 1:
-                    raise
-            except (httpx.TimeoutException, httpx.TransportError):
-                if attempt == _MAX_ATTEMPTS - 1:
-                    raise
-            self._backoff_fn(_BACKOFF_BASE_SECONDS * (2**attempt))
-        if payload is None:  # defensive; every exhausted path raises above
-            return None
+        payload = retry_external_call(
+            lambda: self._http_get(FINNHUB_EARNINGS_URL, params),
+            before_attempt=self._throttle,
+            sleep_fn=self._backoff_fn,
+        )
         calendar = payload.get("earningsCalendar")
         if not isinstance(calendar, list):
             msg = "Finnhub earningsCalendar response must be a list"

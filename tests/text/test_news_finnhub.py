@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+import httpx
+import pytest
+
 from swing_copilot.text.news_finnhub import FinnhubNewsClient, _real_http_get
 
 
@@ -120,6 +123,62 @@ class TestRateLimiting:
         client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
         client.fetch_company_news("MSFT", date(2027, 1, 1), as_of=date(2027, 1, 10))
 
+        assert sleeps == []
+
+
+class TestRetries:
+    def test_retries_rate_limited_request_and_throttles_every_attempt(self):
+        calls = 0
+        sleeps: list[float] = []
+
+        def rate_limited_then_succeeds(_url, _params):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request = httpx.Request("GET", "https://example.com")
+                response = httpx.Response(429, request=request)
+                msg = "rate limited"
+                raise httpx.HTTPStatusError(msg, request=request, response=response)
+            return _fake_response()
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=rate_limited_then_succeeds,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+            rate_clock=FakeClock([0.0, 1.0]),
+            sleep_fn=sleeps.append,
+        )
+
+        result = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )
+
+        assert len(result) == 1
+        assert calls == 2
+        assert sleeps == [1.0]
+
+    def test_does_not_retry_non_transient_http_error(self):
+        calls = 0
+        sleeps: list[float] = []
+
+        def unauthorized(_url, _params):
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("GET", "https://example.com")
+            response = httpx.Response(401, request=request)
+            msg = "unauthorized"
+            raise httpx.HTTPStatusError(msg, request=request, response=response)
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=unauthorized,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+            sleep_fn=sleeps.append,
+        )
+
+        with pytest.raises(httpx.HTTPStatusError, match="unauthorized"):
+            client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
+        assert calls == 1
         assert sleeps == []
 
 

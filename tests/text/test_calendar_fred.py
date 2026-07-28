@@ -192,6 +192,21 @@ class TestFetchCalendarEventsRetry:
         assert http_get.calls == 3
         assert sleeps == [1.0, 2.0]
 
+    def test_request_timeout_status_is_retried(self):
+        http_get = _CountingFailThenSucceed(
+            _make_status_error("Request Timeout", 408),
+            fail_times=1,
+            payload={"release_dates": []},
+        )
+        sleeps: list[float] = []
+        client = FredCalendarClient(
+            "test-key", http_get=http_get, sleep_fn=sleeps.append
+        )
+
+        assert client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28)) == []
+        assert http_get.calls == 2
+        assert sleeps == [1.0]
+
     def test_malformed_response_body_propagates_without_retry(self):
         def malformed_response(*_args, **_kwargs):
             return {"release_dates": [{"release_id": 50}]}  # missing "date"

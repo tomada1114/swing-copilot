@@ -791,6 +791,12 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 
 ### P8-30 【基盤/worktree:p8-retro】storage/retro - verdict 永続化と当否評価
 
+> **現況（P8）**: 完了済み（#71）。`verdicts` / `verdict_sources` /
+> `verdict_outcomes` の 3 テーブル、`copilot-retro collect` / `evaluate`、
+> `pipeline/forward_returns.py`（逆算 `find_target_trading_day` / 順算
+> `find_maturity_trading_day`）の抽出が入った。設計の現況は
+> `docs/04_detailed_design.md` 3.23 節を正とする。
+
 - **目的**: LLM verdict を DuckDB に正本化し、forward return で当否を
   決定論的に分類する（P2-11 の verdict 版・観測専用）。
 - **スコープ**: `storage/schema.py`（新テーブル `verdicts` /
@@ -816,6 +822,11 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 
 ### P8-31 【依存あり/worktree:p8-retro】retro - 集約とretro_input.json エクスポート
 
+> **現況（P8）**: 完了済み（#72）。`retro/aggregate.py` / `surprises.py` /
+> `export.py` と strict スキーマ `retro-input-v1`、`RetroConfig`
+> （`max_surprises` / 予約済み `approval_mode`）、`prepare` umbrella が入った。
+> 設計の現況は `docs/04_detailed_design.md` 3.23.3〜3.23.4 節を正とする。
+
 - **目的**: 振り返りスキルに渡す証拠 dossier を strict スキーマで出力する。
 - **スコープ**: `retro/export.py` / `retro/schemas.py`（`retro-input-v1`）、
   `config.py`（`RetroConfig`: `max_surprises=5` (要検証) 等）
@@ -835,6 +846,12 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 - **依存**: P8-30
 
 ### P8-32 【依存あり/worktree:p8-retro】retro - retro_result 検証・レポート・提案台帳
+
+> **現況（P8）**: 完了済み（#73）。`retro/ingest.py` / `validate.py` /
+> `ledger.py` と strict スキーマ `retro-result-v1` が入った。台帳は再提案
+> ガードが完全一致で判定できるよう `proposal_key` 列を持ち、この乖離は
+> `docs/04_detailed_design.md` 3.23.7 節に記録した。設計の現況は同 3.23.5〜
+> 3.23.6 節を正とする。
 
 - **目的**: スキル出力を信用せず検証し、振り返りレポートと提案台帳へ
   fail-closed で反映する。
@@ -859,6 +876,15 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 - **依存**: P8-31
 
 ### P8-33 【依存あり/worktree:p8-retro】skill/docs - swing-retro スキルと設計正本昇格
+
+> **現況（P8）**: 完了済み。`.claude/skills/swing-retro/`（SKILL.md +
+> `references/proposal-rules.md` / `result-schema.md`）、空の提案台帳
+> `docs/retro/proposals.md`（ヘッダが `ingest` の生成物と一致することを
+> `tests/retro/test_ledger.py::TestCommittedLedger` が固定）、
+> `docs/04_detailed_design.md` 3.23 節への昇格が入った。以降、振り返り機構の
+> 設計正本は 3.23 節であり、`docs/goal-prompts/swing-copilot-retrospective/`
+> は実装前シードと実行履歴として残す。「動作確認」の実データ 1 周は本フェーズの
+> スコープ外（E33.3）で、初回の手動運用時に行う。
 
 - **目的**: 人間が数日おきに手動起動する振り返りスキルを整備し、設計を
   正本へ昇格する。

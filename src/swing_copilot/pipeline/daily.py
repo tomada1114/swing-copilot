@@ -18,20 +18,14 @@ therefore always show the qualitative sections as pending.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import logging
-import shutil
-import sys
 import time
-import traceback
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
-
-from rich.console import Console
+from typing import TYPE_CHECKING, Any, Protocol
 
 from swing_copilot import __version__
 from swing_copilot.analysis.export import (
@@ -42,20 +36,9 @@ from swing_copilot.analysis.export import (
     write_analysis_input,
 )
 from swing_copilot.analysis.snapshot import ReportContext, write_report_context
-from swing_copilot.clock import SystemClock
-from swing_copilot.config import (
-    load_secrets,
-    load_settings,
-    load_strategies,
-    require_secrets,
-)
-from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
-from swing_copilot.data.edgar import EdgarClient
-from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.models import (
     DailyRunOptions,
-    DailyRunResult,
     DataTier,
     RunMode,
     RunStatus,
@@ -81,16 +64,9 @@ from swing_copilot.report.daily_brief import (
     DailyBriefContext,
     build_daily_brief,
 )
-from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.markdown_report import (
     LatestMarkdownUpdateError,
     write_markdown_report,
-)
-from swing_copilot.report.terminal_report import (
-    TerminalPaths,
-    TerminalRunSummary,
-    render_run_summary,
-    render_terminal,
 )
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
@@ -109,19 +85,10 @@ from swing_copilot.risk.circuit_breaker import (
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.audit_records import ScreeningRunMeta
-from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
-from swing_copilot.storage.state_store import StateStore
-from swing_copilot.text.calendar_fred import FredCalendarClient
+from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.text.edgar_filings import (
     FilingLookbackBounds,
     fetch_recent_filings_text,
-)
-from swing_copilot.text.news_finnhub import FinnhubNewsClient
-from swing_copilot.universe import (
-    UniverseError,
-    UniverseFetchOptions,
-    resolve_daily_universe,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,21 +101,23 @@ _LOG_LEVELS = {
 }
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
     from uuid import UUID
 
     import pandas as pd
 
     from swing_copilot.clock import Clock
-    from swing_copilot.config import Secrets, Settings, StrategiesConfig
+    from swing_copilot.config import Settings
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
+    from swing_copilot.models import DailyRunResult
     from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
-    from swing_copilot.storage.market_store import FundamentalsRecord
+    from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+    from swing_copilot.storage.state_store import StateStore
     from swing_copilot.text.base import TextItem
     from swing_copilot.universe import UniverseMember
 
@@ -1273,624 +1242,28 @@ def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
         )
 
 
-def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionally linear
-    options: DailyRunOptions, deps: DailyDependencies
-) -> DailyRunResult:
-    """Run the full eight-step daily batch.
+# Compatibility facade: the public console-script target remains this module.
+# Step implementations and shared dependency values above intentionally stay
+# importable here; lifecycle and composition have explicit module boundaries.
+__all__ = ["DailyDependencies", "main", "run_daily"]
 
-    Args:
-        options: Parsed CLI options (`--as-of`, `--limit`, `--dry-run`, ...).
-        deps: Real (or fake, for dry-run/tests) collaborators.
 
-    Returns:
-        The run outcome. `exit_code` is nonzero when a required step (1-4)
-        fails or when no local brief/run-specific Markdown can be produced.
-        Optional source, notification, `latest.md`, and report-context
-        failures leave the surviving run artifact visible as `DEGRADED`.
-    """
-    run_started_at = deps.monotonic()
-    budget_s = deps.settings.schedule.timeout_minutes * 60
-    deadline = run_started_at + budget_s
-
-    mode = _run_mode(options)
-    fetch_cutoff = options.as_of or deps.clock.today()
-    held_symbols = {
-        position.symbol for position in deps.state_store.get_open_positions()
-    }
-    symbols = _select_symbols(deps.universe, held_symbols, options.limit)
-    # The market strip (SPY/QQQ/^VIX/^TNX) is never part of the screening
-    # universe, but its bars still need fetching here so the brief has market
-    # context to show.
-    price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
-
-    prefetched_prices: BarFetchResult | None = None
-    prefetch_error: str | None = None
-    run_date = fetch_cutoff
-    if options.as_of is None:
-        try:
-            start = fetch_cutoff - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
-            prefetched_prices = deps.data_provider.get_daily_bars(
-                price_symbols, start, fetch_cutoff + timedelta(days=1)
-            )
-            if not prefetched_prices.bars.empty:
-                latest = max(prefetched_prices.bars["date"])
-                run_date = latest.date() if isinstance(latest, datetime) else latest
-        except Exception as exc:
-            prefetch_error = f"unexpected error: {exc}"
-
-    config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
-    run_id = deps.state_store.start_run(
-        run_date,
-        mode,
-        config_hash,
-        metadata=_run_metadata(deps),
-    )
-    logger.info(
-        "run %s started: mode=%s run_date=%s symbols=%d",
-        run_id,
-        mode.value,
-        run_date,
-        len(symbols),
+def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResult:
+    """Run the lifecycle implementation while preserving the historic API."""
+    from swing_copilot.pipeline.daily_runner import (  # noqa: PLC0415
+        run_daily as run_lifecycle,
     )
 
-    if deps.universe_warning is not None:
-        logger.warning(
-            "run %s universe data quality: %s", run_id, deps.universe_warning
-        )
-        _record_step(
-            deps,
-            run_id,
-            "0_universe",
-            _StepOutcome(False, deps.universe_warning),
-            time.perf_counter(),
-        )
-
-    # NFR-03 stuck-run detection: a run that crashed mid-execution never
-    # reaches `complete_run()` and would sit in `status='running'` forever.
-    stale_cutoff = deps.clock.now() - timedelta(seconds=budget_s)
-    stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
-    _warn_stale_runs(run_id, stale_run_ids)
-
-    empty_run_data: tuple[
-        list[Candidate], list[RejectionRecord], list[RiskAssessment]
-    ] = ([], [], [])
-    candidates, rejections, risk_assessments = empty_run_data
-    regime_snapshot: RegimeSnapshot | None = None
-    exposure_decision: ExposureDecision | None = None
-    ftd_snapshot: FtdSnapshot | None = None
-    portfolio_heat: PortfolioHeatResult | None = None
-    circuit_breaker: CircuitBreakerResult | None = None
-    earnings_guard_notice: str | None = None
-
-    def _step_screening() -> _StepOutcome:
-        nonlocal candidates, rejections
-        outcome, candidates, rejections = _run_step_screening(
-            deps, symbols, run_date, run_id
-        )
-        return outcome
-
-    def _step_risk() -> _StepOutcome:
-        nonlocal circuit_breaker, earnings_guard_notice, exposure_decision
-        nonlocal ftd_snapshot, portfolio_heat
-        nonlocal regime_snapshot, risk_assessments
-        regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
-        ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
-        exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
-        (
-            outcome,
-            risk_assessments,
-            portfolio_heat,
-            circuit_breaker,
-            earnings_guard_notice,
-        ) = _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
-        return outcome
-
-    def _step_prices() -> _StepOutcome:
-        if prefetch_error is not None:
-            return _StepOutcome(False, prefetch_error)
-        return _run_step_prices(deps, price_symbols, run_date, prefetched_prices)
-
-    # Time-budget policy for steps 1-4: only fundamentals (2) is gated (per
-    # symbol, inside `_run_step_fundamentals`) since it is the dominant
-    # network cost. Prices (1), screening (3), and risk (4) always run --
-    # prices is needed to establish `run_date`/bars at all, and screening/risk
-    # are cheap, local, and required to produce a report.
-    fatal_steps: list[tuple[str, Callable[[], _StepOutcome]]] = [
-        ("1_prices", _step_prices),
-        (
-            "2_fundamentals",
-            lambda: _run_step_fundamentals(deps, symbols, run_date, deadline),
-        ),
-        ("3_screening", _step_screening),
-        ("4_risk", _step_risk),
-    ]
-
-    for step_name, step_fn in fatal_steps:
-        logger.debug("step %s starting", step_name)
-        _step_started(deps, step_name)
-        started_at = time.perf_counter()
-        try:
-            outcome = step_fn()
-        except Exception as exc:
-            logger.exception("step %s raised unexpectedly", step_name)
-            outcome = _StepOutcome(False, f"unexpected error: {exc}")
-        _record_step(deps, run_id, step_name, outcome, started_at)
-        if not outcome.success:
-            deps.state_store.complete_run(
-                run_id, RunStatus.FAILED, error_summary=outcome.detail
-            )
-            logger.error(
-                "run %s failed at step %s: %s", run_id, step_name, outcome.detail
-            )
-            return DailyRunResult(run_id, run_date, RunStatus.FAILED, exit_code=1)
-
-    regime_snapshot = cast("RegimeSnapshot", regime_snapshot)
-    exposure_decision = cast("ExposureDecision", exposure_decision)
-    ftd_snapshot = cast("FtdSnapshot", ftd_snapshot)
-    portfolio_heat = cast("PortfolioHeatResult", portfolio_heat)
-    circuit_breaker = cast("CircuitBreakerResult", circuit_breaker)
-
-    ctx = _RunContext(
-        run_id=run_id,
-        run_date=run_date,
-        candidates=candidates,
-        rejections=rejections,
-        risk_assessments=risk_assessments,
-        portfolio_heat=portfolio_heat,
-        circuit_breaker=circuit_breaker,
-        earnings_guard_notice=earnings_guard_notice,
-        held_symbols=frozenset(held_symbols),
-        regime_snapshot=regime_snapshot,
-        exposure_decision=exposure_decision,
-        ftd_snapshot=ftd_snapshot,
-    )
-    return _run_soft_steps(options, deps, ctx, deadline)
-
-
-def _run_soft_steps(
-    options: DailyRunOptions,
-    deps: DailyDependencies,
-    ctx: _RunContext,
-    deadline: float,
-) -> DailyRunResult:
-    """Run fail-soft local/optional steps after the fatal steps.
-
-    Fail-soft MAE/MFE, text/analysis-export/postmortem, notification, then
-    local output.
-
-    NFR-03 time-budget policy: steps 5 (text), 6 (analysis export), postmortem, and 7
-    (Discord notify) are skipped outright once `deps.monotonic() >=
-    deadline`, recorded via `_TIME_BUDGET_STEP_OUTCOME` (`is_skipped=True`
-    but `success=False`) -- a *degrading* skip, distinct from the ordinary
-    "not configured" skip, so the run still ends up `RunStatus.DEGRADED`
-    even though nothing here technically raised. Postmortem itself is local
-    (DB/Parquet, not network), but is gated the same way for consistency and
-    so a run already over budget doesn't spend more time on it. Step 8 is
-    cheap/local and always attempts to complete regardless of budget, so a
-    timed-out run still produces terminal output and a Markdown archive.
-    """
-    degraded = deps.universe_warning is not None
-    text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
-
-    excursion_outcome = _run_mae_mfe_soft_step(deps, ctx.run_id, ctx.run_date)
-    degraded = degraded or not excursion_outcome.success
-
-    text_outcome, text_items = _run_text_soft_step(
-        options, deps, ctx, deadline, text_symbols
-    )
-    degraded = degraded or not text_outcome.success
-
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step 6_analysis_export skipped: time budget exceeded")
-        export_outcome, analysis_input_path, analysis_input_digest = (
-            _TIME_BUDGET_STEP_OUTCOME,
-            None,
-            None,
-        )
-    else:
-        logger.debug("step 6_analysis_export starting")
-        _step_started(deps, "6_analysis_export")
-        export_outcome, analysis_input_path, analysis_input_digest = (
-            _run_step_analysis_export(
-                deps,
-                ctx,
-                text_items,
-                include_decision_history=(
-                    not options.is_dry_run and options.as_of is None
-                ),
-            )
-        )
-    _record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
-    degraded = degraded or not export_outcome.success
-
-    started_at = time.perf_counter()
-    signal_performance: tuple[SignalPerformanceRow, ...]
-    if deps.monotonic() >= deadline:
-        logger.warning("step postmortem skipped: time budget exceeded")
-        postmortem_outcome, signal_performance = _TIME_BUDGET_STEP_OUTCOME, ()
-    else:
-        logger.debug("step postmortem starting")
-        postmortem_outcome, signal_performance = _run_step_postmortem(
-            deps, ctx.run_date
-        )
-    _record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
-    degraded = degraded or not postmortem_outcome.success
-
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step 7_notify skipped: time budget exceeded")
-        notify_outcome = _TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step 7_notify starting")
-        _step_started(deps, "7_notify")
-        notify_outcome = _run_step_notify(
-            deps,
-            ctx.candidates,
-            ctx.run_date,
-            ctx.exposure_decision,
-            is_dry_run=options.is_dry_run,
-        )
-    _record_step(deps, ctx.run_id, "7_notify", notify_outcome, started_at)
-    degraded = degraded or not notify_outcome.success
-
-    status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
-    notices = (
-        ((deps.universe_warning,) if deps.universe_warning is not None else ())
-        + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
-        + tuple(
-            f"{label}: {outcome.detail}"
-            for label, outcome in (
-                ("MAE/MFE", excursion_outcome),
-                ("text", text_outcome),
-                ("analysis export", export_outcome),
-                ("postmortem", postmortem_outcome),
-                ("notification", notify_outcome),
-            )
-            if outcome.detail is not None
-            and (not outcome.success or not outcome.is_skipped)
-        )
-    )
-    started_at = time.perf_counter()
-    logger.debug("step 8_output starting")
-    _step_started(deps, "8_output")
-    output_outcome, report_path, brief = _run_step_output(
-        deps,
-        _OutputContext(
-            run=ctx,
-            analysis_input_path=analysis_input_path,
-            analysis_input_digest=analysis_input_digest,
-            signal_performance=signal_performance,
-            notices=notices,
-            status=status_before_output,
-        ),
-    )
-    _record_step(deps, ctx.run_id, "8_output", output_outcome, started_at)
-    return _finalize_output(
-        deps,
-        ctx,
-        _OutputCompletion(
-            outcome=output_outcome,
-            report_path=report_path,
-            brief=brief,
-            analysis_input_path=analysis_input_path,
-            text_outcome=text_outcome,
-            export_outcome=export_outcome,
-        ),
-        degraded,
-    )
-
-
-def _finalize_output(
-    deps: DailyDependencies,
-    ctx: _RunContext,
-    completion: _OutputCompletion,
-    degraded: bool,
-) -> DailyRunResult:
-    """Persist and return the only terminal state compatible with step 8."""
-    missing_sources = _missing_sources(
-        deps, completion.text_outcome, completion.export_outcome
-    )
-    if not completion.outcome.success and completion.report_path is None:
-        deps.state_store.complete_run(
-            ctx.run_id,
-            RunStatus.FAILED,
-            error_summary=completion.outcome.detail,
-        )
-        logger.error(
-            "run %s failed to produce a local report: %s",
-            ctx.run_id,
-            completion.outcome.detail,
-        )
-        return DailyRunResult(
-            ctx.run_id,
-            ctx.run_date,
-            RunStatus.FAILED,
-            exit_code=1,
-            brief=completion.brief,
-            analysis_input_path=completion.analysis_input_path,
-            provider_name=deps.provider_name,
-            data_tier=deps.data_tier,
-            missing_sources=missing_sources,
-        )
-
-    final_degraded = degraded or not completion.outcome.success
-    final_status = RunStatus.DEGRADED if final_degraded else RunStatus.SUCCESS
-    deps.state_store.complete_run(
-        ctx.run_id, final_status, report_path=completion.report_path
-    )
-    logger.info("run %s completed: status=%s", ctx.run_id, final_status.value)
-    return DailyRunResult(
-        ctx.run_id,
-        ctx.run_date,
-        final_status,
-        exit_code=0,
-        report_path=completion.report_path,
-        brief=completion.brief,
-        analysis_input_path=completion.analysis_input_path,
-        provider_name=deps.provider_name,
-        data_tier=deps.data_tier,
-        missing_sources=missing_sources,
-    )
-
-
-def _missing_sources(
-    deps: DailyDependencies,
-    text_outcome: _StepOutcome,
-    export_outcome: _StepOutcome,
-) -> tuple[str, ...]:
-    """List unavailable source boundaries without conflating notifications."""
-    return tuple(
-        label
-        for label, outcome in (
-            ("universe", _StepOutcome(deps.universe_warning is None)),
-            ("text", text_outcome),
-            ("analysis input", export_outcome),
-        )
-        if not outcome.success
-    )
-
-
-def _non_negative_int(raw_value: str) -> int:
-    """Parse a CLI count without admitting Python's negative slicing semantics."""
-    value = int(raw_value)
-    if value < 0:
-        msg = "must be greater than or equal to 0"
-        raise argparse.ArgumentTypeError(msg)
-    return value
-
-
-def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
-    parser = argparse.ArgumentParser(prog="copilot-daily")
-    parser.add_argument("--as-of", type=date.fromisoformat, default=None)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--skip-text", action="store_true")
-    parser.add_argument(
-        "--limit",
-        type=_non_negative_int,
-        default=None,
-        help="screen at most this many universe symbols; 0 keeps only open holdings",
-    )
-    parser.add_argument("--strategy", default="default")
-    parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
-    args = parser.parse_args(argv)
-    return DailyRunOptions(
-        as_of=args.as_of,
-        is_dry_run=args.dry_run,
-        skip_text=args.skip_text,
-        limit=args.limit,
-        strategy_key=args.strategy,
-        log_level=args.log_level,
-    )
-
-
-def _required_features(options: DailyRunOptions, settings: Settings) -> set[str]:
-    features = {"edgar"}
-    if not options.skip_text:
-        features |= {"finnhub", "fred"}
-    if settings.notification.enabled:
-        features.add("discord")
-    return features
-
-
-def _compose_dependencies(
-    options: DailyRunOptions, settings: Settings, strategies: StrategiesConfig
-) -> DailyDependencies:
-    """Wire real adapters for a live (non-test) run (composition root, FR-12)."""
-    if options.strategy_key not in strategies.strategies:
-        available = ", ".join(sorted(strategies.strategies))
-        msg = f"Unknown strategy {options.strategy_key!r}; available: {available}"
-        raise ConfigError(msg)
-    secrets = load_secrets()
-    require_secrets(secrets, _required_features(options, settings))
-
-    mode = _run_mode(options)
-    db_path, output_dir = _paths_for_mode(mode)
-    database = Database(db_path)
-    market_store = MarketStore(database)
-    state_store = StateStore(database)
-    state_store.init_schema()
-    clock = SystemClock()
-
-    universe_resolution = resolve_daily_universe(
-        options.as_of or clock.today(),
-        state_store,
-        is_historical=options.as_of is not None,
-        refresh_interval_days=settings.universe.refresh_interval_days,
-        options=UniverseFetchOptions(
-            snapshot_path=settings.universe.snapshot_path,
-            manual_include=settings.universe.manual_include,
-            manual_exclude=settings.universe.manual_exclude,
-        ),
-    )
-
-    edgar_client = (
-        EdgarClient(secrets.edgar_identity) if secrets.edgar_identity else None
-    )
-    news_client = (
-        FinnhubNewsClient(secrets.finnhub_api_key)
-        if secrets.finnhub_api_key and not options.skip_text
-        else None
-    )
-    earnings_client = (
-        FinnhubEarningsClient(secrets.finnhub_api_key)
-        if secrets.finnhub_api_key
-        else None
-    )
-    calendar_client = (
-        FredCalendarClient(secrets.fred_api_key)
-        if secrets.fred_api_key and not options.skip_text
-        else None
-    )
-    notifier = (
-        DiscordNotifier(secrets.discord_webhook_url)
-        if settings.notification.enabled and secrets.discord_webhook_url
-        else None
-    )
-
-    return DailyDependencies(
-        data_provider=YFinanceProvider(),
-        market_store=market_store,
-        state_store=state_store,
-        settings=settings,
-        universe=universe_resolution.members,
-        strategies_config=strategies.model_dump(),
-        clock=clock,
-        universe_snapshot_date=universe_resolution.snapshot_date,
-        universe_warning=universe_resolution.warning,
-        edgar_client=edgar_client,
-        earnings_client=earnings_client,
-        news_client=news_client,
-        calendar_client=calendar_client,
-        notifier=notifier,
-        output_dir=output_dir,
-        strategy_key=options.strategy_key,
-        progress=ProgressReporter(Console(stderr=True)),
-    )
-
-
-class _SecretRedactionFilter(logging.Filter):
-    """Replaces configured secret values with `"[REDACTED]"` in every record.
-
-    `text/calendar_fred.py` and `text/news_finnhub.py` send their API keys as
-    URL query parameters; a non-retried `httpx.HTTPStatusError` embeds the
-    full request URL in its message, so an uncaught traceback logged via
-    `logger.exception(...)` (`daily.py`'s fundamentals/news/filings/calendar
-    fetch steps) would otherwise print the real secret to stderr. Attached to
-    every root handler by `_configure_logging` so this applies regardless of
-    which module's logger emitted the record (AGENTS.md: "never log secrets").
-    """
-
-    def __init__(self, secrets: Iterable[str | None]) -> None:
-        super().__init__()
-        # Empty/`None` values are dropped, not just falsy-skipped at replace
-        # time: an empty pattern would otherwise match (and mangle) every
-        # message. Longest-first so a secret that is a substring of another
-        # configured secret is still fully redacted.
-        self._secrets = tuple(
-            sorted({secret for secret in secrets if secret}, key=len, reverse=True)
-        )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not self._secrets:
-            return True
-
-        record.msg = self._redact(record.getMessage())
-        record.args = ()
-
-        if record.exc_info is not None:
-            formatted = "".join(traceback.format_exception(*record.exc_info))
-            record.exc_text = self._redact(formatted)
-            record.exc_info = None
-
-        return True
-
-    def _redact(self, value: str) -> str:
-        redacted = value
-        for secret in self._secrets:
-            redacted = redacted.replace(secret, "[REDACTED]")
-        return redacted
-
-
-def _configure_logging(secrets: Secrets, *, level: str | None = None) -> None:
-    """Configure stderr logging levels and secret redaction.
-
-    The default keeps third-party loggers at WARNING while preserving INFO for
-    `swing_copilot`. Passing `--log-level` applies the selected level to both.
-    A `_SecretRedactionFilter` seeded from every configured secret is attached
-    to each root handler so a leaked API key/webhook URL (record message or
-    exception traceback) never reaches stderr in the clear.
-
-    Factored out of `main()` so tests can exercise the redaction behavior
-    without invoking the whole CLI.
-
-    Args:
-        secrets: Loaded secrets to redact from now on. Unset (`None`/empty)
-            values are ignored.
-        level: Optional CLI log-level override.
-    """
-    root_level = _LOG_LEVELS[level] if level is not None else logging.WARNING
-    application_level = _LOG_LEVELS[level] if level is not None else logging.INFO
-    logging.basicConfig(
-        level=root_level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logging.getLogger().setLevel(root_level)
-    logging.getLogger("swing_copilot").setLevel(application_level)
-    redaction_filter = _SecretRedactionFilter(
-        (
-            secrets.finnhub_api_key,
-            secrets.fred_api_key,
-            secrets.discord_webhook_url,
-        )
-    )
-    for handler in logging.root.handlers:
-        handler.addFilter(redaction_filter)
+    return run_lifecycle(options, deps)
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: parse args, compose real dependencies, run, exit.
+    """Run the CLI composition implementation at the historic script target."""
+    from swing_copilot.pipeline.daily_composition import (  # noqa: PLC0415
+        main as compose_and_run,
+    )
 
-    Args:
-        argv: Argument list, or `None` to use `sys.argv[1:]`.
-    """
-    options = _parse_args(argv)
-    _configure_logging(load_secrets(), level=options.log_level)
-    settings = load_settings()
-    strategies = load_strategies()
-    try:
-        deps = _compose_dependencies(options, settings, strategies)
-    except UniverseError as exc:
-        raise SystemExit(str(exc)) from exc
-    result = run_daily(options, deps)
-    paths = TerminalPaths(
-        report=result.report_path,
-        analysis_input=result.analysis_input_path,
-    )
-    summary = TerminalRunSummary(
-        run_id=result.run_id,
-        status=result.status,
-        exit_code=result.exit_code,
-        provider_name=result.provider_name,
-        data_tier=result.data_tier,
-        missing_sources=result.missing_sources,
-        paths=paths,
-    )
-    width = shutil.get_terminal_size(fallback=(120, 24)).columns
-    if result.brief is not None:
-        sys.stdout.write(
-            render_terminal(
-                result.brief,
-                result.status,
-                width=width,
-                color=sys.stdout.isatty(),
-            )
-        )
-    sys.stdout.write(
-        render_run_summary(summary, width=width, color=sys.stdout.isatty())
-    )
-    raise SystemExit(result.exit_code)
+    compose_and_run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

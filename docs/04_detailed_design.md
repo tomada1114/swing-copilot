@@ -1121,8 +1121,15 @@ class PerformanceSummary:
 
 ### 3.21 `pipeline/daily.py`（FR-12）
 
-`run_daily()`は`(options, deps)`の2引数を取り、`DailyDependencies`が
-実アダプタまたはfakeを運ぶcomposition rootとなる。開始時に検証済み`Settings`、
+公開互換面は`pipeline/daily.py`に残す。`run_daily(options, deps)`と
+`main(argv)`は従来どおりこのモジュールから利用でき、`pyproject.toml`の
+`copilot-daily = "swing_copilot.pipeline.daily:main"`も変更しない。内部の責務は
+`daily_runner.py`（run lifecycle、step順序、fatal/fail-soft、terminal state）と
+`daily_composition.py`（CLI引数、秘密値のredaction、実アダプタのcomposition）に
+分離する。`daily.py`は`DailyDependencies`と各step実装を保持し、3モジュール間で
+同じdataclass/step関数を再定義しない。
+
+`DailyDependencies`が実アダプタまたはfakeを運ぶ。開始時に検証済み`Settings`、
 選択`StrategySpec`、`strategy_key`のcanonical JSONから完全SHA-256指紋を作り、
 provider名/data tier、実効ユニバースのsnapshot日・identity、アプリ版・metadata
 schema版とともに`runs`へ保存する。固定8ステップのうちステップ1〜4、ブリーフ生成、

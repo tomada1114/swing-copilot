@@ -1271,6 +1271,147 @@ uv run copilot-history performance [--db PATH]
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
+### 3.23 `retro/` と `copilot-retro`（P8-30〜P8-33、roadmap §5 P8）
+
+定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）は一切変更せず、独立したループとして人間が数日おきに手動起動する。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
+
+`analysis/`に同居させず新パッケージにした理由は、`analysis/`が「ネットワークもDBも触らない検証専用境界」という憲章を持つのに対し、retroはDuckDBを読み書きし（`collect`/`evaluate`/`export`）、鮮度データ取得で外部APIも叩くため（決定D8）。`copilot-ingest-analysis`がDBに触れない不変条件はそのまま維持される。エントリポイントは`copilot-retro = "swing_copilot.retro.cli:main"`の1行追加。CLIの操作面は`docs/reference.md`が正本。
+
+```text
+src/swing_copilot/retro/
+├── cli.py        # copilot-retro: collect / evaluate / export / prepare / ingest
+├── collect.py    # reports/ 走査 → verdicts / verdict_sources 取り込み
+├── evaluate.py   # 満期判定・forward return → verdict_outcomes
+├── aggregate.py  # 集約指標（separation / 重大外し率 / skip的中率 / 人間整合 / ソース貢献）
+├── surprises.py  # MISS_SEVERE の選定と鮮度データ取得
+├── export.py     # 集約 + 証拠一式 → retro_input.json
+├── ingest.py     # retro_result.json → retro_report.md + 提案台帳
+├── validate.py   # 同一性・evidence参照・CON-03・再提案ガード
+├── ledger.py     # docs/retro/proposals.md と提案全文の読み書き
+└── schemas.py    # retro-input-v1 / retro-result-v1 strictスキーマ
+```
+
+**責務分担**: 当否分類・集約・閾値判定・検証はすべてPythonの決定論コードが行い、スキル（`.claude/skills/swing-retro/`）は「なぜ外したか」の定性再読と提案の叙述だけを担う。Python側には config / コードを書き換える経路が存在せず、変更を行うのはスキルの適用段階のみ（本節末尾の承認モデル）。verdict_outcomesの集計が閾値を直接書き換えるフィードバックループは存在しない。
+
+#### 3.23.1 データモデル（新テーブル3つ）
+
+`signal_outcomes`には相乗りしない。`signal_outcomes`は1候補が複数シグナルに同時ヒットした結果を全シグナルへ按分するのが本質（3.21a節）なのに対し、verdictは1 symbol × 1 runで1判断であり意味論が別物だからである（決定D5）。既存テーブルは無変更。
+
+| テーブル | 主キー | 役割 |
+|---|---|---|
+| `verdicts` | `(run_id, symbol)` | `analysis_result.json`から取り込んだverdictの正本。`as_of`（runのas_of）/ `strategy_key` / `recommendation`（CHECK `proceed`\|`skip`）/ `reasons_json` / `no_trade` |
+| `verdict_sources` | `(run_id, symbol, source_id)` | その銘柄の分析が引用したsource_id。`source_type`（CHECK `news`\|`filing`\|`calendar`）は`analysis_input.json`（コード所有メタデータ）から解決し、result側の申告を信用しない |
+| `verdict_outcomes` | `(run_id, symbol, horizon_days)` | 当否分類。`horizon_days` CHECK `(5,20)`、`classification` CHECK `HIT`\|`MISS_MILD`\|`MISS_SEVERE`\|`NEUTRAL`、`recommendation`は非正規化コピー |
+
+`collect`（`copilot-retro collect`）は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の完全置換（DELETE→INSERT、1トランザクション）で取り込む。`analysis_result.json`が訂正されていれば再取り込みで更新される。run_idはディレクトリ名のUUID、runのas_ofは親ディレクトリ名の日付から得る。`analysis_result.json`と`analysis_input.json`のどちらかを欠くrunディレクトリ、および`analysis_input.json`側に見つからないsource_idを引用する行は、取り込まずnoteへ記録する（fail-soft）。走査0件は正常終了。
+
+`evaluate`は`(run_id, horizon_days)`単位の完全置換で、`replace_signal_outcomes`と同じパターン。株価訂正後の再実行で分類が更新される。複数行書き込みは全コミットか全ロールバック。
+
+#### 3.23.2 満期セマンティクスと`as_of`の意味（決定D7・重要）
+
+**`verdict_outcomes.as_of`は満期営業日であり、`signal_outcomes.as_of`（観測日）とは意図的に異なる。** 3.21aのpostmortemは毎日走り「今日ちょうどN営業日前のrunはどれか」を問うのに対し、retroは数日おきのバッチなので問いを反転させる。取り込み済みの各runについて、run_dateから5/20営業日**先**の取引日（満期日）を求め、`満期日 <= as_of`のものだけを評価し、確定した満期日を`as_of`列に記録する。
+
+この相違が効くのは冪等性である。観測日を記録すると、同じ`(run, horizon)`でも実行日によって行の内容が変わる。満期日を記録すれば、いつ振り返りを回しても同じ行が再現され、実行間隔が空いても評価漏れ・二重評価が構造的に起きない。
+
+取引日カレンダーは`pipeline/forward_returns.py`の純関数を3.21aのpostmortemと共有する（逆算`find_target_trading_day`／順算`find_maturity_trading_day`、いずれもベンチマーク銘柄のバー実在日を代替カレンダーとする）。すべて`date <= as_of`の価格のみ使用（look-ahead禁止）。bar欠損は当該`(run, symbol, horizon)`をスキップしてnoteに残すfail-soft、未満期のスライスはnoteに出さず`pending_slice_count`に数える（バッチでは大半が正当に未満期なので、1件ずつnoteに出すと本当のデータ品質シグナルが埋もれる）。
+
+走査窓は`settings.postmortem.lookback_window_days` + 30日で、集約窓（`export`、`lookback_window_days`ちょうど）より広い。報告窓の端にあるrunでも20営業日ホライズンが走査範囲に入るようにするためで、design §5.2の`[as_of − lookback_window_days − 30, as_of]`をそのまま実装している。
+
+#### 3.23.3 評価フレームワーク
+
+verdictは強気/弱気の方向予測ではなく、**スクリーニング通過済み候補への追加リスク回避フィルタ**である。したがって当否は騰落との単純相関ではなく非対称に定義する。`proceed`の的中は「その後に重大な逆行がなかった」という片側の主張、`skip`の的中は下落（＝損失回避）で、上昇は機会損失として実損を出す`proceed`の外れより軽い失敗として扱う。
+
+| recommendation | forward return r | classification |
+|---|---|---|
+| `proceed` | r > −0.5% | `HIT` |
+| `proceed` | −2.0% < r ≤ −0.5% | `MISS_MILD` |
+| `proceed` | r ≤ −2.0% | `MISS_SEVERE` |
+| `skip` | r ≤ −0.5% | `HIT`（下落回避） |
+| `skip` | \|r\| < 0.5% | `NEUTRAL` |
+| `skip` | +0.5% ≤ r < +2.0% | `MISS_MILD`（機会損失小） |
+| `skip` | r ≥ +2.0% | `MISS_SEVERE`（機会損失大） |
+
+`proceed`側に`NEUTRAL`がないのは意図的で、「重大逆行なし」という片側の主張を小幅な変動は否定しないため。ホライズン（5/20営業日）・ノイズ境界（±0.5%）・重大境界（±2.0%）・重み（0.6/0.4）・サンプル床（20）はすべて`settings.postmortem`の既存値を流用し、verdict用の第2の閾値語彙を作らない（決定D6）。これによりシグナル成績とverdict成績が同じ物差しで比較できる。閾値は既に`(要検証)`であり、本機構自身のレビュー対象（敗因分類`threshold_artifact`）に入る。
+
+**価格に現れないリスク事象（horizon外での顕在化等）は決定論分類では拾えない。** これは既知の限界として設計上明記され、スキル側の定性再読で補完する。
+
+集約（`aggregate.py`、`export`が計算）:
+
+| 指標 | 定義 | 判定 |
+|---|---|---|
+| **separation**（最重要） | proceed群とskip群の平均forward returnの差（ホライズン別＋重み合成） | n≥40で≤0が持続すればL3検討トリガー。定性レイヤの存在意義そのものを測る |
+| proceed重大外し率 | proceedのうち`MISS_SEVERE`の割合 | `settings.retro`ではなくコード定数`PROCEED_SEVERE_MISS_WATCH_RATE=0.15`超でフラグ。同runの全候補（skip含む）のベースラインを併記し、ベースラインより悪ければ水準未満でもフラグ |
+| skip的中率 | skipのうち非`NEUTRAL`に占める`HIT` | 絶対閾値ではなく同期間ベースライン比で判定 |
+| 人間整合 | `trades_journal.decision`（followed/ignored/modified）× recommendation × ホライズンのクロス集計 | 観測のみ。新たな実現損益計算は作らず、`verdict_outcomes`のforward_return_pct/classificationをjoinする |
+| ソース貢献 | `(source_type, provider)`別の引用回数とHIT/MISS/NEUTRAL引用数・HIT引用比率 | 観測のみ。引用されないソース・MISSに偏るソースが削減候補になる |
+
+重み合成の値は、値を持つホライズンだけで重みを再正規化する。5日しか満期を迎えていない窓（運用初期の通常状態）で、欠けた20日を0として重み付けすると実在する効果をゼロ方向へ引き戻してしまうため。`sample_size < preliminary_sample_threshold`（既定20）の行は`is_preliminary`が立ち「暫定」表示になる。`value: null`は「この窓では測れない」であって「ゼロ」ではない。
+
+#### 3.23.4 `retro-input-v1`（`export`が書く証拠dossier）
+
+`reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v2`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
+
+内容物: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+
+**サプライズ銘柄**（`surprises`）は`MISS_SEVERE`を両方向（proceedの重大逆行・skipの大幅上昇）から選び、`settings.retro.max_surprises`（既定5、要検証）で打ち切る。超過分は`|forward_return|`降順で切り、切った件数を`dropped_count`に必ず残す（silent cap禁止：読み手が「重大な外れはこれだけだった」と「11件中の上位5件だった」を区別できなければならない）。各銘柄に当時のverdict・reasons・引用source_id・実現パス（5/20日リターンと期間内最大逆行）と、**鮮度データ**（runのas_of以降〜retroのas_ofに公開されたニュース・開示を既存textアダプタで今取得したもの）を同梱する。鮮度データは`analysis.*`の件数・文字数予算とtimeout/retry/rate limitをそのまま流用し、取得失敗は当該銘柄の`fetch_failed`を立ててnoteに残すfail-soft（export全体を落とさない）。APIキーが無い側はクライアントを組み立てず、その分の鮮度が空になるだけで失敗にはしない。
+
+**証拠ID空間**: dossierが供給する全識別子が`retro-result-v1`の`evidence_refs`の値域になる。名前空間は実装が採番した（design §5.3は「集約ID」としか書いていない）。
+
+- 集約指標: `metric:<名前>:<N>d` / `metric:<名前>:composed`
+- 人間整合: `metric:human_alignment:<decision>:<recommendation>:<N>d`
+- ソース貢献: `metric:source_contribution:<source_type>:<provider>`
+- サプライズ: `surprise:<run_id>:<SYMBOL>`
+- 引用ソース: `source_id`（引用・reasons・鮮度データのnews/filings）
+
+`signal_performance`の行だけはIDを持たない。P2-11の出力を逐語同梱しているだけでretroが採番していないためで、シグナルについて提案するときはシグナル名ではなくそれを示す指標IDかサプライズIDを引くことになる。
+
+`config_snapshot`は提案対象になりうる設定（`risk` / `fundamental_filters` / `technical_signals` / `backtest` / `analysis` / `postmortem` / `regime` / `retro`）の抜粋と`config_hash`で、提案が「どの設定に対する変更か」を一意にする。
+
+#### 3.23.5 `retro-result-v1`（スキルの回答）と`ingest`の検証
+
+`retro_result.json`は`schema_version` / `as_of` / `input_digest` / `structural_review_note` / `narrations[]` / `proposals[]` から成る。
+
+`narrations[]`は敗因分類の定性再読で、`failure_class`は閉じた5値（`information_absent` / `information_present_missed` / `interpretation_error` / `exogenous` / `threshold_artifact`）**1つ**を必須とする。listではなく単一値なのは、分類の目的が「同じ原因が何回繰り返したか」を数えることにあり、3つの分類にまたがってヘッジした叙述はそもそも数えられないため。この反復パターンが、個別の外れを構造的な提案へ昇格させる橋になる。
+
+`proposals[]`の必須フィールドは`proposal_key` / `level`（L1/L2/L3）/ `target` / `title` / `claim` / `expected_effect` / `evidence_refs`（非空）/ `evidence_basis`（quantitative\|qualitative\|mixed）/ `verification_plan` / `risks`（非空）。`verification_plan`はデフォルト値を持たない必須フィールドで、L1/L2では`null`をmodel validatorが拒否する（スキルが適用する層には、適用段階で実行できる検査が必ず要る）。L3は適用前に`AskUserQuestion`で設計を決めるので`null`可。`risks`が非空必須なのは、「リスクなし」も主張であり、書かれない主張はレビューできないため。
+
+`structural_review_note`は**design §6手順4の自問（「L2/L3相当の構造的観察はないか」、無ければ「再点検の上でなし」と明記）をスキーマ必須フィールドへ昇格させたもの**。design.mdでは手順の規律としてしか書かれていなかったが、スキル手順にしか書かれていない規律は最初に守られなくなるため、機械が欠落を検出できる形にした（決定D9の運用担保）。
+
+`ingest`（`copilot-retro ingest <dir>`、DBに一切触れない）の検証は次の順で、hard failと項目単位のwithholdを明確に分ける。
+
+1. **strictスキーマ検証**と、`as_of` / `input_digest`の同一性。不一致は**run全体のhard fail**（何も書かずに非0終了）。`validate_artifact_identity`と同型
+2. **evidence参照検証**: `evidence_refs`が3.23.4のID空間の部分集合であること。`narrations[].surprise_id`はdossierに実在するサプライズであること。捏造された参照を含む項目は当該項目のみwithhold
+3. **CON-03機械検査**: `analysis/safety.py`の`check_display_texts`を全ユーザー表示テキスト（`structural_review_note`・叙述・提案の各文字列）へ適用。違反した項目のみwithholdし、**リトライしない**（銘柄単位fail-closedと同じ思想）。`structural_review_note`が違反した場合は本文を非表示メッセージへ差し替え、runは継続する
+4. **再提案ガード**: 台帳が`rejected` / `verification_failed`として持つ`proposal_key`と**完全一致**する提案は、`reopen_justification`がなければ差し戻す
+
+通過後、`retro_report.md`を`retro_input.json`と同じディレクトリへ原子的に描画し、提案を台帳へ`status=proposed`で追記して全文を`docs/retro/proposals/RP-NNN-<slug>.md`に生成する。書き込み失敗時は以前の成果物が保存される。
+
+#### 3.23.6 提案台帳と承認モデル（決定D3・D10）
+
+台帳（`docs/retro/proposals.md`、既定パスは`--ledger`で変更可）は**承認の場ではなく、履歴・監査・重複抑止の装置**。GitHub Issuesを使わないのは、振り返り実行がネットワーク/認証に依存するのと証拠が分散するのを避けるため。P8-33で空の状態（ヘッダのみ）をコミット済みで、そのヘッダが`ingest`の生成物と一致することは`tests/retro/test_ledger.py::TestCommittedLedger`が固定している。
+
+RP-IDは`RP-001`からの全体連番（3桁ゼロ埋め）で、台帳の既存最大番号と提案全文ファイルの両方の上を採る。書かれた全文に対して台帳行が落ちた中断実行があっても、同じ番号が別の提案へ渡らないようにするため。行は列位置ではなく構造で読む（`RP-NNN`セルがあれば行、ライフサイクル語のセルがstatus）ので、列の追加・並べ替えや人間の手編集で再提案ガードが黙って空振りすることはない。
+
+statusライフサイクルは`proposed` → `applied`（PR番号を記録）/ `rejected` / `deferred` / `verification_failed`、`applied`後は`merged` / `reverted`。**`ingest`が書くのは`proposed`の追記のみ**で、以降の遷移は適用段階のスキルと人間が記録する。
+
+承認モデル（ユーザーは投資の素人前提であり、個別数値の事前承認は求めない）:
+
+- **L1（パラメータ調整）**: 事前承認なし。スキルが提案ごとのブランチで即時適用し、`verification_plan`と`just verify`の合格を確認してPRを作成する。不合格なら適用を取り消し`verification_failed`を記録する。人間のチェックポイントはPRレビュー・マージに集約される
+- **L2/L3（構成変更・設計見直し）**: スキルが設計（変更内容・影響範囲・検証計画・代替案、L3は代替案2案以上）をまとめ、`AskUserQuestion`で**設計の方向性**の承認を得てから適用しPRを作成する。1セッションに収まらない規模は承認後にroadmap P-ID / goal-prompt化して別セッションへ引き継ぐ（台帳は`deferred`）
+- 1提案 = 1ブランチ = 1 PR（原子性とrevert容易性のため）。`main`への直接コミットはしない。この「1提案1 PR」要件はAGENTS.mdのGit Workflowが定める通常の開発フロー（軽微な変更はmain直コミット可）に優先する
+- 証拠ゲート（L1: 該当集約n≥20かつ両ホライズンで方向一致、または2回以上の振り返りでの再現／L2: n≥40または同一`failure_class`が直近3回で累計5件／L3: separation≤0がn≥40で持続、またはsystemic欠陥＋代替案比較）は**床であって上限ではない**。計測を可能にするための構造変更（例: `analysis_result`へのconfidenceフィールド追加）は初回から定性根拠のみで提案してよい（決定D9）
+- `settings.retro.approval_mode`（`auto` | `manual`、既定`auto`）は将来の細粒度介入への切替余地として**名前だけ予約**されており、現時点でどのコードも参照しない
+
+#### 3.23.7 design.mdからの乖離（記録）
+
+| 箇所 | design.mdの記述 | 実装 | 理由 |
+|---|---|---|---|
+| 台帳の列 | RP-ID / 日付 / level / タイトル / status / PR・決裁メモ / リンク（§8.2） | 上記に`proposal_key`列を追加 | E32.2の再提案ガードは`proposal_key`の完全一致で判定する。その鍵を台帳が持たなければガードが機能しない。列を持たない台帳も読めるが、キー照合には参加できない |
+| 台帳参照の受け渡し | 「status=rejectedのRP-ID一覧」（§5.3項7） | dossierは`rejected_proposal_ids`（RP-ID）を渡し、機械ガードは台帳から読んだ`proposal_key`で判定する | RP-IDは人間・スキルが過去提案の全文へ辿るための参照、ガードの鍵は`proposal_key`。両者は役割が違うので同一視しない |
+| ソース貢献指標 | 敗因分類`information_absent`の件数を併記（§3.4） | 集約には含めない | 敗因分類を生成するのはスキルであってコードではない。件数は`retro_result.json`の`narrations[].failure_class`として残り、振り返りを横断した集計はスキルが台帳と過去の全文から行う |
+| 構造的観察の自問 | 手順の規律としてのみ記述（§6手順4） | `retro-result-v1`の必須フィールド`structural_review_note` | 規律を機械が検出できる形にした（3.23.5） |
+| 重大外し率のウォッチ水準 | 15%（要検証、config化を示唆） | コード定数`PROCEED_SEVERE_MISS_WATCH_RATE` | `settings.retro`はD6に従い意図的に小さく保つ。この水準を動かす提案自体が本機構の対象なので、変更はL1提案としてコード修正＋PRを経る |
+
 ---
 
 ## 4. データスキーマ定義

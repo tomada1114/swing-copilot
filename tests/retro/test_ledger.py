@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,10 +23,11 @@ from swing_copilot.retro.ledger import (
 from swing_copilot.retro.schemas import Proposal
 from tests.retro.conftest import proposal_payload
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 AS_OF = date(2027, 3, 29)
+PROJECT_ROOT = Path(__file__).parents[2]
+#: The empty ledger committed by P8-33, which `ingest` would otherwise create
+#: on its first run (E32.1).
+COMMITTED_LEDGER = PROJECT_ROOT / "docs/retro/proposals.md"
 
 
 def _proposal(**overrides: Any) -> Proposal:
@@ -251,3 +253,34 @@ class TestRecordProposals:
 
         assert path.read_text(encoding="utf-8") == before
         assert list(tmp_path.glob(".proposals.md*")) == []
+
+
+class TestCommittedLedger:
+    """P8-33's committed empty ledger must stay the header `ingest` generates.
+
+    The ledger is initialized in the repository so a first retrospective does
+    not have to create it, but that only helps if the committed bytes are the
+    ones `record_proposals` would have written (E32.1). Two hand-maintained
+    copies of the same header would drift, and the drift would only surface as
+    a malformed table after a real ingest.
+    """
+
+    def test_matches_the_header_record_proposals_generates(
+        self, tmp_path: Path
+    ) -> None:
+        generated_path = tmp_path / "proposals.md"
+        record_proposals(generated_path, [_proposal()], AS_OF)
+        generated = generated_path.read_text(encoding="utf-8").splitlines()
+
+        committed = COMMITTED_LEDGER.read_text(encoding="utf-8").splitlines()
+
+        assert generated[: len(committed)] == committed
+        # The only line the generation added is the proposal row itself: the
+        # committed file is the whole header, not a truncated prefix of it.
+        assert _ledger_rows(generated_path) == generated[len(committed) :]
+
+    def test_is_parsed_as_an_existing_ledger_with_no_rows(self) -> None:
+        state = read_ledger(COMMITTED_LEDGER)
+
+        assert state.exists
+        assert state.rows == ()

@@ -21,6 +21,7 @@ from swing_copilot.analysis.context import (
     format_risk_constraints,
     format_score_breakdown,
 )
+from swing_copilot.analysis.filing_selection import select_filing_inputs
 from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     AnalysisContextBlocks,
@@ -64,6 +65,7 @@ class TextExportLimits:
     max_news_items: int
     max_news_chars: int
     max_filing_chars: int
+    max_filing_chars_per_symbol: int
     max_calendar_events: int
     max_calendar_chars: int
 
@@ -241,22 +243,12 @@ def _news_inputs(
 def _filing_inputs(
     text_items: Sequence[TextItem], limits: TextExportLimits
 ) -> list[FilingInput]:
-    """Newest-first filing excerpts, each truncated to the export char budget."""
-    filings = sorted(
-        (item for item in text_items if item.source_type == "filing"),
-        key=lambda item: (item.published_at, item.source_id),
-        reverse=True,
+    """Newest-first filing excerpts under per-item and per-symbol budgets."""
+    return select_filing_inputs(
+        text_items,
+        per_filing_chars=limits.max_filing_chars,
+        per_symbol_chars=limits.max_filing_chars_per_symbol,
     )
-    return [
-        FilingInput(
-            source_id=item.source_id,
-            form_type=form_type_of(item.title),
-            filed_at=item.published_at,
-            text=item.content_text[: limits.max_filing_chars],
-            url=item.source_url,
-        )
-        for item in filings
-    ]
 
 
 def _calendar_event_inputs(

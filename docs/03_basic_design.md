@@ -310,12 +310,13 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 用途 | ニュース解釈、開示（8-K/10-Q）解釈、スクリーニング結果の定性評価、銘柄ごとのverdict決定（FR-08） |
 | 実行主体 | 利用者のClaude Codeセッション。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェント（またはWorkflow）へ並列委譲する |
 | 認証 | なし（APIキーを持たない）。利用者のClaude Code環境が実行権限を担う |
-| 渡すもの | `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v2`）。決定論的な文脈ブロックと未信頼テキストを、フィールドレベルで分離して含む |
+| 渡すもの | `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）。決定論的な文脈ブロックと未信頼テキストをフィールドレベルで分離し、開示にはコード所有のcoverageを含む |
 | 受け取るもの | `reports/<run_date>/<run_id>/analysis_result.json`（schema `analysis-result-v2`）。スキルが書く唯一の成果物 |
 | 信頼境界 | スキル出力は未信頼入力として扱う。`copilot-ingest-analysis`が3文書のstrict schema・run identity・provenance・CON-03を検証するまで、いかなる文字列もレポートへ出さない |
 | 失敗時 | 銘柄単位でfail-closed（当該銘柄の定性欄を非表示にして継続、リトライなし）。`run_id`、`as_of`、`strategy_key`、input digest不一致・JSON破損・スキーマ違反は既存レポート不変のrun全体hard fail |
 | 監査記録 | run専用ディレクトリに`analysis_input.json`／`analysis_result.json`／`report_context.json`をそのまま残す（NFR-05） |
 | 未信頼テキストの分離 | ニュース・開示本文はスキーマ上の専用フィールド（`news[].summary`／`filings[].text`）に置き、コード計算済みの文脈は別フィールドの`<market_regime>`等のブロックに置く。本文が指示を含んでもコード側の判定を装えない |
+| 開示の長文境界 | 1開示120,000字・1銘柄240,000字を上限とする。10-Q/10-Q-Aは財務諸表・MD&A・リスク要因・法的手続を章優先で構成し、抽出不能時だけ先頭スライスへ縮退する。coverageで欠落を監査可能にする |
 | マクロ/経済カレンダー情報 | symbolを持たない`TextItem`（`source_type="calendar"`）は候補ごとの`news`/`filings`ではなく、run単位の`context.calendar_events`に載る。provenance検証はこのIDをどの銘柄の分析からの引用も許容する（ニュース/開示IDは引き続き当該銘柄限定） |
 
 ---

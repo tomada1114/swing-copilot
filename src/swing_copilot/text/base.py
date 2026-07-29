@@ -10,6 +10,19 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class FilingSection:
+    """One code-extracted section of a filing's primary document.
+
+    `content_text` remains the complete audit copy. Sections are an optional
+    analysis aid produced while the filing HTML is still available; an empty
+    tuple means the adapter could not establish a trustworthy structure.
+    """
+
+    name: str
+    content_text: str
+
+
+@dataclass(frozen=True, slots=True)
 class TextItem:
     """One collected text unit (news article, filing excerpt, or calendar event).
 
@@ -26,3 +39,4 @@ class TextItem:
     source_url: str
     content_text: str
     fetched_at: datetime
+    filing_sections: tuple[FilingSection, ...] = ()

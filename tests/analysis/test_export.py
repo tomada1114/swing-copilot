@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from uuid import UUID
 
@@ -26,7 +27,7 @@ from swing_copilot.regime.exposure import ExposureDecision, ExposureVerdict
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import Candidate
-from swing_copilot.text.base import TextItem
+from swing_copilot.text.base import FilingSection, TextItem
 
 AS_OF = date(2027, 3, 1)
 GENERATED_AT = datetime(2027, 3, 1, 12, tzinfo=UTC)
@@ -34,6 +35,7 @@ LIMITS = TextExportLimits(
     max_news_items=2,
     max_news_chars=20,
     max_filing_chars=15,
+    max_filing_chars_per_symbol=30,
     max_calendar_events=2,
     max_calendar_chars=20,
 )
@@ -81,7 +83,13 @@ def _news(source_id: str, day: int, body: str = "A" * 100) -> TextItem:
     )
 
 
-def _filing(source_id: str = "edgar:1", title: str | None = "10-Q - Apple") -> TextItem:
+def _filing(
+    source_id: str = "edgar:1",
+    title: str | None = "10-Q - Apple",
+    *,
+    body: str = "B" * 100,
+    sections: tuple[FilingSection, ...] = (),
+) -> TextItem:
     stamp = datetime(2027, 2, 20, tzinfo=UTC)
     return TextItem(
         source_id=source_id,
@@ -90,8 +98,9 @@ def _filing(source_id: str = "edgar:1", title: str | None = "10-Q - Apple") -> T
         published_at=stamp,
         title=title,
         source_url="https://example.com/filing",
-        content_text="B" * 100,
+        content_text=body,
         fetched_at=stamp,
+        filing_sections=sections,
     )
 
 
@@ -154,7 +163,7 @@ class TestBuildAnalysisInput:
     def test_it_stamps_the_agreed_schema_version_and_as_of(self):
         payload = build_analysis_input(_request())
 
-        assert payload.schema_version == "analysis-input-v2"
+        assert payload.schema_version == "analysis-input-v3"
         assert payload.as_of == AS_OF
         assert str(payload.run_id) == "123e4567-e89b-12d3-a456-426614174000"
         assert payload.strategy_key == "default"
@@ -202,6 +211,24 @@ class TestBuildAnalysisInput:
         assert filing.form_type == "10-Q"
         assert len(filing.text) == LIMITS.max_filing_chars
         assert filing.filed_at == datetime(2027, 2, 20, tzinfo=UTC)
+        assert filing.coverage is not None
+        assert filing.coverage.selection_mode == "head_fallback"
+        assert filing.coverage.is_truncated is True
+
+    def test_symbol_budget_prioritizes_ten_q_over_newer_long_form(self):
+        newer = _filing("edgar:8k", "8-K - Apple", body="8" * 100)
+        older = _filing("edgar:10q", body="Q" * 100)
+        older = replace(
+            older,
+            published_at=datetime(2027, 2, 19, tzinfo=UTC),
+        )
+
+        payload = build_analysis_input(_request(newer, older))
+
+        by_id = {filing.source_id: filing for filing in payload.candidates[0].filings}
+        assert len(by_id["edgar:10q"].text) == LIMITS.max_filing_chars
+        assert len(by_id["edgar:8k"].text) == LIMITS.max_filing_chars
+        assert sum(len(filing.text) for filing in by_id.values()) == 30
 
     def test_a_filing_without_a_title_falls_back_to_unknown(self):
         payload = build_analysis_input(_request(_filing(title=None)))

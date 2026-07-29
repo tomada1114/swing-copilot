@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from swing_copilot.analysis.export import form_type_of
+from swing_copilot.analysis.filing_selection import select_filing_inputs
 from swing_copilot.analysis.schemas import FilingInput, NewsInput
 from swing_copilot.retro.evaluate import MISS_SEVERE
 from swing_copilot.text.edgar_filings import (
@@ -53,7 +53,6 @@ FRESHNESS_FORM_TYPES = ["8-K", "10-Q", "10-K"]
 
 _SURPRISE_PREFIX = "surprise"
 _NEWS = "news"
-_FILING = "filing"
 
 
 class NewsClientLike(Protocol):
@@ -305,19 +304,11 @@ def _news_inputs(
 def _filing_inputs(
     items: Sequence[TextItem], limits: AnalysisConfig
 ) -> tuple[FilingInput, ...]:
-    """Newest-first filing excerpts, each truncated to the export budget."""
-    filings = sorted(
-        (item for item in items if item.source_type == _FILING),
-        key=lambda item: (item.published_at, item.source_id),
-        reverse=True,
-    )
+    """Use the daily export's filing selection and coverage contract."""
     return tuple(
-        FilingInput(
-            source_id=item.source_id,
-            form_type=form_type_of(item.title),
-            filed_at=item.published_at,
-            text=item.content_text[: limits.max_filing_chars],
-            url=item.source_url,
+        select_filing_inputs(
+            items,
+            per_filing_chars=limits.max_filing_chars,
+            per_symbol_chars=limits.max_filing_chars_per_symbol,
         )
-        for item in filings
     )

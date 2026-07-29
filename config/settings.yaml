@@ -85,6 +85,8 @@ analysis:
   # Per-filing export budget (single setting; formerly filing_chunk_chars *
   # max_filing_chunks).
   max_filing_chars: 120000
+  # Combined filing-text budget for one symbol / filing-analysis context.
+  max_filing_chars_per_symbol: 240000
   # Filing collection recency bound (days) and per-symbol count cap.
   filing_lookback_days: 90
   max_filings_per_symbol: 3

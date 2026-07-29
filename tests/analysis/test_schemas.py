@@ -16,6 +16,7 @@ from swing_copilot.analysis.schemas import (
     SymbolAnalysis,
     Verdict,
     VerdictReason,
+    canonical_json_digest,
 )
 from tests.analysis.conftest import (
     NEWS_ID,
@@ -27,8 +28,27 @@ from tests.analysis.conftest import (
 
 class TestSchemaVersions:
     def test_input_and_result_versions_are_the_agreed_constants(self):
-        assert INPUT_SCHEMA_VERSION == "analysis-input-v2"
+        assert INPUT_SCHEMA_VERSION == "analysis-input-v3"
         assert RESULT_SCHEMA_VERSION == "analysis-result-v2"
+
+    def test_v3_requires_filing_coverage_but_v2_archive_remains_readable(self):
+        legacy = input_payload()
+        legacy["schema_version"] = "analysis-input-v2"
+        legacy["candidates"][0]["filings"][0].pop("coverage")
+        legacy["input_digest"] = canonical_json_digest(
+            legacy, excluded_field="input_digest"
+        )
+        AnalysisInput.model_validate(legacy)
+        legacy["schema_version"] = "analysis-input-v3"
+
+        legacy["input_digest"] = canonical_json_digest(
+            legacy, excluded_field="input_digest"
+        )
+
+        with pytest.raises(
+            ValidationError, match="analysis-input-v3 requires coverage"
+        ):
+            AnalysisInput.model_validate(legacy)
 
     def test_a_wrong_result_schema_version_is_rejected(self):
         with pytest.raises(ValidationError, match="schema_version"):

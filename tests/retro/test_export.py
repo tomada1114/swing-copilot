@@ -28,6 +28,7 @@ from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
+    AnalysisSourceCoverageRecord,
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -150,6 +151,21 @@ def populated_store(state_store: StateStore) -> StateStore:
                 source_type="news",
             )
         ],
+        [
+            AnalysisSourceCoverageRecord(
+                run_id=RUN_ID,
+                symbol="AAPL",
+                source_id="edgar:quarterly",
+                original_chars=180_000,
+                exported_chars=120_000,
+                is_truncated=True,
+                selection_mode="section_priority_partial",
+                sections=(
+                    ("part_i_item_2", "full"),
+                    ("part_ii_item_1a", "partial"),
+                ),
+            )
+        ],
     )
     state_store.replace_verdict_outcomes(
         RUN_ID,
@@ -220,10 +236,24 @@ class TestBuildRetroInput:
         document = build_retro_input(
             _deps(populated_store, market_store), _request(tmp_path)
         )
-
         assert document.evaluation.severe_threshold_pct == pytest.approx(2.0)
         assert document.evaluation.preliminary_sample_threshold == 20
         assert document.evaluation.proceed_severe_miss_watch_rate == pytest.approx(0.15)
+
+    def test_counts_export_gaps_without_claiming_they_caused_a_miss(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.input_coverage is not None
+        assert document.input_coverage.filing_count == 1
+        assert document.input_coverage.truncated_filing_count == 1
+        assert document.input_coverage.severe_miss_symbol_count_with_gap == 1
+        dossier = document.surprises.items[0]
+        assert dossier.input_filing_coverage[0].source_id == "edgar:quarterly"
+        assert dossier.input_filing_coverage[0].coverage.sections[1].status == "partial"
 
     def test_cross_tabs_the_human_journal_and_the_cited_sources(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

@@ -103,7 +103,7 @@
 
 ```jsonc
 {
-  "schema_version": "analysis-input-v2",
+  "schema_version": "analysis-input-v3",
   "run_id": "11111111-2222-3333-4444-555555555555",
   "as_of": "2026-07-27",
   "strategy_key": "default",
@@ -130,7 +130,17 @@
       ],
       "filings": [
         { "source_id": "filing-...", "form_type": "10-Q", "filed_at": "...",
-          "text": "...", "url": "..." }
+          "text": "...", "url": "...",
+          "coverage": {
+            "original_chars": 180000,
+            "exported_chars": 120000,
+            "is_truncated": true,
+            "selection_mode": "section_priority",
+            "sections": [
+              { "name": "part_i_item_2", "status": "full" },
+              { "name": "part_ii_item_1a", "status": "partial" }
+            ]
+          } }
       ]
     }
   ]
@@ -138,6 +148,8 @@
 ```
 
 - `source_id` というキー名は【固定】。
+- 新規runは`analysis-input-v3`で、全filingにコード所有の`coverage`が必須。
+  `analysis-input-v2`は過去のP8アーカイブ読み込みに限り互換対応し、新規生成しない。
 - news/filings が空の候補も `candidates` に含まれる（screening 評価は行うため）。
 - `candidates[].symbol` は文書内で一意、各候補の news と filings を合わせた
   `source_id` も一意にする。重複は strict schema の parse failure になる。

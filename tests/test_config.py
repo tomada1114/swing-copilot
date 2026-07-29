@@ -426,6 +426,7 @@ def test_analysis_config_has_documented_defaults():
     assert settings.analysis.max_news_items_per_symbol == 20
     assert settings.analysis.max_news_chars_per_item == 4000
     assert settings.analysis.max_filing_chars == 120_000
+    assert settings.analysis.max_filing_chars_per_symbol == 240_000
     assert settings.analysis.filing_lookback_days == 90
     assert settings.analysis.max_filings_per_symbol == 3
     assert settings.analysis.max_calendar_events == 20
@@ -436,8 +437,27 @@ def test_analysis_config_max_filing_chars_is_directly_configurable():
     # Consolidated from the old `filing_chunk_chars * max_filing_chunks`
     # product into a single setting; the default (120_000) preserves the
     # previous 30_000 * 4 product unchanged.
-    settings = Settings.model_validate({"analysis": {"max_filing_chars": 3_000}})
+    settings = Settings.model_validate(
+        {
+            "analysis": {
+                "max_filing_chars": 3_000,
+                "max_filing_chars_per_symbol": 4_000,
+            }
+        }
+    )
     assert settings.analysis.max_filing_chars == 3_000
+
+
+def test_analysis_config_rejects_symbol_budget_below_per_filing_budget():
+    with pytest.raises(ValidationError, match="max_filing_chars_per_symbol"):
+        Settings.model_validate(
+            {
+                "analysis": {
+                    "max_filing_chars": 3_000,
+                    "max_filing_chars_per_symbol": 2_999,
+                }
+            }
+        )
 
 
 def test_analysis_config_no_longer_has_the_old_chunk_keys():

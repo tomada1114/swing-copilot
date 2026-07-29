@@ -62,10 +62,14 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
 （`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・P1-06実現損益
 サマリ・市場レジーム・過去判断）と、ステップ5で収集済みの未信頼テキストを
-`reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v2`）へまとめ、宛先と同じディレクトリの
+`reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
-開示は`max_filing_chars`文字までに切り詰める。
+開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする。
+10-Q/10-Q-Aは財務諸表、MD&A、リスク要因、法的手続を章優先で構成し、抽出不能時のみ
+先頭スライスへ縮退する。各開示の`coverage`には元/出力文字数、選択方式、章の
+`full`/`partial`/`missing`が入り、過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
+後方互換で受理する。
 ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
 どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの
 `TextItem`（`source_type="calendar"`）はどの候補にも属さないため、run単位の

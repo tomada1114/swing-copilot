@@ -222,6 +222,22 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, source_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS analysis_source_coverage (
+        run_id          UUID NOT NULL,
+        symbol          VARCHAR NOT NULL,
+        source_id       VARCHAR NOT NULL,
+        original_chars  INTEGER NOT NULL CHECK (original_chars >= 0),
+        exported_chars  INTEGER NOT NULL CHECK (exported_chars >= 0),
+        is_truncated    BOOLEAN NOT NULL,
+        selection_mode  VARCHAR NOT NULL CHECK (selection_mode IN (
+            'full','section_priority','section_priority_partial',
+            'head_fallback','omitted_symbol_budget'
+        )),
+        sections_json   JSON NOT NULL,
+        PRIMARY KEY (run_id, symbol, source_id)
+    )
+    """,
     # `as_of` here is the *maturity* session, not the observation date --
     # intentionally unlike `signal_outcomes.as_of`, so a batch retrospective
     # produces the same rows no matter which day it is run (design §5.2, D7).

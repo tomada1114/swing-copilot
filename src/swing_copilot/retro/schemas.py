@@ -1,0 +1,266 @@
+"""Strict schema for the retrospective's evidence dossier (P8-31, design §5.3).
+
+`retro_input.json` is written by `copilot-retro export` and read by the
+`swing-retro` skill. It is the pipeline -> skill half of the retrospective
+contract; the skill's answer (`retro-result-v1`) is validated back in P8-32.
+
+Held to the same rules as `analysis-input-v2` (E31.2):
+
+* `extra="forbid"` everywhere, so a renamed or invented field fails loudly
+  instead of being silently dropped on either side.
+* `schema_version` is a `Literal` constant, not a free string.
+* `input_digest` binds the document to its own bytes, and the skill copies it
+  verbatim into its result so P8-32 can prove both halves refer to the same
+  export.
+
+Every aggregate, surprise, and cited source carries an ID. That is not
+decoration: `retro-result-v1`'s `evidence_refs` must be provable subsets of
+the identifiers supplied here (E32.4), and an evidence space that cannot be
+named cannot be checked.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Final, Literal, Self
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+
+from swing_copilot.analysis.schemas import (
+    FilingInput,
+    NewsInput,
+    NonBlankText,
+    Sha256Digest,
+    SourceId,
+    canonical_json_digest,
+)
+
+RETRO_INPUT_SCHEMA_VERSION: Final[Literal["retro-input-v1"]] = "retro-input-v1"
+
+
+class _StrictModel(BaseModel):
+    """Base for the dossier: reject unknown fields at every level."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EvaluationSettings(_StrictModel):
+    """The thresholds the classification and the aggregates actually used.
+
+    Copied into the document rather than left implicit so a dossier read
+    months later still says which boundaries produced its numbers -- and so
+    a proposal to change one of them can cite the value it is changing.
+    """
+
+    horizon_5d_weight: float
+    horizon_20d_weight: float
+    neutral_threshold_pct: float
+    severe_threshold_pct: float
+    preliminary_sample_threshold: int
+    lookback_window_days: int
+    proceed_severe_miss_watch_rate: float
+
+
+class MetricEntry(_StrictModel):
+    """One horizon's (or the weighted headline's) value for a metric."""
+
+    metric_id: NonBlankText
+    #: `None` marks the weight-composed headline rather than one horizon.
+    horizon_days: int | None
+    #: `None` means "not measurable from this window", never "zero".
+    value: float | None
+    sample_size: int = Field(ge=0)
+    is_preliminary: bool
+
+
+class RateMetricEntry(_StrictModel):
+    """A rate metric with the same-period baseline it is judged against."""
+
+    metric_id: NonBlankText
+    horizon_days: int | None
+    value: float | None
+    baseline_value: float | None
+    is_flagged: bool
+    sample_size: int = Field(ge=0)
+    is_preliminary: bool
+
+
+class AggregateMetrics(_StrictModel):
+    """Design §3.4's headline measures of the qualitative layer."""
+
+    separation: list[MetricEntry]
+    proceed_severe_miss_rate: list[RateMetricEntry]
+    skip_hit_rate: list[RateMetricEntry]
+
+
+class SignalPerformanceEntry(_StrictModel):
+    """One signal's P2-11 hit-rate row, included verbatim for one overview.
+
+    `signal_outcomes` is not reinterpreted here (design §5.3 item 2): the
+    retrospective shows signal and verdict performance side by side so a
+    proposal can tell "the signal was wrong" from "the reading was wrong".
+    """
+
+    signal_name: NonBlankText
+    true_positive_count: int = Field(ge=0)
+    false_positive_count: int = Field(ge=0)
+    neutral_count: int = Field(ge=0)
+    hit_rate: float | None
+    n: int = Field(ge=0)
+    is_preliminary: bool
+
+
+class AlignmentEntry(_StrictModel):
+    """One `(decision, recommendation, horizon)` cell of the human cross-tab."""
+
+    cell_id: NonBlankText
+    decision: NonBlankText
+    recommendation: NonBlankText
+    horizon_days: int
+    count: int = Field(ge=0)
+    mean_forward_return_pct: float
+    hit_count: int = Field(ge=0)
+    severe_miss_count: int = Field(ge=0)
+
+
+class SourceContributionEntry(_StrictModel):
+    """One `(source_type, provider)` group's citation tally and hit share."""
+
+    contribution_id: NonBlankText
+    source_type: NonBlankText
+    provider: NonBlankText
+    citation_count: int = Field(ge=0)
+    hit_citation_count: int = Field(ge=0)
+    miss_citation_count: int = Field(ge=0)
+    neutral_citation_count: int = Field(ge=0)
+    hit_citation_ratio: float | None
+
+
+class VerdictReasonEntry(_StrictModel):
+    """One reason the verdict gave at the time, with what it cited."""
+
+    text: NonBlankText
+    #: May be empty: a reason resting only on deterministic pipeline values
+    #: has no news/filing source to cite (mirrors `analysis.VerdictReason`).
+    source_ids: list[SourceId]
+
+
+class SurpriseOutcomeEntry(_StrictModel):
+    """One matured horizon of a surprise symbol's realized path."""
+
+    horizon_days: int
+    #: The maturity session the return was fixed at, not the observation date.
+    maturity_as_of: date
+    forward_return_pct: float
+    classification: NonBlankText
+
+
+class FreshnessEntry(_StrictModel):
+    """What the text adapters report about the symbol *now* (design §5.3).
+
+    The material for telling `information_absent` from `exogenous`: news and
+    filings published after the reviewed run but on or before the
+    retrospective's `as_of`. `fetch_failed` marks an attempted fetch that
+    raised, which is why an empty list here is not evidence of silence.
+    """
+
+    news: list[NewsInput]
+    filings: list[FilingInput]
+    fetch_failed: bool
+
+
+class SurpriseDossier(_StrictModel):
+    """One severe miss's complete evidence packet."""
+
+    surprise_id: NonBlankText
+    run_id: UUID
+    symbol: NonBlankText
+    run_as_of: date
+    strategy_key: NonBlankText
+    recommendation: NonBlankText
+    no_trade: bool
+    reasons: list[VerdictReasonEntry]
+    cited_source_ids: list[SourceId]
+    outcomes: list[SurpriseOutcomeEntry]
+    #: Worst close-to-close drawdown from the run's close inside the evaluated
+    #: window; `None` when the bars needed to compute it are missing.
+    max_adverse_return_pct: float | None
+    freshness: FreshnessEntry
+
+
+class SurpriseBundle(_StrictModel):
+    """The capped surprise selection, with what the cap left out.
+
+    `dropped_count` exists so truncation is always visible: a reader must be
+    able to tell "these were the only severe misses" from "these were the
+    five largest of eleven" (design §5.3, no silent cap).
+    """
+
+    max_surprises: int = Field(ge=1)
+    dropped_count: int = Field(ge=0)
+    items: list[SurpriseDossier]
+
+
+class ConfigSnapshot(_StrictModel):
+    """The settings a proposal could target, plus their hash.
+
+    `config_hash` makes a proposal say *which* configuration it was written
+    against, so an outdated proposal cannot be applied to settings that have
+    since moved.
+    """
+
+    sections: dict[str, JsonValue]
+    config_hash: Sha256Digest
+
+
+class ProposalsLedger(_StrictModel):
+    """Where the proposal ledger lives and which proposals are closed.
+
+    `rejected_proposal_ids` feeds P8-32's re-proposal guard: an RP-ID already
+    rejected (or whose verification failed) may only come back with an
+    explicit reopening justification.
+    """
+
+    path: str
+    exists: bool
+    rejected_proposal_ids: list[str]
+
+
+class RetroInput(_StrictModel):
+    """`retro_input.json`: everything the retrospective skill is given.
+
+    Deliberately a closed document. The skill reads only this file and the
+    ledger it names; nothing it produces may cite evidence that is not
+    identified somewhere in here.
+    """
+
+    schema_version: Literal["retro-input-v1"]
+    as_of: date
+    #: Wall-clock provenance from the injected `Clock`. Never a substitute for
+    #: `as_of`, which is the only point-in-time cutoff any query used.
+    generated_at: datetime
+    window_start: date
+    evaluation: EvaluationSettings
+    aggregates: AggregateMetrics
+    signal_performance: list[SignalPerformanceEntry]
+    human_alignment: list[AlignmentEntry]
+    source_contribution: list[SourceContributionEntry]
+    surprises: SurpriseBundle
+    config_snapshot: ConfigSnapshot
+    proposals_ledger: ProposalsLedger
+    #: Fail-soft data-quality remarks from the export (missing bars, a failed
+    #: freshness fetch). Part of the evidence: a metric computed over a window
+    #: with gaps should be read knowing that.
+    notes: list[str]
+    input_digest: Sha256Digest
+
+    @model_validator(mode="after")
+    def _verify_input_digest(self) -> Self:
+        """Reject a document whose body was edited after it was written."""
+        payload = self.model_dump(mode="json")
+        expected = canonical_json_digest(payload, excluded_field="input_digest")
+        if self.input_digest != expected:
+            msg = "input_digest does not match canonical retro input JSON"
+            raise ValueError(msg)
+        return self

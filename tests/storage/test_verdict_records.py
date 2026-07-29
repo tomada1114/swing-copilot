@@ -9,19 +9,21 @@ must leave the previous state intact.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import duckdb
 import pytest
 
+from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
     VerdictSourceRecord,
 )
+from swing_copilot.text.base import TextItem
 
 if TYPE_CHECKING:
     from swing_copilot.storage.state_store import StateStore
@@ -484,3 +486,241 @@ class TestGetVerdictsInWindow:
         self, state_store: StateStore
     ) -> None:
         assert state_store.get_verdicts_in_window(AS_OF, AS_OF) == ()
+
+
+class TestGetVerdictOutcomesInWindow:
+    """P8-31: the aggregate metrics' source rows, scoped by *maturity* date."""
+
+    def test_returns_rows_inside_the_inclusive_maturity_window_only(
+        self, state_store: StateStore
+    ) -> None:
+        before, start, end, after = (
+            date(2026, 7, 9),
+            date(2026, 7, 10),
+            date(2026, 7, 20),
+            date(2026, 7, 21),
+        )
+        for index, maturity in enumerate((before, start, end, after)):
+            run_id = uuid4()
+            state_store.replace_verdict_outcomes(
+                run_id,
+                5,
+                [
+                    VerdictOutcomeRecord(
+                        run_id=run_id,
+                        symbol=f"S{index}",
+                        horizon_days=5,
+                        as_of=maturity,
+                        recommendation="proceed",
+                        forward_return_pct=1.0,
+                        classification="HIT",
+                    )
+                ],
+            )
+
+        rows = state_store.get_verdict_outcomes_in_window(start, end)
+
+        assert [(row.symbol, row.as_of) for row in rows] == [("S1", start), ("S2", end)]
+
+    def test_returns_every_evaluated_horizon_of_one_run(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        for horizon_days in (5, 20):
+            state_store.replace_verdict_outcomes(
+                run_id,
+                horizon_days,
+                [
+                    _outcome(
+                        run_id,
+                        "AAPL",
+                        horizon_days,
+                        forward_return_pct=-3.0,
+                        classification="MISS_SEVERE",
+                    )
+                ],
+            )
+
+        rows = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
+
+        assert [(row.horizon_days, row.classification) for row in rows] == [
+            (5, "MISS_SEVERE"),
+            (20, "MISS_SEVERE"),
+        ]
+
+    def test_returns_nothing_for_an_empty_database(
+        self, state_store: StateStore
+    ) -> None:
+        assert state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF) == ()
+
+
+class TestGetRunVerdicts:
+    """P8-31: one surprise symbol's verdict as it was written at the time."""
+
+    def test_returns_the_run_s_verdicts_with_their_reasons(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [
+                _verdict(
+                    run_id,
+                    "MSFT",
+                    "skip",
+                    reasons=(
+                        VerdictReasonRecord(text="供給制約の懸念", source_ids=("n-1",)),
+                        VerdictReasonRecord(text="決算前", source_ids=()),
+                    ),
+                )
+            ],
+            [],
+        )
+
+        rows = state_store.get_run_verdicts(run_id)
+
+        assert len(rows) == 1
+        assert (rows[0].symbol, rows[0].recommendation) == ("MSFT", "skip")
+        assert rows[0].strategy_key == "default"
+        assert rows[0].as_of == AS_OF
+        assert rows[0].no_trade is False
+        assert rows[0].reasons == (
+            VerdictReasonRecord(text="供給制約の懸念", source_ids=("n-1",)),
+            VerdictReasonRecord(text="決算前", source_ids=()),
+        )
+
+    def test_returns_nothing_for_an_unknown_run(self, state_store: StateStore) -> None:
+        assert state_store.get_run_verdicts(uuid4()) == ()
+
+
+class TestGetVerdictCitationsInWindow:
+    """P8-31: `verdict_sources` x `verdict_outcomes` x `text_items` (design §5.3)."""
+
+    def test_returns_one_row_per_cited_source_with_its_recorded_url(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.record_text_items(
+            [
+                TextItem(
+                    source_id="finnhub:1",
+                    symbol="AAPL",
+                    source_type="news",
+                    published_at=datetime(2026, 7, 15, tzinfo=UTC),
+                    title="headline",
+                    source_url="https://example.test/1",
+                    content_text="body",
+                    fetched_at=datetime(2026, 7, 15, tzinfo=UTC),
+                )
+            ]
+        )
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL")], [_source(run_id, "AAPL", "finnhub:1")]
+        )
+        for horizon_days in (5, 20):
+            state_store.replace_verdict_outcomes(
+                run_id, horizon_days, [_outcome(run_id, "AAPL", horizon_days)]
+            )
+
+        rows = state_store.get_verdict_citations_in_window(AS_OF, AS_OF)
+
+        # One row per citation, not one per horizon: the same source cited
+        # once must not be counted twice because two horizons matured.
+        assert [
+            (row.symbol, row.source_id, row.source_type, row.source_url) for row in rows
+        ] == [("AAPL", "finnhub:1", "news", "https://example.test/1")]
+
+    def test_keeps_a_citation_whose_text_item_was_never_recorded(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL")], [_source(run_id, "AAPL", "edgar:9")]
+        )
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+
+        rows = state_store.get_verdict_citations_in_window(AS_OF, AS_OF)
+
+        assert [(row.source_id, row.source_url) for row in rows] == [("edgar:9", None)]
+
+    def test_omits_citations_whose_verdict_has_not_matured_in_the_window(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL")], [_source(run_id, "AAPL", "finnhub:1")]
+        )
+
+        assert state_store.get_verdict_citations_in_window(AS_OF, AS_OF) == ()
+
+
+class TestGetVerdictDecisionAlignment:
+    """P8-31 (E31.5): human decision x verdict x realized classification."""
+
+    def _journal(self, state_store: StateStore, run_id: UUID, decision: str) -> None:
+        state_store.record_trade_decision(
+            TradeDecisionRecord(
+                run_id=run_id,
+                symbol="AAPL",
+                strategy_key="default",
+                position_id=None,
+                decision=decision,
+                reason_memo=None,
+                virtual_fill_price=None,
+            )
+        )
+
+    def test_joins_the_journal_to_each_matured_horizon(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        self._journal(state_store, run_id, "followed")
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+        for horizon_days, forward_return_pct in ((5, 1.5), (20, -3.0)):
+            state_store.replace_verdict_outcomes(
+                run_id,
+                horizon_days,
+                [
+                    _outcome(
+                        run_id,
+                        "AAPL",
+                        horizon_days,
+                        forward_return_pct=forward_return_pct,
+                        classification="HIT" if horizon_days == 5 else "MISS_SEVERE",
+                    )
+                ],
+            )
+
+        rows = state_store.get_verdict_decision_alignment(AS_OF, AS_OF)
+
+        assert [
+            (
+                row.decision,
+                row.recommendation,
+                row.horizon_days,
+                row.forward_return_pct,
+                row.classification,
+            )
+            for row in rows
+        ] == [
+            ("followed", "proceed", 5, 1.5, "HIT"),
+            ("followed", "proceed", 20, -3.0, "MISS_SEVERE"),
+        ]
+
+    def test_omits_symbols_the_human_never_journaled(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+
+        assert state_store.get_verdict_decision_alignment(AS_OF, AS_OF) == ()
+
+    def test_omits_journal_rows_whose_verdict_has_not_matured(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        self._journal(state_store, run_id, "ignored")
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        assert state_store.get_verdict_decision_alignment(AS_OF, AS_OF) == ()

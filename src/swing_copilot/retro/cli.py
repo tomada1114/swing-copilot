@@ -1,14 +1,18 @@
-"""`copilot-retro`: the retrospective mechanism's command line (P8-30).
+"""`copilot-retro`: the retrospective mechanism's command line (P8-30/P8-31).
 
-Two subcommands exist so far, matching the two halves of this phase:
+Four subcommands, in the order one retrospective uses them:
 
 * `collect` scans `reports/` for archived `analysis_result.json` documents and
   brings each run's verdicts into DuckDB.
 * `evaluate` classifies the collected verdicts whose horizons have matured.
+* `export` aggregates the matured window into `retro_input.json`, the dossier
+  the `swing-retro` skill reads.
+* `prepare` runs those three in order -- the one command the skill's preflight
+  invokes (E31.4).
 
-`prepare` / `export` / `ingest` belong to later phases and are deliberately
-absent rather than stubbed (E30.1) -- a subcommand that parses but does
-nothing is harder to notice than one that does not exist.
+`ingest` belongs to P8-32 and is deliberately absent rather than stubbed
+(E30.1) -- a subcommand that parses but does nothing is harder to notice than
+one that does not exist.
 
 Like every other entry point here, this one only observes: it writes
 observation tables and never rewrites configuration, code, or any
@@ -25,13 +29,23 @@ from pathlib import Path
 
 from rich.console import Console
 
-from swing_copilot.config import load_settings
+from swing_copilot.clock import SystemClock
+from swing_copilot.config import Settings, load_secrets, load_settings
+from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.retro.evaluate import evaluate_verdicts
+from swing_copilot.retro.export import (
+    DEFAULT_LEDGER_PATH,
+    RetroExportDependencies,
+    RetroExportRequest,
+    export_retro_input,
+)
+from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.text.news_finnhub import FinnhubNewsClient
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +79,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     evaluate_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     evaluate_parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
 
+    export_parser = subparsers.add_parser(
+        "export", help="集約と証拠一式を retro_input.json へ書き出す"
+    )
+    _add_export_arguments(export_parser)
+
+    prepare_parser = subparsers.add_parser(
+        "prepare", help="collect → evaluate → export をまとめて実行する"
+    )
+    _add_export_arguments(prepare_parser)
+
     return parser.parse_args(argv)
+
+
+def _add_export_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments `export` and its `prepare` umbrella share."""
+    parser.add_argument("--as-of", type=date.fromisoformat, required=True)
+    parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS_DIR)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
+    parser.add_argument("--ledger", type=Path, default=Path(DEFAULT_LEDGER_PATH))
 
 
 def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -> None:
@@ -79,19 +112,27 @@ def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -
     _print_notes(console, summary.notes)
 
 
-def _run_evaluate(
-    state_store: StateStore, args: argparse.Namespace, console: Console
-) -> None:
+def _load_settings(path: str) -> Settings:
     try:
-        settings = load_settings(args.settings)
+        return load_settings(path)
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
 
-    # Parquet bars live alongside the DuckDB file, mirroring the
-    # DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing -- `--db` moves both.
-    market_store = MarketStore(
-        state_store.database, parquet_root=Path(args.db).parent / "bars"
-    )
+
+def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
+    """Bars source for `--db`.
+
+    Parquet bars live alongside the DuckDB file, mirroring the
+    DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing -- `--db` moves both.
+    """
+    return MarketStore(state_store.database, parquet_root=Path(db_path).parent / "bars")
+
+
+def _run_evaluate(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    settings = _load_settings(args.settings)
+    market_store = _market_store(state_store, args.db)
     summary = evaluate_verdicts(
         market_store,
         state_store,
@@ -107,13 +148,66 @@ def _run_evaluate(
     _print_notes(console, summary.notes)
 
 
+def _run_export(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    settings = _load_settings(args.settings)
+    summary = export_retro_input(
+        RetroExportDependencies(
+            market_store=_market_store(state_store, args.db),
+            state_store=state_store,
+            settings=settings,
+            clock=SystemClock(),
+            freshness=_freshness_sources(),
+        ),
+        RetroExportRequest(
+            as_of=args.as_of, reports_root=args.reports_dir, ledger_path=args.ledger
+        ),
+    )
+    console.print(
+        f"評価 {summary.outcome_count} 行 / "
+        f"サプライズ {summary.surprise_count} 件（上限超過 "
+        f"{summary.dropped_surprise_count} 件）→ {summary.path}"
+    )
+    _print_notes(console, summary.notes)
+
+
+def _freshness_sources() -> FreshnessSources:
+    """Build the freshness adapters the available API keys allow.
+
+    A missing key yields no client, and the dossier then carries no freshness
+    for that side rather than failing: the retrospective's core evidence is
+    already in the database (design §5.3, E31.3).
+    """
+    secrets = load_secrets()
+    return FreshnessSources(
+        news_client=(
+            FinnhubNewsClient(secrets.finnhub_api_key)
+            if secrets.finnhub_api_key
+            else None
+        ),
+        edgar_client=(
+            EdgarClient(secrets.edgar_identity) if secrets.edgar_identity else None
+        ),
+    )
+
+
+def _run_prepare(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    """Run the whole chain, which is what the skill's preflight calls (E31.4)."""
+    _run_collect(state_store, args.reports_dir, console)
+    _run_evaluate(state_store, args, console)
+    _run_export(state_store, args, console)
+
+
 def _print_notes(console: Console, notes: tuple[str, ...]) -> None:
     for note in notes:
         console.print(f"[yellow]{note}[/yellow]")
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: dispatch to `collect` or `evaluate`.
+    """CLI entry point: dispatch to `collect`, `evaluate`, `export`, or `prepare`.
 
     Args:
         argv: Argument vector, defaulting to `sys.argv[1:]`.
@@ -128,8 +222,12 @@ def main(argv: list[str] | None = None) -> None:
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
     if args.command == "collect":
         _run_collect(state_store, args.reports_dir, console)
-    else:
+    elif args.command == "evaluate":
         _run_evaluate(state_store, args, console)
+    elif args.command == "export":
+        _run_export(state_store, args, console)
+    else:
+        _run_prepare(state_store, args, console)
 
 
 if __name__ == "__main__":  # pragma: no cover

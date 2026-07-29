@@ -1,20 +1,23 @@
-"""P8-30: `copilot-retro` CLI surface.
+"""P8-30/P8-31: `copilot-retro` CLI surface.
 
-Only `collect` and `evaluate` exist in this phase (E30.1): the later
-`prepare` / `export` / `ingest` subcommands must not be pre-announced in
-argparse, because a subcommand that parses but does nothing is worse than one
-that plainly does not exist yet.
+`collect`, `evaluate`, `export`, and the `prepare` umbrella exist; `ingest`
+(P8-32) must not be pre-announced in argparse, because a subcommand that
+parses but does nothing is worse than one that plainly does not exist yet
+(E30.1).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 
+from swing_copilot.config import Secrets
 from swing_copilot.retro.cli import main
+from swing_copilot.retro.schemas import RetroInput
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
@@ -33,6 +36,34 @@ CALENDAR = [RUN_DATE + timedelta(days=offset) for offset in range(30)]
 def _rows(db_path: Path, sql: str) -> list[tuple[object, ...]]:
     with Database(db_path).connect() as conn:
         return conn.execute(sql).fetchall()
+
+
+def _archive(write_run: Callable[..., Path]) -> None:
+    """Write one archived run: one symbol with prices and one without.
+
+    The second symbol proves a missing bar degrades to a skip instead of
+    breaking the batch.
+    """
+    write_run(
+        result=result_payload(
+            symbols=[
+                symbol_payload(),
+                symbol_payload(
+                    symbol="NOBAR",
+                    news_summary=None,
+                    filing_analyses=[],
+                    verdict={"recommendation": "skip", "reasons": []},
+                ),
+            ]
+        )
+    )
+
+
+def _seed_prices(db_path: Path) -> None:
+    """Give the calendar benchmark and one symbol the bars evaluation needs."""
+    market_store = MarketStore(Database(db_path), parquet_root=db_path.parent / "bars")
+    market_store.write_bars(bars("SPY", dict.fromkeys(CALENDAR, 100.0)))
+    market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, CALENDAR[5]: 101.5}))
 
 
 class TestCollectCommand:
@@ -187,32 +218,6 @@ class TestCollectThenEvaluate:
     """The roadmap P8-30 動作確認 bullets, driven through the CLI end to end."""
 
     @staticmethod
-    def _archive(write_run: Callable[..., Path]) -> None:
-        # One symbol with prices and one without: the second proves a missing
-        # bar degrades to a skip instead of breaking the batch.
-        write_run(
-            result=result_payload(
-                symbols=[
-                    symbol_payload(),
-                    symbol_payload(
-                        symbol="NOBAR",
-                        news_summary=None,
-                        filing_analyses=[],
-                        verdict={"recommendation": "skip", "reasons": []},
-                    ),
-                ]
-            )
-        )
-
-    @staticmethod
-    def _seed_prices(db_path: Path) -> None:
-        market_store = MarketStore(
-            Database(db_path), parquet_root=db_path.parent / "bars"
-        )
-        market_store.write_bars(bars("SPY", dict.fromkeys(CALENDAR, 100.0)))
-        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, CALENDAR[5]: 101.5}))
-
-    @staticmethod
     def _counts(db_path: Path) -> tuple[int, ...]:
         counts: list[int] = []
         with Database(db_path).connect() as conn:
@@ -230,8 +235,8 @@ class TestCollectThenEvaluate:
         self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
     ) -> None:
         db_path = tmp_path / "retro.duckdb"
-        self._archive(write_run)
-        self._seed_prices(db_path)
+        _archive(write_run)
+        _seed_prices(db_path)
 
         self._run_both(reports_root, db_path)
 
@@ -242,8 +247,8 @@ class TestCollectThenEvaluate:
         self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
     ) -> None:
         db_path = tmp_path / "retro.duckdb"
-        self._archive(write_run)
-        self._seed_prices(db_path)
+        _archive(write_run)
+        _seed_prices(db_path)
 
         self._run_both(reports_root, db_path)
         first = self._counts(db_path)
@@ -259,8 +264,8 @@ class TestCollectThenEvaluate:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         db_path = tmp_path / "retro.duckdb"
-        self._archive(write_run)
-        self._seed_prices(db_path)
+        _archive(write_run)
+        _seed_prices(db_path)
 
         self._run_both(reports_root, db_path)
 
@@ -268,14 +273,170 @@ class TestCollectThenEvaluate:
         assert "NOBAR" in capsys.readouterr().out
 
 
+class TestExportCommand:
+    """P8-31: `export` writes the dossier; `prepare` runs the whole chain."""
+
+    @pytest.fixture(autouse=True)
+    def _offline_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No API keys: the CLI must build no live client in the test suite.
+
+        `_env_file=None` isolates this from whatever `.env` a developer has,
+        which is what keeps the export offline here -- a real key would
+        otherwise construct a real adapter (mirrors `tests/test_config.py`).
+        """
+        monkeypatch.setattr(
+            "swing_copilot.retro.cli.load_secrets",
+            lambda: Secrets(_env_file=None),  # type: ignore[call-arg]
+        )
+
+    def test_writes_the_dossier_under_the_reports_root(
+        self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
+    ) -> None:
+        db_path = tmp_path / "retro.duckdb"
+        _archive(write_run)
+        _seed_prices(db_path)
+        self._collect_and_evaluate(reports_root, db_path)
+
+        main(
+            [
+                "export",
+                "--as-of",
+                CALENDAR[10].isoformat(),
+                "--db",
+                str(db_path),
+                "--reports-dir",
+                str(reports_root),
+            ]
+        )
+
+        destination = (
+            reports_root / "retro" / CALENDAR[10].isoformat() / "retro_input.json"
+        )
+        document = RetroInput.model_validate(
+            json.loads(destination.read_text(encoding="utf-8"))
+        )
+        assert document.as_of == CALENDAR[10]
+        assert document.evaluation.lookback_window_days == 90
+
+    def test_reports_the_export_summary_on_stdout(
+        self,
+        tmp_path: Path,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        db_path = tmp_path / "retro.duckdb"
+        _archive(write_run)
+        _seed_prices(db_path)
+        self._collect_and_evaluate(reports_root, db_path)
+
+        main(
+            [
+                "export",
+                "--as-of",
+                CALENDAR[10].isoformat(),
+                "--db",
+                str(db_path),
+                "--reports-dir",
+                str(reports_root),
+            ]
+        )
+
+        assert "retro_input.json" in capsys.readouterr().out
+
+    def test_prepare_runs_collect_evaluate_and_export_in_one_pass(
+        self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
+    ) -> None:
+        db_path = tmp_path / "retro.duckdb"
+        _archive(write_run)
+        _seed_prices(db_path)
+
+        main(
+            [
+                "prepare",
+                "--as-of",
+                CALENDAR[10].isoformat(),
+                "--db",
+                str(db_path),
+                "--reports-dir",
+                str(reports_root),
+            ]
+        )
+
+        assert _rows(db_path, "SELECT symbol FROM verdict_outcomes") == [("AAPL",)]
+        assert (
+            reports_root / "retro" / CALENDAR[10].isoformat() / "retro_input.json"
+        ).is_file()
+
+    def test_export_on_an_empty_database_still_writes_a_valid_dossier(
+        self, tmp_path: Path, reports_root: Path
+    ) -> None:
+        db_path = tmp_path / "retro.duckdb"
+
+        main(
+            [
+                "export",
+                "--as-of",
+                CALENDAR[10].isoformat(),
+                "--db",
+                str(db_path),
+                "--reports-dir",
+                str(reports_root),
+            ]
+        )
+
+        destination = (
+            reports_root / "retro" / CALENDAR[10].isoformat() / "retro_input.json"
+        )
+        document = RetroInput.model_validate(
+            json.loads(destination.read_text(encoding="utf-8"))
+        )
+        assert document.surprises.items == []
+
+    def test_reads_the_proposal_ledger_it_was_pointed_at(
+        self, tmp_path: Path, reports_root: Path
+    ) -> None:
+        ledger = tmp_path / "proposals.md"
+        ledger.write_text(
+            "| RP-ID | status |\n|---|---|\n| RP-007 | rejected |\n",
+            encoding="utf-8",
+        )
+
+        main(
+            [
+                "export",
+                "--as-of",
+                CALENDAR[10].isoformat(),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+                "--reports-dir",
+                str(reports_root),
+                "--ledger",
+                str(ledger),
+            ]
+        )
+
+        destination = (
+            reports_root / "retro" / CALENDAR[10].isoformat() / "retro_input.json"
+        )
+        document = RetroInput.model_validate(
+            json.loads(destination.read_text(encoding="utf-8"))
+        )
+        assert document.proposals_ledger.rejected_proposal_ids == ["RP-007"]
+
+    @staticmethod
+    def _collect_and_evaluate(reports_root: Path, db_path: Path) -> None:
+        main(["collect", "--reports-dir", str(reports_root), "--db", str(db_path)])
+        main(["evaluate", "--as-of", CALENDAR[10].isoformat(), "--db", str(db_path)])
+
+
 class TestSubcommandSurface:
     def test_requires_a_subcommand(self) -> None:
         with pytest.raises(SystemExit):
             main([])
 
-    @pytest.mark.parametrize("command", ["prepare", "export", "ingest"])
-    def test_later_phase_subcommands_are_not_registered_yet(self, command: str) -> None:
-        # P8-31/P8-32 add these; until then they must fail loudly rather than
-        # parse into a silent no-op.
+    def test_ingest_is_not_registered_yet(self) -> None:
+        # P8-32 adds it; until then it must fail loudly rather than parse
+        # into a silent no-op.
         with pytest.raises(SystemExit):
-            main([command])
+            main(["ingest"])

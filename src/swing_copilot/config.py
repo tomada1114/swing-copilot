@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import (
@@ -389,6 +390,28 @@ class RegimeConfig(_StrictModel):
         return self
 
 
+class RetroConfig(_StrictModel):
+    """`retro.*` in `settings.yaml` (P8-31, roadmap §5 P8-31).
+
+    Deliberately tiny. The retrospective's evaluation window, horizon weights,
+    noise/severity boundaries, and preliminary-sample floor all come from
+    `settings.postmortem` (decision D6): a verdict and a signal are measured
+    through the same window so their performance stays comparable, and one
+    quantity never gets two configurable names.
+    """
+
+    # How many MISS_SEVERE symbols get a full evidence dossier in
+    # `retro_input.json` (要検証: set from the reading budget of one
+    # retrospective pass, not from data). Overflow is truncated by
+    # |forward_return| with the dropped count reported, never silently.
+    max_surprises: int = Field(default=5, ge=1)
+    # Reserved for a future switch to per-proposal human approval (D10,
+    # design §8.2). Nothing reads it yet: the initial implementation is
+    # `auto`-only, and the name exists so the eventual `manual` mode does not
+    # have to rename a shipped setting.
+    approval_mode: Literal["auto", "manual"] = "auto"
+
+
 class Settings(_StrictModel):
     """Parsed, validated `config/settings.yaml`."""
 
@@ -402,6 +425,7 @@ class Settings(_StrictModel):
     notification: NotificationConfig = NotificationConfig()
     postmortem: PostmortemConfig = PostmortemConfig()
     regime: RegimeConfig = RegimeConfig()
+    retro: RetroConfig = RetroConfig()
 
 
 _SCORE_WEIGHT_SUM_TOLERANCE = 1e-9

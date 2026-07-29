@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
     from swing_copilot.storage.verdict_records import (
+        VerdictCitationRow,
+        VerdictDecisionRow,
         VerdictOutcomeRecord,
         VerdictRecord,
         VerdictRow,
@@ -704,6 +706,57 @@ class StateStore:
             Rows in a deterministic `(as_of, run_id, symbol)` order.
         """
         return verdict_records.get_verdicts_in_window(
+            self._database, window_start, as_of
+        )
+
+    def get_verdict_outcomes_in_window(
+        self, window_start: date, as_of: date
+    ) -> tuple[VerdictOutcomeRecord, ...]:
+        """Return classifications that matured in `[window_start, as_of]` (P8-31).
+
+        Args:
+            window_start: Inclusive earliest maturity date.
+            as_of: Inclusive latest maturity date.
+
+        Returns:
+            Rows in a deterministic `(as_of, run_id, symbol, horizon_days)`
+            order, the input of every retrospective aggregate.
+        """
+        return verdict_records.get_verdict_outcomes_in_window(
+            self._database, window_start, as_of
+        )
+
+    def get_run_verdicts(self, run_id: UUID) -> tuple[VerdictRecord, ...]:
+        """Return one run's collected verdicts with their reasons (P8-31).
+
+        Args:
+            run_id: The archived run to read back.
+        """
+        return verdict_records.get_run_verdicts(self._database, run_id)
+
+    def get_verdict_citations_in_window(
+        self, window_start: date, as_of: date
+    ) -> tuple[VerdictCitationRow, ...]:
+        """Return sources cited by verdicts matured in the window (P8-31).
+
+        Args:
+            window_start: Inclusive earliest maturity date.
+            as_of: Inclusive latest maturity date.
+        """
+        return verdict_records.get_verdict_citations_in_window(
+            self._database, window_start, as_of
+        )
+
+    def get_verdict_decision_alignment(
+        self, window_start: date, as_of: date
+    ) -> tuple[VerdictDecisionRow, ...]:
+        """Return matured verdicts joined to the human's journal (P8-31, E31.5).
+
+        Args:
+            window_start: Inclusive earliest maturity date.
+            as_of: Inclusive latest maturity date.
+        """
+        return verdict_records.get_verdict_decision_alignment(
             self._database, window_start, as_of
         )
 

@@ -110,11 +110,14 @@ verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`�
 ## `copilot-retro`とverdictの当否評価
 
 `retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、日次フローとは独立に
-数日おき手動で回す。本フェーズ（P8-30）の実装は`collect`と`evaluate`の2つ。
+数日おき手動で回す。実装済みは`collect`/`evaluate`/`export`と、その3つを順に
+走らせるumbrella `prepare`（`ingest`はP8-32）。
 
 ```bash
 copilot-retro collect --reports-dir reports          # verdictをDuckDBへ取り込む
 copilot-retro evaluate --as-of 2027-03-11            # 満期を迎えた当否を分類する
+copilot-retro export --as-of 2027-03-11              # 証拠一式をJSONへ書き出す
+copilot-retro prepare --as-of 2027-03-11             # 上記3つをまとめて実行する
 ```
 
 `collect`は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の
@@ -130,6 +133,19 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 意図的に異なる）。分類は非対称で、`proceed`は「重大な逆行がなかった」という
 片側の主張のためNEUTRALを持たず、`skip`は下落を的中・上昇を機会損失として
 扱う。閾値は`settings.postmortem`の既存値を流用し、新しい閾値体系を作らない。
+
+`export`は満期日が`[as_of - lookback_window_days, as_of]`に入る当否行を集約し、
+`reports/retro/<as_of>/retro_input.json`をstrictスキーマ`retro-input-v1`で
+原子的に書き出す。含まれるのはseparation（proceed群−skip群の平均リターン）・
+proceed重大外し率（候補全体ベースライン併記、ウォッチ水準0.15超または
+ベースライン超でフラグ）・skip的中率（ベースライン比）・人間整合クロス集計
+（`trades_journal`×verdict×当否）・ソース貢献表・既存`signal_outcomes`の
+シグナル成績・サプライズ銘柄の証拠一式（当時のverdictとreasons、実現パス、
+run以降の鮮度データ）・提案対象になりうる設定のスナップショットと
+`config_hash`・提案台帳の参照・`input_digest`。サプライズは
+`settings.retro.max_surprises`で打ち切り、切った件数を必ず出力に残す。
+鮮度データは既存textアダプタ（timeout/retry/rate limitはそのまま）で取得し、
+APIキー未設定や取得失敗は当該欄を空にしてnoteを残す（fail-soft）。
 
 `retro/`が`analysis/`と別パッケージなのは、`analysis/`が「ネットワークもDBも
 触らない」憲章を持つのに対し、retroはDBを読み書きするためである。

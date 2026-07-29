@@ -3,6 +3,10 @@
 Reuses `tests/analysis/conftest.py`'s payload builders so the fixtures stay
 bound to the one strict schema pair `collect` actually parses, rather than
 drifting into a second hand-maintained copy of it.
+
+The `retro-input-v1` / `retro-result-v1` builders live here for the same
+reason: the schema tests and the ingest tests must agree on one document pair,
+or an ingest test could pass against a dossier the schema would reject.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
 )
+from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from tests.analysis.conftest import (
@@ -46,6 +51,210 @@ __all__ = [
     "result_payload",
     "symbol_payload",
 ]
+
+#: Identities the dossier below supplies, and the only ones a result may cite.
+RETRO_RUN_ID = "11111111-1111-1111-1111-111111111111"
+RETRO_AS_OF = "2027-03-29"
+SURPRISE_ID = f"surprise:{RETRO_RUN_ID}:AAPL"
+SEPARATION_METRIC_ID = "metric:separation:5d"
+CITED_SOURCE_ID = "finnhub:1"
+
+
+def retro_input_unsigned_payload() -> dict[str, Any]:
+    """A complete `retro-input-v1` body, digest excluded."""
+    return {
+        "schema_version": "retro-input-v1",
+        "as_of": RETRO_AS_OF,
+        "generated_at": "2027-03-29T00:00:00Z",
+        "window_start": "2026-12-29",
+        "evaluation": {
+            "horizon_5d_weight": 0.6,
+            "horizon_20d_weight": 0.4,
+            "neutral_threshold_pct": 0.5,
+            "severe_threshold_pct": 2.0,
+            "preliminary_sample_threshold": 20,
+            "lookback_window_days": 90,
+            "proceed_severe_miss_watch_rate": 0.15,
+        },
+        "aggregates": {
+            "separation": [
+                {
+                    "metric_id": SEPARATION_METRIC_ID,
+                    "horizon_days": 5,
+                    "value": -0.9,
+                    "sample_size": 3,
+                    "is_preliminary": True,
+                }
+            ],
+            "proceed_severe_miss_rate": [
+                {
+                    "metric_id": "metric:proceed_severe_miss_rate:5d",
+                    "horizon_days": 5,
+                    "value": 0.5,
+                    "baseline_value": 0.33,
+                    "is_flagged": True,
+                    "sample_size": 2,
+                    "is_preliminary": True,
+                }
+            ],
+            "skip_hit_rate": [
+                {
+                    "metric_id": "metric:skip_hit_rate:composed",
+                    "horizon_days": None,
+                    "value": None,
+                    "baseline_value": None,
+                    "is_flagged": False,
+                    "sample_size": 0,
+                    "is_preliminary": True,
+                }
+            ],
+        },
+        "signal_performance": [
+            {
+                "signal_name": "rsi_pullback",
+                "true_positive_count": 2,
+                "false_positive_count": 1,
+                "neutral_count": 0,
+                "hit_rate": 0.6,
+                "n": 3,
+                "is_preliminary": True,
+            }
+        ],
+        "human_alignment": [
+            {
+                "cell_id": "metric:human_alignment:followed:proceed:5d",
+                "decision": "followed",
+                "recommendation": "proceed",
+                "horizon_days": 5,
+                "count": 2,
+                "mean_forward_return_pct": 1.25,
+                "hit_count": 1,
+                "severe_miss_count": 1,
+            }
+        ],
+        "source_contribution": [
+            {
+                "contribution_id": "metric:source_contribution:news:finnhub",
+                "source_type": "news",
+                "provider": "finnhub",
+                "citation_count": 3,
+                "hit_citation_count": 2,
+                "miss_citation_count": 1,
+                "neutral_citation_count": 0,
+                "hit_citation_ratio": 0.6666666666666666,
+            }
+        ],
+        "surprises": {
+            "max_surprises": 5,
+            "dropped_count": 1,
+            "items": [
+                {
+                    "surprise_id": SURPRISE_ID,
+                    "run_id": RETRO_RUN_ID,
+                    "symbol": "AAPL",
+                    "run_as_of": "2027-03-01",
+                    "strategy_key": "default",
+                    "recommendation": "proceed",
+                    "no_trade": False,
+                    "reasons": [
+                        {"text": "受注は堅調に見える", "source_ids": [CITED_SOURCE_ID]}
+                    ],
+                    "cited_source_ids": [CITED_SOURCE_ID],
+                    "outcomes": [
+                        {
+                            "horizon_days": 5,
+                            "maturity_as_of": "2027-03-08",
+                            "forward_return_pct": -8.0,
+                            "classification": "MISS_SEVERE",
+                        }
+                    ],
+                    "max_adverse_return_pct": -9.5,
+                    "freshness": {
+                        "news": [
+                            {
+                                "source_id": "finnhub:9",
+                                "published_at": "2027-03-05T00:00:00Z",
+                                "headline": "見出し",
+                                "summary": "本文",
+                                "url": "https://example.test/9",
+                                "provider": "finnhub",
+                            }
+                        ],
+                        "filings": [],
+                        "fetch_failed": False,
+                    },
+                }
+            ],
+        },
+        "config_snapshot": {
+            "sections": {"retro": {"max_surprises": 5, "approval_mode": "auto"}},
+            "config_hash": "0" * 64,
+        },
+        "proposals_ledger": {
+            "path": "docs/retro/proposals.md",
+            "exists": False,
+            "rejected_proposal_ids": [],
+        },
+        "notes": ["AAPL: 鮮度開示を取得できなかったため空欄"],
+    }
+
+
+def retro_input_payload(**overrides: Any) -> dict[str, Any]:
+    """A signed `retro-input-v1` document, digest recomputed after overrides."""
+    unsigned = {**retro_input_unsigned_payload(), **overrides}
+    return {
+        **unsigned,
+        "input_digest": canonical_json_digest(unsigned, excluded_field="input_digest"),
+    }
+
+
+def retro_input_digest() -> str:
+    """The digest a matching `retro-result-v1` must copy verbatim."""
+    return canonical_json_digest(
+        retro_input_unsigned_payload(), excluded_field="input_digest"
+    )
+
+
+def proposal_payload(**overrides: Any) -> dict[str, Any]:
+    """One `retro-result-v1` proposal, citing only supplied identifiers."""
+    return {
+        "proposal_key": "config:postmortem.severe_threshold_pct",
+        "level": "L1",
+        "target": "postmortem.severe_threshold_pct",
+        "title": "重大境界の見直し",
+        "claim": "separation が負のまま推移している可能性がある",
+        "expected_effect": "重大逆行の分類が実態に近づくと考えられる",
+        "evidence_refs": [SEPARATION_METRIC_ID],
+        "evidence_basis": "quantitative",
+        "verification_plan": "copilot-backtest で変更前後を比較し、最大DDが悪化しないこと",
+        "risks": ["サンプルが小さく暫定域である"],
+        "reopen_justification": None,
+        **overrides,
+    }
+
+
+def narration_payload(**overrides: Any) -> dict[str, Any]:
+    """One surprise narration, citing only supplied identifiers."""
+    return {
+        "surprise_id": SURPRISE_ID,
+        "failure_class": "information_absent",
+        "narrative": "当時の入力に材料が無く、後から出た開示に兆候が読める",
+        "evidence_refs": [SURPRISE_ID, CITED_SOURCE_ID],
+        **overrides,
+    }
+
+
+def retro_result_payload(**overrides: Any) -> dict[str, Any]:
+    """A `retro-result-v1` document answering `retro_input_payload()`."""
+    return {
+        "schema_version": "retro-result-v1",
+        "as_of": RETRO_AS_OF,
+        "input_digest": retro_input_digest(),
+        "structural_review_note": "再点検の上で L2/L3 相当の構造的観察はなし",
+        "narrations": [narration_payload()],
+        "proposals": [proposal_payload()],
+        **overrides,
+    }
 
 
 @pytest.fixture

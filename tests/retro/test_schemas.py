@@ -1,9 +1,9 @@
-"""P8-31: the `retro-input-v1` strict schema (E31.2).
+"""P8-31/P8-32: the `retro-input-v1` and `retro-result-v1` strict schemas.
 
-The retrospective's dossier is the second machine-checked boundary in this
-repository, so it is held to the same rules as `analysis-input-v2`: unknown
-fields fail loudly, the version is a constant rather than a free string, and
-the document's digest binds it to its own contents.
+The retrospective's two documents are the second machine-checked boundary in
+this repository, so they are held to the same rules as the `analysis-*` pair:
+unknown fields fail loudly, the version is a constant rather than a free
+string, and the input's digest binds it to its own contents.
 """
 
 from __future__ import annotations
@@ -17,160 +17,24 @@ from pydantic import ValidationError
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.retro.schemas import (
     RETRO_INPUT_SCHEMA_VERSION,
+    RETRO_RESULT_SCHEMA_VERSION,
     RetroInput,
+    RetroResult,
+)
+from tests.retro.conftest import (
+    narration_payload,
+    proposal_payload,
+    retro_result_payload,
+)
+from tests.retro.conftest import (
+    retro_input_payload as _payload,
+)
+from tests.retro.conftest import (
+    retro_input_unsigned_payload as _unsigned_payload,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-RUN_ID = "11111111-1111-1111-1111-111111111111"
-
-
-def _unsigned_payload() -> dict[str, Any]:
-    """A complete document body, digest excluded."""
-    return {
-        "schema_version": RETRO_INPUT_SCHEMA_VERSION,
-        "as_of": "2027-03-29",
-        "generated_at": "2027-03-29T00:00:00Z",
-        "window_start": "2026-12-29",
-        "evaluation": {
-            "horizon_5d_weight": 0.6,
-            "horizon_20d_weight": 0.4,
-            "neutral_threshold_pct": 0.5,
-            "severe_threshold_pct": 2.0,
-            "preliminary_sample_threshold": 20,
-            "lookback_window_days": 90,
-            "proceed_severe_miss_watch_rate": 0.15,
-        },
-        "aggregates": {
-            "separation": [
-                {
-                    "metric_id": "metric:separation:5d",
-                    "horizon_days": 5,
-                    "value": -0.9,
-                    "sample_size": 3,
-                    "is_preliminary": True,
-                }
-            ],
-            "proceed_severe_miss_rate": [
-                {
-                    "metric_id": "metric:proceed_severe_miss_rate:5d",
-                    "horizon_days": 5,
-                    "value": 0.5,
-                    "baseline_value": 0.33,
-                    "is_flagged": True,
-                    "sample_size": 2,
-                    "is_preliminary": True,
-                }
-            ],
-            "skip_hit_rate": [
-                {
-                    "metric_id": "metric:skip_hit_rate:composed",
-                    "horizon_days": None,
-                    "value": None,
-                    "baseline_value": None,
-                    "is_flagged": False,
-                    "sample_size": 0,
-                    "is_preliminary": True,
-                }
-            ],
-        },
-        "signal_performance": [
-            {
-                "signal_name": "rsi_pullback",
-                "true_positive_count": 2,
-                "false_positive_count": 1,
-                "neutral_count": 0,
-                "hit_rate": 0.6,
-                "n": 3,
-                "is_preliminary": True,
-            }
-        ],
-        "human_alignment": [
-            {
-                "cell_id": "metric:human_alignment:followed:proceed:5d",
-                "decision": "followed",
-                "recommendation": "proceed",
-                "horizon_days": 5,
-                "count": 2,
-                "mean_forward_return_pct": 1.25,
-                "hit_count": 1,
-                "severe_miss_count": 1,
-            }
-        ],
-        "source_contribution": [
-            {
-                "contribution_id": "metric:source_contribution:news:finnhub",
-                "source_type": "news",
-                "provider": "finnhub",
-                "citation_count": 3,
-                "hit_citation_count": 2,
-                "miss_citation_count": 1,
-                "neutral_citation_count": 0,
-                "hit_citation_ratio": 0.6666666666666666,
-            }
-        ],
-        "surprises": {
-            "max_surprises": 5,
-            "dropped_count": 1,
-            "items": [
-                {
-                    "surprise_id": f"surprise:{RUN_ID}:AAPL",
-                    "run_id": RUN_ID,
-                    "symbol": "AAPL",
-                    "run_as_of": "2027-03-01",
-                    "strategy_key": "default",
-                    "recommendation": "proceed",
-                    "no_trade": False,
-                    "reasons": [
-                        {"text": "受注は堅調に見える", "source_ids": ["finnhub:1"]}
-                    ],
-                    "cited_source_ids": ["finnhub:1"],
-                    "outcomes": [
-                        {
-                            "horizon_days": 5,
-                            "maturity_as_of": "2027-03-08",
-                            "forward_return_pct": -8.0,
-                            "classification": "MISS_SEVERE",
-                        }
-                    ],
-                    "max_adverse_return_pct": -9.5,
-                    "freshness": {
-                        "news": [
-                            {
-                                "source_id": "finnhub:9",
-                                "published_at": "2027-03-05T00:00:00Z",
-                                "headline": "見出し",
-                                "summary": "本文",
-                                "url": "https://example.test/9",
-                                "provider": "finnhub",
-                            }
-                        ],
-                        "filings": [],
-                        "fetch_failed": False,
-                    },
-                }
-            ],
-        },
-        "config_snapshot": {
-            "sections": {"retro": {"max_surprises": 5, "approval_mode": "auto"}},
-            "config_hash": "0" * 64,
-        },
-        "proposals_ledger": {
-            "path": "docs/retro/proposals.md",
-            "exists": False,
-            "rejected_proposal_ids": [],
-        },
-        "notes": ["AAPL: 鮮度開示を取得できなかったため空欄"],
-    }
-
-
-def _payload() -> dict[str, Any]:
-    unsigned = _unsigned_payload()
-    return {
-        **unsigned,
-        "input_digest": canonical_json_digest(unsigned, excluded_field="input_digest"),
-    }
 
 
 class TestRetroInput:
@@ -292,3 +156,158 @@ class TestRetroInput:
         )
 
         assert document.surprises.items == []
+
+
+class TestRetroResult:
+    def test_accepts_and_round_trips_a_complete_document(self) -> None:
+        document = RetroResult.model_validate(retro_result_payload())
+
+        reloaded = RetroResult.model_validate(
+            json.loads(document.model_dump_json(by_alias=False))
+        )
+
+        assert reloaded == document
+        assert reloaded.proposals[0].level == "L1"
+        assert reloaded.narrations[0].failure_class == "information_absent"
+
+    def test_pins_the_schema_version_to_the_constant(self) -> None:
+        assert RETRO_RESULT_SCHEMA_VERSION == "retro-result-v1"
+        with pytest.raises(ValidationError, match="schema_version"):
+            RetroResult.model_validate(
+                retro_result_payload(schema_version="retro-result-v2")
+            )
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(
+                lambda payload: payload.update({"unexpected": 1}), id="document"
+            ),
+            pytest.param(
+                lambda payload: payload["proposals"][0].update({"unexpected": 1}),
+                id="proposal",
+            ),
+            pytest.param(
+                lambda payload: payload["narrations"][0].update({"unexpected": 1}),
+                id="narration",
+            ),
+        ],
+    )
+    def test_rejects_an_unknown_field_anywhere_in_the_document(
+        self, mutate: Callable[[dict[str, Any]], None]
+    ) -> None:
+        payload = retro_result_payload()
+        mutate(payload)
+
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            RetroResult.model_validate(payload)
+
+    def test_rejects_a_failure_class_outside_the_closed_enum(self) -> None:
+        payload = retro_result_payload(
+            narrations=[narration_payload(failure_class="bad_luck")]
+        )
+
+        with pytest.raises(ValidationError, match="failure_class"):
+            RetroResult.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        "failure_class",
+        [
+            "information_absent",
+            "information_present_missed",
+            "interpretation_error",
+            "exogenous",
+            "threshold_artifact",
+        ],
+    )
+    def test_accepts_every_documented_failure_class(self, failure_class: str) -> None:
+        document = RetroResult.model_validate(
+            retro_result_payload(
+                narrations=[narration_payload(failure_class=failure_class)]
+            )
+        )
+
+        assert document.narrations[0].failure_class == failure_class
+
+    def test_requires_a_narration_to_name_exactly_one_failure_class(self) -> None:
+        payload = retro_result_payload(narrations=[narration_payload()])
+        del payload["narrations"][0]["failure_class"]
+
+        with pytest.raises(ValidationError, match="failure_class"):
+            RetroResult.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("proposal_key", "  ", id="blank-key"),
+            pytest.param("title", "", id="blank-title"),
+            pytest.param("level", "L4", id="unknown-level"),
+            pytest.param("evidence_basis", "vibes", id="unknown-basis"),
+            pytest.param("evidence_refs", [], id="no-evidence"),
+            pytest.param("risks", [], id="no-risks"),
+        ],
+    )
+    def test_rejects_a_proposal_missing_a_mandatory_value(
+        self, field: str, value: object
+    ) -> None:
+        payload = retro_result_payload(proposals=[proposal_payload(**{field: value})])
+
+        with pytest.raises(ValidationError, match=field):
+            RetroResult.model_validate(payload)
+
+    def test_rejects_a_narration_citing_no_evidence(self) -> None:
+        payload = retro_result_payload(narrations=[narration_payload(evidence_refs=[])])
+
+        with pytest.raises(ValidationError, match="evidence_refs"):
+            RetroResult.model_validate(payload)
+
+    @pytest.mark.parametrize("level", ["L1", "L2"])
+    def test_requires_a_verification_plan_for_an_applied_level(
+        self, level: str
+    ) -> None:
+        payload = retro_result_payload(
+            proposals=[proposal_payload(level=level, verification_plan=None)]
+        )
+
+        with pytest.raises(ValidationError, match="verification_plan"):
+            RetroResult.model_validate(payload)
+
+    def test_allows_a_design_review_proposal_without_a_verification_plan(self) -> None:
+        document = RetroResult.model_validate(
+            retro_result_payload(
+                proposals=[proposal_payload(level="L3", verification_plan=None)]
+            )
+        )
+
+        assert document.proposals[0].verification_plan is None
+
+    def test_rejects_two_proposals_sharing_one_proposal_key(self) -> None:
+        payload = retro_result_payload(
+            proposals=[proposal_payload(), proposal_payload(title="別案")]
+        )
+
+        with pytest.raises(ValidationError, match="proposal_key"):
+            RetroResult.model_validate(payload)
+
+    def test_rejects_two_narrations_for_one_surprise(self) -> None:
+        payload = retro_result_payload(
+            narrations=[narration_payload(), narration_payload(narrative="別解釈")]
+        )
+
+        with pytest.raises(ValidationError, match="surprise_id"):
+            RetroResult.model_validate(payload)
+
+    def test_accepts_a_retrospective_that_proposes_nothing(self) -> None:
+        document = RetroResult.model_validate(
+            retro_result_payload(narrations=[], proposals=[])
+        )
+
+        assert document.proposals == []
+        assert document.structural_review_note
+
+    def test_requires_the_structural_review_note(self) -> None:
+        payload = retro_result_payload()
+        del payload["structural_review_note"]
+
+        with pytest.raises(ValidationError, match="structural_review_note"):
+            RetroResult.model_validate(payload)

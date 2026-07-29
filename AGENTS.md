@@ -147,6 +147,18 @@ the divergence, and update the stale canonical source or request a decision.
   - `analysis/**`: strict schema boundary, provenance, CON-03, fail-closed withholding
   - config/pipeline: fail-fast validation, fatal/fail-soft boundary, rerun safety
 
+## Git Workflow
+
+- Small, low-risk changes (documentation, comments, typo fixes, and similar
+  edits that do not change behavior) may be committed and pushed directly to
+  `main`.
+- Anything that changes behavior, public API, storage schema, or configuration
+  semantics goes through a branch and a pull request.
+- Direct-to-`main` does not relax the quality gates: run the matching checks
+  (`just verify` before a completion claim on code changes) either way.
+- This is the workflow for human/agent development. It does not apply to the
+  P8 retrospective apply flow, which is required to be one proposal per PR.
+
 ## Language and Scope
 
 - Code identifiers and public API names remain English.

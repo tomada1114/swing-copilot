@@ -1,9 +1,9 @@
-"""P8-30: `copilot-retro` CLI surface.
+"""P8-30/P8-31: `copilot-retro` CLI surface.
 
-Only `collect` and `evaluate` exist in this phase (E30.1): the later
-`prepare` / `export` / `ingest` subcommands must not be pre-announced in
-argparse, because a subcommand that parses but does nothing is worse than one
-that plainly does not exist yet.
+`collect`, `evaluate`, `export`, and the `prepare` umbrella exist; `ingest`
+(P8-32) must not be pre-announced in argparse, because a subcommand that
+parses but does nothing is worse than one that plainly does not exist yet
+(E30.1).
 """
 
 from __future__ import annotations

@@ -22,6 +22,10 @@ description: >
 
 - `<WORKDIR>/analysis_input.json` — 必須。絶対パスで渡される。読み取り専用。
   対象銘柄の指定が無ければ **全候補**が対象（news/filings が空の銘柄も含む）
+- 銘柄別入力スライス — 統括から渡された場合は、
+  [output-schema.md の入力スライス契約](../swing-daily/references/output-schema.md#サブエージェント入力スライス読み取り専用作業用)
+  に従い、これを分析に使う。`run_id` / `as_of` / `input_digest` が元 input と一致することを
+  確認し、担当外の元入力本文は読み込まない
 - [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md) — AC1〜AC15 の共通規約（**必読**）
 - [../swing-daily/references/output-schema.md](../swing-daily/references/output-schema.md) — JSON の形と `analysis_work/` 断片の形式
 - `src/swing_copilot/analysis/schemas.py` — **スキーマの最終正本**。JSON を組み立てる前に読む
@@ -87,7 +91,9 @@ description: >
 
 ```jsonc
 {
+  "run_id": "11111111-2222-3333-4444-555555555555", // analysis_input.json から逐語コピー
   "as_of": "2026-07-27",           // analysis_input.json の as_of をそのままコピー
+  "input_digest": "<64 lowercase hexadecimal SHA-256 characters>", // 同じく逐語コピー
   "symbol": "AAPL",
   "ac_check": "AC1-AC15 違反なし",
   "screening_assessment": {        // 全銘柄必須。null や省略は不可
@@ -98,7 +104,8 @@ description: >
 }
 ```
 
-`as_of` / `ac_check` は作業用メタデータで、統括がマージ時に捨てる。
+`run_id` / `as_of` / `input_digest` / `ac_check` は作業用メタデータで、統括がマージ時に捨てる。
+この 3 値は Step 0 の再入判定に使うため、いずれも省略・再計算・変更しない。
 `screening_assessment` の中身だけが `analysis_result.json` の
 `symbols[].screening_assessment` に載る。
 フィールド名は `schemas.py` の実装が正本。食い違ったら `schemas.py` に従う。

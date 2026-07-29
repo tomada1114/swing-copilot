@@ -93,16 +93,37 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 
 - **N > 9**: **Workflow ツール（Dynamic Workflow）での fan-out を第一候補**にする。
   決定論的な分岐・レジューム・進捗可視化・トークン予算連動が効くため、
-  組の数が多いときは Agent ツールの手動列挙より確実
+  組の数が多いときは Agent ツールの手動列挙より確実。**ただし、Workflow の利用が
+  明示的に許可されている場合に限る**。許可が無い、または利用できない場合は、
+  Agent ツールで下記と同じ指示を渡し、1 エージェントに同一専門家の複数銘柄を
+  割り当てて並列起動する
 - **N <= 9**: Agent ツール（`model: sonnet`）を **同一メッセージ内で並列に**起動する。
   1 エージェント = 1 専門家 × 数銘柄。同じ専門家を銘柄分割して複数並列起動してよい
 - どちらの手段でも **各エージェントへの指示内容は同一**（下記）。手段の違いが
   分析内容の違いになってはならない
 
+### サブエージェントへ渡す入力範囲
+
+`analysis_input.json` の全件をサブエージェントのメッセージに貼り付けない。親は、
+担当する専門家と銘柄に必要な入力だけを含む**読み取り専用の入力スライス**を作成し、
+その絶対パスを渡す。スライスの形式・不変条件は
+[references/output-schema.md](references/output-schema.md) の「サブエージェント入力スライス」
+に従う。
+
+- ニュース／開示専門家には、担当銘柄の該当テキストと必要なメタデータだけを渡す。
+  スクリーニング専門家には、担当銘柄の決定論的入力と必要な run-wide context だけを渡す
+- 切り出した文字列と `source_id` は元の入力から逐語コピーする。要約・ID の再採番・
+  他銘柄のテキスト混入をしない
+- 元の `analysis_input.json` の絶対パスも併記するが、サブエージェントは metadata の
+  照合以外で全件を読み込まない。これにより、長大な開示本文を担当外銘柄ごとに
+  重複してコンテキストへ載せない
+
 ### 各エージェントへの指示に必ず含めるもの
 
 1. `.claude/skills/<name>/SKILL.md` を読み、それに従うこと
-2. `analysis_input.json` の**絶対パス**と、担当する銘柄シンボルの列挙
+2. `analysis_input.json` と入力スライスの**絶対パス**、担当する銘柄シンボルの列挙。
+   スライスを分析に使い、元入力の `run_id` / `as_of` / `input_digest` と一致することを
+   確認すること
 3. 出力は `<WORKDIR>/analysis_work/<kind>-<SYMBOL>.json` への**ファイル書き出し**
    （`<kind>` は `news` / `filings` / `screening`、1 銘柄 1 ファイル）
 4. 親に返すのは **銘柄ごと 1〜2 行の要約 + 特記事項 + AC 自己点検結果**だけ。
@@ -164,6 +185,11 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 - `context.calendar_events`（マクロ／経済カレンダーイベント）も verdict 理由の根拠に
   できる。引用する場合は該当イベントの `source_id` を `reasons[].source_ids` に含める
   （run単位の文脈のため、全銘柄が共通して引用可）
+- **verdict を確定する前に provenance を検証する。** 各 `reasons[].source_ids` について、
+  空でなければ、該当銘柄の `news` / `filings` の ID または
+  `context.calendar_events` の ID に実在する完全一致の部分集合であることを、入力を見て
+  1 件ずつ確認する。ID を推測・生成・整形しない（AC6・AC7・AC10）。根拠がテキスト由来なら
+  空リストにせず、確認できない ID は書かない
 - 全銘柄が `skip`、または市場環境（`context.market_regime`）から当日の新規エントリーを
   推奨しないと判断した場合は `no_trade: true` とし、`no_trade_reason` に理由を書く
 - 最終判断は人間。verdict は指示ではなく推奨として書く（命令形・断定的売買指示は禁止）
@@ -181,6 +207,10 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 - 出力先は `<WORKDIR>/analysis_result.json`（`analysis_input.json` と同じディレクトリ）
 - input に無い symbol を追加しない。input にある symbol を落とさない
 - `analysis_work/` 由来の`run_id` / `as_of` / `input_digest` / `ac_check`を result へ持ち込まない（未知フィールドは hard fail）
+- 書き出し直前に、全 `verdict.reasons[].source_ids` をもう一度走査する。空でない各 ID は、
+  その symbol の入力 `news` / `filings` または run-wide `context.calendar_events` に
+  実在する完全一致の ID でなければならない。テキスト由来の理由に空リストを使わず、
+  決定論的入力だけの理由に限り空リストを許可する
 
 書き出したら JSON として妥当かを確認する。
 

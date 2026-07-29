@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _LOOKAHEAD_CALENDAR_DAYS = 30
 _DISABLED_NOTICE = "NO_EARNINGS_DATA: FINNHUB_API_KEY is not configured"
+_HISTORICAL_NOTICE = (
+    "NO_EARNINGS_DATA: historical replay cannot reconstruct what earnings "
+    "dates were known at the requested as_of"
+)
 
 
 class _EarningsStore(Protocol):
@@ -38,8 +42,16 @@ def collect_earnings_calendar(
     symbols: list[str],
     as_of: date,
     store: _EarningsStore,
+    *,
+    is_historical: bool = False,
 ) -> EarningsCollection:
-    """Fetch each symbol independently so one failure never stops the batch."""
+    """Fetch current data, or fail soft when point-in-time truth is unavailable."""
+    if is_historical:
+        return EarningsCollection(
+            False,
+            dict.fromkeys(symbols),
+            _HISTORICAL_NOTICE,
+        )
     if client is None:
         return EarningsCollection(False, {}, _DISABLED_NOTICE)
     end = as_of + timedelta(days=_LOOKAHEAD_CALENDAR_DAYS)

@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
-    from swing_copilot.models import DailyRunResult
+    from swing_copilot.models import DailyRunResult, Position
     from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
@@ -278,6 +278,18 @@ class _RunContext:
     # screening-derived like the other fields -- computed once inside step 6
     # (analysis export) itself via `_compute_performance_summary()`.
     performance_summary: PerformanceSummary | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RiskStepRequest:
+    """Point-in-time inputs for one risk step."""
+
+    candidates: list[Candidate]
+    portfolio: list[Position]
+    run_id: UUID
+    as_of: date
+    exposure: ExposureDecision
+    is_historical: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,10 +628,7 @@ def _run_step_screening(
 
 def _run_step_risk(
     deps: DailyDependencies,
-    candidates: list[Candidate],
-    run_id: UUID,
-    as_of: date,
-    exposure: ExposureDecision,
+    request: _RiskStepRequest,
 ) -> tuple[
     _StepOutcome,
     list[RiskAssessment],
@@ -627,8 +636,10 @@ def _run_step_risk(
     CircuitBreakerResult,
     str | None,
 ]:
-    portfolio = deps.state_store.get_open_positions(is_paper=True)
-    closed = deps.state_store.get_closed_positions(is_paper=True, as_of=as_of)
+    closed = deps.state_store.get_closed_positions(
+        is_paper=True,
+        as_of=request.as_of,
+    )
     circuit_config = deps.settings.risk
     circuit_breaker = evaluate_circuit_breaker(
         [
@@ -643,8 +654,8 @@ def _run_step_risk(
             for position in closed
         ],
         circuit_config.account_equity_usd,
-        as_of,
-        evaluation_time_for_as_of(as_of),
+        request.as_of,
+        evaluation_time_for_as_of(request.as_of),
         CircuitThresholds(
             circuit_config.circuit_daily_loss_pct,
             circuit_config.circuit_weekly_loss_pct,
@@ -657,12 +668,13 @@ def _run_step_risk(
         deps.earnings_client,
         sorted(
             {
-                *(position.symbol for position in portfolio),
-                *(candidate.symbol for candidate in candidates),
+                *(position.symbol for position in request.portfolio),
+                *(candidate.symbol for candidate in request.candidates),
             }
         ),
-        as_of,
+        request.as_of,
         deps.state_store,
+        is_historical=request.is_historical,
     )
     checker = RiskChecker(
         deps.settings,
@@ -676,14 +688,15 @@ def _run_step_risk(
         ),
     )
     assessments = checker.check(
-        candidates,
-        portfolio,
+        request.candidates,
+        request.portfolio,
         deps.settings.risk.account_equity_usd,
-        exposure,
+        request.exposure,
     )
-    deps.state_store.record_risk_assessments(assessments, run_id)
+    deps.state_store.record_risk_assessments(assessments, request.run_id)
     base_heat = calculate_portfolio_heat(
-        portfolio, deps.settings.risk.account_equity_usd
+        request.portfolio,
+        deps.settings.risk.account_equity_usd,
     )
     final_heat = (
         replace(base_heat, heat_pct=assessments[-1].portfolio_heat_pct)
@@ -1064,16 +1077,27 @@ def _run_step_excursions(deps: DailyDependencies, as_of: date) -> _StepOutcome:
 
 
 def _run_mae_mfe_soft_step(
-    deps: DailyDependencies, run_id: UUID, as_of: date
+    deps: DailyDependencies,
+    run_id: UUID,
+    as_of: date,
+    *,
+    is_historical: bool,
 ) -> _StepOutcome:
     """Execute and audit MAE/MFE without crossing the fatal boundary."""
     started_at = time.perf_counter()
     logger.debug("step mae_mfe starting")
-    try:
-        outcome = _run_step_excursions(deps, as_of)
-    except Exception as exc:
-        logger.exception("MAE/MFE step raised unexpectedly")
-        outcome = _StepOutcome(False, f"unexpected error: {exc}")
+    if is_historical:
+        outcome = _StepOutcome(
+            True,
+            "skipped: historical replay does not use current position state",
+            is_skipped=True,
+        )
+    else:
+        try:
+            outcome = _run_step_excursions(deps, as_of)
+        except Exception as exc:
+            logger.exception("MAE/MFE step raised unexpectedly")
+            outcome = _StepOutcome(False, f"unexpected error: {exc}")
     _record_step(deps, run_id, "mae_mfe", outcome, started_at)
     return outcome
 

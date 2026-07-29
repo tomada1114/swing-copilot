@@ -264,7 +264,18 @@ class TestFiveSymbolEndToEnd:
             "mae_mfe",
             "postmortem",
         ]
-        assert all(status == "success" for _step, status in steps)
+        assert dict(steps) == {
+            "1_prices": "success",
+            "2_fundamentals": "success",
+            "3_screening": "success",
+            "4_risk": "success",
+            "5_text": "success",
+            "6_analysis_export": "success",
+            "7_notify": "success",
+            "8_output": "success",
+            "mae_mfe": "skipped",
+            "postmortem": "success",
+        }
 
     def test_markdown_contains_every_candidate_and_the_pending_analysis_placeholder(
         self, deps

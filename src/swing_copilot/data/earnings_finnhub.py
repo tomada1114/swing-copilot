@@ -99,22 +99,24 @@ class FinnhubEarningsClient:
         if not isinstance(calendar, list):
             msg = "Finnhub earningsCalendar response must be a list"
             raise TypeError(msg)
-        matching = sorted(
-            (
-                item
-                for item in calendar
-                if isinstance(item, dict)
-                and item.get("symbol") == symbol
-                and isinstance(item.get("date"), str)
-            ),
-            key=lambda item: item["date"],
-        )
+        matching: list[tuple[date, dict[str, Any]]] = []
+        for item in calendar:
+            if (
+                not isinstance(item, dict)
+                or item.get("symbol") != symbol
+                or not isinstance(item.get("date"), str)
+            ):
+                continue
+            earnings_date = date.fromisoformat(item["date"])
+            if start <= earnings_date <= end:
+                matching.append((earnings_date, item))
+        matching.sort(key=lambda match: match[0])
         if not matching:
             return None
-        item = matching[0]
+        earnings_date, item = matching[0]
         return EarningsEvent(
             symbol=symbol,
-            earnings_date=date.fromisoformat(item["date"]),
+            earnings_date=earnings_date,
             session=str(item.get("hour") or "unknown"),
             fetched_at=self._clock.now(),
         )

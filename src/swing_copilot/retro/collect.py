@@ -1,0 +1,289 @@
+"""`copilot-retro collect`: archive past verdicts into DuckDB (P8-30).
+
+A daily run's qualitative verdict only ever exists in
+`reports/<date>/<run_id>/analysis_result.json`, which is gitignored and never
+reaches the database -- `copilot-ingest-analysis` deliberately does not open a
+connection. This module is the deferred ingestion path (decision D2): it walks
+that directory tree and replaces each run's rows in `verdicts` /
+`verdict_sources`, so a corrected re-export is picked up by simply re-running
+the scan.
+
+Two rules shape the error handling:
+
+* Code-owned metadata is resolved from `analysis_input.json`, never echoed
+  back from the skill's answer. `strategy_key` and every `source_type` come
+  from the input side (design.md §4, E30.2).
+* The scan is fail-soft per run and per source. An unusable run directory or
+  an unresolvable `source_id` is recorded as a note and skipped, because one
+  bad archive must not block the rest of the history (E30.2/E30.4). Scanning
+  zero runs is a normal success.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import date
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
+from swing_copilot.analysis.validate import (
+    AnalysisIngestError,
+    load_analysis_input,
+    load_analysis_result,
+)
+from swing_copilot.storage.verdict_records import (
+    VerdictReasonRecord,
+    VerdictRecord,
+    VerdictSourceRecord,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from swing_copilot.analysis.schemas import AnalysisInput, SymbolAnalysis
+    from swing_copilot.storage.state_store import StateStore
+
+logger = logging.getLogger(__name__)
+
+_NEWS = "news"
+_FILING = "filing"
+_CALENDAR = "calendar"
+
+
+@dataclass(frozen=True, slots=True)
+class RunDirectory:
+    """One `reports/<run_date>/<run_id>/` archive located by the scan."""
+
+    run_date: date
+    run_id: UUID
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CollectSummary:
+    """What one scan found, wrote, and had to skip."""
+
+    scanned_run_count: int
+    collected_run_count: int
+    verdict_count: int
+    source_count: int
+    notes: tuple[str, ...]
+
+
+def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSummary:
+    """Scan `reports_root` and replace each archived run's verdict rows.
+
+    Args:
+        state_store: Write target for `verdicts` / `verdict_sources`.
+        reports_root: The daily pipeline's output directory (`reports/`).
+            A missing or empty directory yields an all-zero summary.
+
+    Returns:
+        Per-scan counts plus a note for every run or citation that was
+        skipped. Notes are informational: a non-empty `notes` with a non-zero
+        `collected_run_count` is a partially successful scan, not a failure.
+    """
+    notes: list[str] = []
+    collected = verdict_count = source_count = 0
+    run_directories = _find_run_directories(reports_root)
+    for run_directory in run_directories:
+        written = _collect_one_run(state_store, run_directory, notes)
+        if written is None:
+            continue
+        collected += 1
+        verdict_count += written[0]
+        source_count += written[1]
+    return CollectSummary(
+        scanned_run_count=len(run_directories),
+        collected_run_count=collected,
+        verdict_count=verdict_count,
+        source_count=source_count,
+        notes=tuple(notes),
+    )
+
+
+def _find_run_directories(reports_root: Path) -> tuple[RunDirectory, ...]:
+    """Return every `<date>/<uuid>/` directory under `reports_root`, in order.
+
+    Entries that do not parse as a date or a UUID are not run archives (the
+    daily pipeline also writes per-run Markdown alongside them), so they are
+    ignored silently rather than noted as skips.
+    """
+    if not reports_root.is_dir():
+        return ()
+    found: list[RunDirectory] = []
+    for date_directory in sorted(reports_root.iterdir()):
+        run_date = _parse_date(date_directory)
+        if run_date is None:
+            continue
+        for run_directory in sorted(date_directory.iterdir()):
+            run_id = _parse_uuid(run_directory)
+            if run_id is None:
+                continue
+            found.append(
+                RunDirectory(run_date=run_date, run_id=run_id, path=run_directory)
+            )
+    return tuple(found)
+
+
+def _parse_date(candidate: Path) -> date | None:
+    if not candidate.is_dir():
+        return None
+    try:
+        return date.fromisoformat(candidate.name)
+    except ValueError:
+        return None
+
+
+def _parse_uuid(candidate: Path) -> UUID | None:
+    if not candidate.is_dir():
+        return None
+    try:
+        return UUID(candidate.name)
+    except ValueError:
+        return None
+
+
+def _collect_one_run(
+    state_store: StateStore, run_directory: RunDirectory, notes: list[str]
+) -> tuple[int, int] | None:
+    """Replace one run's rows; return `(verdicts, sources)` written, or `None`.
+
+    `None` means the run was skipped fail-soft, with the reason appended to
+    `notes`.
+    """
+    label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
+    input_path = run_directory.path / ANALYSIS_INPUT_FILENAME
+    result_path = run_directory.path / ANALYSIS_RESULT_FILENAME
+    for path in (input_path, result_path):
+        if not path.is_file():
+            notes.append(f"{label}: {path.name} が見つからないためスキップ")
+            return None
+
+    try:
+        analysis_input = load_analysis_input(input_path)
+        result = load_analysis_result(result_path)
+    except AnalysisIngestError:
+        logger.exception("retro collect: %s の解析に失敗", label)
+        notes.append(f"{label}: 解析文書を読めなかったためスキップ")
+        return None
+
+    if result.run_id != run_directory.run_id:
+        notes.append(
+            f"{label}: analysis_result.json の run_id "
+            f"({result.run_id}) がディレクトリ名と一致しないためスキップ"
+        )
+        return None
+
+    source_types = _SourceTypeIndex(analysis_input)
+    verdicts: list[VerdictRecord] = []
+    sources: list[VerdictSourceRecord] = []
+    for analysis in result.symbols:
+        verdicts.append(
+            VerdictRecord(
+                run_id=run_directory.run_id,
+                symbol=analysis.symbol,
+                as_of=run_directory.run_date,
+                strategy_key=analysis_input.strategy_key,
+                recommendation=analysis.verdict.recommendation,
+                reasons=tuple(
+                    VerdictReasonRecord(
+                        text=reason.text, source_ids=tuple(reason.source_ids)
+                    )
+                    for reason in analysis.verdict.reasons
+                ),
+                no_trade=result.no_trade,
+            )
+        )
+        sources.extend(
+            _resolve_sources(
+                analysis,
+                source_types,
+                run_id=run_directory.run_id,
+                label=label,
+                notes=notes,
+            )
+        )
+
+    state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources)
+    return len(verdicts), len(sources)
+
+
+class _SourceTypeIndex:
+    """Resolves a cited `source_id` to its code-owned `source_type`.
+
+    News and filing IDs are scoped to the candidate they were exported for;
+    calendar events are run-wide, so any symbol's analysis may cite them
+    (the same admission rule `analysis/validate.py` applies to provenance).
+    """
+
+    def __init__(self, analysis_input: AnalysisInput) -> None:
+        self._per_symbol = {
+            candidate.symbol: {
+                **{item.source_id: _NEWS for item in candidate.news},
+                **{item.source_id: _FILING for item in candidate.filings},
+            }
+            for candidate in analysis_input.candidates
+        }
+        self._calendar = {
+            item.source_id: _CALENDAR for item in analysis_input.context.calendar_events
+        }
+
+    def resolve(self, symbol: str, source_id: str) -> str | None:
+        """Return the source's type, or `None` if the input never supplied it."""
+        per_symbol = self._per_symbol.get(symbol, {})
+        return per_symbol.get(source_id) or self._calendar.get(source_id)
+
+
+def _cited_source_ids(analysis: SymbolAnalysis) -> tuple[str, ...]:
+    """Return every `source_id` this symbol's analysis referenced, deduplicated.
+
+    Facts, filing analyses, and verdict reasons are unioned (design §4): the
+    contribution table asks which sources informed *the judgement*, not which
+    section happened to name them.
+    """
+    cited: list[str] = []
+    if analysis.news_summary is not None:
+        for fact in analysis.news_summary.facts:
+            cited.extend(fact.source_ids)
+    for filing in analysis.filing_analyses:
+        cited.append(filing.source_id)
+        for fact in filing.facts:
+            cited.extend(fact.source_ids)
+    for reason in analysis.verdict.reasons:
+        cited.extend(reason.source_ids)
+    return tuple(dict.fromkeys(cited))
+
+
+def _resolve_sources(
+    analysis: SymbolAnalysis,
+    source_types: _SourceTypeIndex,
+    *,
+    run_id: UUID,
+    label: str,
+    notes: list[str],
+) -> list[VerdictSourceRecord]:
+    """Map one symbol's citations to rows, dropping the unresolvable ones."""
+    resolved: list[VerdictSourceRecord] = []
+    for source_id in _cited_source_ids(analysis):
+        source_type = source_types.resolve(analysis.symbol, source_id)
+        if source_type is None:
+            notes.append(
+                f"{label}: {analysis.symbol} が引用した source_id "
+                f"{source_id!r} は analysis_input.json に無いため除外"
+            )
+            continue
+        resolved.append(
+            VerdictSourceRecord(
+                run_id=run_id,
+                symbol=analysis.symbol,
+                source_id=source_id,
+                source_type=source_type,
+            )
+        )
+    return resolved

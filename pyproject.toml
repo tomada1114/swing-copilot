@@ -41,6 +41,7 @@ copilot-decision = "swing_copilot.paper.cli:main"
 copilot-history = "swing_copilot.report.history_cli:main"
 copilot-backtest = "swing_copilot.backtest.cli:main"
 copilot-ingest-analysis = "swing_copilot.analysis.cli:main"
+copilot-retro = "swing_copilot.retro.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"

@@ -139,7 +139,7 @@ flowchart TD
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲート・Distribution Day・表示専用FTD状態機械を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
-| 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する | P4-18 |
+| 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示`--as-of`では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する | P4-18 |
 | サーキットブレーカー | `risk/circuit_breaker.py` | ペーパージャーナルの実現損益だけをETの日次・週次・月次境界で再集計する。損失上限または連敗後24時間に該当する間は新規候補を拒否するが、収集・レポート生成は継続する | P4-19 |
 | MAE/MFEトラッキング | `paper/excursions.py`, `storage/paper_records.py` | fail-softな`mae_mfe` stepで、保有期間中の日足高安から1株あたりの累積MAE/MFEを日次保存する。欠損日は品質フラグ付きで既存極値を維持し、クローズ済みだけをUSD換算してperformanceへ集計する | P4-20 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
@@ -165,6 +165,12 @@ flowchart TD
 ## 4. データフロー（日次バッチのシーケンス）
 
 `pipeline/daily.py` は以下の8ステップを固定順で実行する。起動時に一意な`run_id`を発行し、`run_date`は取得済み日足の最新取引日または明示された`--as-of`から決める。ステップ(5)テキスト収集・(6)分析入力エクスポートが失敗しても、ステップ(8)はスクリーニング結果のみの縮退版を出力する。同じ`run_date`の再実行でも業務データを重複させず、実行履歴は別`run_id`で残す。
+
+明示`--as-of`は、履歴正本を持つ価格・財務・filing・ユニバースだけを時点選択する。
+決算予定の現在値と現在のオープンポジションは、後日取得・記録した情報を過去へ
+持ち込む可能性があり、当時の状態を復元できる監査履歴もない。そのため両方を参照せず
+「不明」として警告へ明示し、ポジション依存の保有銘柄追加・リスク文脈・MAE/MFE更新を
+行わない。通常実行（`--as-of`なし）は従来どおり現在状態を利用する。
 
 定性分析そのものはこのシーケンスに含まれない。ステップ(6)は`analysis_input.json`を書き出すだけであり、モデルを一切呼ばないため常に安全かつ低コストに実行できる。日次バッチが出すレポートの定性欄は常に「分析待ち」である。分析はこの後、Claude Codeスキルと`copilot-ingest-analysis`が担う（下記の第2シーケンス）。
 

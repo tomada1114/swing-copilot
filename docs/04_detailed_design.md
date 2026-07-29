@@ -81,7 +81,7 @@ P4対象の`data/eodhd_provider.py`はP1〜P2ではスタブも作成しない�
 
 以下はP1〜P2実装で解釈を委ねないアーキテクチャ契約である。後続の例示と矛盾した場合は本節を優先する。
 
-1. **時点整合性**: すべてのスクリーニング・リスクチェック・レポート・バックテストは明示的な`as_of`を受け取る。財務/filingは`filed_at <= as_of`、価格は`date <= as_of`、ユニバース履歴は`snapshot_date <= as_of`だけを参照する。境界は包含とし、直前・同値・直後をテストする。端末時刻は`Clock`経由の取得/監査metadataに限定し、業務可視性の代用にしない。
+1. **時点整合性**: すべてのスクリーニング・リスクチェック・レポート・バックテストは明示的な`as_of`を受け取る。財務/filingは`filed_at <= as_of`、価格は`date <= as_of`、ユニバース履歴は`snapshot_date <= as_of`だけを参照する。境界は包含とし、直前・同値・直後をテストする。端末時刻は`Clock`経由の取得/監査metadataに限定し、業務可視性の代用にしない。当時の公表・記録状態を復元できる履歴がない決算予定の現在値と現在のオープンポジションは、明示`--as-of`では参照せず不明へfail-softに縮退する。
 2. **単一構造化ストア**: 構造化データは`data/copilot.duckdb`へ集約し、株価時系列のみParquetへ外出しする。SQLiteは導入しない。`MarketStore`と`StateStore`は論理的な責務分離であり、同じ`Database`を共有する。
 3. **再実行可能性と原子性**: 毎回新しい`run_id`を作り、`runs`/`run_steps`に履歴を残す。業務データは訂正可能な自然キーupsertとし、複数行の論理更新は1トランザクションで全件commit/rollbackする。snapshot置換では消えた行も削除する。Parquet/report/分析JSONは同一directoryのtemp fileから`os.replace()`し、失敗時は旧destinationを保持する。過去の成功だけを理由にステップ全体を飛ばさない。（**P7（スキル移行）での変更**: LLM応答キャッシュ（`(model,prompt_hash,schema_version)`による再利用とcache hit再検証）は、LLM API呼び出しの廃止に伴い機構ごと削除した。）
 4. **決定的な候補生成**: 全Filterと全required SignalはAND条件。複数の`SignalHit`を銘柄単位の`Candidate`へ集約し、`(rsi14昇順, avg_volume降順, symbol昇順)`で順位付けして最大10件に絞る。根拠のない合成スコアは作らない。
@@ -384,10 +384,17 @@ class StateStore:
         """signalsへ記録する。(date, symbol, signal_name)の重複はUNIQUE制約によりスキップ（冪等）。"""
 
     def get_open_positions(self, is_paper: bool = True) -> list["Position"]:
-        """オープン中のポジション一覧を返す（risk/checks.pyのセクター集中度計算等で使用）。"""
+        """現在オープン中のポジション一覧を返す（通常run専用、時点履歴ではない）。"""
 ```
 
 **エラー処理**: DuckDB書き込みはステップ単位のトランザクションとし、失敗時はロールバックして呼び出し元へ例外を伝播する。`runs`/`run_steps`自体の記録失敗は標準エラーへ構造化ログを出し、非ゼロ終了する。
+
+`positions`は現在状態を訂正更新する台帳であり、各訂正がいつ可視になったかを復元する
+履歴テーブルではない。したがって`get_open_positions()`へ`as_of`条件を後付けして
+`entry_date`/`close_date`だけで過去状態を推測してはならない。`copilot-daily
+--as-of`はこの読み出しを呼ばず、保有銘柄の取得対象追加・セクター/相関/
+ポートフォリオヒート文脈・MAE/MFE更新から現在ポジションを除外し、レポートへ
+`NO_POSITION_DATA`警告を表示する。通常runは従来どおり現在のopen positionを使う。
 
 **`storage/json_guard.py::dumps_safe()`（P1-04、roadmap §5、Issue #13）**: `storage/`配下でJSONカラム（`signals.metrics_json`、`candidates.metrics_json`、`screening_rejections.detail`、`risk_assessments.reasons_json`/`warnings_json`/`sizing_warnings_json`）へ書き込むすべての`json.dumps`呼び出しは`dumps_safe()`を経由する。
 
@@ -677,9 +684,16 @@ class RiskChecker:
 `FinnhubEarningsClient`が`/calendar/earnings`を10秒タイムアウト、最大3試行、
 1秒間隔の全試行レート制限、1秒・2秒の決定論的指数バックオフで呼ぶ。
 429/5xxとtransport/timeoutだけを再試行し、4xx・応答型不正は再試行しない。
+応答イベントは要求した包含区間`start <= earnings_date <= end`でも再検証する。
 各銘柄の失敗は`pipeline/earnings.py`で`None`へ変換し、他銘柄を継続する。
 APIキー未設定時はガード全体を無効化し、
 `NO_EARNINGS_DATA: FINNHUB_API_KEY is not configured`をレポート警告へ渡す。
+
+Finnhubは「指定した過去日に公表済みだった予定」ではなく、呼び出し時点の訂正済み予定を
+返す。`earnings_calendar`も`symbol`主キーの現在値だけで履歴を保持しないため、明示
+`--as-of`ではAPI・保存済み現在値のどちらも参照せず、全銘柄を予定不明として
+`NO_EARNINGS_DATA: historical replay ...`警告へfail-softに縮退する。通常runの
+取得・訂正upsert・ガード判定は変更しない。
 
 `risk/earnings.py`は`as_of`翌日から決算日までの平日数（土日だけを除外）を数え、
 2営業日以内を`EARNINGS_PROXIMITY_BLOCK`、3〜5営業日を
@@ -1142,6 +1156,13 @@ run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする
 基づく試作結果であることを明示する。ブラウザ自動起動は行わない。
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
+
+明示`--as-of`では、現在状態しか持たない`get_open_positions()`をrun開始時にも
+risk step内にも呼ばない。保有集合を空として価格・テキスト対象へ追加せず、risk stepへ
+現在ポジションを渡さず、`mae_mfe` stepも`skipped`にする。これは空のポートフォリオを
+過去の事実として確定する意味ではなく、`NO_POSITION_DATA` noticeで時点状態が不明で
+あることを明示する縮退である。同様に決算予定は`collect_earnings_calendar(...,
+is_historical=True)`が外部call前に無効化する。通常runの両経路は変更しない。
 
 **P7（スキル移行）でのステップ6の変更**: ステップ名は`6_llm`から`6_analysis_export`
 へ変わり、内容もLLM分析から`analysis_input.json`のエクスポートだけになった

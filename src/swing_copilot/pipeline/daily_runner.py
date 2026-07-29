@@ -24,6 +24,7 @@ from swing_copilot.pipeline.daily import (
     _record_ftd_snapshot,
     _record_regime_snapshot,
     _record_step,
+    _RiskStepRequest,
     _run_mae_mfe_soft_step,
     _run_metadata,
     _run_mode,
@@ -46,6 +47,9 @@ from swing_copilot.pipeline.daily import (
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
 
 logger = logging.getLogger(__name__)
+_HISTORICAL_POSITION_NOTICE = (
+    "NO_POSITION_DATA: historical replay does not use current position state"
+)
 
 __all__ = ["DailyDependencies", "run_daily"]
 
@@ -77,9 +81,11 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     mode = _run_mode(options)
     fetch_cutoff = options.as_of or deps.clock.today()
-    held_symbols = {
-        position.symbol for position in deps.state_store.get_open_positions()
-    }
+    is_historical = options.as_of is not None
+    portfolio = (
+        [] if is_historical else deps.state_store.get_open_positions(is_paper=True)
+    )
+    held_symbols = {position.symbol for position in portfolio}
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
     # The market strip is never screened but must be fetched for report context.
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
@@ -161,7 +167,17 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
             portfolio_heat,
             circuit_breaker,
             earnings_guard_notice,
-        ) = _run_step_risk(deps, candidates, run_id, run_date, exposure_decision)
+        ) = _run_step_risk(
+            deps,
+            _RiskStepRequest(
+                candidates,
+                portfolio,
+                run_id,
+                run_date,
+                exposure_decision,
+                is_historical,
+            ),
+        )
         return outcome
 
     def _step_prices() -> _StepOutcome:
@@ -224,7 +240,12 @@ def _run_soft_steps(
     degraded = deps.universe_warning is not None
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
 
-    excursion_outcome = _run_mae_mfe_soft_step(deps, ctx.run_id, ctx.run_date)
+    excursion_outcome = _run_mae_mfe_soft_step(
+        deps,
+        ctx.run_id,
+        ctx.run_date,
+        is_historical=options.as_of is not None,
+    )
     degraded = degraded or not excursion_outcome.success
 
     text_outcome, text_items = _run_text_soft_step(
@@ -289,6 +310,7 @@ def _run_soft_steps(
     status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
     notices = (
         ((deps.universe_warning,) if deps.universe_warning is not None else ())
+        + ((_HISTORICAL_POSITION_NOTICE,) if options.as_of is not None else ())
         + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
         + tuple(
             f"{label}: {outcome.detail}"

@@ -117,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `copilot-daily --as-of` no longer leaks current open positions or
+  currently known Finnhub earnings dates into historical replays; both
+  unavailable point-in-time sources now fail soft with explicit notices,
+  while normal runs keep using current state
 - Screening rejection detail no longer reports a raw NaN `net_income` (a
   real EDGAR data gap) as a non-finite JSON value — it now reports `null`,
   matching the existing `fcf`/`equity_ratio` convention; the raw NaN

@@ -451,7 +451,7 @@ class TestMaeMfeFailureDegrades:
 
         monkeypatch.setattr(daily_module, "update_position_excursions", _raise)
 
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+        result = run_daily(DailyRunOptions(is_dry_run=True), base_deps)
 
         assert result.status == RunStatus.DEGRADED
         assert result.exit_code == 0
@@ -554,7 +554,7 @@ class TestHeldSymbolGetsTextCoverage:
         )
         deps = replace(base_deps, news_client=FakeNewsClient())
 
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
         with state_store._database.connect() as conn:  # noqa: SLF001

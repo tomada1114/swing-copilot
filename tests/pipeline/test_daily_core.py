@@ -470,7 +470,9 @@ class TestSymbolLimit:
             ).fetchall()
         assert rows == []
 
-    def test_zero_limit_keeps_open_holdings_in_the_fetch_scope(self, deps, state_store):
+    def test_zero_limit_keeps_open_holdings_in_current_run_fetch_scope(
+        self, deps, state_store
+    ):
         class RecordingDataProvider(FakeDataProvider):
             def __init__(self, bars):
                 super().__init__(bars)
@@ -495,13 +497,59 @@ class TestSymbolLimit:
         provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
         zero_limit_deps = replace(deps, data_provider=provider)
 
-        result = run_daily(
-            DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=0), zero_limit_deps
-        )
+        result = run_daily(DailyRunOptions(is_dry_run=True, limit=0), zero_limit_deps)
 
         assert result.status == RunStatus.SUCCESS
         assert "AAPL" in provider.requested_symbols[0]
         assert "MSFT" not in provider.requested_symbols[0]
+
+    @pytest.mark.parametrize(
+        "entry_offset",
+        [
+            pytest.param(-1, id="immediately-before"),
+            pytest.param(0, id="exactly-at"),
+            pytest.param(1, id="immediately-after"),
+        ],
+    )
+    def test_historical_run_excludes_current_positions_at_all_boundaries(
+        self, deps, state_store, entry_offset
+    ):
+        class RecordingDataProvider(FakeDataProvider):
+            def __init__(self, bars):
+                super().__init__(bars)
+                self.requested_symbols: list[tuple[str, ...]] = []
+
+            def get_daily_bars(self, symbols, start, end):
+                self.requested_symbols.append(tuple(symbols))
+                return super().get_daily_bars(symbols, start, end)
+
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol="AAPL",
+                is_paper=True,
+                entry_date=AS_OF + timedelta(days=entry_offset),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+                stop_price=95.0,
+            )
+        )
+        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
+        historical_deps = replace(deps, data_provider=provider)
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=0),
+            historical_deps,
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert "AAPL" not in provider.requested_symbols[0]
+        assert result.brief is not None
+        assert any(
+            "historical replay does not use current position state" in notice
+            for notice in result.brief.notices
+        )
 
 
 class TestFundamentalsStepSkipped:

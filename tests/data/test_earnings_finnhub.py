@@ -51,6 +51,30 @@ def test_normalizes_earliest_matching_event_and_query_parameters():
     }
 
 
+@pytest.mark.parametrize(
+    ("earnings_date", "expected_date"),
+    [
+        pytest.param("2026-08-19", date(2026, 8, 19), id="immediately-before"),
+        pytest.param("2026-08-20", date(2026, 8, 20), id="exactly-at"),
+        pytest.param("2026-08-21", None, id="immediately-after"),
+    ],
+)
+def test_filters_event_dates_at_inclusive_end_boundary(earnings_date, expected_date):
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=lambda _url, _params: _payload(earnings_date),
+        clock=FakeClock(),
+    )
+
+    event = client.fetch_next_earnings(
+        "AAPL",
+        date(2026, 7, 21),
+        date(2026, 8, 20),
+    )
+
+    assert (None if event is None else event.earnings_date) == expected_date
+
+
 def test_timeout_retries_to_total_attempt_ceiling_with_deterministic_backoff():
     attempts = 0
     backoffs: list[float] = []

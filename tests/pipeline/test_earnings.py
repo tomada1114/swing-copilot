@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import httpx
+import pytest
 
 from swing_copilot.data.earnings import EarningsEvent
 from swing_copilot.pipeline.earnings import collect_earnings_calendar
@@ -19,7 +20,11 @@ class FakeStore:
 
 
 class FakeClient:
+    def __init__(self):
+        self.calls = []
+
     def fetch_next_earnings(self, symbol, start, end):
+        self.calls.append((symbol, start, end))
         del start, end
         if symbol == "FAIL":
             message = "all attempts exhausted"
@@ -49,3 +54,31 @@ def test_exhausted_symbol_is_unknown_while_other_symbols_continue():
     assert result.events_by_symbol["FAIL"] is None
     assert result.events_by_symbol["AAPL"] is not None
     assert [event.symbol for event in store.events] == ["AAPL"]
+
+
+@pytest.mark.parametrize(
+    "as_of",
+    [
+        pytest.param(date(2026, 7, 20), id="immediately-before"),
+        pytest.param(date(2026, 7, 21), id="exactly-at"),
+        pytest.param(date(2026, 7, 22), id="immediately-after"),
+    ],
+)
+def test_historical_replay_never_calls_current_earnings_source(as_of):
+    client = FakeClient()
+    store = FakeStore()
+
+    result = collect_earnings_calendar(
+        client,
+        ["AAPL"],
+        as_of,
+        store,
+        is_historical=True,
+    )
+
+    assert result.is_enabled is False
+    assert result.events_by_symbol == {"AAPL": None}
+    assert result.notice is not None
+    assert "historical replay" in result.notice
+    assert client.calls == []
+    assert store.events == []

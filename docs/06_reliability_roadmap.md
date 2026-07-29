@@ -69,6 +69,7 @@ Markdown が `reports/` に原子的に残るため「実行結果の永続化�
 | P5 シグナル拡充（検証済み導入） | Minervini、決算後スコア、実行状態分類、VCP | P2 の装置で裏取りしながら追加 |
 | P6 実運用ギャップ修正 | 実 API 動作確認で発見したリグレッション・境界欠落・会計/表示バグの修正 | P1〜P5 を「テストが通る」から「毎日回る」へ |
 | P7 定性分析のスキル移行 | LLM API 統合の全廃、`analysis/` 境界の新設、Claude Code スキルによる定性分析と `copilot-ingest-analysis` での検証 | 叙述の担い手を API 課金・予算ゲート・キャッシュなしで持てるようにする |
+| P8 振り返り→改善提案 | verdict 当否検証（`verdict_outcomes`）、統合振り返り CLI `copilot-retro` とスキル `swing-retro`、提案台帳と適用 PR | 定性レイヤを含む分析ロジック全体を、蓄積した証拠に基づき継続改善する（軽微は即時適用 + PR、中規模以上は設計承認後に適用 + PR） |
 
 実施順序は P1 → P2 → P3 → P4 → P5 を基本とするが、フェーズ内は並列可能、
 P3/P4 は P2 完了を待たず着手可能（P5 のみ P2 完了が前提）。
@@ -774,6 +775,115 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
   provenance 違反・CON-03 違反を含む `analysis_result.json` で、当該銘柄だけが
   「検証不合格のため非表示」になり他の銘柄が巻き込まれないこと。
 - **依存**: P6-26 / P6-27（同じ境界を扱うため、両者の完了後に実施）
+
+### P8: 振り返り→改善提案機構（2026-07-28）
+
+過去の LLM 定性 verdict の当否を定量計測し、シグナル成績・ソース貢献・
+人間判断との突き合わせを統合俯瞰した上で、パラメータ調整（L1）から
+構成変更（L2）・設計見直し（L3）までの改善提案を生成・適用する仕組み。
+適用は L1 が即時（検証合格 + PR 作成まで）、L2/L3 が設計の
+AskUserQuestion 承認後（適用 + PR 作成まで）。いずれも 1 提案 1 PR で
+main 直接コミットはせず、「人間判断を挟む」原則は PR マージ（および
+L2/L3 の設計承認）に集約する。Python 側には config / コードを書き換える
+経路を持たせない。詳細設計と事前確定判断は
+`docs/goal-prompts/swing-copilot-retrospective/`（design.md / decisions.md）を
+正とする。P7 完了が前提。
+
+### P8-30 【基盤/worktree:p8-retro】storage/retro - verdict 永続化と当否評価
+
+- **目的**: LLM verdict を DuckDB に正本化し、forward return で当否を
+  決定論的に分類する（P2-11 の verdict 版・観測専用）。
+- **スコープ**: `storage/schema.py`（新テーブル `verdicts` /
+  `verdict_sources` / `verdict_outcomes`）、`retro/`（新設: `cli.py` /
+  `collect.py` / `evaluate.py`）、`pipeline/forward_returns.py`（postmortem
+  から純関数抽出）、`pyproject.toml`（`copilot-retro`）
+- **主要仕様**:
+  - `copilot-retro collect`: `reports/<date>/<run_id>/analysis_result.json` を
+    走査し run 単位の完全置換で取り込み。source_type は
+    `analysis_input.json`（コード所有側）から解決。
+  - `copilot-retro evaluate --as-of`: 満期営業日（run_date + 5/20 営業日、
+    `満期日 <= as_of`）の終値で forward return を確定し、verdict 非対称
+    分類（proceed: HIT/MISS_MILD/MISS_SEVERE、skip: HIT/NEUTRAL/
+    MISS_MILD/MISS_SEVERE）。閾値は `settings.postmortem` を流用。
+    `(run_id, horizon_days)` 単位の完全置換で冪等。
+  - `signal_outcomes` と postmortem の既存挙動は不変（回帰テストで担保）。
+- **動作確認**: フィクスチャの reports/ ディレクトリと DB で collect →
+  evaluate を dry-run し、3 テーブルに行が生成されること。再実行で行が
+  重複しないこと。bar 欠損銘柄がスキップされ壊れないこと。
+- **Not in scope**: 集約・レポート（P8-31）、評価コードによる config /
+  コードの書き換え（恒久。適用は P8-33 のスキルが PR 経由で行う）
+- **依存**: P7
+
+### P8-31 【依存あり/worktree:p8-retro】retro - 集約とretro_input.json エクスポート
+
+- **目的**: 振り返りスキルに渡す証拠 dossier を strict スキーマで出力する。
+- **スコープ**: `retro/export.py` / `retro/schemas.py`（`retro-input-v1`）、
+  `config.py`（`RetroConfig`: `max_surprises=5` (要検証) 等）
+- **主要仕様**:
+  - 集約: separation（proceed 群−skip 群の平均 forward return、最重要）、
+    proceed 重大外し率（ウォッチ 15% (要検証)・候補全体ベースライン併記）、
+    skip 的中率（ベースライン比）、`trades_journal` × verdict クロス集計、
+    ソース貢献表（`text_items` join）。サンプル 20 件未満は「暫定」。
+  - サプライズ選定: MISS_SEVERE 両方向、上限超過は |return| 降順で切り
+    件数明示。各銘柄に当時の verdict・reasons・実現パスと、run 以降の
+    鮮度データ（既存 text アダプタで取得、`analysis.*` 予算と timeout/
+    retry/rate limit を流用）を同梱。
+  - `input_digest`（SHA-256）付与、原子的書き込み。
+- **動作確認**: フィクスチャ DB から export し、strict スキーマで
+  round-trip できること。サプライズ超過時に切り捨て件数が出力に残ること。
+- **Not in scope**: 提案の生成・検証（スキル / P8-32）
+- **依存**: P8-30
+
+### P8-32 【依存あり/worktree:p8-retro】retro - retro_result 検証・レポート・提案台帳
+
+- **目的**: スキル出力を信用せず検証し、振り返りレポートと提案台帳へ
+  fail-closed で反映する。
+- **スコープ**: `retro/ingest.py` / `retro/schemas.py`（`retro-result-v1`）、
+  `docs/retro/`（台帳 `proposals.md` + `proposals/RP-NNN-<slug>.md`）
+- **主要仕様**:
+  - strict 検証・`as_of`/`input_digest` 同一性（不一致は run ごと hard fail）。
+  - evidence 参照検証: `evidence_refs` ⊆ 供給した集約 ID・サプライズ ID・
+    source_id。CON-03 機械検査（`analysis/safety.py` 流用）。違反は
+    当該提案/叙述のみ withhold・リトライなし。
+  - 提案は `level`（L1/L2/L3）・`evidence_basis`・`verification_plan`
+    （L1/L2 必須、指標・閾値系は `copilot-backtest` の前後比較手順）・
+    敗因分類（`information_absent` 等 5 値）を必須フィールドに持つ。
+  - ingest の台帳操作は status=proposed の追記のみ。以降の遷移
+    （applied(PR#) / rejected / deferred / verification_failed）は適用段階の
+    スキルが記録する。rejected / verification_failed と同一 `proposal_key` の
+    再提案は `reopen_justification` がなければ差し戻す。
+- **動作確認**: 違反入りフィクスチャ result で当該提案だけが withhold され
+  他が巻き込まれないこと。再 ingest で台帳が重複追記されないこと。
+- **Not in scope**: ingest 自身による config / コードの書き換え（恒久。
+  適用は P8-33 のスキルが検証・承認を経て PR で行う）
+- **依存**: P8-31
+
+### P8-33 【依存あり/worktree:p8-retro】skill/docs - swing-retro スキルと設計正本昇格
+
+- **目的**: 人間が数日おきに手動起動する振り返りスキルを整備し、設計を
+  正本へ昇格する。
+- **スコープ**: `.claude/skills/swing-retro/`、`docs/retro/` 初期化、
+  `docs/04_detailed_design.md`（3.x 節新設）、`docs/reference.md`
+- **主要仕様**:
+  - スキル手順: `copilot-retro prepare` → dossier + 台帳読み込み →
+    サプライズ敗因分析 / シグナル×verdict 突合 / ソース貢献の並列深掘り →
+    証拠ゲート判定（L1: n≥20 + 方向一致、L2: n≥40 または敗因反復、
+    L3: separation ≤ 0 持続または systemic 欠陥 + 代替案 2 案）→
+    `retro_result.json` → `copilot-retro ingest` → ユーザーへ提示 →
+    適用: L1 は即時（提案ごとのブランチで config 編集 →
+    verification_plan + `just verify` 合格 → PR 作成）、L2/L3 は設計を
+    AskUserQuestion で承認後に適用 + PR 作成（規模超過は goal-prompt 化）。
+    不合格・却下は台帳に記録して終了。
+  - 毎回「L2/L3 相当の構造的観察はないか」を自問し、なければ
+    「再点検の上でなし」と明記（細かい調整への偏り防止）。
+  - 叙述規約は `swing-daily` の analysis-conventions を流用。
+- **動作確認**: フィクスチャ dossier でスキルを 1 周し、レポートと
+  proposed 提案が生成されること。L1 適用で検証合格時のみ PR 用ブランチと
+  台帳の applied 記録が作られ、不合格時は適用が取り消されること。
+  rejected 記録後、同一提案が ingest で差し戻されること。
+- **Not in scope**: daily レポートへの Verdict 成績節、`analysis_result` への
+  confidence フィールド追加（いずれも本機構の初回運用で提案として検討）
+- **依存**: P8-30〜P8-32
 
 ## 6. 知見の出典と信頼性
 

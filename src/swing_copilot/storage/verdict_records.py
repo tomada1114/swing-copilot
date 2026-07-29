@@ -17,6 +17,7 @@ succeeded rolls the whole write back and leaves the previous state intact.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -109,6 +110,44 @@ class VerdictRow:
     symbol: str
     as_of: date
     recommendation: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictCitationRow:
+    """One source a matured verdict's analysis cited (P8-31, design §5.3 item 4).
+
+    `source_url` comes from the `text_items` join and is `None` when the cited
+    item is no longer (or was never) recorded there. That is data quality to
+    report, not a reason to drop the citation: the contribution table still
+    needs to know the source was used.
+    """
+
+    run_id: UUID
+    symbol: str
+    source_id: str
+    source_type: str
+    source_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictDecisionRow:
+    """One human decision paired with the verdict it accepted or overrode.
+
+    `trades_journal` x `verdicts` x `verdict_outcomes` (E31.5). The realized
+    figure is the horizon's `forward_return_pct`, deliberately not an
+    execution-aware P&L: the retrospective adds no new realized-return
+    calculation, and `skip` symbols were never actually traded anyway
+    (design §12).
+    """
+
+    run_id: UUID
+    symbol: str
+    strategy_key: str
+    decision: str
+    recommendation: str
+    horizon_days: int
+    forward_return_pct: float
+    classification: str
 
 
 def replace_run_verdicts(
@@ -262,6 +301,188 @@ def get_verdicts_in_window(
             recommendation=recommendation,
         )
         for run_id, symbol, row_as_of, recommendation in rows
+    )
+
+
+def get_verdict_outcomes_in_window(
+    database: Database, window_start: date, as_of: date
+) -> tuple[VerdictOutcomeRecord, ...]:
+    """Return classifications whose *maturity* date falls in `[window_start, as_of]`.
+
+    The window is matched against `verdict_outcomes.as_of`, which holds the
+    maturity session rather than the observation date (decision D7). So the
+    aggregate window means "verdicts that came due in this period", and
+    re-running the retrospective later does not shuffle rows between windows.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        window_start: Inclusive earliest maturity date.
+        as_of: Inclusive latest maturity date, the retrospective's cutoff.
+
+    Returns:
+        Rows ordered by `(as_of, run_id, symbol, horizon_days)` so every
+        aggregate built from them is deterministic.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, symbol, horizon_days, as_of, recommendation,
+                   forward_return_pct, classification
+            FROM verdict_outcomes
+            WHERE as_of >= ? AND as_of <= ?
+            ORDER BY as_of, run_id, symbol, horizon_days
+            """,
+            [window_start, as_of],
+        ).fetchall()
+    return tuple(
+        VerdictOutcomeRecord(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            horizon_days=row[2],
+            as_of=row[3],
+            recommendation=row[4],
+            forward_return_pct=row[5],
+            classification=row[6],
+        )
+        for row in rows
+    )
+
+
+def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, ...]:
+    """Return one run's collected verdicts, reasons included.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The archived run to read back.
+
+    Returns:
+        Rows ordered by symbol, empty for a run that was never collected.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, symbol, as_of, strategy_key, recommendation,
+                   reasons_json, no_trade
+            FROM verdicts
+            WHERE run_id = ?
+            ORDER BY symbol
+            """,
+            [str(run_id)],
+        ).fetchall()
+    return tuple(
+        VerdictRecord(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            as_of=row[2],
+            strategy_key=row[3],
+            recommendation=row[4],
+            reasons=_reasons_from_json(row[5]),
+            no_trade=row[6],
+        )
+        for row in rows
+    )
+
+
+def _reasons_from_json(raw: str) -> tuple[VerdictReasonRecord, ...]:
+    """Rebuild the reason list `replace_run_verdicts` serialized."""
+    reasons: list[dict[str, object]] = json.loads(str(raw))
+    return tuple(
+        VerdictReasonRecord(
+            text=str(reason["text"]),
+            source_ids=tuple(str(value) for value in list(reason["source_ids"])),  # type: ignore[call-overload]
+        )
+        for reason in reasons
+    )
+
+
+def get_verdict_citations_in_window(
+    database: Database, window_start: date, as_of: date
+) -> tuple[VerdictCitationRow, ...]:
+    """Return the sources cited by verdicts that matured in the window.
+
+    One row per `(run, symbol, source)`, not per horizon: a source cited once
+    must not be counted twice because both horizons came due.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        window_start: Inclusive earliest maturity date.
+        as_of: Inclusive latest maturity date.
+
+    Returns:
+        Rows ordered by `(run_id, symbol, source_id)`.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT vs.run_id, vs.symbol, vs.source_id, vs.source_type,
+                   ti.source_url
+            FROM verdict_sources vs
+            JOIN verdict_outcomes vo
+              ON vo.run_id = vs.run_id AND vo.symbol = vs.symbol
+            LEFT JOIN text_items ti ON ti.source_id = vs.source_id
+            WHERE vo.as_of >= ? AND vo.as_of <= ?
+            ORDER BY vs.run_id, vs.symbol, vs.source_id
+            """,
+            [window_start, as_of],
+        ).fetchall()
+    return tuple(
+        VerdictCitationRow(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            source_id=row[2],
+            source_type=row[3],
+            source_url=row[4],
+        )
+        for row in rows
+    )
+
+
+def get_verdict_decision_alignment(
+    database: Database, window_start: date, as_of: date
+) -> tuple[VerdictDecisionRow, ...]:
+    """Return matured verdicts paired with the human decision recorded for them.
+
+    Joined on `(run_id, symbol)` rather than also on `strategy_key`: a verdict
+    is one judgement per symbol per run, so every strategy row the human
+    journaled for that symbol is measured against the same verdict.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        window_start: Inclusive earliest maturity date.
+        as_of: Inclusive latest maturity date.
+
+    Returns:
+        Rows ordered by `(run_id, symbol, strategy_key, horizon_days)`. Empty
+        when the journal is empty -- the cross-tab is observation-only and a
+        user who never journals simply has nothing to cross.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT tj.run_id, tj.symbol, tj.strategy_key, tj.decision,
+                   v.recommendation, vo.horizon_days, vo.forward_return_pct,
+                   vo.classification
+            FROM trades_journal tj
+            JOIN verdicts v ON v.run_id = tj.run_id AND v.symbol = tj.symbol
+            JOIN verdict_outcomes vo
+              ON vo.run_id = tj.run_id AND vo.symbol = tj.symbol
+            WHERE vo.as_of >= ? AND vo.as_of <= ?
+            ORDER BY tj.run_id, tj.symbol, tj.strategy_key, vo.horizon_days
+            """,
+            [window_start, as_of],
+        ).fetchall()
+    return tuple(
+        VerdictDecisionRow(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            strategy_key=row[2],
+            decision=row[3],
+            recommendation=row[4],
+            horizon_days=row[5],
+            forward_return_pct=row[6],
+            classification=row[7],
+        )
+        for row in rows
     )
 
 

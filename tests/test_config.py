@@ -452,3 +452,36 @@ def test_settings_no_longer_has_an_llm_or_budget_section():
         Settings.model_validate({"llm": {"cache_ttl_days": 5}})
     with pytest.raises(ValidationError):
         Settings.model_validate({"budget": {"monthly_cost_cap_usd": 10.0}})
+
+
+class TestRetroConfig:
+    """P8-31 (E31.1): the retrospective's own two settings, and only those."""
+
+    def test_has_documented_defaults(self):
+        settings = load_settings("config/settings.yaml")
+        assert settings.retro.max_surprises == 5
+        assert settings.retro.approval_mode == "auto"
+
+    def test_max_surprises_is_configurable(self):
+        settings = Settings.model_validate({"retro": {"max_surprises": 3}})
+        assert settings.retro.max_surprises == 3
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"max_surprises": 0}, id="max-surprises-below-one"),
+            pytest.param({"approval_mode": "sometimes"}, id="unknown-approval-mode"),
+            pytest.param({"unknown_field": 1}, id="unknown-field"),
+        ],
+    )
+    def test_rejects_invalid_values(self, overrides):
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"retro": overrides})
+
+    def test_does_not_duplicate_the_postmortem_thresholds(self):
+        # D6: verdict evaluation reuses `settings.postmortem`'s window and
+        # thresholds rather than growing a second vocabulary for the same
+        # quantities, so these must stay unknown fields here.
+        for duplicated in ("neutral_threshold_pct", "preliminary_sample_threshold"):
+            with pytest.raises(ValidationError):
+                Settings.model_validate({"retro": {duplicated: 1.0}})

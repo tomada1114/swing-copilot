@@ -113,3 +113,12 @@ regime:
   ftd_correction_decline_pct: 0.03
   ftd_correction_down_days: 3
   ftd_gain_pct: 0.0125
+
+retro:
+  # roadmap §5 P8-31（要検証）: how many MISS_SEVERE symbols get a full
+  # evidence dossier in retro_input.json. Overflow is truncated by
+  # |forward_return| and the dropped count is reported.
+  max_surprises: 5
+  # Reserved (D10): the retrospective skill applies L1 proposals without
+  # prior approval today. `manual` is a future switch, not yet read.
+  approval_mode: auto

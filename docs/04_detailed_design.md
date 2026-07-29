@@ -1351,7 +1351,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v2`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
 
-内容物: `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+内容物: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
 
 **サプライズ銘柄**（`surprises`）は`MISS_SEVERE`を両方向（proceedの重大逆行・skipの大幅上昇）から選び、`settings.retro.max_surprises`（既定5、要検証）で打ち切る。超過分は`|forward_return|`降順で切り、切った件数を`dropped_count`に必ず残す（silent cap禁止：読み手が「重大な外れはこれだけだった」と「11件中の上位5件だった」を区別できなければならない）。各銘柄に当時のverdict・reasons・引用source_id・実現パス（5/20日リターンと期間内最大逆行）と、**鮮度データ**（runのas_of以降〜retroのas_ofに公開されたニュース・開示を既存textアダプタで今取得したもの）を同梱する。鮮度データは`analysis.*`の件数・文字数予算とtimeout/retry/rate limitをそのまま流用し、取得失敗は当該銘柄の`fetch_failed`を立ててnoteに残すfail-soft（export全体を落とさない）。APIキーが無い側はクライアントを組み立てず、その分の鮮度が空になるだけで失敗にはしない。
 

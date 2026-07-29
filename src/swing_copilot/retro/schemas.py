@@ -1,8 +1,8 @@
-"""Strict schema for the retrospective's evidence dossier (P8-31, design §5.3).
+"""Strict schemas for the retrospective's two documents (P8-31/P8-32).
 
 `retro_input.json` is written by `copilot-retro export` and read by the
-`swing-retro` skill. It is the pipeline -> skill half of the retrospective
-contract; the skill's answer (`retro-result-v1`) is validated back in P8-32.
+`swing-retro` skill; `retro_result.json` is the skill's answer, validated
+back by `copilot-retro ingest` (design §5.3/§5.4).
 
 Held to the same rules as `analysis-input-v2` (E31.2):
 
@@ -22,10 +22,17 @@ named cannot be checked.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Final, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    model_validator,
+)
 
 from swing_copilot.analysis.schemas import (
     FilingInput,
@@ -36,7 +43,31 @@ from swing_copilot.analysis.schemas import (
     canonical_json_digest,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 RETRO_INPUT_SCHEMA_VERSION: Final[Literal["retro-input-v1"]] = "retro-input-v1"
+RETRO_RESULT_SCHEMA_VERSION: Final[Literal["retro-result-v1"]] = "retro-result-v1"
+
+#: Design §7's closed set of reasons a verdict went wrong. Closed on purpose:
+#: an open vocabulary cannot be counted, and it is the *repetition* of one
+#: class across retrospectives that promotes a single miss into a structural
+#: proposal (§8.1's qualitative evidence gate).
+FailureClass = Literal[
+    "information_absent",
+    "information_present_missed",
+    "interpretation_error",
+    "exogenous",
+    "threshold_artifact",
+]
+#: Design §8.1's proposal scope: parameter change, composition change, design review.
+ProposalLevel = Literal["L1", "L2", "L3"]
+EvidenceBasis = Literal["quantitative", "qualitative", "mixed"]
+
+#: Levels the skill applies itself, so a check the application step can run is
+#: mandatory for them (design §8.1). L3 is a design review, decided by
+#: `AskUserQuestion` before anything is written, so it may carry none.
+_VERIFICATION_PLAN_REQUIRED_LEVELS = frozenset({"L1", "L2"})
 
 
 class _StrictModel(BaseModel):
@@ -262,5 +293,110 @@ class RetroInput(_StrictModel):
         expected = canonical_json_digest(payload, excluded_field="input_digest")
         if self.input_digest != expected:
             msg = "input_digest does not match canonical retro input JSON"
+            raise ValueError(msg)
+        return self
+
+
+def _duplicate_value(values: Iterable[str]) -> str | None:
+    """Return the first repeated value, preserving the document's order."""
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            return value
+        seen.add(value)
+    return None
+
+
+#: An identifier the dossier supplied. `ingest` proves each one is a member of
+#: that space (E32.4); the type only guarantees it is not blank.
+EvidenceRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class SurpriseNarration(_StrictModel):
+    """The skill's re-reading of one surprise symbol (design §7).
+
+    `failure_class` is a single mandatory value rather than a list: the point
+    of the classification is to count how often one cause repeats, and a
+    narration that hedges across three classes cannot be counted at all.
+    """
+
+    surprise_id: NonBlankText
+    failure_class: FailureClass
+    narrative: NonBlankText
+    #: Non-empty by construction, mirroring `SourcedFact.source_ids`: a reading
+    #: that cites nothing cannot be checked against what was actually supplied.
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
+
+
+class Proposal(_StrictModel):
+    """One improvement proposal with design §8.1's mandatory fields.
+
+    `verification_plan` is required rather than defaulted so a proposal has to
+    state one explicitly -- including stating `null` for an L3 design review,
+    which the validator below allows only at that level.
+    """
+
+    proposal_key: NonBlankText
+    level: ProposalLevel
+    #: What the proposal changes: a config path, a module, or an area.
+    target: NonBlankText
+    title: NonBlankText
+    claim: NonBlankText
+    expected_effect: NonBlankText
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
+    evidence_basis: EvidenceBasis
+    verification_plan: NonBlankText | None
+    #: Non-empty: "no risk" is a claim, and an unstated one cannot be reviewed.
+    risks: list[NonBlankText] = Field(min_length=1)
+    #: Required only when reopening a proposal the ledger closed (E32.2).
+    reopen_justification: NonBlankText | None = None
+
+    @model_validator(mode="after")
+    def _verify_verification_plan_is_present_when_applied(self) -> Self:
+        if (
+            self.level in _VERIFICATION_PLAN_REQUIRED_LEVELS
+            and self.verification_plan is None
+        ):
+            msg = f"verification_plan is required for a {self.level} proposal"
+            raise ValueError(msg)
+        return self
+
+
+class RetroResult(_StrictModel):
+    """`retro_result.json`: the skill's narration and proposals, untrusted.
+
+    Nothing here is believed on sight. `as_of` and `input_digest` must match
+    the dossier this answers, every `evidence_refs` entry must be an
+    identifier that dossier supplied, and every user-visible string passes
+    CON-03 before it can reach a report or the ledger (`retro/validate.py`).
+    """
+
+    schema_version: Literal["retro-result-v1"]
+    as_of: date
+    #: Copied verbatim from `retro_input.json` so ingest can prove both halves
+    #: describe the same export.
+    input_digest: Sha256Digest
+    #: Design §6 step 4 / D9: the answer to "was there an L2/L3-level
+    #: structural observation?", stated every time -- "再点検の上でなし"
+    #: included. A required field because a discipline that is only written in
+    #: skill instructions is the one that quietly stops happening.
+    structural_review_note: NonBlankText
+    narrations: list[SurpriseNarration]
+    proposals: list[Proposal]
+
+    @model_validator(mode="after")
+    def _verify_unique_item_identities(self) -> Self:
+        """Reject ambiguous identities the ledger and the guard key on."""
+        duplicate_surprise = _duplicate_value(
+            narration.surprise_id for narration in self.narrations
+        )
+        if duplicate_surprise is not None:
+            msg = f"narration surprise_id must be unique: {duplicate_surprise!r}"
+            raise ValueError(msg)
+        duplicate_key = _duplicate_value(
+            proposal.proposal_key for proposal in self.proposals
+        )
+        if duplicate_key is not None:
+            msg = f"proposal_key must be unique within one result: {duplicate_key!r}"
             raise ValueError(msg)
         return self

@@ -110,14 +110,15 @@ verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`�
 ## `copilot-retro`とverdictの当否評価
 
 `retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、日次フローとは独立に
-数日おき手動で回す。実装済みは`collect`/`evaluate`/`export`と、その3つを順に
-走らせるumbrella `prepare`（`ingest`はP8-32）。
+数日おき手動で回す。`collect`/`evaluate`/`export`、その3つを順に走らせる
+umbrella `prepare`、そしてスキルの回答を検証する`ingest`の5つを持つ。
 
 ```bash
 copilot-retro collect --reports-dir reports          # verdictをDuckDBへ取り込む
 copilot-retro evaluate --as-of 2027-03-11            # 満期を迎えた当否を分類する
 copilot-retro export --as-of 2027-03-11              # 証拠一式をJSONへ書き出す
 copilot-retro prepare --as-of 2027-03-11             # 上記3つをまとめて実行する
+copilot-retro ingest reports/retro/2027-03-11        # スキルの回答を検証して記録する
 ```
 
 `collect`は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の
@@ -146,6 +147,28 @@ run以降の鮮度データ）・提案対象になりうる設定のスナッ�
 `settings.retro.max_surprises`で打ち切り、切った件数を必ず出力に残す。
 鮮度データは既存textアダプタ（timeout/retry/rate limitはそのまま）で取得し、
 APIキー未設定や取得失敗は当該欄を空にしてnoteを残す（fail-soft）。
+
+`ingest`は`retro_result.json`（strictスキーマ`retro-result-v1`）を検証し、
+`retro_report.md`を同ディレクトリへ原子的に描画したうえで、通過した提案を
+提案台帳（既定`docs/retro/proposals.md`、`--ledger`で変更可）へ
+status=proposedで追記する。5つのサブコマンドで唯一DBに触れない。
+
+検証は`analysis/`の境界と同型である。`as_of`と`input_digest`の不一致は
+retro全体のhard fail（何も書かずに非0終了）。個別の提案・叙述については、
+CON-03機械検査（`analysis/safety.py`の`check_display_texts`）→
+`evidence_refs`がexportの供給したID空間（集約ID・サプライズID・source_id）の
+部分集合であることの検証→再提案ガード、の順に適用し、いずれかに触れた項目
+**だけ**をリトライなしでwithholdする。CON-03を先に検査するのは、後続の
+withhold理由が識別子を安全に引用できるようにするためで、CON-03で落ちた項目は
+識別子も出さない。
+
+台帳操作は追記のみで、`proposed`以降の遷移（applied/rejected/deferred/
+verification_failed）は適用段階のスキルと人間が記録する。RP-IDは台帳の既存
+最大値と既存全文ファイルの双方から採番し、提案全文は
+`docs/retro/proposals/RP-NNN-<slug>.md`に生成する。同一`proposal_key`の再
+ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejected`/
+`verification_failed`として持つ`proposal_key`の再提案は、
+`reopen_justification`が無ければ差し戻す。
 
 `retro/`が`analysis/`と別パッケージなのは、`analysis/`が「ネットワークもDBも
 触らない」憲章を持つのに対し、retroはDBを読み書きするためである。

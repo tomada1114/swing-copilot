@@ -22,7 +22,6 @@ Boundaries this module keeps:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -38,6 +37,7 @@ from swing_copilot.retro.aggregate import (
     compute_skip_hit_rate,
     compute_source_contribution,
 )
+from swing_copilot.retro.ledger import read_ledger
 from swing_copilot.retro.schemas import (
     RETRO_INPUT_SCHEMA_VERSION,
     AggregateMetrics,
@@ -103,11 +103,6 @@ _SNAPSHOT_SECTIONS = (
     "regime",
     "retro",
 )
-
-#: Ledger statuses that close a proposal for re-proposal without an explicit
-#: reopening justification (E32.2).
-_CLOSED_STATUSES = frozenset({"rejected", "verification_failed"})
-_RP_ID_PATTERN = re.compile(r"^RP-\d{3,}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,11 +463,10 @@ def _config_snapshot(settings: Settings) -> ConfigSnapshot:
 def read_proposals_ledger(path: Path) -> ProposalsLedger:
     """Read the proposal ledger's closed RP-IDs, tolerating its absence.
 
-    The ledger is a markdown table maintained by P8-32's ingest and the
-    retrospective skill; before the first retrospective it simply does not
-    exist yet. Rows are matched structurally (an `RP-NNN` cell plus a closed
-    status cell) rather than by column position, so a later column reorder
-    does not silently empty the re-proposal guard.
+    Parsing lives in `retro/ledger.py`, which `ingest` also uses: the IDs this
+    dossier reports as closed and the keys the re-proposal guard blocks have to
+    come from one reading of one file, or the guard the skill sees and the
+    guard ingest enforces could disagree.
 
     Args:
         path: Ledger location, typically `docs/retro/proposals.md`.
@@ -481,17 +475,9 @@ def read_proposals_ledger(path: Path) -> ProposalsLedger:
         The reference the dossier carries: the path, whether it exists, and
         the sorted RP-IDs a re-proposal must justify reopening.
     """
-    if not path.is_file():
-        return ProposalsLedger(path=str(path), exists=False, rejected_proposal_ids=[])
-
-    closed: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        identifiers = [cell for cell in cells if _RP_ID_PATTERN.match(cell)]
-        if identifiers and any(cell in _CLOSED_STATUSES for cell in cells):
-            closed.append(identifiers[0])
+    state = read_ledger(path)
     return ProposalsLedger(
-        path=str(path), exists=True, rejected_proposal_ids=sorted(dict.fromkeys(closed))
+        path=str(path),
+        exists=state.exists,
+        rejected_proposal_ids=sorted(state.closed_rp_ids()),
     )

@@ -69,6 +69,36 @@
 - 該当テキストが無い銘柄の断片は、ペイロードを `null`（news）/ `[]`（filings）
   にしたファイルを書く（＝「分析済みで空」と「未分析」を区別できるようにする）。
 
+## サブエージェント入力スライス【読み取り専用・作業用】
+
+`analysis_input.json` が大きい場合、統括は専門家ごと・銘柄ごとに必要な範囲だけを
+読み取り専用ファイルへ切り出して渡す。これはコンテキスト消費を抑えるための
+**作業用の輸送形式**であり、`AnalysisInput` の JSON スキーマでも、成果物でもない。
+`<WORKDIR>/analysis_work/` には置かない。
+
+```jsonc
+{
+  "run_id": "11111111-2222-3333-4444-555555555555", // 元 input から逐語コピー
+  "as_of": "2026-07-27",                            // 元 input から逐語コピー
+  "input_digest": "<input の値を逐語コピー>",        // 元 input 全体の digest。slice の再計算値ではない
+  "context": { "...": "担当分析に必要な run-wide context のみ" },
+  "candidate": {
+    "symbol": "AAPL",
+    "...": "担当専門家に必要な元 candidates[] のフィールドだけ"
+  }
+}
+```
+
+- 元入力の `run_id` / `as_of` / `input_digest` は必ず含め、専門家は断片出力の同名 3 値へ
+  逐語コピーする。統括は元の `analysis_input.json` と一致を確認する
+- `source_id` と、その専門家が分析する `summary` / `text` は元入力から逐語コピーする。
+  担当対象の source object を要約・再採番・省略しない
+- ニュース／開示スライスには担当銘柄の該当 source object だけを、スクリーニング
+  スライスにはその銘柄の決定論的入力と必要な run-wide context だけを入れる。担当外の
+  候補や長文テキストを入れない
+- スライスは `analysis_input.json` を置き換えない。digest は元入力全体に対する値なので、
+  スライス単体で digest を再計算・検証しない
+
 ## analysis_input.json（Python が生成、読み取り専用）
 
 ```jsonc

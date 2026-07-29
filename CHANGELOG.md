@@ -84,6 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Daily-analysis skills now require reusable expert fragments to retain the
+  source input identity and use per-symbol, read-only input slices for
+  large qualitative-analysis inputs.
 - Moved coverage enforcement (`--cov-fail-under=80`) out of pytest
   `addopts` and into `just test` / CI, so a single test can be run in
   isolation without failing the coverage gate

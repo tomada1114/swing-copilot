@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
     from swing_copilot.storage.verdict_records import (
+        AnalysisSourceCoverageRecord,
         VerdictCitationRow,
         VerdictDecisionRow,
         VerdictOutcomeRecord,
@@ -664,6 +665,7 @@ class StateStore:
         run_id: UUID,
         verdicts: Sequence[VerdictRecord],
         sources: Sequence[VerdictSourceRecord],
+        coverages: Sequence[AnalysisSourceCoverageRecord] = (),
     ) -> None:
         """Replace one run's complete verdict and citation set atomically (P8-30).
 
@@ -673,8 +675,28 @@ class StateStore:
                 new answer no longer covers.
             verdicts: The run's collected verdicts.
             sources: The `source_id`s those analyses cited.
+            coverages: Code-owned filing coverage archived from the analysis
+                input for later retrospective comparison.
         """
-        verdict_records.replace_run_verdicts(self._database, run_id, verdicts, sources)
+        verdict_records.replace_run_verdicts(
+            self._database, run_id, verdicts, sources, coverages
+        )
+
+    def get_analysis_source_coverages(
+        self, run_id: UUID, symbol: str
+    ) -> tuple[AnalysisSourceCoverageRecord, ...]:
+        """Return archived filing-input coverage for one run and symbol."""
+        return verdict_records.get_analysis_source_coverages(
+            self._database, run_id, symbol
+        )
+
+    def get_analysis_source_coverages_in_window(
+        self, window_start: date, as_of: date
+    ) -> tuple[AnalysisSourceCoverageRecord, ...]:
+        """Return filing-input coverage for outcomes maturing in a window."""
+        return verdict_records.get_analysis_source_coverages_in_window(
+            self._database, window_start, as_of
+        )
 
     def replace_verdict_outcomes(
         self,

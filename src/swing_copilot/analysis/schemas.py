@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v2"]] = "analysis-input-v2"
+INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v3"]] = "analysis-input-v3"
 RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v2"]] = "analysis-result-v2"
 
 SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -100,6 +100,44 @@ class NewsInput(_StrictModel):
     provider: str
 
 
+FilingSelectionMode = Literal[
+    "full",
+    "section_priority",
+    "section_priority_partial",
+    "head_fallback",
+    "omitted_symbol_budget",
+]
+FilingSectionStatus = Literal["full", "partial", "missing"]
+
+
+class FilingSectionCoverage(_StrictModel):
+    """How much of one priority 10-Q section reached the exported text."""
+
+    name: NonBlankText
+    status: FilingSectionStatus
+
+
+class FilingCoverage(_StrictModel):
+    """Code-owned completeness metadata for one exported filing."""
+
+    original_chars: int = Field(ge=0)
+    exported_chars: int = Field(ge=0)
+    is_truncated: bool
+    selection_mode: FilingSelectionMode
+    sections: list[FilingSectionCoverage] = []
+
+    @model_validator(mode="after")
+    def _verify_lengths(self) -> Self:
+        """Keep the explicit truncation signal consistent with its counts."""
+        if self.exported_chars > self.original_chars:
+            msg = "exported_chars cannot exceed original_chars"
+            raise ValueError(msg)
+        if self.is_truncated != (self.exported_chars < self.original_chars):
+            msg = "is_truncated must match exported_chars < original_chars"
+            raise ValueError(msg)
+        return self
+
+
 class FilingInput(_StrictModel):
     """One collected filing excerpt offered to the analysis skill."""
 
@@ -108,6 +146,10 @@ class FilingInput(_StrictModel):
     filed_at: datetime
     text: str
     url: str
+    # Historical `analysis-input-v2` archives remain readable by P8 collect.
+    # Every newly exported v3 filing is required to carry this field by
+    # `AnalysisInput._verify_unique_candidates_and_sources`.
+    coverage: FilingCoverage | None = None
 
 
 class CandidateInput(_StrictModel):
@@ -155,7 +197,7 @@ class AnalysisContextBlocks(_StrictModel):
 class AnalysisInput(_StrictModel):
     """`analysis_input.json`: everything a skill needs, and nothing it must fetch."""
 
-    schema_version: Literal["analysis-input-v2"]
+    schema_version: Literal["analysis-input-v2", "analysis-input-v3"]
     run_id: UUID
     as_of: date
     strategy_key: NonBlankText
@@ -196,6 +238,11 @@ class AnalysisInput(_StrictModel):
                     "candidate source_ids must be unique for "
                     f"{candidate.symbol!r}: {duplicate_source_id!r}"
                 )
+                raise ValueError(msg)
+            if self.schema_version == INPUT_SCHEMA_VERSION and any(
+                filing.coverage is None for filing in candidate.filings
+            ):
+                msg = "analysis-input-v3 requires coverage for every filing"
                 raise ValueError(msg)
         return self
 

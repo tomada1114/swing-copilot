@@ -41,6 +41,13 @@ _INSERT_VERDICT_SOURCE = """
     VALUES (?, ?, ?, ?)
 """
 
+_INSERT_ANALYSIS_COVERAGE = """
+    INSERT INTO analysis_source_coverage (
+        run_id, symbol, source_id, original_chars, exported_chars,
+        is_truncated, selection_mode, sections_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
 _INSERT_VERDICT_OUTCOME = """
     INSERT INTO verdict_outcomes (
         run_id, symbol, horizon_days, as_of, recommendation,
@@ -87,6 +94,20 @@ class VerdictSourceRecord:
     symbol: str
     source_id: str
     source_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSourceCoverageRecord:
+    """One filing source's code-owned export completeness for a past run."""
+
+    run_id: UUID
+    symbol: str
+    source_id: str
+    original_chars: int
+    exported_chars: int
+    is_truncated: bool
+    selection_mode: str
+    sections: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +176,7 @@ def replace_run_verdicts(
     run_id: UUID,
     verdicts: Sequence[VerdictRecord],
     sources: Sequence[VerdictSourceRecord],
+    coverages: Sequence[AnalysisSourceCoverageRecord] = (),
 ) -> None:
     """Atomically replace one run's complete verdict and citation set.
 
@@ -164,18 +186,24 @@ def replace_run_verdicts(
         verdicts: The run's verdicts. Empty clears the run (a re-ingest of a
             result that no longer analyzes any symbol).
         sources: The `source_id`s those verdicts' analyses cited.
+        coverages: Every filing source offered to the analysis, cited or not.
 
     Raises:
         ValueError: A record belongs to a different run than `run_id`.
     """
     _reject_foreign_run(run_id, (record.run_id for record in verdicts))
     _reject_foreign_run(run_id, (record.run_id for record in sources))
+    _reject_foreign_run(run_id, (record.run_id for record in coverages))
 
     with database.connect() as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
             conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
             conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
+            conn.execute(
+                "DELETE FROM analysis_source_coverage WHERE run_id = ?",
+                [str(run_id)],
+            )
             for verdict in verdicts:
                 conn.execute(
                     _INSERT_VERDICT,
@@ -207,11 +235,99 @@ def replace_run_verdicts(
                         source.source_type,
                     ],
                 )
+            for coverage in coverages:
+                conn.execute(
+                    _INSERT_ANALYSIS_COVERAGE,
+                    [
+                        str(coverage.run_id),
+                        coverage.symbol,
+                        coverage.source_id,
+                        coverage.original_chars,
+                        coverage.exported_chars,
+                        coverage.is_truncated,
+                        coverage.selection_mode,
+                        dumps_safe(
+                            [
+                                {"name": name, "status": status}
+                                for name, status in coverage.sections
+                            ]
+                        ),
+                    ],
+                )
         except Exception:
             conn.execute("ROLLBACK")
             raise
         else:
             conn.execute("COMMIT")
+
+
+def get_analysis_source_coverages(
+    database: Database, run_id: UUID, symbol: str
+) -> tuple[AnalysisSourceCoverageRecord, ...]:
+    """Return one symbol's archived filing coverage in source order."""
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_id, original_chars, exported_chars, is_truncated,
+                   selection_mode, sections_json
+            FROM analysis_source_coverage
+            WHERE run_id = ? AND symbol = ?
+            ORDER BY source_id
+            """,
+            [str(run_id), symbol],
+        ).fetchall()
+    return tuple(
+        AnalysisSourceCoverageRecord(
+            run_id=run_id,
+            symbol=symbol,
+            source_id=row[0],
+            original_chars=row[1],
+            exported_chars=row[2],
+            is_truncated=row[3],
+            selection_mode=row[4],
+            sections=tuple(
+                (str(section["name"]), str(section["status"]))
+                for section in json.loads(str(row[5]))
+            ),
+        )
+        for row in rows
+    )
+
+
+def get_analysis_source_coverages_in_window(
+    database: Database, window_start: date, as_of: date
+) -> tuple[AnalysisSourceCoverageRecord, ...]:
+    """Return coverage for run-symbols with an outcome maturing in the window."""
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ac.run_id, ac.symbol, ac.source_id,
+                   ac.original_chars, ac.exported_chars, ac.is_truncated,
+                   ac.selection_mode, ac.sections_json
+            FROM analysis_source_coverage ac
+            JOIN verdict_outcomes vo
+              ON vo.run_id = ac.run_id AND vo.symbol = ac.symbol
+            WHERE vo.as_of >= ? AND vo.as_of <= ?
+            ORDER BY ac.run_id, ac.symbol, ac.source_id
+            """,
+            [window_start, as_of],
+        ).fetchall()
+    return tuple(
+        AnalysisSourceCoverageRecord(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            source_id=row[2],
+            original_chars=row[3],
+            exported_chars=row[4],
+            is_truncated=row[5],
+            selection_mode=row[6],
+            sections=tuple(
+                (str(section["name"]), str(section["status"]))
+                for section in json.loads(str(row[7]))
+            ),
+        )
+        for row in rows
+    )
 
 
 def replace_verdict_outcomes(

@@ -51,12 +51,17 @@ class TestCollectHappyPath:
 
         assert (summary.scanned_run_count, summary.collected_run_count) == (1, 1)
         assert summary.verdict_count == 1
+        assert summary.coverage_count == 1
         assert summary.notes == ()
         assert _rows(
             state_store,
             "SELECT run_id, symbol, as_of, strategy_key, recommendation, no_trade "
             "FROM verdicts",
         ) == [(UUID(RUN_ID), "AAPL", AS_OF, "default", "proceed", False)]
+        coverage = state_store.get_analysis_source_coverages(UUID(RUN_ID), "AAPL")
+        assert len(coverage) == 1
+        assert coverage[0].source_id == FILING_ID
+        assert coverage[0].selection_mode == "full"
 
     def test_persists_every_cited_source_with_its_input_resolved_type(
         self,

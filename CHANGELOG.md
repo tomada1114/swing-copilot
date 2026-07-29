@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `analysis-input-v3`に開示coverageを追加し、10-Q/10-Q-Aを財務諸表・MD&A・
+  リスク要因・法的手続の章優先で120,000字へ構成。銘柄合計240,000字の
+  コンテキスト予算と、P8で重大外しとの併存を切り分けるcoverage集計も追加
 - Reliability phase 1 (judgment-basis visibility and numeric robustness):
   composite screening scores with a per-candidate breakdown
   (`rsi_pullback`/`trend_quality`/`liquidity`, configurable via

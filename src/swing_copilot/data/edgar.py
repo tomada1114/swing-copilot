@@ -28,6 +28,7 @@ unit-testable without real waiting.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ import edgar
 from swing_copilot.clock import SystemClock
 from swing_copilot.retry import retry_external_call
 from swing_copilot.storage.market_store import FundamentalsRecord
-from swing_copilot.text.base import TextItem
+from swing_copilot.text.base import FilingSection, TextItem
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,6 +53,7 @@ _FINANCIAL_TAXONOMY_PREFIX = "us-gaap:"
 _MIN_REQUEST_INTERVAL_SECONDS = 0.1  # 10 requests/second cap
 _DEFAULT_FUNDAMENTALS_LOOKBACK_DAYS = 400  # SEC filing lookback window; owned independently of pipeline/daily.py's price-history lookback
 _SEC_ARCHIVE_URL = "https://www.sec.gov/Archives/edgar"
+logger = logging.getLogger(__name__)
 
 # US-GAAP concept tag variants, tried in priority order per metric. Facts are
 # matched by the concept's local name (namespace prefix such as `us-gaap:` is
@@ -92,6 +94,14 @@ class _FilingLike(Protocol):
     filing_url: str
 
     def text(self) -> str: ...  # pragma: no cover
+
+    def obj(self) -> _CompanyReportLike | None: ...  # pragma: no cover
+
+
+class _CompanyReportLike(Protocol):
+    def get_item_with_part(
+        self, part: str, item: str, markdown: bool = True
+    ) -> str | None: ...  # pragma: no cover
 
 
 class _FactLike(Protocol):
@@ -472,16 +482,52 @@ class EdgarClient:
         if limit is not None:
             matching = matching[:limit]
 
-        return [
-            TextItem(
-                source_id=f"edgar:{filing.accession_number}",
-                symbol=symbol,
-                source_type="filing",
-                published_at=_to_utc_datetime(filing.filing_date),
-                title=f"{filing.form} - {symbol}",
-                source_url=filing.filing_url,
-                content_text=self._with_retries(filing.text),
-                fetched_at=self._date_clock.now(),
-            )
-            for filing in matching
-        ]
+        return [self._filing_text_item(filing, symbol) for filing in matching]
+
+    def _filing_text_item(self, filing: _FilingLike, symbol: str) -> TextItem:
+        """Build one audit-complete item plus optional structured 10-Q sections."""
+        content_text = self._with_retries(filing.text)
+        return TextItem(
+            source_id=f"edgar:{filing.accession_number}",
+            symbol=symbol,
+            source_type="filing",
+            published_at=_to_utc_datetime(filing.filing_date),
+            title=f"{filing.form} - {symbol}",
+            source_url=filing.filing_url,
+            content_text=content_text,
+            fetched_at=self._date_clock.now(),
+            filing_sections=_extract_ten_q_sections(filing),
+        )
+
+
+def _extract_ten_q_sections(filing: _FilingLike) -> tuple[FilingSection, ...]:
+    """Extract priority sections without making their absence a fetch failure.
+
+    EdgarTools parses the primary HTML already loaded by `filing.text()`.
+    Issuer-specific markup can still defeat section detection; that is an
+    expected data-quality outcome, surfaced later as `head_fallback`.
+    """
+    if filing.form not in {"10-Q", "10-Q/A"}:
+        return ()
+    try:
+        report = filing.obj()
+        if report is None:
+            return ()
+        requested = (
+            ("part_i_item_1", "Part I", "Item 1"),
+            ("part_i_item_2", "Part I", "Item 2"),
+            ("part_ii_item_1a", "Part II", "Item 1A"),
+            ("part_ii_item_1", "Part II", "Item 1"),
+        )
+        return tuple(
+            FilingSection(name=name, content_text=text)
+            for name, part, item in requested
+            if (text := report.get_item_with_part(part, item, markdown=False))
+            and text.strip()
+        )
+    except Exception:  # edgartools parser failures are a documented fail-soft boundary
+        logger.exception(
+            "10-Q section extraction failed for accession %s; using head fallback",
+            filing.accession_number,
+        )
+        return ()

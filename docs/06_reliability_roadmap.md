@@ -644,6 +644,11 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
 > は LLM API 呼び出しの廃止に伴い削除された。生き残ったのは開示取得の境界設定
 > （`filing_lookback_days` / `max_filings_per_symbol`）で、`settings.llm.*` から
 > `settings.analysis.*` へ移設されている。
+>
+> **2026-07-29再評価**: 1開示120,000字は維持し、10-Q/10-Q-Aを重要章優先で
+> 構成する。1銘柄合計240,000字の上限と`analysis-input-v3`のcoverageを追加した。
+> P8は重大外しと入力欠落の併存を`with_gap` / `without_gap` / `unknown`で集計するが、
+> 因果は自動認定しない。詳細は`docs/04_detailed_design.md` 3.15、3.16、3.23.4、6節。
 
 - **目的**: NFR-01 の月次予算上限を「実支出に対する保証」にする。
   1回の実行で予算を溶かす構造を止める。

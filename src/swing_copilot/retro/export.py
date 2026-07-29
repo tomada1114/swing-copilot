@@ -24,10 +24,16 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from swing_copilot.analysis.export import write_json_atomically
-from swing_copilot.analysis.schemas import canonical_json_digest
+from swing_copilot.analysis.schemas import (
+    FilingCoverage,
+    FilingSectionCoverage,
+    FilingSectionStatus,
+    FilingSelectionMode,
+    canonical_json_digest,
+)
 from swing_copilot.pipeline.postmortem import compute_signal_performance
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
@@ -37,14 +43,17 @@ from swing_copilot.retro.aggregate import (
     compute_skip_hit_rate,
     compute_source_contribution,
 )
+from swing_copilot.retro.evaluate import MISS_SEVERE
 from swing_copilot.retro.ledger import read_ledger
 from swing_copilot.retro.schemas import (
     RETRO_INPUT_SCHEMA_VERSION,
     AggregateMetrics,
     AlignmentEntry,
+    ArchivedFilingCoverage,
     ConfigSnapshot,
     EvaluationSettings,
     FreshnessEntry,
+    InputCoverageSummary,
     MetricEntry,
     ProposalsLedger,
     RateMetricEntry,
@@ -55,6 +64,7 @@ from swing_copilot.retro.schemas import (
     SurpriseDossier,
     SurpriseOutcomeEntry,
     VerdictReasonEntry,
+    retro_input_digest,
 )
 from swing_copilot.retro.surprises import (
     FreshnessSources,
@@ -76,6 +86,7 @@ if TYPE_CHECKING:
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.storage.verdict_records import (
+        AnalysisSourceCoverageRecord,
         VerdictCitationRow,
         VerdictOutcomeRecord,
         VerdictRecord,
@@ -235,6 +246,7 @@ def build_retro_input(
     window_start = as_of - timedelta(days=thresholds.lookback_window_days)
 
     outcomes = store.get_verdict_outcomes_in_window(window_start, as_of)
+    coverages = store.get_analysis_source_coverages_in_window(window_start, as_of)
     citations = store.get_verdict_citations_in_window(window_start, as_of)
     alignment = store.get_verdict_decision_alignment(window_start, as_of)
     signals = compute_signal_performance(
@@ -267,6 +279,9 @@ def build_retro_input(
             SourceContributionEntry(**asdict(row)).model_dump(mode="json")
             for row in compute_source_contribution(citations, outcomes)
         ],
+        "input_coverage": _input_coverage_summary(outcomes, coverages).model_dump(
+            mode="json"
+        ),
         "surprises": SurpriseBundle(
             max_surprises=deps.settings.retro.max_surprises,
             dropped_count=selection.dropped_count,
@@ -281,9 +296,7 @@ def build_retro_input(
     return RetroInput.model_validate(
         {
             **unsigned,
-            "input_digest": canonical_json_digest(
-                unsigned, excluded_field="input_digest"
-            ),
+            "input_digest": retro_input_digest(unsigned),
         }
     )
 
@@ -404,11 +417,72 @@ def _dossier(
             verdict.as_of,
             max(row.as_of for row in candidate.outcomes),
         ),
+        input_filing_coverage=[
+            ArchivedFilingCoverage(
+                source_id=coverage.source_id,
+                coverage=_filing_coverage(coverage),
+            )
+            for coverage in deps.state_store.get_analysis_source_coverages(
+                candidate.run_id, candidate.symbol
+            )
+        ],
         freshness=FreshnessEntry(
             news=list(freshness.news),
             filings=list(freshness.filings),
             fetch_failed=freshness.fetch_failed,
         ),
+    )
+
+
+def _input_coverage_summary(
+    outcomes: Sequence[VerdictOutcomeRecord],
+    coverages: Sequence[AnalysisSourceCoverageRecord],
+) -> InputCoverageSummary:
+    """Count severe misses by whether their original filing input had a gap."""
+    severe_keys = {
+        (outcome.run_id, outcome.symbol)
+        for outcome in outcomes
+        if outcome.classification == MISS_SEVERE
+    }
+    by_key: dict[tuple[UUID, str], list[AnalysisSourceCoverageRecord]] = {}
+    for coverage in coverages:
+        by_key.setdefault((coverage.run_id, coverage.symbol), []).append(coverage)
+    with_gap = {
+        key
+        for key in severe_keys
+        if key in by_key and any(row.is_truncated for row in by_key[key])
+    }
+    without_gap = {
+        key
+        for key in severe_keys
+        if key in by_key and not any(row.is_truncated for row in by_key[key])
+    }
+    return InputCoverageSummary(
+        filing_count=len(coverages),
+        truncated_filing_count=sum(row.is_truncated for row in coverages),
+        fallback_filing_count=sum(
+            row.selection_mode == "head_fallback" for row in coverages
+        ),
+        omitted_filing_count=sum(
+            row.selection_mode == "omitted_symbol_budget" for row in coverages
+        ),
+        severe_miss_symbol_count_with_gap=len(with_gap),
+        severe_miss_symbol_count_without_gap=len(without_gap),
+        severe_miss_symbol_count_unknown=len(severe_keys - with_gap - without_gap),
+    )
+
+
+def _filing_coverage(record: AnalysisSourceCoverageRecord) -> FilingCoverage:
+    """Rebuild strict coverage metadata from its normalized DB row."""
+    return FilingCoverage(
+        original_chars=record.original_chars,
+        exported_chars=record.exported_chars,
+        is_truncated=record.is_truncated,
+        selection_mode=cast("FilingSelectionMode", record.selection_mode),
+        sections=[
+            FilingSectionCoverage(name=name, status=cast("FilingSectionStatus", status))
+            for name, status in record.sections
+        ],
     )
 
 

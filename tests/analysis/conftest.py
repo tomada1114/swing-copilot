@@ -75,6 +75,13 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
                         "filed_at": datetime(2027, 2, 20, tzinfo=UTC).isoformat(),
                         "text": "Quarterly report body.",
                         "url": "https://example.com/filing",
+                        "coverage": {
+                            "original_chars": 22,
+                            "exported_chars": 22,
+                            "is_truncated": False,
+                            "selection_mode": "full",
+                            "sections": [],
+                        },
                     }
                 ],
             }

@@ -81,6 +81,10 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    過去に却下・検証不合格になった提案は Step 4 の突合対象になる
 5. `is_preliminary: true` の指標は「暫定」。`value: null` は「この窓では測れない」で
    あって「ゼロ」ではない。両者を混同した提案は書かない
+6. `input_coverage` と各サプライズの `input_filing_coverage` を確認する。
+   `severe_miss_symbol_count_with_gap` は情報不足との併存数であり因果を証明しない。
+   `without_gap` / `unknown` と比較し、個別dossierの章状態を読んだうえでのみ
+   `information_present_missed` と `information_absent` を分類する
 
 ## Step 3: 並列深掘り（サブエージェント fan-out）
 
@@ -90,7 +94,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 
 | 観点 | 担当 | 出力 |
 |---|---|---|
-| サプライズ敗因分析 | `surprises.items[]` の 1 銘柄ずつ。当時の verdict・reasons・引用 facts と、`freshness`（run 以降に公開されたニュース・開示）を突き合わせる | 銘柄ごとの `failure_class` 1 値 + 叙述 + `evidence_refs` |
+| サプライズ敗因分析 | `surprises.items[]` の 1 銘柄ずつ。当時の verdict・reasons・`input_filing_coverage`・引用 facts と、`freshness`（run 以降に公開されたニュース・開示）を突き合わせる | 銘柄ごとの `failure_class` 1 値 + 叙述 + `evidence_refs` |
 | シグナル×verdict 突合 | `signal_performance` と `aggregates` を並べ、「シグナルが外した」のか「読みが外した」のかを切り分ける | 指標の取捨選択観点の観察 |
 | ソース貢献レビュー | `source_contribution` の引用回数と HIT/MISS 引用比率、`information_absent` の反復 | ニュース源の増減観点の観察 |
 

@@ -33,9 +33,22 @@ class FakeFiling:
         self.period_of_report = period_of_report
         self.filing_url = self.DEFAULT_URL
         self.filing_text = "Full filing text content."
+        self.report: FakeTenQReport | None = None
 
     def text(self):
         return self.filing_text
+
+    def obj(self):
+        return self.report
+
+
+class FakeTenQReport:
+    def __init__(self, sections: dict[tuple[str, str], str]) -> None:
+        self._sections = sections
+
+    def get_item_with_part(self, part, item, markdown=True):
+        del markdown
+        return self._sections.get((part, item))
 
 
 @dataclass
@@ -659,6 +672,36 @@ class TestFetchFilingTexts:
         assert item.content_text == "Full filing text content."
         assert item.source_url == FakeFiling.DEFAULT_URL
         assert company.get_filings_calls == [["8-K"]]
+
+    def test_ten_q_carries_structured_priority_sections_with_full_audit_text(self):
+        filing = FakeFiling(
+            "0001-26-000005", "10-Q", date(2026, 7, 18), date(2026, 6, 30)
+        )
+        filing.report = FakeTenQReport(
+            {
+                ("Part I", "Item 1"): "financial statements",
+                ("Part I", "Item 2"): "management discussion",
+                ("Part II", "Item 1A"): "risk factors",
+            }
+        )
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany([filing])),
+            sleep_fn=lambda _s: None,
+        )
+
+        item = client.fetch_filing_texts(
+            "AAPL", ["10-Q"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )[0]
+
+        assert item.content_text == "Full filing text content."
+        assert [
+            (section.name, section.content_text) for section in item.filing_sections
+        ] == [
+            ("part_i_item_1", "financial statements"),
+            ("part_i_item_2", "management discussion"),
+            ("part_ii_item_1a", "risk factors"),
+        ]
 
     def test_excludes_filing_text_published_after_as_of(self):
         filings = [

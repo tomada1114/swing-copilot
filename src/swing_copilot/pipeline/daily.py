@@ -1030,6 +1030,7 @@ def _export_request(
             max_news_items=analysis_config.max_news_items_per_symbol,
             max_news_chars=analysis_config.max_news_chars_per_item,
             max_filing_chars=analysis_config.max_filing_chars,
+            max_filing_chars_per_symbol=(analysis_config.max_filing_chars_per_symbol),
             max_calendar_events=analysis_config.max_calendar_events,
             max_calendar_chars=analysis_config.max_calendar_chars_per_item,
         ),

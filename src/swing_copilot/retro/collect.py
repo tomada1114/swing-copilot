@@ -37,6 +37,7 @@ from swing_copilot.analysis.validate import (
     load_analysis_result,
 )
 from swing_copilot.storage.verdict_records import (
+    AnalysisSourceCoverageRecord,
     VerdictReasonRecord,
     VerdictRecord,
     VerdictSourceRecord,
@@ -72,6 +73,7 @@ class CollectSummary:
     collected_run_count: int
     verdict_count: int
     source_count: int
+    coverage_count: int
     notes: tuple[str, ...]
 
 
@@ -89,7 +91,7 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
         `collected_run_count` is a partially successful scan, not a failure.
     """
     notes: list[str] = []
-    collected = verdict_count = source_count = 0
+    collected = verdict_count = source_count = coverage_count = 0
     run_directories = _find_run_directories(reports_root)
     for run_directory in run_directories:
         written = _collect_one_run(state_store, run_directory, notes)
@@ -98,11 +100,13 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
         collected += 1
         verdict_count += written[0]
         source_count += written[1]
+        coverage_count += written[2]
     return CollectSummary(
         scanned_run_count=len(run_directories),
         collected_run_count=collected,
         verdict_count=verdict_count,
         source_count=source_count,
+        coverage_count=coverage_count,
         notes=tuple(notes),
     )
 
@@ -151,8 +155,8 @@ def _parse_uuid(candidate: Path) -> UUID | None:
 
 def _collect_one_run(
     state_store: StateStore, run_directory: RunDirectory, notes: list[str]
-) -> tuple[int, int] | None:
-    """Replace one run's rows; return `(verdicts, sources)` written, or `None`.
+) -> tuple[int, int, int] | None:
+    """Replace one run; return `(verdicts, sources, coverages)`, or `None`.
 
     `None` means the run was skipped fail-soft, with the reason appended to
     `notes`.
@@ -183,6 +187,23 @@ def _collect_one_run(
     source_types = _SourceTypeIndex(analysis_input)
     verdicts: list[VerdictRecord] = []
     sources: list[VerdictSourceRecord] = []
+    coverages = [
+        AnalysisSourceCoverageRecord(
+            run_id=run_directory.run_id,
+            symbol=candidate.symbol,
+            source_id=filing.source_id,
+            original_chars=coverage.original_chars,
+            exported_chars=coverage.exported_chars,
+            is_truncated=coverage.is_truncated,
+            selection_mode=coverage.selection_mode,
+            sections=tuple(
+                (section.name, section.status) for section in coverage.sections
+            ),
+        )
+        for candidate in analysis_input.candidates
+        for filing in candidate.filings
+        if (coverage := filing.coverage) is not None
+    ]
     for analysis in result.symbols:
         verdicts.append(
             VerdictRecord(
@@ -210,8 +231,8 @@ def _collect_one_run(
             )
         )
 
-    state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources)
-    return len(verdicts), len(sources)
+    state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources, coverages)
+    return len(verdicts), len(sources), len(coverages)
 
 
 class _SourceTypeIndex:

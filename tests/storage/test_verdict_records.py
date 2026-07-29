@@ -18,6 +18,7 @@ import pytest
 
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
+    AnalysisSourceCoverageRecord,
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -74,6 +75,25 @@ def _outcome(
         recommendation="proceed",
         forward_return_pct=forward_return_pct,
         classification=classification,
+    )
+
+
+def _coverage(
+    run_id: UUID,
+    symbol: str = "AAPL",
+    source_id: str = "edgar:1",
+    *,
+    exported_chars: int = 120_000,
+) -> AnalysisSourceCoverageRecord:
+    return AnalysisSourceCoverageRecord(
+        run_id=run_id,
+        symbol=symbol,
+        source_id=source_id,
+        original_chars=180_000,
+        exported_chars=exported_chars,
+        is_truncated=True,
+        selection_mode="section_priority",
+        sections=(("part_i_item_2", "full"), ("part_ii_item_1a", "partial")),
     )
 
 
@@ -142,6 +162,36 @@ class TestReplaceRunVerdicts:
         )
 
         assert _rows(state_store, "SELECT no_trade FROM verdicts") == [(True,)]
+
+    def test_persists_and_replaces_filing_coverage(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict(run_id, "AAPL")],
+            [],
+            [_coverage(run_id)],
+        )
+
+        rows = state_store.get_analysis_source_coverages(run_id, "AAPL")
+        assert len(rows) == 1
+        assert rows[0].exported_chars == 120_000
+        assert rows[0].sections == (
+            ("part_i_item_2", "full"),
+            ("part_ii_item_1a", "partial"),
+        )
+
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict(run_id, "AAPL")],
+            [],
+            [_coverage(run_id, exported_chars=100_000)],
+        )
+
+        replaced = state_store.get_analysis_source_coverages(run_id, "AAPL")
+        assert len(replaced) == 1
+        assert replaced[0].exported_chars == 100_000
 
     def test_rerun_replaces_corrected_rows_without_duplicating(
         self, state_store: StateStore

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import yaml
 from pydantic import (
@@ -312,6 +312,10 @@ class AnalysisConfig(_StrictModel):
     # nothing chunks filings for separate calls anymore (the skill reads one
     # filing's export in a single context).
     max_filing_chars: int = Field(default=120_000, ge=1)
+    # Combined filing text for one symbol. This keeps a fresh filing-analysis
+    # agent comfortably below a 200k-token context even when collection found
+    # several long forms; individual filings remain bounded above.
+    max_filing_chars_per_symbol: int = Field(default=240_000, ge=1)
     # Filing *collection* recency bound and per-symbol count cap, applied in
     # `text/edgar_filings.py::fetch_recent_filings_text()` -- symmetric with
     # the news-side limit above (roadmap §5 P6-26).
@@ -322,6 +326,13 @@ class AnalysisConfig(_StrictModel):
     # to any one candidate).
     max_calendar_events: int = Field(default=20, ge=1)
     max_calendar_chars_per_item: int = Field(default=2000, ge=1)
+
+    @model_validator(mode="after")
+    def _verify_filing_export_budgets(self) -> Self:
+        if self.max_filing_chars_per_symbol < self.max_filing_chars:
+            msg = "max_filing_chars_per_symbol must be >= max_filing_chars"
+            raise ValueError(msg)
+        return self
 
 
 class ScheduleConfig(_StrictModel):

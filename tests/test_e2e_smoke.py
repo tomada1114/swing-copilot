@@ -299,7 +299,7 @@ class TestFiveSymbolEndToEnd:
         assert result.analysis_input_path.is_file()
 
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
-        assert payload["schema_version"] == "analysis-input-v2"
+        assert payload["schema_version"] == "analysis-input-v3"
         assert payload["run_id"] == str(result.run_id)
         assert payload["strategy_key"] == "default"
         assert len(payload["input_digest"]) == 64

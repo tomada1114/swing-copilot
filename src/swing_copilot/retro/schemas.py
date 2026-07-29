@@ -4,7 +4,7 @@
 `swing-retro` skill; `retro_result.json` is the skill's answer, validated
 back by `copilot-retro ingest` (design §5.3/§5.4).
 
-Held to the same rules as `analysis-input-v2` (E31.2):
+Held to the same rules as `analysis-input-v3` (E31.2):
 
 * `extra="forbid"` everywhere, so a renamed or invented field fails loudly
   instead of being silently dropped on either side.
@@ -22,7 +22,7 @@ named cannot be checked.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self, cast
 from uuid import UUID
 
 from pydantic import (
@@ -35,6 +35,7 @@ from pydantic import (
 )
 
 from swing_copilot.analysis.schemas import (
+    FilingCoverage,
     FilingInput,
     NewsInput,
     NonBlankText,
@@ -168,6 +169,25 @@ class SourceContributionEntry(_StrictModel):
     hit_citation_ratio: float | None
 
 
+class InputCoverageSummary(_StrictModel):
+    """Code-counted relationship between export gaps and severe misses."""
+
+    filing_count: int = Field(ge=0)
+    truncated_filing_count: int = Field(ge=0)
+    fallback_filing_count: int = Field(ge=0)
+    omitted_filing_count: int = Field(ge=0)
+    severe_miss_symbol_count_with_gap: int = Field(ge=0)
+    severe_miss_symbol_count_without_gap: int = Field(ge=0)
+    severe_miss_symbol_count_unknown: int = Field(ge=0)
+
+
+class ArchivedFilingCoverage(_StrictModel):
+    """One original analysis input's filing coverage, keyed by source."""
+
+    source_id: SourceId
+    coverage: FilingCoverage
+
+
 class VerdictReasonEntry(_StrictModel):
     """One reason the verdict gave at the time, with what it cited."""
 
@@ -217,6 +237,7 @@ class SurpriseDossier(_StrictModel):
     #: Worst close-to-close drawdown from the run's close inside the evaluated
     #: window; `None` when the bars needed to compute it are missing.
     max_adverse_return_pct: float | None
+    input_filing_coverage: list[ArchivedFilingCoverage] = []
     freshness: FreshnessEntry
 
 
@@ -277,6 +298,7 @@ class RetroInput(_StrictModel):
     signal_performance: list[SignalPerformanceEntry]
     human_alignment: list[AlignmentEntry]
     source_contribution: list[SourceContributionEntry]
+    input_coverage: InputCoverageSummary | None = None
     surprises: SurpriseBundle
     config_snapshot: ConfigSnapshot
     proposals_ledger: ProposalsLedger
@@ -289,12 +311,33 @@ class RetroInput(_StrictModel):
     @model_validator(mode="after")
     def _verify_input_digest(self) -> Self:
         """Reject a document whose body was edited after it was written."""
-        payload = self.model_dump(mode="json")
-        expected = canonical_json_digest(payload, excluded_field="input_digest")
+        expected = retro_input_digest(self.model_dump(mode="json"))
         if self.input_digest != expected:
             msg = "input_digest does not match canonical retro input JSON"
             raise ValueError(msg)
         return self
+
+
+def retro_input_digest(payload: dict[str, object]) -> str:
+    """Hash a retro input while preserving pre-coverage v1 compatibility."""
+    normalized = cast("dict[str, object]", _drop_legacy_coverage_defaults(payload))
+    return canonical_json_digest(normalized, excluded_field="input_digest")
+
+
+def _drop_legacy_coverage_defaults(value: object) -> object:
+    """Omit defaults introduced after the original retro-input-v1 contract."""
+    if isinstance(value, dict):
+        return {
+            key: _drop_legacy_coverage_defaults(child)
+            for key, child in value.items()
+            if not (
+                (key == "input_coverage" and child is None)
+                or (key == "input_filing_coverage" and child == [])
+            )
+        }
+    if isinstance(value, list):
+        return [_drop_legacy_coverage_defaults(child) for child in value]
+    return value
 
 
 def _duplicate_value(values: Iterable[str]) -> str | None:

@@ -119,7 +119,8 @@ def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -
         f"走査 {summary.scanned_run_count} run / "
         f"取り込み {summary.collected_run_count} run / "
         f"verdict {summary.verdict_count} 件 / "
-        f"source {summary.source_count} 件"
+        f"source {summary.source_count} 件 / "
+        f"coverage {summary.coverage_count} 件"
     )
     _print_notes(console, summary.notes)
 

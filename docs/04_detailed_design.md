@@ -743,7 +743,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-INPUT_SCHEMA_VERSION = "analysis-input-v2"
+INPUT_SCHEMA_VERSION = "analysis-input-v3"
 RESULT_SCHEMA_VERSION = "analysis-result-v2"
 
 SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -762,7 +762,7 @@ class NewsInput(_StrictModel):
     """source_id / published_at / headline / summary / url / provider"""
 
 class FilingInput(_StrictModel):
-    """source_id / form_type / filed_at / text / url"""
+    """source_id / form_type / filed_at / text / url / coverage"""
 
 class CandidateInput(_StrictModel):
     symbol: str
@@ -779,7 +779,7 @@ class AnalysisContextBlocks(_StrictModel):
     """run単位の文脈: market_regime / performance_summary / calendar_events"""
 
 class AnalysisInput(_StrictModel):
-    schema_version: Literal["analysis-input-v2"]
+    schema_version: Literal["analysis-input-v2", "analysis-input-v3"]
     run_id: UUID
     as_of: date
     strategy_key: NonBlankText
@@ -835,6 +835,8 @@ class AnalysisResult(_StrictModel):
 
 `FilingAnalysis`が書類種別・提出日を持たないのは意図的である。これらはコードが所有する`TextItem`のメタデータであり、スキルに正確にエコーバックさせるのではなく`analysis/validate.py`が`analysis_input.json`から解決する。`VerdictReason.source_ids`だけが空を許すのは、スコアやサイジング制約のようにコード自身が計算した決定論的入力にのみ基づく理由には、引用すべきニュース/開示ソースが存在しないためである。
 
+`analysis-input-v3`では各`FilingInput`に`coverage`を必須とし、元本文文字数、書き出し文字数、切り詰め有無、選択方式、重要章ごとの`full` / `partial` / `missing`をコード所有値として載せる。`analysis-input-v2`の受理は既存P8アーカイブの再読に限る後方互換であり、新規runは常にv3を生成する。
+
 `input_digest`は入力JSONから自身を除いたcanonical JSON（キーソート、UTF-8、安定した日時表現）の完全SHA-256である。resultはこの値を逐語コピーし、contextは同じ値と自身の`context_digest`を保持する。ingestは3文書の`run_id`、`as_of`、`strategy_key`、`input_digest`をレポート書換え前に照合する。旧v1成果物は新規runに混在させず、推測で復元しない。
 
 `context.calendar_events`（`CalendarEventInput`のリスト）は、`text/`が収集したマクロ／経済カレンダーイベント（`TextItem.symbol is None`。例: FREDの経済指標発表日）を運搬する。候補ごとの`news`/`filings`とは異なりrun単位の文脈であり、どの銘柄の分析からも引用できる。`analysis/validate.py`のprovenance検査は、当該銘柄の`news`/`filings`のIDに加えて`context.calendar_events`の全IDを、どの銘柄についても許容集合へ含める（他銘柄の`news`/`filings`のIDは引き続き拒否する）。
@@ -857,6 +859,7 @@ def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str: .
 @dataclass(frozen=True, slots=True)
 class TextExportLimits:
     """max_news_items / max_news_chars / max_filing_chars /
+    max_filing_chars_per_symbol /
     max_calendar_events / max_calendar_chars"""
 
 @dataclass(frozen=True, slots=True)
@@ -878,7 +881,9 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 **レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・判断履歴は候補ごとの`news`/`filings`/`decision_history`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
 
-**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは公開日時の新しい順に`max_news_items`件・各`max_news_chars`文字まで、開示は`max_filing_chars`文字までに切り詰める。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴はdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。
+**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは公開日時の新しい順に`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、10-Q/10-Q-Aを他様式より先に割り当てる。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴はdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。
+
+10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
 **calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 
@@ -1370,9 +1375,11 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 #### 3.23.4 `retro-input-v1`（`export`が書く証拠dossier）
 
-`reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v2`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
+`reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v3`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
 
-内容物: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+内容物: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+
+`collect`は各runの開示`coverage`を`analysis_source_coverage`へverdictと同じトランザクションで完全置換する。`input_coverage`は開示数、切り詰め・fallback・銘柄予算による省略数と、重大外し銘柄の`with_gap` / `without_gap` / `unknown`をコードで数える。各サプライズにも当時の`input_filing_coverage`を付ける。この集計は「情報不足と外しの併存」を切り分ける観測であり、情報不足が外しを引き起こしたという因果判定ではない。過去の`analysis-input-v2`はcoverage不明として`unknown`へ数える。
 
 **サプライズ銘柄**（`surprises`）は`MISS_SEVERE`を両方向（proceedの重大逆行・skipの大幅上昇）から選び、`settings.retro.max_surprises`（既定5、要検証）で打ち切る。超過分は`|forward_return|`降順で切り、切った件数を`dropped_count`に必ず残す（silent cap禁止：読み手が「重大な外れはこれだけだった」と「11件中の上位5件だった」を区別できなければならない）。各銘柄に当時のverdict・reasons・引用source_id・実現パス（5/20日リターンと期間内最大逆行）と、**鮮度データ**（runのas_of以降〜retroのas_ofに公開されたニュース・開示を既存textアダプタで今取得したもの）を同梱する。鮮度データは`analysis.*`の件数・文字数予算とtimeout/retry/rate limitをそのまま流用し、取得失敗は当該銘柄の`fetch_failed`を立ててnoteに残すfail-soft（export全体を落とさない）。APIキーが無い側はクライアントを組み立てず、その分の鮮度が空になるだけで失敗にはしない。
 
@@ -1789,6 +1796,7 @@ analysis:
   max_news_items_per_symbol: 20    # 1銘柄あたりのニュース件数（新しい順）
   max_news_chars_per_item: 4000    # 1記事あたりのエクスポート文字数
   max_filing_chars: 120000         # 1開示あたりのエクスポート上限（文字数）
+  max_filing_chars_per_symbol: 240000  # 1銘柄の全開示合計上限
   filing_lookback_days: 90         # 開示「収集」の遡及日数（roadmap §5 P6-26）
   max_filings_per_symbol: 3        # 1銘柄あたりの開示件数（同上）
   max_calendar_events: 20          # context.calendar_eventsに載せるrun単位の件数上限
@@ -1894,7 +1902,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 - 定量シグナルと矛盾する定性解釈は保守側を採用し、矛盾自体を両論併記する。スコア・順位・株数・リスク判定は再計算も上書きもしない。
 - 検証で縮退が出ても、文言を書き換えて再投入しない（fail-closedが仕様）。スキーマ不一致によるhard failのみ、フィールド名の誤りを直しての再実行を許す。
 
-**長文の扱い（固定）**: EDGARから抽出した本文は`analysis.max_filing_chars`文字まで、ニュースは公開日時の新しい順に`analysis.max_news_items_per_symbol`件・各`analysis.max_news_chars_per_item`文字までを`analysis_input.json`へ載せる。切り捨てが発生した場合はスキル側が「全文未分析」である旨を`red_flags`とレポートへ明示する。旧実装のようにチャンクごとの個別API呼び出しと結果マージは行わない——スキルは1銘柄分の開示を1つのコンテキストで読む。マクロ／経済カレンダーイベントは公開日時の新しい順に`analysis.max_calendar_events`件・各`analysis.max_calendar_chars_per_item`文字まで`context.calendar_events`へ載る（run単位で全銘柄に共通）。
+**長文の扱い（固定）**: EDGARから抽出した本文は1開示`analysis.max_filing_chars`（既定120,000字）、1銘柄合計`analysis.max_filing_chars_per_symbol`（既定240,000字）までとする。10-Q/10-Q-Aは財務諸表・MD&A・リスク要因・法的手続を章抽出して優先構成し、抽出不能時のみ先頭スライスへ戻る。`analysis-input-v3`の`coverage`が切り捨て、fallback、省略、章欠落を構造化して伝え、スキルは未分析範囲を明示する。10-QのItem 1Aが10-Kを参照援用するだけ、または比較対象が入力にない場合、「新規リスクなし」とは判定しない。旧実装のようなチャンクごとの個別API呼び出しと結果マージは行わない——1銘柄の開示は合計240,000字以下の1担当コンテキストで読む。これは公称コンテキスト上限まで本文を詰める値ではなく、指示・決定論的文脈・出力・再検討の余白を確保する運用上限である。英語開示を4字/tokenとする概算では約60,000 token、保守的な2字/tokenでも約120,000 tokenで、200k token級のコンテキストでも余白を残す。親セッションは本文を読まずmetadata投影と断片だけを扱う。本プロセスはモデルAPIを呼ばないためAPI従量課金・APIレート制限・呼び出し回数は増えないが、Claude Code側のセッション使用量と読解時間は入力長に応じて増えうる。ニュースは公開日時の新しい順に`analysis.max_news_items_per_symbol`件・各`analysis.max_news_chars_per_item`文字、マクロ／経済カレンダーイベントは`analysis.max_calendar_events`件・各`analysis.max_calendar_chars_per_item`文字まで載せる。
 
 ---
 

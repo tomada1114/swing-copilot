@@ -1,6 +1,6 @@
-"""`copilot-retro`: the retrospective mechanism's command line (P8-30/P8-31).
+"""`copilot-retro`: the retrospective mechanism's command line (P8-30..P8-32).
 
-Four subcommands, in the order one retrospective uses them:
+Five subcommands, in the order one retrospective uses them:
 
 * `collect` scans `reports/` for archived `analysis_result.json` documents and
   brings each run's verdicts into DuckDB.
@@ -9,14 +9,14 @@ Four subcommands, in the order one retrospective uses them:
   the `swing-retro` skill reads.
 * `prepare` runs those three in order -- the one command the skill's preflight
   invokes (E31.4).
-
-`ingest` belongs to P8-32 and is deliberately absent rather than stubbed
-(E30.1) -- a subcommand that parses but does nothing is harder to notice than
-one that does not exist.
+* `ingest` verifies the skill's `retro_result.json`, renders `retro_report.md`,
+  and appends the surviving proposals to the ledger. It is the only subcommand
+  that needs no database at all.
 
 Like every other entry point here, this one only observes: it writes
-observation tables and never rewrites configuration, code, or any
-deterministic screening/sizing/ranking value (design §10).
+observation tables, a report, and a ledger entry, and never rewrites
+configuration, code, or any deterministic screening/sizing/ranking value
+(design §10).
 """
 
 from __future__ import annotations
@@ -41,7 +41,9 @@ from swing_copilot.retro.export import (
     RetroExportRequest,
     export_retro_input,
 )
+from swing_copilot.retro.ingest import RetroIngestRequest, ingest_retro_result
 from swing_copilot.retro.surprises import FreshnessSources
+from swing_copilot.retro.validate import RetroIngestError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
@@ -88,6 +90,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "prepare", help="collect → evaluate → export をまとめて実行する"
     )
     _add_export_arguments(prepare_parser)
+
+    ingest_parser = subparsers.add_parser(
+        "ingest", help="retro_result.json を検証しレポートと提案台帳へ反映する"
+    )
+    ingest_parser.add_argument(
+        "retro_dir",
+        type=Path,
+        help="retro_input.json と retro_result.json を置いた reports/retro/<as_of>/",
+    )
+    ingest_parser.add_argument("--ledger", type=Path, default=Path(DEFAULT_LEDGER_PATH))
 
     return parser.parse_args(argv)
 
@@ -201,25 +213,54 @@ def _run_prepare(
     _run_export(state_store, args, console)
 
 
+def _run_ingest(args: argparse.Namespace, console: Console) -> None:
+    """Verify the skill's answer and record it (no database is touched)."""
+    try:
+        summary = ingest_retro_result(
+            RetroIngestRequest(retro_dir=args.retro_dir, ledger_path=args.ledger)
+        )
+    except RetroIngestError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(
+        f"提案 {len(summary.recorded)} 件を台帳（{summary.ledger_path}）へ記録 / "
+        f"非表示 {len(summary.withheld)} 件 / "
+        f"叙述 {summary.narration_count} 件 → {summary.report_path}"
+    )
+    for item in summary.recorded:
+        console.print(f"  {item.rp_id} [{item.proposal.level}] {item.proposal.title}")
+    _print_notes(
+        console,
+        tuple(
+            f"非表示 {item.kind} {item.identifier or ''}: {item.reason}"
+            for item in summary.withheld
+        ),
+    )
+
+
 def _print_notes(console: Console, notes: tuple[str, ...]) -> None:
     for note in notes:
         console.print(f"[yellow]{note}[/yellow]")
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: dispatch to `collect`, `evaluate`, `export`, or `prepare`.
+    """CLI entry point: dispatch to one of the five subcommands.
 
     Args:
         argv: Argument vector, defaulting to `sys.argv[1:]`.
 
     Raises:
-        SystemExit: Argument parsing failed, or the settings file named by
-            `--settings` is missing or invalid.
+        SystemExit: Argument parsing failed, the settings file named by
+            `--settings` is missing or invalid, or `ingest` was given documents
+            it cannot trust.
     """
     args = _parse_args(argv)
+    console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
+    if args.command == "ingest":
+        # The only subcommand with no database side: two files in, two out.
+        _run_ingest(args, console)
+        return
     state_store = StateStore(Database(args.db))
     state_store.init_schema()
-    console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
     if args.command == "collect":
         _run_collect(state_store, args.reports_dir, console)
     elif args.command == "evaluate":

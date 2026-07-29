@@ -19,11 +19,12 @@ Two rules shape the code here:
 
 from __future__ import annotations
 
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
+
+from swing_copilot.analysis.export import write_text_atomically
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -381,17 +382,6 @@ def _proposal_document(item: RecordedProposal, as_of: date) -> str:
 
 
 def _write_atomically(destination: Path, content: str) -> None:
-    """Replace `destination` with `content` via a same-directory temp file.
-
-    Raises:
-        OSError: Writing or replacing failed. The previous destination is left
-            untouched and the temporary artifact is removed.
-    """
+    """Create the destination's directory, then replace it atomically."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = destination.with_name(f".{destination.name}.tmp")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        os.replace(tmp_path, destination)  # noqa: PTH105 - atomic replace by design
-    except OSError:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    write_text_atomically(destination, content)

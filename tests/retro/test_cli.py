@@ -1,9 +1,8 @@
-"""P8-30/P8-31: `copilot-retro` CLI surface.
+"""P8-30..P8-32: `copilot-retro` CLI surface.
 
-`collect`, `evaluate`, `export`, and the `prepare` umbrella exist; `ingest`
-(P8-32) must not be pre-announced in argparse, because a subcommand that
-parses but does nothing is worse than one that plainly does not exist yet
-(E30.1).
+`collect`, `evaluate`, `export`, the `prepare` umbrella, and `ingest`. Only
+`ingest` runs without a database, which is what keeps the verification step
+free of storage concerns.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.verdict_records import VerdictRecord
 from tests.analysis.conftest import result_payload, symbol_payload
-from tests.retro.conftest import bars
+from tests.retro.conftest import bars, retro_input_payload, retro_result_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -435,8 +434,59 @@ class TestSubcommandSurface:
         with pytest.raises(SystemExit):
             main([])
 
-    def test_ingest_is_not_registered_yet(self) -> None:
-        # P8-32 adds it; until then it must fail loudly rather than parse
-        # into a silent no-op.
+    def test_ingest_requires_the_retrospective_directory(self) -> None:
         with pytest.raises(SystemExit):
             main(["ingest"])
+
+
+class TestIngest:
+    def _retro_dir(self, tmp_path: Path, **overrides: object) -> Path:
+        directory = tmp_path / "reports" / "retro" / "2027-03-29"
+        directory.mkdir(parents=True)
+        (directory / "retro_input.json").write_text(
+            json.dumps(retro_input_payload()), encoding="utf-8"
+        )
+        (directory / "retro_result.json").write_text(
+            json.dumps(retro_result_payload(**overrides)), encoding="utf-8"
+        )
+        return directory
+
+    def test_writes_the_report_and_generates_the_ledger(self, tmp_path: Path) -> None:
+        directory = self._retro_dir(tmp_path)
+        ledger = tmp_path / "docs" / "retro" / "proposals.md"
+
+        main(["ingest", str(directory), "--ledger", str(ledger)])
+
+        assert (directory / "retro_report.md").is_file()
+        assert "| RP-001 |" in ledger.read_text(encoding="utf-8")
+
+    def test_reports_the_recorded_proposal(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        directory = self._retro_dir(tmp_path)
+
+        main(
+            [
+                "ingest",
+                str(directory),
+                "--ledger",
+                str(tmp_path / "docs" / "retro" / "proposals.md"),
+            ]
+        )
+
+        assert "RP-001" in capsys.readouterr().out
+
+    def test_exits_when_the_result_answers_another_export(self, tmp_path: Path) -> None:
+        directory = self._retro_dir(tmp_path, as_of="2027-04-30")
+
+        with pytest.raises(SystemExit, match="as_of"):
+            main(
+                [
+                    "ingest",
+                    str(directory),
+                    "--ledger",
+                    str(tmp_path / "proposals.md"),
+                ]
+            )
+
+        assert not (directory / "retro_report.md").exists()

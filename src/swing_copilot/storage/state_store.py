@@ -24,6 +24,7 @@ from swing_copilot.storage import (
     paper_records,
     regime_records,
     text_records,
+    verdict_records,
 )
 from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_STATEMENTS
 from swing_copilot.universe import UniverseMember
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
+    from swing_copilot.storage.verdict_records import (
+        VerdictOutcomeRecord,
+        VerdictRecord,
+        VerdictRow,
+        VerdictSourceRecord,
+    )
     from swing_copilot.text.base import TextItem
 
 _UNIVERSE_SOURCE = "wikipedia"
@@ -648,6 +655,56 @@ class StateStore:
         """Replace one historical run/horizon's complete outcome set atomically."""
         audit_records.replace_signal_outcomes(
             self._database, run_id, horizon_days, outcomes
+        )
+
+    def replace_run_verdicts(
+        self,
+        run_id: UUID,
+        verdicts: Sequence[VerdictRecord],
+        sources: Sequence[VerdictSourceRecord],
+    ) -> None:
+        """Replace one run's complete verdict and citation set atomically (P8-30).
+
+        Args:
+            run_id: The run whose `verdicts`/`verdict_sources` rows are being
+                replaced wholesale, so a corrected re-ingest drops symbols the
+                new answer no longer covers.
+            verdicts: The run's collected verdicts.
+            sources: The `source_id`s those analyses cited.
+        """
+        verdict_records.replace_run_verdicts(self._database, run_id, verdicts, sources)
+
+    def replace_verdict_outcomes(
+        self,
+        run_id: UUID,
+        horizon_days: int,
+        outcomes: Sequence[VerdictOutcomeRecord],
+    ) -> None:
+        """Replace one run/horizon's complete verdict classification set (P8-30).
+
+        Args:
+            run_id: The evaluated run.
+            horizon_days: The evaluated horizon (5 or 20).
+            outcomes: Classified forward-return outcomes to persist.
+        """
+        verdict_records.replace_verdict_outcomes(
+            self._database, run_id, horizon_days, outcomes
+        )
+
+    def get_verdicts_in_window(
+        self, window_start: date, as_of: date
+    ) -> tuple[VerdictRow, ...]:
+        """Return collected verdicts with a run date in `[window_start, as_of]`.
+
+        Args:
+            window_start: Inclusive earliest run date to evaluate.
+            as_of: Inclusive latest run date to evaluate.
+
+        Returns:
+            Rows in a deterministic `(as_of, run_id, symbol)` order.
+        """
+        return verdict_records.get_verdicts_in_window(
+            self._database, window_start, as_of
         )
 
     def record_text_items(self, items: Sequence[TextItem]) -> None:

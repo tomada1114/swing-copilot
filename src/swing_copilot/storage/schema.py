@@ -195,6 +195,50 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
+    # P8-30: the qualitative verdict's own record of truth. Deliberately not
+    # merged into `signal_outcomes`: a signal outcome is apportioned across
+    # every signal that fired, whereas a verdict is one judgement per symbol
+    # per run (design.md §4, decision D5).
+    """
+    CREATE TABLE IF NOT EXISTS verdicts (
+        run_id         UUID NOT NULL,
+        symbol         VARCHAR NOT NULL,
+        as_of          DATE NOT NULL,
+        strategy_key   VARCHAR NOT NULL,
+        recommendation VARCHAR NOT NULL
+            CHECK (recommendation IN ('proceed','skip')),
+        reasons_json   JSON NOT NULL,
+        no_trade       BOOLEAN NOT NULL,
+        PRIMARY KEY (run_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verdict_sources (
+        run_id      UUID NOT NULL,
+        symbol      VARCHAR NOT NULL,
+        source_id   VARCHAR NOT NULL,
+        source_type VARCHAR NOT NULL
+            CHECK (source_type IN ('news','filing','calendar')),
+        PRIMARY KEY (run_id, symbol, source_id)
+    )
+    """,
+    # `as_of` here is the *maturity* session, not the observation date --
+    # intentionally unlike `signal_outcomes.as_of`, so a batch retrospective
+    # produces the same rows no matter which day it is run (design §5.2, D7).
+    """
+    CREATE TABLE IF NOT EXISTS verdict_outcomes (
+        run_id             UUID NOT NULL,
+        symbol             VARCHAR NOT NULL,
+        horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+        as_of              DATE NOT NULL,
+        recommendation     VARCHAR NOT NULL,
+        forward_return_pct DOUBLE NOT NULL,
+        classification     VARCHAR NOT NULL CHECK (classification IN (
+            'HIT','MISS_MILD','MISS_SEVERE','NEUTRAL'
+        )),
+        PRIMARY KEY (run_id, symbol, horizon_days)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS regime_snapshots (
         run_id          UUID PRIMARY KEY,

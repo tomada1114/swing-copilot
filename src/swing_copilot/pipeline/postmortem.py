@@ -16,6 +16,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
+from swing_copilot.pipeline.forward_returns import (
+    compute_forward_return,
+    find_target_trading_day,
+)
 from swing_copilot.report.daily_brief import SignalPerformanceRow
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.history_queries import (
@@ -45,12 +49,6 @@ NEUTRAL = "NEUTRAL"
 # weights/percentages, changing this would change what the feature *is*, not
 # how conservatively it's tuned.
 HORIZON_DAYS: tuple[int, ...] = (5, 20)
-
-# `_find_target_trading_day`'s calendar-derivation window: wide enough to
-# cross holidays/weekends for the requested horizon (mirrors the (N+5)*3
-# heuristic used elsewhere in this feature's design).
-_CALENDAR_WINDOW_PADDING_DAYS = 5
-_CALENDAR_WINDOW_MULTIPLIER = 3
 
 
 def classify_forward_return(
@@ -168,66 +166,6 @@ def compute_signal_performance(
     return tuple(rows)
 
 
-def _find_target_trading_day(
-    market_store: MarketStore, benchmark_symbol: str, as_of: date, horizon_days: int
-) -> date | None:
-    """Return the trading day `horizon_days` sessions before `as_of`, or `None`.
-
-    Derives the trading calendar from `benchmark_symbol`'s own distinct bar
-    dates over a generously wide window -- this repo has no dedicated
-    trading-calendar module; mirrors `backtest/runner.py`'s `_trading_days()`.
-
-    Args:
-        market_store: Bars source.
-        benchmark_symbol: Reference symbol whose distinct bar dates stand in
-            for the trading calendar (e.g. `settings.backtest.benchmark`).
-        as_of: Today's evaluation date -- assumed to itself be the most
-            recent trading day in the window.
-        horizon_days: How many trading sessions back to look.
-
-    Returns:
-        `None` if there are fewer than `horizon_days + 1` distinct trading
-        days in the window -- there is no way to compute this horizon yet
-        (e.g. too early in the product's life, or a data gap).
-    """
-    window_days = (
-        horizon_days + _CALENDAR_WINDOW_PADDING_DAYS
-    ) * _CALENDAR_WINDOW_MULTIPLIER
-    start = as_of - timedelta(days=window_days)
-    bars = market_store.read_bars([benchmark_symbol], start, as_of, as_of)
-    if bars.empty:
-        return None
-    trading_days: list[date] = sorted(bars["date"].unique().tolist())
-    if len(trading_days) < horizon_days + 1:
-        return None
-    return trading_days[-1 - horizon_days]
-
-
-def _compute_forward_return(
-    market_store: MarketStore, symbol: str, run_date: date, as_of: date
-) -> float | None:
-    """Return `(close(as_of) - close(run_date)) / close(run_date) * 100`, or `None`.
-
-    `read_bars`'s own `as_of` clamp already guarantees no bar dated after
-    `as_of` is ever considered (REQ-006, look-ahead prevention) -- this is
-    not re-checked here, it is structurally impossible via this call.
-    `None` covers a missing close on either date, a genuine data-quality
-    skip rather than an error (the issue's own boundary condition).
-    """
-    bars = market_store.read_bars([symbol], run_date, as_of, as_of)
-    if bars.empty:
-        return None
-    run_rows = bars[bars["date"] == run_date]
-    as_of_rows = bars[bars["date"] == as_of]
-    if run_rows.empty or as_of_rows.empty:
-        return None
-    run_close = float(run_rows.iloc[0]["close"])
-    as_of_close = float(as_of_rows.iloc[0]["close"])
-    if run_close == 0:
-        return None
-    return (as_of_close - run_close) / run_close * 100
-
-
 @dataclass(frozen=True, slots=True)
 class _PostmortemRequest:
     """Per-call inputs `_process_horizon` needs beyond the stores themselves.
@@ -250,7 +188,7 @@ def _process_horizon(
 ) -> str | None:
     """Compute and persist one horizon's outcomes; return a skip note, or `None` on success."""
     as_of = request.as_of
-    target_date = _find_target_trading_day(
+    target_date = find_target_trading_day(
         market_store, request.benchmark_symbol, as_of, horizon_days
     )
     if target_date is None:
@@ -275,7 +213,7 @@ def _process_horizon(
 
     records: list[SignalOutcomeRecord] = []
     for candidate in detail.candidates:
-        forward_return_pct = _compute_forward_return(
+        forward_return_pct = compute_forward_return(
             market_store, candidate.symbol, target_date, as_of
         )
         if forward_return_pct is None:

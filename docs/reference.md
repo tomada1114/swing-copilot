@@ -107,6 +107,34 @@ verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`�
 `reports/<run_date>/<run_id>/`に残る`analysis_input.json`・`analysis_result.json`・
 `report_context.json`の3ファイルが、そのままNFR-05の監査証跡になる。
 
+## `copilot-retro`とverdictの当否評価
+
+`retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、日次フローとは独立に
+数日おき手動で回す。本フェーズ（P8-30）の実装は`collect`と`evaluate`の2つ。
+
+```bash
+copilot-retro collect --reports-dir reports          # verdictをDuckDBへ取り込む
+copilot-retro evaluate --as-of 2027-03-11            # 満期を迎えた当否を分類する
+```
+
+`collect`は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の
+完全置換で`verdicts`/`verdict_sources`へ取り込む。`strategy_key`と
+`source_type`はコードが所有する`analysis_input.json`から解決し、スキルの
+申告値を採用しない。文書欠損・解析不能のrunと入力側に存在しない`source_id`は
+noteを残してスキップする（fail-soft）。走査0件は正常終了である。
+
+`evaluate`はrun_dateから5/20営業日先の**満期営業日**を求め、`満期日 <= as_of`の
+ものだけを分類して`verdict_outcomes`へ`(run_id, horizon_days)`単位の完全置換で
+保存する。`verdict_outcomes.as_of`には観測日ではなく満期日を記録するため、
+いつ実行しても同じ行が得られる（`signal_outcomes.as_of`が観測日なのとは
+意図的に異なる）。分類は非対称で、`proceed`は「重大な逆行がなかった」という
+片側の主張のためNEUTRALを持たず、`skip`は下落を的中・上昇を機会損失として
+扱う。閾値は`settings.postmortem`の既存値を流用し、新しい閾値体系を作らない。
+
+`retro/`が`analysis/`と別パッケージなのは、`analysis/`が「ネットワークもDBも
+触らない」憲章を持つのに対し、retroはDBを読み書きするためである。
+`copilot-ingest-analysis`がDBに触れない不変条件はこれで維持される。
+
 > **P7（スキル移行）で廃止**: Anthropic API直呼びのLLM統合（`llm/`パッケージ、
 > `llm_calls`テーブル、月次予算ゲート・実行単位の呼び出し上限、応答キャッシュと
 > near-stale警告）はすべて削除した。表示専用だった`catalyst_quality`と

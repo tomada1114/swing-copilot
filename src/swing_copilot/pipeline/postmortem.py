@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from swing_copilot.report.daily_brief import SignalPerformanceRow
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from datetime import date
 
     from swing_copilot.config import PostmortemConfig
-    from swing_copilot.storage.history_queries import SignalOutcomeRow
+    from swing_copilot.storage.history_queries import RunDetail, SignalOutcomeRow
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
 
@@ -267,15 +267,11 @@ def _process_horizon(
         logger.info("postmortem step: %s", note)
         return note
 
-    detail = get_run_detail(state_store.database, historical_run_id)
-    # Defensive only: `get_run_by_date` just found this exact `run_id` in the
-    # same `runs` table, so this branch requires the row to vanish between
-    # the two reads (impossible in this batch's single-threaded execution
-    # model) -- excluded from coverage as genuinely unreachable in tests.
-    if detail is None:  # pragma: no cover
-        note = f"{horizon_days}d: run {historical_run_id} not found on detail read"
-        logger.warning("postmortem step: %s", note)
-        return note
+    # `get_run_by_date` just selected this exact row from the same local runs
+    # table. The daily batch has no concurrent deletion path, so model the
+    # relational invariant directly instead of retaining a dead fail-open
+    # branch solely for defensive coverage suppression.
+    detail = cast("RunDetail", get_run_detail(state_store.database, historical_run_id))
 
     records: list[SignalOutcomeRecord] = []
     for candidate in detail.candidates:

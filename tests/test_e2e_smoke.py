@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from swing_copilot.analysis.cli import ingest
+from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.config import load_settings
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
@@ -175,6 +176,36 @@ def _member(symbol: str) -> UniverseMember:
     )
 
 
+def _offline_skill_result(input_payload: dict[str, object]) -> dict[str, object]:
+    """Build the deterministic fixture written by the external skill boundary."""
+    candidates = input_payload["candidates"]
+    assert isinstance(candidates, list)
+    return {
+        "schema_version": "analysis-result-v2",
+        "run_id": input_payload["run_id"],
+        "as_of": input_payload["as_of"],
+        "strategy_key": input_payload["strategy_key"],
+        "input_digest": input_payload["input_digest"],
+        "generated_by": "offline skill fixture",
+        "symbols": [
+            {
+                "symbol": candidate["symbol"],
+                "news_summary": None,
+                "filing_analyses": [],
+                "screening_assessment": {
+                    "summary": "No extra qualitative concern.",
+                    "strengths": [],
+                    "concerns": [],
+                },
+                "verdict": {"recommendation": "proceed", "reasons": []},
+            }
+            for candidate in candidates
+        ],
+        "no_trade": False,
+        "no_trade_reason": None,
+    }
+
+
 @pytest.fixture
 def deps(tmp_path):
     market_store = MarketStore(
@@ -292,30 +323,7 @@ class TestFiveSymbolEndToEnd:
 
         assert run.analysis_input_path is not None
         input_payload = json.loads(run.analysis_input_path.read_text(encoding="utf-8"))
-        result_payload = {
-            "schema_version": "analysis-result-v2",
-            "run_id": input_payload["run_id"],
-            "as_of": input_payload["as_of"],
-            "strategy_key": input_payload["strategy_key"],
-            "input_digest": input_payload["input_digest"],
-            "generated_by": "offline skill fixture",
-            "symbols": [
-                {
-                    "symbol": candidate["symbol"],
-                    "news_summary": None,
-                    "filing_analyses": [],
-                    "screening_assessment": {
-                        "summary": "No extra qualitative concern.",
-                        "strengths": [],
-                        "concerns": [],
-                    },
-                    "verdict": {"recommendation": "proceed", "reasons": []},
-                }
-                for candidate in input_payload["candidates"]
-            ],
-            "no_trade": False,
-            "no_trade_reason": None,
-        }
+        result_payload = _offline_skill_result(input_payload)
         result_path = run.analysis_input_path.with_name("analysis_result.json")
         result_path.write_text(json.dumps(result_payload), encoding="utf-8")
 
@@ -329,6 +337,30 @@ class TestFiveSymbolEndToEnd:
         assert "No extra qualitative concern." in report_path.read_text(
             encoding="utf-8"
         )
+
+    def test_mismatched_skill_result_preserves_the_daily_report(self, deps):
+        run = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert run.analysis_input_path is not None
+        assert run.report_path is not None
+        input_payload = json.loads(run.analysis_input_path.read_text(encoding="utf-8"))
+        result_payload = _offline_skill_result(input_payload)
+        result_payload["run_id"] = "123e4567-e89b-12d3-a456-426614174999"
+        result_path = run.analysis_input_path.with_name("analysis_result.json")
+        result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+
+        latest_path = run.report_path.parent.parent / "latest.md"
+        report_before = run.report_path.read_bytes()
+        latest_before = latest_path.read_bytes()
+        with pytest.raises(AnalysisIngestError, match="run_id"):
+            ingest(
+                run.analysis_input_path,
+                result_path,
+                run.analysis_input_path.with_name("report_context.json"),
+            )
+
+        assert run.report_path.read_bytes() == report_before
+        assert latest_path.read_bytes() == latest_before
 
     def test_price_step_also_populates_the_market_strip(self, deps):
         # The market strip's symbols (SPY/QQQ/^VIX/^TNX) are never part of

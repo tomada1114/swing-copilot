@@ -1,4 +1,4 @@
-"""Tests for pipeline/daily.py's CLI parsing and composition root (FR-12).
+"""Tests for the daily CLI/composition boundary (FR-12).
 
 `_compose_dependencies` is exercised with `load_secrets`/`resolve_daily_universe`
 monkeypatched to avoid any real network access or dependency on a
@@ -19,13 +19,12 @@ import pytest
 from swing_copilot.config import Secrets, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
-from swing_copilot.pipeline import daily as daily_module
-from swing_copilot.pipeline.daily import (
-    DailyDependencies,
+from swing_copilot.pipeline import daily_composition as daily_module
+from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
+from swing_copilot.pipeline.daily_composition import (
     _compose_dependencies,
     _configure_logging,
     _parse_args,
-    _paths_for_mode,
     _required_features,
     main,
 )

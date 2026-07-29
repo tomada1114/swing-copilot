@@ -273,12 +273,35 @@ def _classify_liquidity(
 
 
 def _classify_signal(
-    symbol: str, data: ScreeningInput, settings: Settings, signal_name: str
+    symbol: str,
+    data: ScreeningInput,
+    settings: Settings,
+    signal_name: str,
 ) -> RejectionRecord:
     if signal_name == "trend_sma":
-        return _classify_trend_sma(symbol, data, settings)
+        series = symbol_bars(data.bars, symbol, data.as_of)
+        if series is None:
+            return _insufficient_history(
+                symbol,
+                0,
+                max(
+                    settings.technical_signals.trend.sma_short,
+                    settings.technical_signals.trend.sma_long,
+                ),
+            )
+        return _classify_trend_sma(symbol, series, settings)
     if signal_name == "pullback_rsi":
-        return _classify_pullback_rsi(symbol, data, settings)
+        series = symbol_bars(data.bars, symbol, data.as_of)
+        if series is None:
+            return _insufficient_history(
+                symbol,
+                0,
+                max(
+                    settings.technical_signals.pullback.rsi_period,
+                    _PULLBACK_SMA_WINDOW,
+                ),
+            )
+        return _classify_pullback_rsi(symbol, series, settings)
     if signal_name == "minervini_stage2":
         return _classify_minervini_stage2(symbol, data)
     if signal_name == "vcp_breakout":
@@ -290,19 +313,11 @@ def _classify_signal(
 
 
 def _classify_trend_sma(
-    symbol: str, data: ScreeningInput, settings: Settings
+    symbol: str, series: pd.DataFrame, settings: Settings
 ) -> RejectionRecord:
     """Mirror `TrendSMASignal.evaluate()`'s condition."""
     config = settings.technical_signals.trend
     required_bars = max(config.sma_short, config.sma_long)
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    if series is None:
-        # Unreachable via `classify_rejections`: `_classify_liquidity` reads
-        # the same `data.bars` and already returns DATA_INSUFFICIENT_HISTORY
-        # for a None series before any signal is ever checked. Kept for
-        # structural symmetry with `TrendSMASignal.evaluate()`'s own guard.
-        return _insufficient_history(symbol, 0, required_bars)  # pragma: no cover
-
     sma_short = sma(series["close"], config.sma_short)
     sma_long = sma(series["close"], config.sma_long)
     if pd.isna(sma_short.iloc[-1]) or pd.isna(sma_long.iloc[-1]):
@@ -320,17 +335,11 @@ def _classify_trend_sma(
 
 
 def _classify_pullback_rsi(
-    symbol: str, data: ScreeningInput, settings: Settings
+    symbol: str, series: pd.DataFrame, settings: Settings
 ) -> RejectionRecord:
     """Mirror `PullbackRSISignal.evaluate()`'s condition."""
     config = settings.technical_signals.pullback
     required_bars = max(config.rsi_period, _PULLBACK_SMA_WINDOW)
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    if series is None:
-        # Unreachable via `classify_rejections`: see the identical note in
-        # `_classify_trend_sma` above.
-        return _insufficient_history(symbol, 0, required_bars)  # pragma: no cover
-
     rsi = wilder_rsi(series["close"], config.rsi_period)
     sma50 = sma(series["close"], _PULLBACK_SMA_WINDOW)
     if pd.isna(rsi.iloc[-1]) or pd.isna(sma50.iloc[-1]):

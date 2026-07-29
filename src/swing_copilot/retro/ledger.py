@@ -15,6 +15,14 @@ Two rules shape the code here:
   as the same proposal and reuses its RP-ID; a key whose only rows are closed
   is a *reopening* and gets a new one, which is why the re-proposal guard
   (`retro/validate.py`) runs before this module ever sees it.
+
+Divergence from the design sketch: design §8.2 lists the ledger's columns as
+RP-ID / 日付 / level / タイトル / status / PR・決裁メモ / リンク, with no
+`proposal_key`. E32.2 nonetheless requires the guard to match a re-proposal
+against closed rows by exactly that key, which those columns cannot express, so
+the table carries a `proposal_key` column. Rows are still read structurally, so
+a ledger written without the column keeps parsing -- it simply cannot take part
+in key matching.
 """
 
 from __future__ import annotations

@@ -145,6 +145,37 @@ class TestDataInsufficientHistoryFundamentals:
         assert rejection.reason_code is RejectionReasonCode.DATA_INSUFFICIENT_HISTORY
         assert rejection.detail == {"available_quarters": 0, "required_quarters": 4}
 
+    @pytest.mark.parametrize("signal_name", ["trend_sma", "pullback_rsi"])
+    def test_missing_bars_without_a_liquidity_filter_is_data_quality(
+        self, settings, signal_name
+    ):
+        """Signal classification validates its own input when filters omit liquidity."""
+        data = _input((_member("XYZ"),), [], _liquid_bars("OTHER"))
+        plan = RejectionPlan(
+            filter_order=(),
+            signal_order=(signal_name,),
+            hits_by_signal=((),),
+        )
+
+        [rejection] = classify_rejections(
+            data, settings, candidate_symbols=set(), plan=plan
+        )
+
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.reason_code is RejectionReasonCode.DATA_INSUFFICIENT_HISTORY
+        required_bars = (
+            max(
+                settings.technical_signals.trend.sma_short,
+                settings.technical_signals.trend.sma_long,
+            )
+            if signal_name == "trend_sma"
+            else max(settings.technical_signals.pullback.rsi_period, 50)
+        )
+        assert rejection.detail == {
+            "available_bars": 0,
+            "required_bars": required_bars,
+        }
+
     def test_filing_exactly_at_as_of_cutoff_counts(self, settings):
         # as-of boundary: filed_at exactly at day-end of `as_of` is included,
         # so the quarter-count reason must not fire (whatever else the

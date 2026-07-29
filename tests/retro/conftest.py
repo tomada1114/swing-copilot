@@ -8,14 +8,18 @@ drifting into a second hand-maintained copy of it.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 import pytest
 
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
 )
+from swing_copilot.storage.database import Database
+from swing_copilot.storage.market_store import MarketStore
 from tests.analysis.conftest import (
     AS_OF,
     CALENDAR_ID,
@@ -42,6 +46,34 @@ __all__ = [
     "result_payload",
     "symbol_payload",
 ]
+
+
+@pytest.fixture
+def market_store(tmp_path: Path) -> MarketStore:
+    """Bars source sharing the `state_store` fixture's database path."""
+    return MarketStore(
+        Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+    )
+
+
+def bars(symbol: str, prices: dict[date, float]) -> pd.DataFrame:
+    """Tidy `BARS_COLUMNS` frame with `close` equal to each mapped price."""
+    return pd.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "date": bar_date,
+                "open": price,
+                "high": price + 1,
+                "low": price - 1,
+                "close": price,
+                "volume": 1_000_000,
+                "provider": "test",
+                "fetched_at": datetime(2027, 3, 1, tzinfo=UTC),
+            }
+            for bar_date, price in prices.items()
+        ]
+    )
 
 
 @pytest.fixture

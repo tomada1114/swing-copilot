@@ -459,6 +459,89 @@ class TestEarningsGuard:
         assert result.status == "approved"
         assert EARNINGS_DATE_UNKNOWN_WARNING in result.sizing_warnings
 
+    def test_regime_rejection_keeps_binding_constraint_when_earnings_also_blocks(
+        self, settings, market_store
+    ):
+        """A later guard must not claim the share count an earlier one settled.
+
+        Observed in the 2026-07-30 run: every candidate was zeroed by the
+        CASH_PRIORITY regime, yet the one candidate whose earnings date had
+        already passed reported `binding_constraint: earnings`, hiding the
+        regime as the actual determinant.
+        """
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 5),
+                "amc",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+        )
+
+        result = checker.check(
+            [_candidate("AAPL")],
+            portfolio=[],
+            account_equity=100_000.0,
+            exposure=_exposure(GateVerdict.BEAR, DistributionLevel.NORMAL),
+        )[0]
+
+        assert result.max_shares == 0
+        assert result.binding_constraint == "regime"
+        assert REGIME_CASH_PRIORITY_REASON in result.reasons
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
+        # `reasons` is not exported to analysis_input.json; the block stays
+        # visible to the qualitative layer through sizing_warnings.
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.sizing_warnings
+
+    def test_circuit_breaker_keeps_earlier_earnings_binding_constraint(
+        self, settings, market_store
+    ):
+        events = {
+            "AAPL": EarningsEvent(
+                "AAPL",
+                date(2027, 1, 5),
+                "amc",
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+        }
+        circuit = CircuitBreakerResult(
+            CircuitState.HALTED,
+            2.0,
+            2.0,
+            2.0,
+            2,
+            ("DAILY_LOSS",),
+            "OK",
+        )
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                circuit_breaker=circuit,
+                earnings_guard=EarningsGuardInput(True, events),
+            ),
+        )
+
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.binding_constraint == "earnings"
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
+        assert any(
+            reason.startswith(CIRCUIT_BREAKER_REASON_PREFIX)
+            for reason in result.reasons
+        )
+
     def test_disabled_guard_adds_no_per_symbol_unknown_warning(self, checker):
         result = checker.check(
             [_candidate("AAPL")],

@@ -864,3 +864,75 @@ class TestPerformanceSummaryReachesAnalysisInput:
                 / ANALYSIS_INPUT_FILENAME
             ).resolve()
         )
+
+
+class SharedArticleNewsClient:
+    """Returns one article tagged for every symbol, plus a per-symbol article.
+
+    Mirrors Finnhub's `company-news`, which surfaces sector round-ups and peer
+    comparisons under several tickers at once.
+    """
+
+    SHARED_SOURCE_ID = "news:sector-roundup"
+
+    def fetch_company_news(self, symbol, since, *, as_of):
+        del since
+        stamp = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC)
+        return [
+            TextItem(
+                source_id=self.SHARED_SOURCE_ID,
+                symbol=symbol,
+                source_type="news",
+                published_at=stamp,
+                title="Sector round-up",
+                source_url="https://example.com/roundup",
+                content_text="Several peers reported this week.",
+                fetched_at=stamp,
+            ),
+            TextItem(
+                source_id=f"news:{symbol}",
+                symbol=symbol,
+                source_type="news",
+                published_at=stamp,
+                title=f"{symbol} news",
+                source_url=f"https://example.com/{symbol}",
+                content_text=f"{symbol} announced a new product line.",
+                fetched_at=stamp,
+            ),
+        ]
+
+
+class TestCrossSymbolNewsDeduplication:
+    """One article must not count as independent coverage of two symbols.
+
+    `TextItem.source_id` has no symbol component, so the same Finnhub article
+    reached both candidates' `news` arrays, and `text_items`
+    (`PRIMARY KEY (source_id)`) kept whichever symbol was written last.
+    """
+
+    def test_shared_article_reaches_exactly_one_candidate(self, base_deps):
+        deps = replace(base_deps, news_client=SharedArticleNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.analysis_input_path is not None
+        exported = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        owners = [
+            candidate["symbol"]
+            for candidate in exported["candidates"]
+            for news in candidate["news"]
+            if news["source_id"] == SharedArticleNewsClient.SHARED_SOURCE_ID
+        ]
+        assert owners == ["AAPL"]
+
+    def test_persisted_symbol_is_not_last_write_wins(self, base_deps, state_store):
+        deps = replace(base_deps, news_client=SharedArticleNewsClient())
+
+        run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol FROM text_items WHERE source_id = ?",
+                [SharedArticleNewsClient.SHARED_SOURCE_ID],
+            ).fetchall()
+        assert [row[0] for row in rows] == ["AAPL"]

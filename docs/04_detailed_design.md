@@ -700,7 +700,18 @@ Finnhubは「指定した過去日に公表済みだった予定」ではなく�
 `EARNINGS_PROXIMITY_WARN`、予定不明を`EARNINGS_DATE_UNKNOWN`とする。
 米国市場祝日を考慮しない簡易カレンダーは、休日を営業日として多めに数える既知の乖離である。
 閾値は`risk.earnings_block_business_days`/`earnings_warn_business_days`で管理し、
-前者が後者を超える設定は起動前に拒否する。
+前者が後者を超える設定は起動前に拒否する。決算日が`as_of`以前（営業日数0）の場合も
+`EARNINGS_PROXIMITY_BLOCK`として扱う。
+
+`binding_constraint`は「最終株数を決定した制約」（REQ-004）であり、**最初に候補を
+rejectした段が保持する**。`check()`は sizing/regime → 決算ガード → サーキットブレーカ
+→ ポートフォリオヒートの順に評価するが、後段の段は既に`rejected`な候補の
+`binding_constraint`を上書きしない。上書きすると、レジームが株数を0にした候補が
+「決算が決定要因」と表示され、実際の決定要因が失われるためである。後段の段は
+`reasons`に自らを追記して発火を残す。`reasons`は`analysis_input.json`へ出力されない
+（`analysis/context.py`は`binding_constraint`と`sizing_warnings`のみ描画する）ため、
+決算ブロックは`sizing_warnings`にも`EARNINGS_PROXIMITY_BLOCK`を追記して定性分析側から
+可視に保つ。
 
 **P4-19（roadmap §5、Issue #28）**:
 `risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、

@@ -12,6 +12,8 @@ from swing_copilot.risk.earnings import evaluate_earnings_proximity
 @pytest.mark.parametrize(
     ("earnings_date", "expected_days", "expected_status"),
     [
+        pytest.param(date(2026, 7, 17), 0, "block", id="already-reported-before-as-of"),
+        pytest.param(date(2026, 7, 21), 0, "block", id="reported-on-as-of"),
         pytest.param(date(2026, 7, 22), 1, "block", id="one-business-day"),
         pytest.param(date(2026, 7, 23), 2, "block", id="two-business-days"),
         pytest.param(date(2026, 7, 24), 3, "warn", id="three-business-days"),

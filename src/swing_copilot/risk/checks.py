@@ -151,6 +151,33 @@ class RiskAssessment:
     portfolio_heat_pct: float | None = None
 
 
+def _binding_constraint_after(
+    assessment: RiskAssessment, candidate_constraint: BindingConstraint
+) -> BindingConstraint:
+    """Return the constraint that actually fixed the final share count.
+
+    REQ-004 defines `binding_constraint` as the constraint that determined the
+    final share count, so a guard running after an earlier stage already
+    rejected the candidate must not claim the field: the share count was
+    already settled. Such a guard still records itself in `reasons` (and, for
+    the earnings block, in `sizing_warnings`), which is where "this also fired"
+    belongs. The portfolio-heat stages in `check()` express the same rule by
+    only acting while the assessment is still `approved`.
+
+    Args:
+        assessment: The assessment as produced by the preceding stages.
+        candidate_constraint: The constraint this stage would claim if it were
+            the one that settled the share count.
+
+    Returns:
+        The existing constraint when the candidate was already rejected,
+        otherwise `candidate_constraint`.
+    """
+    if assessment.status == "rejected":
+        return assessment.binding_constraint
+    return candidate_constraint
+
+
 def _daily_returns(bars: pd.DataFrame, lookback_days: int) -> pd.Series | None:
     if bars.empty:
         return None
@@ -281,7 +308,7 @@ class RiskChecker:
                 *assessment.reasons,
                 f"{CIRCUIT_BREAKER_REASON_PREFIX}{result.state.value}",
             ),
-            binding_constraint="regime",
+            binding_constraint=_binding_constraint_after(assessment, "regime"),
         )
 
     def _apply_earnings_guard(
@@ -304,7 +331,16 @@ class RiskChecker:
                 assessment,
                 status="rejected",
                 reasons=(*assessment.reasons, EARNINGS_PROXIMITY_BLOCK_REASON),
-                binding_constraint="earnings",
+                # `reasons` never reaches `analysis_input.json`
+                # (`analysis/context.py` renders `binding_constraint` and
+                # `sizing_warnings` only), so a block that does not claim
+                # `binding_constraint` would otherwise be invisible to the
+                # qualitative layer.
+                sizing_warnings=(
+                    *assessment.sizing_warnings,
+                    EARNINGS_PROXIMITY_BLOCK_REASON,
+                ),
+                binding_constraint=_binding_constraint_after(assessment, "earnings"),
             )
         if proximity.status == "warn" and event is not None:
             warning = (

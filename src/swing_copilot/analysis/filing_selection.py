@@ -25,6 +25,13 @@ _SECTION_TARGETS = (
     ("part_ii_item_1", 10_000),
 )
 _TOTAL_SECTION_QUOTA = sum(quota for _, quota in _SECTION_TARGETS)
+# A truncated section keeps its head and its tail rather than the head alone.
+# The decision-relevant passages of a 10-Q sit at the end of a section: Part I
+# Item 1's commitments/contingencies and legal notes follow the statements, and
+# results-of-operations discussion sits past MD&A's opening overview. The
+# marker is fixed-width so the kept length stays deterministic.
+_SECTION_OMISSION_MARKER = "\n[... omitted middle of section ...]\n"
+_SECTION_HEAD_SHARE = (3, 5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +119,7 @@ def select_filing_text(
         return _selection(original[:budget], len(original), "head_fallback", ())
     allocated = _allocate_section_chars(available, content_budget)
     parts = [
-        f"{headers[name]}{content[: allocated[name]]}"
+        f"{headers[name]}{_shape_section(content, allocated[name])}"
         for name, _, content in available
         if allocated[name] > 0
     ]
@@ -136,6 +143,35 @@ def select_filing_text(
         else "section_priority_partial"
     )
     return _selection(selected, len(original), mode, coverage)
+
+
+def _shape_section(content: str, allocated: int) -> str:
+    """Return `allocated` characters of `content`, keeping its head and tail.
+
+    Head-only truncation silently dropped whatever sat at the end of a section,
+    which is where a 10-Q puts the passages this project cares most about
+    (commitments/contingencies and legal notes at the end of Part I Item 1,
+    results-of-operations discussion past MD&A's opening overview). Keeping
+    both ends costs the middle instead, and the omission is marked inline so a
+    reader never mistakes the join for continuous text.
+
+    Args:
+        content: The full section text.
+        allocated: Characters this section may occupy, marker included.
+
+    Returns:
+        `content` unchanged when it fits, otherwise its head and tail joined by
+        `_SECTION_OMISSION_MARKER`, exactly `allocated` characters long.
+    """
+    if allocated >= len(content):
+        return content
+    head_share, total_share = _SECTION_HEAD_SHARE
+    kept = allocated - len(_SECTION_OMISSION_MARKER)
+    head = kept * head_share // total_share
+    tail = kept - head
+    if kept <= 0 or tail <= 0:
+        return content[:allocated]
+    return f"{content[:head]}{_SECTION_OMISSION_MARKER}{content[len(content) - tail :]}"
 
 
 def _allocate_section_chars(

@@ -896,6 +896,8 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
+配分を超える章は**先頭だけでなく末尾も残す**。10-Qで判断材料になる記述は章の末尾に寄っており、Part I Item 1では財務諸表本体の後ろに約定・偶発債務・訴訟の注記（Note 13相当）が、Part I Item 2では冒頭のBusiness Overviewの後ろにResults of Operationsが置かれる。先頭のみの切り詰めはこれらを無言で落とすため、割当文字数を先頭3/5・末尾2/5に配分し、境界に`[... omitted middle of section ...]`を挿入して結合部を連続本文と誤読させない。マーカーは固定長で、割当文字数に含める。割当がマーカー長以下の場合だけ従来どおり先頭スライスとする。章の`status`（full/partial/missing）の判定は変更しない。
+
 **calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 
 ### 3.17 `analysis/validate.py` / `analysis/safety.py` / `analysis/snapshot.py` / `analysis/cli.py`（FR-08、CON-03、NFR-05）

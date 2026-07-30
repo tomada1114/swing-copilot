@@ -316,7 +316,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 失敗時 | 銘柄単位でfail-closed（当該銘柄の定性欄を非表示にして継続、リトライなし）。`run_id`、`as_of`、`strategy_key`、input digest不一致・JSON破損・スキーマ違反は既存レポート不変のrun全体hard fail |
 | 監査記録 | run専用ディレクトリに`analysis_input.json`／`analysis_result.json`／`report_context.json`をそのまま残す（NFR-05） |
 | 未信頼テキストの分離 | ニュース・開示本文はスキーマ上の専用フィールド（`news[].summary`／`filings[].text`）に置き、コード計算済みの文脈は別フィールドの`<market_regime>`等のブロックに置く。本文が指示を含んでもコード側の判定を装えない |
-| 開示の長文境界 | 1開示120,000字・1銘柄240,000字を上限とする。10-Q/10-Q-Aは財務諸表・MD&A・リスク要因・法的手続を章優先で構成し、抽出不能時だけ先頭スライスへ縮退する。coverageで欠落を監査可能にする |
+| 開示の長文境界 | 1開示120,000字・1銘柄240,000字を上限とする。10-Q/10-Q-Aは財務諸表・MD&A・リスク要因・法的手続を章優先で構成し、抽出不能時だけ先頭スライスへ縮退する。配分を超える章は先頭と末尾の両方を残し、境界に省略マーカーを置く（末尾の注記・Results of Operationsを無言で落とさない）。coverageで欠落を監査可能にする |
 | マクロ/経済カレンダー情報 | symbolを持たない`TextItem`（`source_type="calendar"`）は候補ごとの`news`/`filings`ではなく、run単位の`context.calendar_events`に載る。provenance検証はこのIDをどの銘柄の分析からの引用も許容する（ニュース/開示IDは引き続き当該銘柄限定） |
 
 ---

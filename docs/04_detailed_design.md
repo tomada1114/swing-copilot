@@ -1689,6 +1689,15 @@ CREATE TABLE IF NOT EXISTS text_items (
 );
 ```
 
+`text_items`の主キーは`source_id`単独であり`symbol`を含まない。Finnhubの
+`company-news`は同一記事を複数ティッカーの feed に返す（セクター横断記事・同業比較）
+ため、`pipeline/daily.py::_deduplicate_text_items()`がステップ5の収集結果を
+`source_id`で一意化してから保存とエクスポートへ渡す。これが無いと、1本の記事が
+2銘柄それぞれ独立の材料であるかのように`analysis_input.json`へ載り、`text_items`の
+`symbol`列は最後に書かれた銘柄で上書きされる。tie-breakは収集順（
+`_text_target_symbols()`が保有銘柄を先頭に、次いでアルファベット順に並べる）に従う
+先着とし、保有中の銘柄が共有記事を保持する。
+
 > **P7（スキル移行）での削除**: `llm_calls`テーブル（call_id / model / prompt_text / prompt_hash / source_ids / status / トークン数 / 単価 / cost_usd / response_json）と、`(model, prompt_hash, schema_version)`一致による成功レスポンス再利用は、LLM API呼び出しの廃止に伴い削除した（`storage/llm_records.py`ごと）。定性分析の監査証跡は`reports/<run_date>/`に残る`analysis_input.json`・`analysis_result.json`・`report_context.json`が担う（NFR-05、3.15〜3.17節）。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、そのまま監査証跡になるためである。
 
 `screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は`strategies.yaml`で実際に設定されたFilter順、Signal順、ランキング用データ品質の順で行われ、ランキング指標が欠損した銘柄も`DATA_INSUFFICIENT_HISTORY`として候補・落選のどちらにも出ない状態を避ける。candidate_limitだけで順位落ちした銘柄は落選理由を付けない。将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。

@@ -876,6 +876,34 @@ def _text_step_outcome(
     return _StepOutcome(False, detail), None
 
 
+def _deduplicate_text_items(items: list[TextItem]) -> list[TextItem]:
+    """Keep one item per `source_id`: the first symbol that collected it.
+
+    Finnhub's company-news feed returns the same article under more than one
+    ticker (sector round-ups, peer comparisons), and `TextItem.source_id`
+    carries no symbol component. Without this, one article reaches two
+    candidates' `news` arrays as if each had independent coverage, and
+    `text_items` (`PRIMARY KEY (source_id)`) keeps whichever symbol happened to
+    be written last. `_text_target_symbols` orders held positions first and
+    then alphabetically, so a symbol the account actually holds keeps the
+    shared article; otherwise the alphabetically first candidate does.
+
+    Args:
+        items: Collected text in fetch order.
+
+    Returns:
+        The same items, minus later occurrences of an already-seen `source_id`.
+    """
+    seen: set[str] = set()
+    unique: list[TextItem] = []
+    for item in items:
+        if item.source_id in seen:
+            continue
+        seen.add(item.source_id)
+        unique.append(item)
+    return unique
+
+
 def _run_step_text(
     deps: DailyDependencies, symbols: list[str], as_of: date, *, skip: bool
 ) -> tuple[_StepOutcome, list[TextItem] | None]:
@@ -900,6 +928,7 @@ def _run_step_text(
 
     calendar_items, calendar_failed = _fetch_calendar_items(deps, as_of)
     items.extend(calendar_items)
+    items = _deduplicate_text_items(items)
 
     if items:
         deps.state_store.record_text_items(items)

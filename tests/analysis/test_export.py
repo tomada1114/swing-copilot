@@ -194,6 +194,20 @@ class TestBuildAnalysisInput:
             "finnhub:2",
         ]
 
+    def test_news_with_a_blank_summary_does_not_displace_one_with_a_body(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, body=""),
+                _news("finnhub:2", 20, body="A" * 100),
+                _news("finnhub:3", 10, body="A" * 100),
+            )
+        )
+
+        assert [item.source_id for item in payload.candidates[0].news] == [
+            "finnhub:2",
+            "finnhub:3",
+        ]
+
     def test_news_bodies_are_truncated_to_the_export_budget(self):
         payload = build_analysis_input(_request(_news("finnhub:1", 20)))
 

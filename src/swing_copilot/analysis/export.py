@@ -221,10 +221,19 @@ def _candidate_input(item: ExportCandidate, limits: TextExportLimits) -> Candida
 def _news_inputs(
     text_items: Sequence[TextItem], limits: TextExportLimits
 ) -> list[NewsInput]:
-    """Newest-first news items, capped in count and per-item length."""
+    """Newest-first news items, capped in count and per-item length.
+
+    Items with a blank `summary` sort after every item that has one, so a
+    summary-less article never displaces one with content within the
+    `max_news_items` cap.
+    """
     news = sorted(
         (item for item in text_items if item.source_type == "news"),
-        key=lambda item: (item.published_at, item.source_id),
+        key=lambda item: (
+            bool(item.content_text.strip()),
+            item.published_at,
+            item.source_id,
+        ),
         reverse=True,
     )
     return [

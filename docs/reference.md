@@ -119,9 +119,12 @@ verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`�
 
 ## `copilot-retro`とverdictの当否評価
 
-`retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、日次フローとは独立に
-数日おき手動で回す。`collect`/`evaluate`/`export`、その3つを順に走らせる
-umbrella `prepare`、そしてスキルの回答を検証する`ingest`の5つを持つ。
+`retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、`collect`/`evaluate`/
+`export`、その3つを順に走らせるumbrella `prepare`、そしてスキルの回答を検証する
+`ingest`の5つを持つ。このうちオフラインで冪等な`collect`と`evaluate`は
+`copilot-daily`のfail-softステップ（`retro_collect`／`retro_evaluate`）としても
+毎日走るので、手動実行は取りこぼしの補完と即時反映のためのものになる。外部APIを
+叩く`export`以降は従来どおり数日おきに手動で回す。
 
 ```bash
 copilot-retro collect --reports-dir reports          # verdictをDuckDBへ取り込む

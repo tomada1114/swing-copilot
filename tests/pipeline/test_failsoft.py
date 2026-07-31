@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -20,7 +21,10 @@ import pytest
 if TYPE_CHECKING:
     from uuid import UUID
 
-from swing_copilot.analysis.export import ANALYSIS_INPUT_FILENAME
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.paper.journal import PaperJournal
@@ -41,6 +45,8 @@ from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
+from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
+from tests.analysis.conftest import input_payload, result_payload
 
 AS_OF = date(2027, 3, 1)
 
@@ -462,6 +468,130 @@ class TestMaeMfeFailureDegrades:
         assert "MAE/MFE: unexpected error" in result.report_path.read_text(
             encoding="utf-8"
         )
+
+
+class FakeMonotonic:
+    """Returns each value in order, then repeats the last one forever."""
+
+    def __init__(self, *values: float):
+        self._values = list(values)
+        self._index = 0
+
+    def __call__(self) -> float:
+        value = self._values[min(self._index, len(self._values) - 1)]
+        self._index += 1
+        return value
+
+
+def _write_archived_run(output_dir: str) -> None:
+    """Archive one past run's analysis documents, as `copilot-daily` would."""
+    directory = Path(output_dir) / AS_OF.isoformat() / ARCHIVED_RUN_ID
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ANALYSIS_INPUT_FILENAME).write_text(
+        json.dumps(input_payload()), encoding="utf-8"
+    )
+    (directory / ANALYSIS_RESULT_FILENAME).write_text(
+        json.dumps(result_payload()), encoding="utf-8"
+    )
+
+
+class TestRetroStepsRunDaily:
+    """P8-30: `collect`/`evaluate` are daily fail-soft steps (3.23 節).
+
+    Both are offline and idempotent, so running them every day removes the
+    risk of a run ageing out of the evaluation window before someone triggers
+    `copilot-retro` by hand. `export` and the skill stay manual.
+    """
+
+    def test_collect_persists_an_archived_verdict_and_both_steps_succeed(
+        self, base_deps: DailyDependencies, state_store: StateStore
+    ) -> None:
+        _write_archived_run(base_deps.output_dir)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _step_status(state_store, result.run_id, "retro_collect") == "success"
+        assert _step_status(state_store, result.run_id, "retro_evaluate") == "success"
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute("SELECT run_id, symbol FROM verdicts").fetchall()
+        # The daily run really invoked `retro.collect`, not a copy of it.
+        assert [(str(row[0]), row[1]) for row in rows] == [(ARCHIVED_RUN_ID, "AAPL")]
+
+    def test_collect_failure_degrades_without_failing_the_run(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "verdict archive unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "collect_verdicts", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "retro_collect") == "failed"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+    def test_evaluate_still_runs_when_collect_failed(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Verdicts collected on earlier days remain evaluable, so one broken
+        # scan must not also cancel the evaluation.
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "verdict archive unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "collect_verdicts", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert _step_status(state_store, result.run_id, "retro_collect") == "failed"
+        assert _step_status(state_store, result.run_id, "retro_evaluate") == "success"
+
+    def test_evaluate_failure_degrades_without_failing_the_run(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "outcome write failed"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "evaluate_verdicts", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "retro_evaluate") == "failed"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+    def test_exhausted_time_budget_skips_both_steps(
+        self, base_deps: DailyDependencies, state_store: StateStore
+    ) -> None:
+        object.__setattr__(base_deps.settings.schedule, "timeout_minutes", 1)
+        deps = replace(base_deps, monotonic=FakeMonotonic(0.0, 999_999.0))
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert _step_status(state_store, result.run_id, "retro_collect") == "skipped"
+        assert _step_status(state_store, result.run_id, "retro_evaluate") == "skipped"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
 
 
 class TestUniverseFallbackDegrades:

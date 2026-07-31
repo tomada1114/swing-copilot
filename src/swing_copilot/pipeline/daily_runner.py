@@ -34,6 +34,8 @@ from swing_copilot.pipeline.daily import (
     _run_step_output,
     _run_step_postmortem,
     _run_step_prices,
+    _run_step_retro_collect,
+    _run_step_retro_evaluate,
     _run_step_risk,
     _run_step_screening,
     _run_text_soft_step,
@@ -290,6 +292,8 @@ def _run_soft_steps(
     _record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
     degraded = degraded or not postmortem_outcome.success
 
+    degraded = _run_retro_soft_steps(deps, ctx, deadline) or degraded
+
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step 7_notify skipped: time budget exceeded")
@@ -353,6 +357,46 @@ def _run_soft_steps(
         ),
         degraded,
     )
+
+
+def _run_retro_soft_steps(
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
+) -> bool:
+    """Run the retrospective's offline, idempotent half inside the daily batch.
+
+    Only `collect` and `evaluate` belong here: both are offline and
+    idempotent, and running them daily stops an un-evaluated run from ageing
+    out of the evaluation window while also backing up the archived
+    `analysis_result.json` into DuckDB. `export` (which fetches freshness data
+    over the network) and the `swing-retro` skill stay manual.
+
+    `evaluate` runs even when `collect` failed, because the verdicts collected
+    on previous days are still evaluable.
+
+    Returns:
+        Whether either step degraded the run.
+    """
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step retro_collect skipped: time budget exceeded")
+        collect_outcome = _TIME_BUDGET_STEP_OUTCOME
+    else:
+        logger.debug("step retro_collect starting")
+        collect_outcome = _run_step_retro_collect(deps)
+    _record_step(deps, ctx.run_id, "retro_collect", collect_outcome, started_at)
+
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step retro_evaluate skipped: time budget exceeded")
+        evaluate_outcome = _TIME_BUDGET_STEP_OUTCOME
+    else:
+        logger.debug("step retro_evaluate starting")
+        evaluate_outcome = _run_step_retro_evaluate(deps, ctx.run_date)
+    _record_step(deps, ctx.run_id, "retro_evaluate", evaluate_outcome, started_at)
+
+    return not collect_outcome.success or not evaluate_outcome.success
 
 
 def _finalize_output(

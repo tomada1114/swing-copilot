@@ -175,8 +175,10 @@ class _NewsClientLike(Protocol):
 class _CalendarClientLike(Protocol):
     """Structural stand-in for `text.calendar_fred.FredCalendarClient`."""
 
-    def fetch_calendar_events(self, start: date, end: date) -> list[TextItem]:
-        """Fetch economic release events in `[start, end]`."""
+    def fetch_calendar_events(
+        self, start: date, end: date, *, as_of: date
+    ) -> list[TextItem]:
+        """Fetch economic release events in `[start, end]`, valued at `as_of`."""
         # pragma: no cover
 
 
@@ -827,7 +829,7 @@ def _fetch_calendar_items(
     try:
         return list(
             deps.calendar_client.fetch_calendar_events(
-                as_of, as_of + timedelta(days=14)
+                as_of, as_of + timedelta(days=14), as_of=as_of
             )
         ), False
     except Exception:

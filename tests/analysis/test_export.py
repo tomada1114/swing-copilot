@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -28,6 +29,13 @@ from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import Candidate
 from swing_copilot.text.base import FilingSection, TextItem
+from swing_copilot.text.calendar_fred import (
+    FRED_RELEASE_DATES_URL,
+    FRED_RELEASE_SERIES_URL,
+    FRED_SERIES_OBSERVATIONS_URL,
+    FredCalendarClient,
+    FredCalendarTiming,
+)
 
 AS_OF = date(2027, 3, 1)
 GENERATED_AT = datetime(2027, 3, 1, 12, tzinfo=UTC)
@@ -39,6 +47,40 @@ LIMITS = TextExportLimits(
     max_calendar_events=2,
     max_calendar_chars=20,
 )
+
+
+class _FixedClock:
+    """Wall clock for the FRED adapter's `fetched_at` stamp."""
+
+    def now(self) -> datetime:
+        return GENERATED_AT
+
+    def today(self) -> date:
+        return AS_OF
+
+
+def _fake_fred(url: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Offline stand-in for the three FRED endpoints the adapter chains."""
+    del params
+    payloads: dict[str, dict[str, Any]] = {
+        FRED_RELEASE_DATES_URL: {
+            "release_dates": [
+                {
+                    "release_id": 50,
+                    "release_name": "Employment Situation",
+                    "date": "2027-02-05",
+                }
+            ]
+        },
+        FRED_RELEASE_SERIES_URL: {"seriess": [{"id": "PAYEMS"}]},
+        FRED_SERIES_OBSERVATIONS_URL: {
+            "observations": [
+                {"date": "2027-01-01", "value": "158200.0"},
+                {"date": "2026-12-01", "value": "158000.0"},
+            ]
+        },
+    }
+    return payloads[url]
 
 
 def _snapshot() -> RegimeSnapshot:
@@ -298,6 +340,29 @@ class TestCalendarEvents:
         )
 
         assert payload.context.calendar_events[0].provider == "fred"
+
+    def test_fred_calendar_summary_stays_distinct_from_its_title(self):
+        """Regression for Issue #82: `title` and `summary` must not duplicate.
+
+        Built from a real `FredCalendarClient` over an offline fake so the
+        export contract is asserted against the adapter's actual output, and
+        under the tightest export budget in this module (20 chars).
+        """
+        client = FredCalendarClient(
+            "test-key",
+            http_get=_fake_fred,
+            timing=FredCalendarTiming(clock=_FixedClock(), sleep_fn=lambda _s: None),
+        )
+        events = client.fetch_calendar_events(
+            date(2027, 2, 1), date(2027, 2, 28), as_of=date(2027, 2, 1)
+        )
+
+        payload = build_analysis_input(_request(calendar_events=tuple(events)))
+
+        exported = payload.context.calendar_events[0]
+        assert exported.title == "Employment Situation"
+        assert exported.summary != exported.title
+        assert exported.summary == "Scheduled for 2027-0"
 
     def test_a_calendar_item_never_appears_on_any_candidate(self):
         payload = build_analysis_input(

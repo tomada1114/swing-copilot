@@ -101,8 +101,8 @@ class FakeNewsClient:
 
 
 class ExplodingCalendarClient:
-    def fetch_calendar_events(self, start, end):
-        del start, end
+    def fetch_calendar_events(self, start, end, *, as_of):
+        del start, end, as_of
         msg = "FRED unreachable"
         raise RuntimeError(msg)
 
@@ -110,8 +110,8 @@ class ExplodingCalendarClient:
 class FakeCalendarClient:
     """Returns one symbol-less macro event, mirroring `FredCalendarClient`."""
 
-    def fetch_calendar_events(self, start, end):
-        del end
+    def fetch_calendar_events(self, start, end, *, as_of):
+        del end, as_of
         stamp = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
         return [
             TextItem(
@@ -121,7 +121,7 @@ class FakeCalendarClient:
                 published_at=stamp,
                 title="Employment Situation",
                 source_url="https://fred.stlouisfed.org/release?rid=1",
-                content_text="Employment Situation",
+                content_text="Scheduled for 2027-03-05: Employment Situation (FRED release 1).",
                 fetched_at=stamp,
             )
         ]

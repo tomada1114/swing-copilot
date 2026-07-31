@@ -29,7 +29,7 @@ from tests.analysis.conftest import (
 class TestSchemaVersions:
     def test_input_and_result_versions_are_the_agreed_constants(self):
         assert INPUT_SCHEMA_VERSION == "analysis-input-v3"
-        assert RESULT_SCHEMA_VERSION == "analysis-result-v2"
+        assert RESULT_SCHEMA_VERSION == "analysis-result-v3"
 
     def test_v3_requires_filing_coverage_but_v2_archive_remains_readable(self):
         legacy = input_payload()
@@ -166,6 +166,63 @@ class TestProvenanceShape:
             {"text": "Score alone justifies proceeding."}
         )
         assert reason.source_ids == []
+
+    def test_a_quote_below_the_minimum_length_is_rejected(self):
+        # Wording this common occurs in any body, so it would evidence nothing.
+        with pytest.raises(ValidationError, match="at least 12 characters"):
+            SourcedFact.model_validate(
+                {
+                    "text": "Something happened.",
+                    "source_ids": [NEWS_ID],
+                    "evidence_quote": "the company",
+                }
+            )
+
+    def test_a_quote_is_measured_after_normalization(self):
+        with pytest.raises(ValidationError, match="at least 12 characters"):
+            SourcedFact.model_validate(
+                {
+                    "text": "Something happened.",
+                    "source_ids": [NEWS_ID],
+                    "evidence_quote": "  the \n\n company  ",
+                }
+            )
+
+    def test_a_quote_at_the_minimum_length_is_accepted(self):
+        fact = SourcedFact.model_validate(
+            {
+                "text": "Something happened.",
+                "source_ids": [NEWS_ID],
+                "evidence_quote": "the company.",
+            }
+        )
+        assert fact.evidence_quote == "the company."
+
+    def test_a_quote_above_the_maximum_length_is_rejected(self):
+        with pytest.raises(ValidationError, match="at most 300 characters"):
+            SourcedFact.model_validate(
+                {
+                    "text": "Something happened.",
+                    "source_ids": [NEWS_ID],
+                    "evidence_quote": "x" * 301,
+                }
+            )
+
+    def test_a_quote_at_the_maximum_length_is_accepted(self):
+        fact = SourcedFact.model_validate(
+            {
+                "text": "Something happened.",
+                "source_ids": [NEWS_ID],
+                "evidence_quote": "x" * 300,
+            }
+        )
+        assert fact.evidence_quote is not None
+
+    def test_a_fact_may_omit_the_quote_so_v2_archives_stay_readable(self):
+        fact = SourcedFact.model_validate(
+            {"text": "Something happened.", "source_ids": [NEWS_ID]}
+        )
+        assert fact.evidence_quote is None
 
 
 class TestVerdictValues:

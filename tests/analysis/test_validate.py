@@ -17,7 +17,9 @@ from swing_copilot.analysis.validate import (
 from tests.analysis.conftest import (
     CALENDAR_ID,
     FILING_ID,
+    FILING_QUOTE,
     NEWS_ID,
+    NEWS_QUOTE,
     input_payload,
     result_payload,
     symbol_payload,
@@ -209,6 +211,195 @@ class TestProvenance:
         assert "edgar:unknown" in error
 
 
+class TestEvidenceQuotes:
+    """The 2026-07-30 failure: correct IDs, text written from another slice."""
+
+    def test_a_quote_that_occurs_in_the_cited_body_is_accepted(self, write_documents):
+        validated = _validated(write_documents)
+
+        assert validated.outcomes[0].error is None
+
+    def test_a_quote_absent_from_the_cited_body_withholds_the_symbol(
+        self, write_documents
+    ):
+        # The mechanism of the incident: a correctly-cited HUM filing carrying a
+        # sentence that only exists in UDR's. IDs alone cannot see this.
+        payload = symbol_payload(
+            filing_analyses=[
+                _filing(
+                    facts=[
+                        {
+                            "text": "Occupancy improved across the portfolio.",
+                            "source_ids": [FILING_ID],
+                            "evidence_quote": "same-store occupancy improved",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        error = validated.outcomes[0].error
+        assert error is not None
+        assert "same-store occupancy improved" in error
+
+    def test_a_fact_without_a_quote_withholds_the_symbol(self, write_documents):
+        payload = symbol_payload(
+            news_summary=_news(
+                facts=[{"text": "Unevidenced claim.", "source_ids": [NEWS_ID]}]
+            )
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        error = validated.outcomes[0].error
+        assert error is not None
+        assert "no evidence_quote" in error
+
+    def test_a_quote_must_occur_in_a_body_the_same_fact_cites(self, write_documents):
+        # The quote is verbatim from the news item, but the fact cites only the
+        # filing. Admitting it would let any supplied body vouch for any claim.
+        payload = symbol_payload(
+            filing_analyses=[
+                _filing(
+                    facts=[
+                        {
+                            "text": "Cross-cited claim.",
+                            "source_ids": [FILING_ID],
+                            "evidence_quote": NEWS_QUOTE,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        error = validated.outcomes[0].error
+        assert error is not None
+        assert NEWS_QUOTE in error
+
+    def test_a_quote_matching_any_one_cited_body_is_enough(self, write_documents):
+        payload = symbol_payload(
+            filing_analyses=[
+                _filing(
+                    facts=[
+                        {
+                            "text": "Corroborated by both sources.",
+                            "source_ids": [FILING_ID, CALENDAR_ID],
+                            "evidence_quote": "Employment Situation",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        assert validated.outcomes[0].error is None
+
+    def test_presentation_differences_do_not_withhold_an_honest_quote(
+        self, write_documents
+    ):
+        payload = symbol_payload(
+            filing_analyses=[
+                _filing(
+                    facts=[
+                        {
+                            "text": "Quarterly results were filed.",
+                            "source_ids": [FILING_ID],
+                            "evidence_quote": "  QUARTERLY\n  REPORT  ",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        validated = _validated(write_documents, symbols=[payload])
+
+        assert validated.outcomes[0].error is None
+
+    def test_one_symbols_unsupported_quote_leaves_its_sibling_intact(
+        self, write_documents
+    ):
+        base_candidate = input_payload()["candidates"][0]
+        sibling = {**base_candidate, "symbol": "MSFT", "news": [], "filings": []}
+        custom_input = input_payload(candidates=[base_candidate, sibling])
+        failing = symbol_payload(
+            news_summary=_news(
+                facts=[
+                    {
+                        "text": "Written from elsewhere.",
+                        "source_ids": [NEWS_ID],
+                        "evidence_quote": "a sentence from another filing",
+                    }
+                ]
+            )
+        )
+        healthy = symbol_payload(
+            symbol="MSFT",
+            news_summary=None,
+            filing_analyses=[],
+            verdict={"recommendation": "proceed", "reasons": []},
+        )
+
+        input_path, result_path = write_documents(
+            custom_input,
+            result_payload(
+                input_digest=custom_input["input_digest"],
+                symbols=[failing, healthy],
+            ),
+        )
+        validated = validate_analysis(
+            load_analysis_input(input_path), load_analysis_result(result_path)
+        )
+
+        assert validated.outcomes[0].error is not None
+        assert validated.outcomes[1].error is None
+
+    def test_an_unverifiable_quote_is_logged_without_retry(
+        self, write_documents, caplog
+    ):
+        payload = symbol_payload(
+            news_summary=_news(
+                facts=[
+                    {
+                        "text": "Written from elsewhere.",
+                        "source_ids": [NEWS_ID],
+                        "evidence_quote": "a sentence from another filing",
+                    }
+                ]
+            )
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _validated(write_documents, symbols=[payload])
+
+        withheld = [record for record in caplog.records if "withheld" in record.message]
+        assert len(withheld) == 1
+
+
+class TestResultSchemaVersion:
+    def test_an_archived_v2_result_cannot_be_ingested(self, write_documents):
+        # Still parseable for P8 collect, but it carries no quotes to verify,
+        # so accepting it at ingest would reopen the hole.
+        legacy = result_payload(schema_version="analysis-result-v2")
+        input_path, result_path = write_documents(None, legacy)
+
+        with pytest.raises(AnalysisIngestError, match="analysis-result-v3 is required"):
+            validate_analysis(
+                load_analysis_input(input_path), load_analysis_result(result_path)
+            )
+
+    def test_an_archived_v2_result_still_parses(self, write_documents):
+        _input_path, result_path = write_documents(
+            None, result_payload(schema_version="analysis-result-v2")
+        )
+
+        assert load_analysis_result(result_path).schema_version == "analysis-result-v2"
+
+
 _VIOLATION = "今すぐ買うべき。"
 
 
@@ -249,7 +440,13 @@ class TestCon03:
             pytest.param(
                 {
                     "news_summary": _news(
-                        facts=[{"text": _VIOLATION, "source_ids": [NEWS_ID]}]
+                        facts=[
+                            {
+                                "text": _VIOLATION,
+                                "source_ids": [NEWS_ID],
+                                "evidence_quote": NEWS_QUOTE,
+                            }
+                        ]
                     )
                 },
                 id="news.facts.text",
@@ -265,7 +462,15 @@ class TestCon03:
             pytest.param(
                 {
                     "filing_analyses": [
-                        _filing(facts=[{"text": _VIOLATION, "source_ids": [FILING_ID]}])
+                        _filing(
+                            facts=[
+                                {
+                                    "text": _VIOLATION,
+                                    "source_ids": [FILING_ID],
+                                    "evidence_quote": FILING_QUOTE,
+                                }
+                            ]
+                        )
                     ]
                 },
                 id="filing.facts.text",
@@ -463,6 +668,7 @@ class TestResolvedMetadata:
                     {
                         "text": "雇用統計が as_of 直後に予定されている。",
                         "source_ids": [CALENDAR_ID],
+                        "evidence_quote": "Employment Situation",
                     }
                 ],
                 "interpretation": [],

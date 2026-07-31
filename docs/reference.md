@@ -77,15 +77,21 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `max_calendar_chars_per_item`文字までに切り詰めて別出しする。
 
 `analysis/validate.py`はスキルが書いた`analysis_result.json`
-（schema `analysis-result-v2`）を検証する。ingestはまず3文書の`run_id`、`as_of`、
+（schema `analysis-result-v3`。新規runはこのバージョン以外をhard failさせ、
+`analysis-result-v2`はP8アーカイブ読み込みだけ後方互換で受理する）を検証する。
+ingestはまず3文書の`run_id`、`as_of`、
 `strategy_key`、完全なinput digestを照合し、不一致なら既存reportと`latest.md`を変更せずhard failする。銘柄ごとに、(1) strictスキーマ
 （`extra="forbid"`）で解析できること、(2) 引用された`source_id`がすべて当該銘柄に
 ついて実際に供給したもの、または`context.calendar_events`のID（run単位でどの銘柄
-からも引用可）であり、各`SourcedFact`が1件以上引用していること、
-(3) 表示テキストが`analysis/safety.py`のCON-03検査を通ること、を確かめる。
-(2)(3)の違反は**銘柄単位のfail-closed**で、当該銘柄の定性セクションを保留
+からも引用可）であり、各`SourcedFact`が1件以上引用していること、(3) 各`SourcedFact`の
+`evidence_quote`（12〜300字）が、その`source_ids`のいずれかの本文（ニュースは
+見出し＋要約、開示は入力に渡された`text`、カレンダーイベントはタイトル＋要約）に
+Unicode NFKC正規化・記号統一・空白畳み込み・大小無視のうえで実在すること、
+(4) 表示テキストが`analysis/safety.py`のCON-03検査を通ること、を確かめる。
+(2)(3)(4)の違反は**銘柄単位のfail-closed**で、当該銘柄の定性セクションを保留
 （`SymbolOutcome.error`を設定し他フィールドを空に）してログへ残すだけで、
-リトライしない。文書が読めない・JSONでない・`as_of`が入力と食い違う場合だけは
+リトライしない。(3)は、別銘柄の本文を読みながら自分の正しい`source_id`だけを
+申告するような取り違えを機械的に検出するための検査である。文書が読めない・JSONでない・`as_of`が入力と食い違う場合だけは
 run全体のhard failとする——別の取引日を記述しているかもしれないファイルに
 「安全な部分読み込み」は存在しないためである。
 

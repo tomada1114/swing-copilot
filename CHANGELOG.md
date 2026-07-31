@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- factに逐語引用`evidence_quote`を必須化し、ingestが引用元本文との一致を機械
+  検証する。`source_ids`は「そのIDが当該銘柄に供給されている」ことしか証明せず、
+  別銘柄の本文を読みながら自分の正しい`source_id`を申告したfactは検証を通過して
+  いた。`evidence_quote`が、そのfactが引用する`source_ids`のいずれかの本文
+  （ニュースは見出し＋要約、開示は入力の`text`、カレンダーイベントはタイトル＋
+  要約）に存在しない銘柄はfail-closedで縮退し、リトライしない。照合はNFKC・
+  引用符/ダッシュ畳み込み・空白圧縮・大小無視のうえで行うため表記ゆれは通るが、
+  言い換えは通らない。`analysis_result.json`のスキーマは`analysis-result-v3`
+  （旧`analysis-result-v2`はP8アーカイブ読み込みのみ後方互換）
 - 開示の章coverageに欠落量と欠落位置を追加。`FilingSectionCoverage`が
   `original_chars` / `exported_chars` / `omission_shape`（`head_only` /
   `head_and_tail`）を任意フィールドとして持ち、`partial`の章が「どれだけ・

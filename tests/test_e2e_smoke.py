@@ -181,7 +181,7 @@ def _offline_skill_result(input_payload: dict[str, object]) -> dict[str, object]
     candidates = input_payload["candidates"]
     assert isinstance(candidates, list)
     return {
-        "schema_version": "analysis-result-v2",
+        "schema_version": "analysis-result-v3",
         "run_id": input_payload["run_id"],
         "as_of": input_payload["as_of"],
         "strategy_key": input_payload["strategy_key"],

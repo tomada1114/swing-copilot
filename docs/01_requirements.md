@@ -148,6 +148,7 @@ Part1調査の結論として、本システムは意思決定支援ツールと
   - `analysis_input.json`・`analysis_result.json`が双方向ともpydanticのstrictスキーマ（`extra="forbid"`）で検証され、未知フィールド・スキーマ違反がエラーとして検出されることをpytestで確認できる。
   - 出力スキーマが「事実（`facts`）」と「解釈（`interpretation`）」を別フィールドとして強制し、`facts`の各要素が非空・非空白の`source_ids`を1件以上持つことを検証できる。
   - 引用された`source_ids`が、当該銘柄について`analysis_input.json`で実際に供給したID集合の部分集合であることを検証できる。部分集合でない銘柄はfail-closedで縮退表示となり、リトライしないことをテストで確認できる。
+  - `facts`の各要素は、その`source_ids`が指す本文（ニュースなら見出し＋要約、開示なら`analysis_input.json`が渡した`text`、カレンダーイベントならタイトル＋要約）からの逐語引用`evidence_quote`（正規化後12〜300字）を持つことを検証できる。`evidence_quote`が欠落している場合、または引用元として申告した`source_ids`のいずれの本文にも（Unicode NFKC正規化・記号統一・空白畳み込み・大小無視のうえで）出現しない場合は、当該銘柄がfail-closedで縮退表示となり、リトライしないことをテストで確認できる。これにより、他銘柄の本文を読みながら自分の正しい`source_ids`を申告するような取り違えを機械的に検出できる。
   - 書類種別・提出日・ソースURLといったコード側メタデータは`analysis_input.json`から解決され、スキル出力の申告値をそのまま採用しないことを確認できる。
   - facts、interpretation、risk/red flag、YoY変化、スクリーニング評価、verdict理由を含む全ユーザー表示文字列についてCON-03検査をingest時に一元実施し、違反銘柄が表示されず縮退することを検証できる。
   - `analysis_input.json`の候補symbolと候補内source_id、`analysis_result.json`のsymbolがそれぞれ一意であり、resultのsymbol集合がinput候補集合と完全一致しなければrun全体をhard failすることを検証できる。

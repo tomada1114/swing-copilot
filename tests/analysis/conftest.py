@@ -28,6 +28,10 @@ FILING_ID = "edgar:0000320193-27-000001"
 CALENDAR_ID = "fred:1:2027-03-05"
 RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
 STRATEGY_KEY = "default"
+#: Verbatim excerpts of the bodies `input_payload()` exports, long enough to
+#: clear `MIN_EVIDENCE_QUOTE_CHARS`.
+NEWS_QUOTE = "announced a new product line"
+FILING_QUOTE = "Quarterly report"
 
 
 def input_payload(**overrides: Any) -> dict[str, Any]:
@@ -117,7 +121,11 @@ def symbol_payload(**overrides: Any) -> dict[str, Any]:
         "symbol": "AAPL",
         "news_summary": {
             "facts": [
-                {"text": "A new product line was announced.", "source_ids": [NEWS_ID]}
+                {
+                    "text": "A new product line was announced.",
+                    "source_ids": [NEWS_ID],
+                    "evidence_quote": NEWS_QUOTE,
+                }
             ],
             "interpretation": ["May support near-term revenue."],
             "risk_flags": ["Execution risk remains."],
@@ -126,7 +134,11 @@ def symbol_payload(**overrides: Any) -> dict[str, Any]:
             {
                 "source_id": FILING_ID,
                 "facts": [
-                    {"text": "Revenue rose year over year.", "source_ids": [FILING_ID]}
+                    {
+                        "text": "Revenue rose year over year.",
+                        "source_ids": [FILING_ID],
+                        "evidence_quote": FILING_QUOTE,
+                    }
                 ],
                 "interpretation": ["May indicate steady demand."],
                 "red_flags": [],

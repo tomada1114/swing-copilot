@@ -6,9 +6,12 @@ module proves, per symbol:
 1. the document parses under the strict schema (`schemas.py`);
 2. every cited `source_id` was actually supplied for that symbol, and every
    fact cites at least one;
-3. no user-visible text violates CON-03 (`safety.py`).
+3. every fact's `evidence_quote` occurs verbatim in a cited source's exported
+   body (`evidence.py`), so a fact written from a slice the expert was never
+   given fails even though its IDs are correct;
+4. no user-visible text violates CON-03 (`safety.py`).
 
-Rules 2 and 3 are enforced **fail-closed per symbol**: a violating symbol's
+Rules 2 to 4 are enforced **fail-closed per symbol**: a violating symbol's
 qualitative section is withheld and the failure is logged, with no retry. A
 malformed document or an `as_of` that disagrees with the input is a hard
 failure for the whole run -- there is no safe partial reading of a file that
@@ -25,12 +28,20 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
+from swing_copilot.analysis.evidence import (
+    normalize_evidence_text,
+    normalized_source_bodies,
+)
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
-from swing_copilot.analysis.schemas import AnalysisInput, AnalysisResult
+from swing_copilot.analysis.schemas import (
+    RESULT_SCHEMA_VERSION,
+    AnalysisInput,
+    AnalysisResult,
+)
 from swing_copilot.exceptions import SwingCopilotError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Collection, Iterator, Mapping
     from datetime import date
     from pathlib import Path
     from uuid import UUID
@@ -40,6 +51,7 @@ if TYPE_CHECKING:
         FilingAnalysis,
         NewsSummary,
         ScreeningAssessment,
+        SourcedFact,
         SymbolAnalysis,
         Verdict,
     )
@@ -159,9 +171,17 @@ def validate_analysis(
         rendered, plus the run-level no-trade flag.
 
     Raises:
-        AnalysisIngestError: The result's `as_of` or symbol set disagrees with
-            the input, so the documents cannot safely describe one analysis.
+        AnalysisIngestError: The result's schema version, `as_of`, or symbol set
+            disagrees with the input, so the documents cannot safely describe
+            one analysis.
     """
+    if result.schema_version != RESULT_SCHEMA_VERSION:
+        msg = (
+            f"analysis_result schema_version {result.schema_version} cannot be "
+            f"ingested: {RESULT_SCHEMA_VERSION} is required so every fact "
+            "carries a verifiable evidence_quote"
+        )
+        raise AnalysisIngestError(msg)
     if result.as_of != analysis_input.as_of:
         msg = (
             f"analysis_result as_of {result.as_of.isoformat()} does not match "
@@ -171,11 +191,12 @@ def validate_analysis(
 
     _verify_complete_symbol_coverage(analysis_input, result)
     candidates = {item.symbol: item for item in analysis_input.candidates}
-    calendar_ids = frozenset(
-        item.source_id for item in analysis_input.context.calendar_events
+    calendar_bodies = normalized_source_bodies(
+        (item.source_id, _text_body(item.title, item.summary))
+        for item in analysis_input.context.calendar_events
     )
     outcomes = tuple(
-        _verify_symbol(analysis, candidates.get(analysis.symbol), calendar_ids)
+        _verify_symbol(analysis, candidates.get(analysis.symbol), calendar_bodies)
         for analysis in result.symbols
     )
     return ValidatedAnalysis(
@@ -251,12 +272,22 @@ def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
 def _verify_symbol(
     analysis: SymbolAnalysis,
     candidate: CandidateInput | None,
-    calendar_ids: frozenset[str],
+    calendar_bodies: Mapping[str, str],
 ) -> SymbolOutcome:
-    """Apply the per-symbol provenance and CON-03 rules, fail-closed."""
+    """Apply the per-symbol provenance, evidence, and CON-03 rules, fail-closed.
+
+    Args:
+        analysis: This symbol's section of the skill's answer.
+        candidate: The exported candidate it claims to answer, or `None` when
+            the input never offered this symbol.
+        calendar_bodies: Run-wide calendar `source_id` -> normalized body, the
+            IDs of which every symbol may cite.
+    """
     if candidate is None:
         return _withheld(analysis.symbol, "symbol is absent from analysis_input.json")
-    error = _provenance_error(analysis, candidate, calendar_ids)
+    error = _provenance_error(analysis, candidate, calendar_bodies.keys())
+    if error is None:
+        error = _evidence_error(analysis, candidate, calendar_bodies)
     if error is None:
         try:
             check_display_texts(_display_texts(analysis))
@@ -316,7 +347,7 @@ def _verify_complete_symbol_coverage(
 def _provenance_error(
     analysis: SymbolAnalysis,
     candidate: CandidateInput,
-    calendar_ids: frozenset[str],
+    calendar_ids: Collection[str],
 ) -> str | None:
     """Return why provenance fails for this symbol, or `None` if it holds.
 
@@ -327,7 +358,7 @@ def _provenance_error(
     known = (
         {item.source_id for item in candidate.news}
         | {item.source_id for item in candidate.filings}
-        | calendar_ids
+        | set(calendar_ids)
     )
     cited = set(_cited_source_ids(analysis))
     unknown = sorted(cited - known)
@@ -342,13 +373,60 @@ def _provenance_error(
     return None
 
 
-def _cited_source_ids(analysis: SymbolAnalysis) -> Iterator[str]:
+def _evidence_error(
+    analysis: SymbolAnalysis,
+    candidate: CandidateInput,
+    calendar_bodies: Mapping[str, str],
+) -> str | None:
+    """Return why a fact's verbatim quote is unsupported, or `None` if all hold.
+
+    Only `SourcedFact` carries a quote. `VerdictReason` is deliberately exempt:
+    a reason may rest solely on deterministic values the code computed, so it is
+    allowed to cite nothing and has no source body to quote from.
+
+    Call this only after `_provenance_error` has passed, so every cited ID is
+    known to have a body here. An unknown ID would fall back to an empty body
+    and fail closed anyway.
+    """
+    bodies = dict(calendar_bodies) | normalized_source_bodies(
+        _candidate_source_bodies(candidate)
+    )
+    for fact in _sourced_facts(analysis):
+        if fact.evidence_quote is None:
+            return f"fact carries no evidence_quote: {fact.text!r}"
+        quote = normalize_evidence_text(fact.evidence_quote)
+        if not any(quote in bodies.get(source_id, "") for source_id in fact.source_ids):
+            return (
+                "evidence_quote is absent from every cited source body "
+                f"{sorted(fact.source_ids)}: {fact.evidence_quote!r}"
+            )
+    return None
+
+
+def _candidate_source_bodies(candidate: CandidateInput) -> Iterator[tuple[str, str]]:
+    """Yield `(source_id, quotable body)` for everything exported to a symbol."""
+    for item in candidate.news:
+        yield item.source_id, _text_body(item.headline, item.summary)
+    for filing in candidate.filings:
+        yield filing.source_id, filing.text
+
+
+def _text_body(title: str | None, summary: str) -> str:
+    """Join an optional headline/title to its summary as one quotable body."""
+    return summary if title is None else f"{title}\n{summary}"
+
+
+def _sourced_facts(analysis: SymbolAnalysis) -> Iterator[SourcedFact]:
+    """Every `SourcedFact` this symbol asserts, across news and filings."""
     if analysis.news_summary is not None:
-        for fact in analysis.news_summary.facts:
-            yield from fact.source_ids
+        yield from analysis.news_summary.facts
     for filing in analysis.filing_analyses:
-        for fact in filing.facts:
-            yield from fact.source_ids
+        yield from filing.facts
+
+
+def _cited_source_ids(analysis: SymbolAnalysis) -> Iterator[str]:
+    for fact in _sourced_facts(analysis):
+        yield from fact.source_ids
     for reason in analysis.verdict.reasons:
         yield from reason.source_ids
 

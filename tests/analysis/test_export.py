@@ -111,7 +111,12 @@ def _exposure() -> ExposureDecision:
     )
 
 
-def _news(source_id: str, day: int, body: str = "A" * 100) -> TextItem:
+def _news(
+    source_id: str,
+    day: int,
+    body: str = "A" * 100,
+    related: tuple[str, ...] = (),
+) -> TextItem:
     stamp = datetime(2027, 2, day, tzinfo=UTC)
     return TextItem(
         source_id=source_id,
@@ -122,6 +127,7 @@ def _news(source_id: str, day: int, body: str = "A" * 100) -> TextItem:
         source_url=f"https://example.com/{source_id}",
         content_text=body,
         fetched_at=stamp,
+        related_symbols=related,
     )
 
 
@@ -248,6 +254,77 @@ class TestBuildAnalysisInput:
         assert [item.source_id for item in payload.candidates[0].news] == [
             "finnhub:2",
             "finnhub:3",
+        ]
+
+    def test_news_not_mentioning_the_symbol_is_demoted_below_news_that_does(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, related=("MSFT",)),
+                _news("finnhub:2", 20, related=("AAPL",)),
+                _news("finnhub:3", 10, related=("AAPL", "MSFT")),
+            )
+        )
+
+        assert [item.source_id for item in payload.candidates[0].news] == [
+            "finnhub:2",
+            "finnhub:3",
+        ]
+
+    def test_off_target_news_still_fills_the_cap_when_nothing_is_on_target(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 20, related=("MSFT",)),
+                _news("finnhub:2", 25, related=("MSFT",)),
+                _news("finnhub:3", 28, related=("MSFT",)),
+            )
+        )
+
+        assert [item.source_id for item in payload.candidates[0].news] == [
+            "finnhub:3",
+            "finnhub:2",
+        ]
+
+    def test_news_without_related_tickers_is_not_demoted(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, related=("MSFT",)),
+                _news("finnhub:2", 10, related=()),
+            )
+        )
+
+        assert [item.source_id for item in payload.candidates[0].news] == [
+            "finnhub:2",
+            "finnhub:1",
+        ]
+
+    def test_relevance_ordering_beats_a_newer_but_off_target_body(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, body="A" * 100, related=("MSFT",)),
+                _news("finnhub:2", 20, body="", related=("AAPL",)),
+                _news("finnhub:3", 10, body="A" * 100, related=("AAPL",)),
+            )
+        )
+
+        assert [item.source_id for item in payload.candidates[0].news] == [
+            "finnhub:3",
+            "finnhub:2",
+        ]
+
+    def test_news_selection_does_not_depend_on_collection_order(self):
+        items = (
+            _news("finnhub:1", 28, related=("MSFT",)),
+            _news("finnhub:2", 20, related=("AAPL",)),
+            _news("finnhub:3", 20, related=("AAPL",)),
+            _news("finnhub:4", 10, related=()),
+        )
+
+        first = build_analysis_input(_request(*items)).candidates[0].news
+        second = build_analysis_input(_request(*reversed(items))).candidates[0].news
+
+        assert [item.source_id for item in first] == ["finnhub:3", "finnhub:2"]
+        assert [item.model_dump() for item in first] == [
+            item.model_dump() for item in second
         ]
 
     def test_news_bodies_are_truncated_to_the_export_budget(self):

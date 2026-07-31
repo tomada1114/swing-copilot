@@ -82,6 +82,118 @@ class TestFetchCompanyNews:
         assert captured["params"]["to"] == "2027-01-08"
         assert captured["params"]["token"] == "test-key"  # noqa: S105 - test fixture, not a real credential
 
+    def test_keeps_related_tickers_and_category_from_the_response(self):
+        def responding_get(*_args, **_kwargs):
+            return [
+                {
+                    "id": 123,
+                    "datetime": int(datetime(2027, 1, 5, tzinfo=UTC).timestamp()),
+                    "headline": "Apple and Microsoft extend their deal",
+                    "url": "https://example.com/article",
+                    "summary": "Both companies confirmed the extension.",
+                    "related": "AAPL,MSFT",
+                    "category": "company",
+                }
+            ]
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=responding_get,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+        )
+
+        item = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )[0]
+
+        assert item.related_symbols == ("AAPL", "MSFT")
+        assert item.category == "company"
+
+    @pytest.mark.parametrize(
+        ("related", "expected"),
+        [
+            pytest.param(" aapl , msft ", ("AAPL", "MSFT"), id="normalized"),
+            pytest.param("AAPL,,AAPL,", ("AAPL",), id="blank-and-duplicate-segments"),
+            pytest.param("", (), id="empty-string"),
+            pytest.param(None, (), id="absent"),
+            pytest.param(["AAPL"], (), id="unexpected-type"),
+        ],
+    )
+    def test_related_tickers_are_normalized_and_missing_ones_stay_empty(
+        self, related, expected
+    ):
+        def responding_get(*_args, **_kwargs):
+            item = {
+                "id": 123,
+                "datetime": int(datetime(2027, 1, 5, tzinfo=UTC).timestamp()),
+                "headline": "Headline",
+                "url": "https://example.com/article",
+                "summary": "Summary.",
+            }
+            if related is not None:
+                item["related"] = related
+            return [item]
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=responding_get,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+        )
+
+        item = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )[0]
+
+        assert item.related_symbols == expected
+
+    @pytest.mark.parametrize(
+        ("category", "expected"),
+        [
+            pytest.param(" company ", "company", id="trimmed"),
+            pytest.param("   ", None, id="blank"),
+            pytest.param(None, None, id="absent"),
+            pytest.param(7, None, id="unexpected-type"),
+        ],
+    )
+    def test_a_blank_or_absent_category_becomes_none(self, category, expected):
+        def responding_get(*_args, **_kwargs):
+            item = {
+                "id": 123,
+                "datetime": int(datetime(2027, 1, 5, tzinfo=UTC).timestamp()),
+                "headline": "Headline",
+                "url": "https://example.com/article",
+                "summary": "Summary.",
+            }
+            if category is not None:
+                item["category"] = category
+            return [item]
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=responding_get,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+        )
+
+        item = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )[0]
+
+        assert item.category == expected
+
+    def test_a_response_without_relevance_metadata_stays_empty(self):
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=_fake_response,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+        )
+
+        item = client.fetch_company_news(
+            "AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10)
+        )[0]
+
+        assert item.related_symbols == ()
+        assert item.category is None
+
     def test_empty_response_returns_empty_list(self):
         client = FinnhubNewsClient(
             "test-key",

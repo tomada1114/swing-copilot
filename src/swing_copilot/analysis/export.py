@@ -213,23 +213,43 @@ def _candidate_input(item: ExportCandidate, limits: TextExportLimits) -> Candida
         score_breakdown=format_score_breakdown(item.candidate),
         risk_constraints=format_risk_constraints(item.risk_assessment),
         decision_history=history or None,
-        news=_news_inputs(item.text_items, limits),
+        news=_news_inputs(item.text_items, limits, item.candidate.symbol),
         filings=_filing_inputs(item.text_items, limits),
     )
 
 
+def _mentions_symbol(item: TextItem, symbol: str) -> bool:
+    """Whether the source's own ticker list still covers `symbol` (FR-07).
+
+    An item without ticker metadata counts as on-target: an empty
+    `related_symbols` means the source did not declare one, and demoting every
+    such article would penalize whole sources rather than off-target content.
+    """
+    if not item.related_symbols:
+        return True
+    return symbol.upper() in item.related_symbols
+
+
 def _news_inputs(
-    text_items: Sequence[TextItem], limits: TextExportLimits
+    text_items: Sequence[TextItem], limits: TextExportLimits, symbol: str
 ) -> list[NewsInput]:
     """Newest-first news items, capped in count and per-item length.
 
-    Items with a blank `summary` sort after every item that has one, so a
-    summary-less article never displaces one with content within the
-    `max_news_items` cap.
+    Articles whose source-declared tickers do not include `symbol` (sector
+    round-ups, peer stories, generic market wraps) sort after every on-target
+    article, so they stop crowding out material coverage. They are demoted, not
+    dropped: a symbol with few on-target articles still fills its
+    `max_news_items` budget instead of going empty.
+
+    Within each relevance tier, items with a blank `summary` sort after every
+    item that has one, so a summary-less article never displaces one with
+    content. Remaining ties break on `published_at` then `source_id`, making
+    the selection identical for identical input and `as_of`.
     """
     news = sorted(
         (item for item in text_items if item.source_type == "news"),
         key=lambda item: (
+            _mentions_symbol(item, symbol),
             bool(item.content_text.strip()),
             item.published_at,
             item.source_id,

@@ -26,9 +26,10 @@ class FilingSection:
 class TextItem:
     """One collected text unit (news article, filing excerpt, or calendar event).
 
-    Matches the `text_items` table schema (`docs/04_detailed_design.md` 4.2)
-    directly, so every source's output stores identically regardless of
-    origin.
+    The stored columns match the `text_items` table schema
+    (`docs/04_detailed_design.md` 4.2) directly, so every source's output
+    stores identically regardless of origin. The trailing fields are
+    collection-time analysis aids that are not persisted.
     """
 
     source_id: str
@@ -40,3 +41,10 @@ class TextItem:
     content_text: str
     fetched_at: datetime
     filing_sections: tuple[FilingSection, ...] = ()
+    # Provider-declared tickers (Finnhub `related`), upper-cased and
+    # de-duplicated in the provider's own order. Empty means "the source did
+    # not say", which is deliberately not "unrelated": a source that carries no
+    # ticker metadata must not be demoted for lacking it.
+    related_symbols: tuple[str, ...] = ()
+    # Provider's own label for the item (Finnhub `category`), e.g. "company".
+    category: str | None = None

@@ -126,6 +126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ニュース枠に関連度の選別が無く、対象銘柄への言及が名目的なだけの記事
+  （セクター横断記事・他社記事・定型マーケットサマリ）が判断価値のある記事を
+  `max_news_items_per_symbol`の枠から押し出していた問題を解消。
+  `text/news_finnhub.py`がFinnhub応答の`related`/`category`を
+  `TextItem.related_symbols`/`TextItem.category`へ正規化して保持し、
+  `analysis/export.py`が関連ティッカーに対象銘柄を含まない記事を**降格**する
+  （除外ではないため、関連記事が少ない銘柄でも枠が空かない）。関連ティッカーの
+  宣言が無い記事は降格しない。`analysis_input.json`のスキーマは変更せず、
+  関連度は`news[]`の順序としてのみ伝わる
 - `analysis_input.json`の`context.calendar_events[]`で`title`と`summary`が
   リリース名の重複になっていた問題を解消。`text/calendar_fred.py`が
   `fred/release/series` → `fred/series/observations`のAPI連鎖で代表系列の

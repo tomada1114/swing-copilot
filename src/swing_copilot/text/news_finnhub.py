@@ -28,6 +28,35 @@ class _HttpGet(Protocol):
         ...  # pragma: no cover
 
 
+def _related_symbols(raw: Any) -> tuple[str, ...]:
+    """Normalize Finnhub's `related` field into a ticker tuple.
+
+    Finnhub returns the tickers it attached to an article as one
+    comma-separated string (`"AAPL,MSFT"`), sometimes blank, sometimes with
+    stray whitespace or empty segments, and occasionally absent. Anything that
+    is not a string yields an empty tuple, which downstream selection reads as
+    "the source did not say" rather than "unrelated".
+
+    Returns:
+        Upper-cased tickers, de-duplicated in the provider's own order.
+    """
+    if not isinstance(raw, str):
+        return ()
+    tickers: dict[str, None] = {}
+    for token in raw.split(","):
+        ticker = token.strip().upper()
+        if ticker:
+            tickers[ticker] = None
+    return tuple(tickers)
+
+
+def _category(raw: Any) -> str | None:
+    """Normalize Finnhub's `category` label, treating blank as absent."""
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
+
+
 def _real_http_get(url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
 
     response = httpx.get(url, params=params, timeout=10.0)
@@ -83,7 +112,9 @@ class FinnhubNewsClient:
             as_of: Latest publication date to request; never inferred from today.
 
         Returns:
-            News items normalized to `TextItem` (`source_type="news"`).
+            News items normalized to `TextItem` (`source_type="news"`),
+            carrying the response's `related` tickers and `category` label so
+            the export step can rank an article's relevance to a candidate.
         """
         params = {
             "symbol": symbol,
@@ -107,6 +138,8 @@ class FinnhubNewsClient:
                 source_url=item.get("url", ""),
                 content_text=item.get("summary", ""),
                 fetched_at=fetched_at,
+                related_symbols=_related_symbols(item.get("related")),
+                category=_category(item.get("category")),
             )
             for item in raw_items
         ]

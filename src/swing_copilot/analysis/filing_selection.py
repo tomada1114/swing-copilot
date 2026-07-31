@@ -9,6 +9,7 @@ from swing_copilot.analysis.schemas import (
     FilingCoverage,
     FilingInput,
     FilingSectionCoverage,
+    FilingSectionOmissionShape,
     FilingSelectionMode,
 )
 
@@ -40,6 +41,21 @@ class FilingTextSelection:
 
     text: str
     coverage: FilingCoverage
+
+
+@dataclass(frozen=True, slots=True)
+class _ShapedSection:
+    """One section's exported text plus the deficit its coverage must report.
+
+    `exported_chars` counts only section characters, excluding the omission
+    marker, so it can be compared against the section's original length.
+    `omission_shape` is `None` when nothing was dropped (or when nothing was
+    kept), because the shape only describes a surviving excerpt.
+    """
+
+    text: str
+    exported_chars: int
+    omission_shape: FilingSectionOmissionShape | None
 
 
 def select_filing_inputs(
@@ -118,23 +134,17 @@ def select_filing_text(
     if content_budget == 0:
         return _selection(original[:budget], len(original), "head_fallback", ())
     allocated = _allocate_section_chars(available, content_budget)
+    shaped = {
+        name: _shape_section(content, allocated[name]) for name, _, content in available
+    }
     parts = [
-        f"{headers[name]}{_shape_section(content, allocated[name])}"
-        for name, _, content in available
+        f"{headers[name]}{shaped[name].text}"
+        for name, _, _ in available
         if allocated[name] > 0
     ]
     selected = "\n\n".join(parts)[:budget]
     coverage = tuple(
-        FilingSectionCoverage(
-            name=name,
-            status=(
-                "missing"
-                if name not in sections
-                else "full"
-                if allocated.get(name, 0) >= len(sections[name])
-                else "partial"
-            ),
-        )
+        _section_coverage(name, sections.get(name), shaped.get(name))
         for name, _ in _SECTION_TARGETS
     )
     mode: FilingSelectionMode = (
@@ -145,7 +155,34 @@ def select_filing_text(
     return _selection(selected, len(original), mode, coverage)
 
 
-def _shape_section(content: str, allocated: int) -> str:
+def _section_coverage(
+    name: str, content: str | None, piece: _ShapedSection | None
+) -> FilingSectionCoverage:
+    """Report one priority section's status together with its deficit.
+
+    Args:
+        name: The priority section's canonical name.
+        content: The parsed section text, or `None` when the parser found no
+            such section in this filing.
+        piece: What `_shape_section` kept of `content`, paired with `content`.
+
+    Returns:
+        Coverage carrying character counts and an omission shape whenever the
+        section existed; a bare `missing` status when it did not, since an
+        absent section has no original length to report.
+    """
+    if content is None or piece is None:
+        return FilingSectionCoverage(name=name, status="missing")
+    return FilingSectionCoverage(
+        name=name,
+        status="full" if piece.exported_chars >= len(content) else "partial",
+        original_chars=len(content),
+        exported_chars=piece.exported_chars,
+        omission_shape=piece.omission_shape,
+    )
+
+
+def _shape_section(content: str, allocated: int) -> _ShapedSection:
     """Return `allocated` characters of `content`, keeping its head and tail.
 
     Head-only truncation silently dropped whatever sat at the end of a section,
@@ -161,17 +198,24 @@ def _shape_section(content: str, allocated: int) -> str:
 
     Returns:
         `content` unchanged when it fits, otherwise its head and tail joined by
-        `_SECTION_OMISSION_MARKER`, exactly `allocated` characters long.
+        `_SECTION_OMISSION_MARKER`, exactly `allocated` characters long. A
+        section too short to hold the marker plus a tail degrades to a leading
+        slice, which the shape reports as `head_only`.
     """
     if allocated >= len(content):
-        return content
+        return _ShapedSection(content, len(content), None)
     head_share, total_share = _SECTION_HEAD_SHARE
     kept = allocated - len(_SECTION_OMISSION_MARKER)
     head = kept * head_share // total_share
     tail = kept - head
     if kept <= 0 or tail <= 0:
-        return content[:allocated]
-    return f"{content[:head]}{_SECTION_OMISSION_MARKER}{content[len(content) - tail :]}"
+        sliced = content[:allocated]
+        return _ShapedSection(sliced, len(sliced), "head_only" if sliced else None)
+    return _ShapedSection(
+        f"{content[:head]}{_SECTION_OMISSION_MARKER}{content[len(content) - tail :]}",
+        kept,
+        "head_and_tail",
+    )
 
 
 def _allocate_section_chars(

@@ -120,6 +120,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `analysis_input.json`の`context.calendar_events[]`で`title`と`summary`が
+  リリース名の重複になっていた問題を解消。`text/calendar_fred.py`が
+  `fred/release/series` → `fred/series/observations`のAPI連鎖で代表系列の
+  直近実績値・前回値・差分を要約に載せる。観測値は`as_of`以前に限り
+  （境界は含む）、全リクエストを120 req/minでスロットルし、値取得は
+  リリース単位のメモ化と上限20件で有界化。取得失敗はイベントを落とさず
+  欠落理由を明示した要約へ縮退する。市場予想はFREDに存在しないため
+  発明せず不在を明示する
 - `copilot-daily --as-of` no longer leaks current open positions or
   currently known Finnhub earnings dates into historical replays; both
   unavailable point-in-time sources now fail soft with explicit notices,

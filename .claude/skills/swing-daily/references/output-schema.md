@@ -13,6 +13,10 @@
 確定済みの事実（schemas.py 実装確認済み。以下は変更しない前提で読んでよい）:
 
 - `SourcedFact` のフィールド名は `text`（旧 `llm/schemas.py` 時代の `statement` ではない）。
+- `SourcedFact` は `evidence_quote`（正規化後 12〜300 字の逐語引用、`str | None`）を持つ。
+  新規に書く fact は必ず値を入れる（省略・null は provenance 検査で fail-closed になる）。
+  `VerdictReason` にはこのフィールドは無い。詳細は
+  [analysis-conventions.md の AC6](analysis-conventions.md) を参照。
 - 旧スキーマにあった `sentiment` / `sources` / `catalyst_quality` /
   `catalyst_quality_source_ids` / `period`（`NewsSummary`）、`filing_type` /
   `guidance_direction`（`FilingAnalysis`）は新契約に**存在しない**。意図的に廃止された
@@ -172,7 +176,7 @@
 
 ```jsonc
 {
-  "schema_version": "analysis-result-v2",
+  "schema_version": "analysis-result-v3",
   "run_id": "11111111-2222-3333-4444-555555555555", // input を逐語コピー
   "as_of": "2026-07-27",             // input と一致必須（不一致は hard fail）
   "strategy_key": "default",          // input を逐語コピー
@@ -182,14 +186,16 @@
     {
       "symbol": "AAPL",
       "news_summary": {              // 該当ニュースが無ければ null
-        "facts": [ { "text": "...", "source_ids": ["news-..."] } ],
+        "facts": [ { "text": "...", "source_ids": ["news-..."],
+                      "evidence_quote": "headline か summary からの12〜300字の逐語引用" } ],
         "interpretation": ["..."],
         "risk_flags": ["..."]
       },
       "filing_analyses": [           // 該当開示が無ければ []
         {
           "source_id": "filing-...",
-          "facts": [ { "text": "...", "source_ids": ["filing-..."] } ],
+          "facts": [ { "text": "...", "source_ids": ["filing-..."],
+                        "evidence_quote": "入力の text からの12〜300字の逐語引用" } ],
           "interpretation": ["..."],
           "red_flags": ["..."],
           "yoy_changes": ["..."]
@@ -222,6 +228,10 @@
   **入力と完全一致**させる。入力にある銘柄を落としたり、入力外銘柄を追加したりしない。
 - `facts[].source_ids` は **非空**、かつ入力の該当銘柄の `source_id` 集合
   （＋ `context.calendar_events` の ID。これは全銘柄共通で引用可）の部分集合。
+- `facts[].evidence_quote` は **必須**（正規化後 12〜300 字）。その fact が引用する
+  `source_ids` のいずれかの本文（ニュースは `headline` ＋ `summary`、開示は入力の
+  `text`、カレンダーイベントは `title` ＋ `summary`）からの逐語引用でなければ、
+  ingest の provenance 検査に落ちる。`verdict.reasons` にはこのフィールドは無い。
 - `verdict.reasons[].source_ids`: ニュース／開示／`context.calendar_events`に基づく
   理由は該当 `source_id` を必ず引用。スコア等の決定論的入力のみに基づく理由は空リスト可。
 - `no_trade=true` のときだけ、非空白の `no_trade_reason` に理由を書く（CON-03 検査対象）。
@@ -229,23 +239,33 @@
 
 ## ingest の検証規則【固定】
 
-1. 3文書の strict schema と digest を検証し、`run_id`、`as_of`、`strategy_key`、
+1. `schema_version` が `analysis-result-v3` であることを検証し、それ以外
+   （`analysis-result-v2` を含む）は run 全体を hard fail とする。P8 の retro
+   collect パスに限り、アーカイブ済みの `analysis-result-v2` を読み取り専用で
+   解釈できる。
+2. 3文書の strict schema と digest を検証し、`run_id`、`as_of`、`strategy_key`、
    `input_digest`が完全一致しなければ hard fail。report と `latest.md` は書き換えない。
-2. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id`、または
+3. provenance 検証: 全 `source_ids` が入力の該当銘柄の `source_id`、または
    `context.calendar_events` の `source_id`（全銘柄共通で引用可）の部分集合。
    `facts` の `source_ids` は非空。
-3. CON-03 機械検査を、Unicode NFKC 正規化後のユーザー表示テキスト全フィールドに適用
+4. evidence_quote 検証: `facts[].evidence_quote` が非空で、正規化後 12〜300 字の
+   範囲にあり、その fact の `source_ids` のいずれかの本文（ニュースは
+   `headline` ＋ `summary`、開示は入力の `text`、カレンダーイベントは `title` ＋
+   `summary`）に、Unicode NFKC 正規化・全角/半角記号統一・空白畳み込み・大小無視の
+   うえで実在すること。正しい `source_id` を申告しつつ別銘柄の本文から書いた
+   fact は、ここで検出される。
+5. CON-03 機械検査を、Unicode NFKC 正規化後のユーザー表示テキスト全フィールドに適用
    （`facts[].text`, `interpretation`, `risk_flags`, `red_flags`, `yoy_changes`,
    `screening_assessment.*`, `verdict.reasons[].text`, `no_trade_reason`）。
    売買動詞と命令形・義務表現の組み合わせを禁止し、引用・否定を含む場合も安全側で
    検査対象にする。
-4. 違反は **銘柄単位の fail-closed**。当該銘柄の定性セクションを縮退表示し、
+6. 違反は **銘柄単位の fail-closed**。当該銘柄の定性セクションを縮退表示し、
    リトライはしない。
-5. result の symbol 集合が input と完全一致しなければ run 全体を hard fail とする。
+7. result の symbol 集合が input と完全一致しなければ run 全体を hard fail とする。
    部分結果・重複・不足・入力外銘柄を縮退表示で受け入れない。
-6. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
+8. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
    事実本文を表示しても source attribution を付けない。
-7. ingest はネットワークアクセスもスクリーニング再実行もしない。
+9. ingest はネットワークアクセスもスクリーニング再実行もしない。
 
 ## レポート表示（ingest 側の責務、参考）
 

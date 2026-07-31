@@ -15,7 +15,8 @@ def test_skill_reuses_only_fragments_bound_to_the_same_input() -> None:
     )
 
     assert "run_id`、`as_of`、`input_digest`" in skill
-    assert "analysis-result-v2" in skill
+    assert "analysis-result-v3" in skill
+    assert "evidence_quote" in schema
     assert '"input_digest"' in schema
     assert "reports/<run_date>/<run_id>/" in schema
     assert "input にある symbol を落とさない" in skill

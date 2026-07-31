@@ -16,7 +16,7 @@
 | AC3 | 断定的売買指示の禁止（CON-03） |
 | AC4 | 命令形の禁止（CON-03） |
 | AC5 | 根拠なき心理・行動診断の禁止（CON-03） |
-| AC6 | すべての fact に非空かつ部分集合の source_ids |
+| AC6 | すべての fact に非空かつ部分集合の source_ids、かつ本文からの逐語引用 evidence_quote |
 | AC7 | source_id を推測・生成・整形しない（逐語コピー） |
 | AC8 | 入力に無い情報を書かない（事前知識で補完しない） |
 | AC9 | 複数ソースに支えられる fact は該当 ID をすべて列挙 |
@@ -92,10 +92,22 @@ CON-03 検査モジュール（`src/swing_copilot/analysis/` 配下）。表に�
 
 ## provenance ルール
 
-### AC6: すべての fact に非空かつ部分集合の source_ids
+### AC6: すべての fact に非空かつ部分集合の source_ids、かつ本文からの逐語引用 evidence_quote
 
 **すべての fact は入力の `source_id` を引用する。** `source_ids` は非空で、
 かつその銘柄の入力に実在する ID の部分集合でなければならない。
+
+加えて、すべての fact は `evidence_quote`（正規化後 12〜300 字の逐語引用）を持つ。
+`evidence_quote` は、その fact が引用する `source_ids` のいずれかの本文（ニュースなら
+`headline` ＋ `summary`、開示なら入力の `text`、カレンダーイベントなら `title` ＋
+`summary`）に実際に含まれる文字列でなければならない。ingest 側の照合は Unicode
+NFKC 正規化・全角/半角記号統一・空白畳み込み・大小無視のうえで行うため表記ゆれは
+吸収されるが、**言い換え（パラフレーズ）は一致とみなされない**。`source_ids` が
+「そのIDが自分の銘柄に供給されている」ことしか証明しないのに対し、
+`evidence_quote` は「自分がその本文を実際に読んだ」ことを証明する。正しい
+`source_id` を申告しながら別銘柄の本文を読んで書いた fact は、引用できる逐語箇所が
+存在しないためここで検出される。`VerdictReason` には `evidence_quote` は無く、
+引き続き空の `source_ids` を許す。
 
 ### AC7: source_id を推測・生成・整形しない
 

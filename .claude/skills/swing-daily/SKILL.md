@@ -57,7 +57,10 @@ description: >
      食い違う → 削除して再分析対象にする
 3. `analysis_input.json` の `candidates[].symbol` に無い銘柄の断片は削除する。
 4. 流用した断片は Step 3 でそのままマージ対象に含める（要約は断片内の
-   `ac_check` と本文から統括が読み取る）。
+   `ac_check` と本文から統括が読み取る）。ただし `facts[].evidence_quote` が
+   欠落している、または引用元本文と一致しない断片は ingest の provenance 検査で
+   その銘柄ごと fail-closed になる。3 値が一致していても `evidence_quote` を
+   欠いた古い断片（本契約変更前に生成されたもの等）は流用せず再分析させる。
 
 ## Step 1: パイプライン実行
 
@@ -148,7 +151,9 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
   再起動する（メッセージで結果を送り直させない。必ずファイルに書かせる）
 - 各断片から**ペイロードキーだけ**を取り出し、銘柄ごとに `news_summary` /
   `filing_analyses` / `screening_assessment` を組み立てる
-- `as_of` / `ac_check` は作業用メタデータなので**捨てる**（strict 検証で hard fail する）
+- `as_of` / `ac_check` は作業用メタデータなので**捨てる**（strict 検証で hard fail する）。
+  一方 `facts[].evidence_quote` は作業用メタデータではなく契約フィールドなので、
+  断片の値をそのまま逐語で運ぶ（落とすと ingest でその銘柄が fail-closed になる）
 - 断片の本文は書き換えない。問題があれば Step 3.5 で再分析を依頼する
 - news が空の銘柄は `news_summary: null`、filings が空の銘柄は `filing_analyses: []`。
   `screening_assessment` は全銘柄必須
@@ -162,7 +167,11 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 - **見落とし**: スクリーニングの強みが、ニュース／開示の懸念で打ち消されていないか
 - **provenance 破れ**: `facts[].source_ids` が非空か（AC6・AC10）、入力の該当銘柄に
   実在する ID の部分集合か（AC6）、逐語コピーか（AC7）、複数ソースを取りこぼして
-  いないか（AC9）
+  いないか（AC9）、`facts[].evidence_quote` がその `source_ids` の本文（ニュースは
+  見出し＋要約、開示は入力の `text`、カレンダーイベントはタイトル＋要約）からの
+  逐語引用になっているか（AC6）。この一致は `analysis/validate.py` が正規化した
+  うえで機械的に照合するため、統括のレビューは「別銘柄の本文からの取り違えが
+  無いか」の見立てであり、最終判定は ingest 側が行う
 - **入力外情報**: 入力に無い企業情報・株価・決算数値が混ざっていないか（AC8）、
   決定論的スコアを書き換えていないか（AC1・AC2）
 - **CON-03**: 断定的売買指示（AC3）・命令形（AC4）・根拠なき心理診断（AC5）
@@ -210,7 +219,7 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 [references/output-schema.md](references/output-schema.md) の形で JSON を組み立てる。
 
 - `run_id`、`as_of`、`strategy_key`、`input_digest`は input から**逐語コピー**する
-- `schema_version` は `analysis-result-v2`
+- `schema_version` は `analysis-result-v3`
 - `screening_assessment` と `verdict` は**全銘柄必須**
 - `symbols[].symbol` は重複させず、input の `candidates[].symbol` と**完全一致**させる
 - `no_trade: true` なら非空白の `no_trade_reason` を書き、`false` なら必ず `null` にする

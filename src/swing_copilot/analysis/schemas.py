@@ -7,10 +7,12 @@ by `copilot-ingest-analysis`. Both sides are validated here with
 silently dropped.
 
 Provenance is structural, not advisory: every `SourcedFact` must cite at least
-one input `source_id`, and `validate.py` additionally proves those IDs were
-actually supplied for that symbol. Separating `facts` from `interpretation`
-does not by itself prevent an unsupported claim -- the source IDs are what make
-a rendered statement traceable.
+one input `source_id` and carry the verbatim `evidence_quote` it was written
+from, and `validate.py` additionally proves those IDs were supplied for that
+symbol and that the quote occurs in one of their exported bodies. Separating
+`facts` from `interpretation` does not by itself prevent an unsupported claim
+-- the source IDs make a rendered statement traceable, and the quote makes the
+trace falsifiable.
 """
 
 from __future__ import annotations
@@ -23,11 +25,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from swing_copilot.analysis.evidence import (
+    MAX_EVIDENCE_QUOTE_CHARS,
+    MIN_EVIDENCE_QUOTE_CHARS,
+    normalize_evidence_text,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 INPUT_SCHEMA_VERSION: Final[Literal["analysis-input-v3"]] = "analysis-input-v3"
-RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v2"]] = "analysis-result-v2"
+RESULT_SCHEMA_VERSION: Final[Literal["analysis-result-v3"]] = "analysis-result-v3"
 
 SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -287,10 +295,42 @@ class AnalysisInput(_StrictModel):
 
 
 class SourcedFact(_StrictModel):
-    """One factual statement tied to the input source(s) it came from."""
+    """One factual statement tied to the input source(s) it came from.
+
+    `evidence_quote` is the verbatim excerpt of the cited body the statement was
+    written from; `validate.py` proves it occurs there. It stays optional on the
+    model so archived `analysis-result-v2` documents remain readable by P8
+    collect -- a live `analysis-result-v3` ingest withholds any symbol whose
+    fact omits it, rather than accepting the fact unverified.
+    """
 
     text: NonBlankText
     source_ids: Annotated[list[SourceId], Field(min_length=1)]
+    evidence_quote: str | None = None
+
+    @model_validator(mode="after")
+    def _verify_quote_length(self) -> Self:
+        """Reject a quote too short to evidence anything or long enough to dump.
+
+        The bounds apply to the normalized form, because that is the text the
+        containment check actually runs on.
+        """
+        if self.evidence_quote is None:
+            return self
+        length = len(normalize_evidence_text(self.evidence_quote))
+        if length < MIN_EVIDENCE_QUOTE_CHARS:
+            msg = (
+                "evidence_quote must normalize to at least "
+                f"{MIN_EVIDENCE_QUOTE_CHARS} characters, got {length}"
+            )
+            raise ValueError(msg)
+        if length > MAX_EVIDENCE_QUOTE_CHARS:
+            msg = (
+                "evidence_quote must normalize to at most "
+                f"{MAX_EVIDENCE_QUOTE_CHARS} characters, got {length}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class NewsSummary(_StrictModel):
@@ -354,9 +394,15 @@ class SymbolAnalysis(_StrictModel):
 
 
 class AnalysisResult(_StrictModel):
-    """`analysis_result.json`: the skill's answer, before any machine checks."""
+    """`analysis_result.json`: the skill's answer, before any machine checks.
 
-    schema_version: Literal["analysis-result-v2"]
+    `analysis-result-v2` remains parseable so P8 collect can still read runs
+    archived before `evidence_quote` existed. It is not ingestible: a live
+    ingest requires `analysis-result-v3` (`validate.validate_analysis`), because
+    a v2 document carries no quotes to verify.
+    """
+
+    schema_version: Literal["analysis-result-v2", "analysis-result-v3"]
     run_id: UUID
     as_of: date
     strategy_key: NonBlankText

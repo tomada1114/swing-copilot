@@ -135,10 +135,18 @@
             "original_chars": 180000,
             "exported_chars": 120000,
             "is_truncated": true,
-            "selection_mode": "section_priority",
+            "selection_mode": "section_priority_partial",
             "sections": [
-              { "name": "part_i_item_2", "status": "full" },
-              { "name": "part_ii_item_1a", "status": "partial" }
+              { "name": "part_i_item_2", "status": "full",
+                "original_chars": 38000, "exported_chars": 38000,
+                "omission_shape": null },
+              // partial は「章の中間 2,110 字が落ちている」と読む
+              { "name": "part_ii_item_1a", "status": "partial",
+                "original_chars": 20500, "exported_chars": 18390,
+                "omission_shape": "head_and_tail" },
+              { "name": "part_ii_item_1", "status": "missing",
+                "original_chars": null, "exported_chars": null,
+                "omission_shape": null }
             ]
           } }
       ]
@@ -150,6 +158,12 @@
 - `source_id` というキー名は【固定】。
 - 新規runは`analysis-input-v3`で、全filingにコード所有の`coverage`が必須。
   `analysis-input-v2`は過去のP8アーカイブ読み込みに限り互換対応し、新規生成しない。
+- `sections[]`の`original_chars` / `exported_chars` / `omission_shape`は**任意**
+  （スキーマは`analysis-input-v3`のまま）。`omission_shape`は残した形を表し、
+  `head_and_tail`＝章の中間が欠落、`head_only`＝先頭スライスのみで以降が欠落。
+  `status: "full"`と`"missing"`には付かない。3値が`null`のときは「未記録」であって
+  「欠落なし」ではない（フィールド追加前のアーカイブと、P8がDB行から復元した
+  coverageが該当する）。欠落量は`original_chars - exported_chars`で読む。
 - news/filings が空の候補も `candidates` に含まれる（screening 評価は行うため）。
 - `candidates[].symbol` は文書内で一意、各候補の news と filings を合わせた
   `source_id` も一意にする。重複は strict schema の parse failure になる。

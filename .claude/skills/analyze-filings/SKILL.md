@@ -43,6 +43,8 @@ description: >
 1. 入力 JSON を読み、担当銘柄の `filings` 配列を取り出す。`source_id`,
    `form_type`, `filed_at`, `text`, `coverage` を控える。`coverage` はコード所有の
    完全性情報であり、`selection_mode`、`is_truncated`、章ごとの `status` を先に確認する。
+   章が `partial` なら `original_chars` / `exported_chars` / `omission_shape` も控える
+   （欠落量 = `original_chars - exported_chars`、欠落位置 = `omission_shape`）。
 2. `filings` が空なら、その銘柄は `filing_analyses: []` とする（内容を作らない・AC14）。
    その場合も断片ファイルは書く（「分析済みで空」と「未分析」を区別するため）。
 3. **開示 1 件につき 1 つの分析オブジェクト**を作る。`text` が長い場合は
@@ -69,6 +71,16 @@ description: >
 - `coverage.is_truncated`、`head_fallback`、`omitted_symbol_budget`、または章の
   `partial` / `missing` を無視しない。欠落した章について事実が無かったとは結論せず、
   どの範囲が未分析かを `interpretation` または `red_flags` に具体的に記す。
+- **未分析範囲は「章名 + 欠落量 + 欠落位置」で書く。** 「一部のみ」で止めない。
+  `original_chars` / `exported_chars` / `omission_shape` がある章はそれを使う。
+  - `omission_shape: "head_and_tail"` → 「part_ii_item_1a は 20,500 字中 18,390 字を
+    読み、章の**中間**約 2,110 字は未分析」。#79 以降は先頭と末尾が残るため、
+    未分析なのは末尾ではなく中間である。「末尾が読めていない」とは書かない
+  - `omission_shape: "head_only"` → 「先頭 N 字のみで、以降 M 字は未分析」
+  - 3 値が `null`（古いアーカイブや復元された coverage）→ 欠落量・位置は不明として
+    「未分析範囲の特定不能」と書く。欠落が無かったことにはしない
+  - `status: "missing"` → その章は入力に**存在しない**（章の長さも不明）。
+    「その章に記載が無かった」ではなく「その章は入力に含まれていない」と書く
 - **interpretation は保守的に（AC12）。** 開示は事後的・法務的な文書であり、単独で
   将来を予測しない。hedge を付け、断定を避ける。
 - **facts は開示の記述そのもの（AC11）。** 数値は加工せずそのまま。自分で比率や成長率を

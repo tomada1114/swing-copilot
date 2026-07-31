@@ -108,13 +108,52 @@ FilingSelectionMode = Literal[
     "omitted_symbol_budget",
 ]
 FilingSectionStatus = Literal["full", "partial", "missing"]
+FilingSectionOmissionShape = Literal["head_only", "head_and_tail"]
 
 
 class FilingSectionCoverage(_StrictModel):
-    """How much of one priority 10-Q section reached the exported text."""
+    """How much of one priority 10-Q section reached the exported text.
+
+    `status` alone cannot say how much a `partial` section lost, nor where the
+    gap sits. That became load-bearing once truncation started keeping a
+    section's head *and* its tail: a reader can no longer assume the missing
+    range is the tail. The character pair mirrors `FilingCoverage` at section
+    granularity, and `omission_shape` names the retained shape —
+    `head_and_tail` means the middle was dropped, `head_only` means everything
+    past the head was.
+
+    All three stay optional so they can be added without moving off
+    `analysis-input-v3`: archived inputs written before these fields existed,
+    and coverage rebuilt from `analysis_source_coverage` rows (which persist
+    only name/status), legitimately carry `None`. Absent means "not recorded",
+    never "nothing was omitted".
+    """
 
     name: NonBlankText
     status: FilingSectionStatus
+    original_chars: int | None = Field(default=None, ge=0)
+    exported_chars: int | None = Field(default=None, ge=0)
+    omission_shape: FilingSectionOmissionShape | None = None
+
+    @model_validator(mode="after")
+    def _verify_section_lengths(self) -> Self:
+        """Keep the deficit counts consistent with the status they qualify."""
+        original, exported = self.original_chars, self.exported_chars
+        if (original is None) != (exported is None):
+            msg = "original_chars and exported_chars must be given together"
+            raise ValueError(msg)
+        if self.omission_shape is not None and self.status != "partial":
+            msg = "omission_shape applies only to a partial section"
+            raise ValueError(msg)
+        if original is None or exported is None:
+            return self
+        if exported > original:
+            msg = "exported_chars cannot exceed original_chars"
+            raise ValueError(msg)
+        if self.status == "partial" and exported == original:
+            msg = "a partial section must export fewer chars than the original"
+            raise ValueError(msg)
+        return self
 
 
 class FilingCoverage(_StrictModel):

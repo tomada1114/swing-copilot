@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
 from swing_copilot.analysis.filing_selection import select_filing_text
+from swing_copilot.analysis.schemas import FilingSectionCoverage
 from swing_copilot.text.base import FilingSection, TextItem
+
+_MARKER = "\n[... omitted middle of section ...]\n"
 
 
 def _item(text: str, sections: tuple[FilingSection, ...] = ()) -> TextItem:
@@ -99,3 +105,105 @@ def test_zero_symbol_budget_keeps_visible_omission_signal() -> None:
     assert selected.text == ""
     assert selected.coverage.selection_mode == "omitted_symbol_budget"
     assert selected.coverage.exported_chars == 0
+
+
+def test_partial_section_reports_its_head_and_tail_deficit() -> None:
+    """A partial section states how much it lost and that the middle is gone."""
+    body = "".join(f"{index:06d}" for index in range(2_000))
+    sections = (FilingSection("part_i_item_1", body),)
+
+    selected = select_filing_text(_item("X" * 50_000, sections), "10-Q", 2_000)
+
+    section = _coverage_of(selected.coverage.sections, "part_i_item_1")
+    exported = selected.text.split("]\n", 1)[1]
+    head, tail = exported.split(_MARKER)
+    assert section.status == "partial"
+    assert section.omission_shape == "head_and_tail"
+    assert section.original_chars == len(body)
+    assert section.exported_chars == len(head) + len(tail)
+    assert body.startswith(head)
+    assert body.endswith(tail)
+
+
+def test_partial_section_too_short_for_a_tail_reports_a_head_only_deficit() -> None:
+    """The leading-slice fallback keeps no tail, so the shape must say so."""
+    sections = (FilingSection("part_i_item_1", "0123456789"),)
+
+    selected = select_filing_text(_item("X" * 5_000, sections), "10-Q", 30)
+
+    section = _coverage_of(selected.coverage.sections, "part_i_item_1")
+    assert selected.text.endswith("012345")
+    assert section.status == "partial"
+    assert section.omission_shape == "head_only"
+    assert section.original_chars == 10
+    assert section.exported_chars == 6
+
+
+def test_complete_section_reports_no_deficit_and_absent_section_reports_no_counts() -> (
+    None
+):
+    sections = (FilingSection("part_i_item_1", "a" * 100),)
+
+    selected = select_filing_text(_item("X" * 50_000, sections), "10-Q", 10_000)
+
+    kept = _coverage_of(selected.coverage.sections, "part_i_item_1")
+    absent = _coverage_of(selected.coverage.sections, "part_ii_item_1a")
+    assert (kept.status, kept.original_chars, kept.exported_chars) == ("full", 100, 100)
+    assert kept.omission_shape is None
+    assert absent.status == "missing"
+    assert (absent.original_chars, absent.exported_chars) == (None, None)
+
+
+def test_section_squeezed_out_reports_a_zero_char_partial_without_a_shape() -> None:
+    """A section that lost its whole allocation has no surviving excerpt to shape."""
+    sections = tuple(
+        FilingSection(name, "body " * 100)
+        for name in ("part_i_item_1", "part_i_item_2", "part_ii_item_1a")
+    )
+
+    selected = select_filing_text(_item("X" * 5_000, sections), "10-Q", 79)
+
+    squeezed = _coverage_of(selected.coverage.sections, "part_i_item_2")
+    assert "[SECTION part_i_item_2]" not in selected.text
+    assert squeezed.status == "partial"
+    assert squeezed.exported_chars == 0
+    assert squeezed.original_chars == 499  # the parsed section is stripped
+    assert squeezed.omission_shape is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        pytest.param(
+            {"status": "partial", "original_chars": 100, "exported_chars": 101},
+            r"exported_chars cannot exceed original_chars",
+            id="exported-above-original",
+        ),
+        pytest.param(
+            {"status": "partial", "exported_chars": 10},
+            r"original_chars and exported_chars must be given together",
+            id="counts-not-paired",
+        ),
+        pytest.param(
+            {"status": "partial", "original_chars": 100, "exported_chars": 100},
+            r"a partial section must export fewer chars than the original",
+            id="partial-lost-nothing",
+        ),
+        pytest.param(
+            {"status": "full", "omission_shape": "head_and_tail"},
+            r"omission_shape applies only to a partial section",
+            id="shape-on-non-partial",
+        ),
+    ],
+)
+def test_incoherent_section_coverage_is_rejected(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        FilingSectionCoverage(name="part_i_item_1", **overrides)  # type: ignore[arg-type]
+
+
+def _coverage_of(
+    sections: list[FilingSectionCoverage], name: str
+) -> FilingSectionCoverage:
+    return next(section for section in sections if section.name == name)

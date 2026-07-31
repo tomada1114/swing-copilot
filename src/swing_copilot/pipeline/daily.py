@@ -68,6 +68,8 @@ from swing_copilot.report.markdown_report import (
     LatestMarkdownUpdateError,
     write_markdown_report,
 )
+from swing_copilot.retro.collect import collect_verdicts
+from swing_copilot.retro.evaluate import evaluate_verdicts
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
     PortfolioHeatResult,
@@ -128,6 +130,8 @@ _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
 _DECISION_HISTORY_LIMIT = 3
+#: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
+_RETRO_NOTE_DETAIL_LIMIT = 3
 _VISIBLE_PIPELINE_STEPS = (
     "1_prices",
     "2_fundamentals",
@@ -1095,6 +1099,88 @@ def _run_step_postmortem(
         logger.exception("postmortem step raised unexpectedly")
         return _StepOutcome(False, f"unexpected error: {exc}"), ()
     return _StepOutcome(True, note), performance
+
+
+def _retro_step_detail(summary_line: str, notes: tuple[str, ...]) -> str:
+    """Join a retro step's counts with a bounded excerpt of its notes.
+
+    `collect`/`evaluate` are fail-soft per run and per symbol, so their notes
+    carry the real data-quality signal (a run archived without
+    `analysis_result.json`, an unresolvable `source_id`, a missing bar). They
+    must not be swallowed, but `run_steps.detail` is a single audit column: the
+    full list is logged, and only the first few notes plus a remainder count
+    are stored.
+    """
+    for note in notes:
+        logger.info("retro step note: %s", note)
+    if not notes:
+        return summary_line
+    excerpt = list(notes[:_RETRO_NOTE_DETAIL_LIMIT])
+    remainder = len(notes) - len(excerpt)
+    if remainder > 0:
+        excerpt.append(f"(+{remainder} more)")
+    return f"{summary_line} / notes: " + "; ".join(excerpt)
+
+
+def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
+    """P8-30: archive the day's verdicts into DuckDB (fail-soft).
+
+    `reports/<date>/<run_id>/analysis_result.json` is the only artifact the
+    daily loop never writes to the database, so running the retrospective's
+    own collector here keeps the archive backed up and stops a run from aging
+    out of the evaluation window while nobody triggers `copilot-retro`
+    manually. The scan is offline and idempotent (run-scoped
+    DELETE-then-INSERT), so a daily repetition changes nothing but recency.
+
+    The current run's own directory already holds `analysis_input.json` at
+    this point, but its `analysis_result.json` is only written later by the
+    skill's ingest, so today's run — like any run whose skill answer was never
+    ingested — simply becomes a note, which is the collector's normal
+    fail-soft outcome and not a degradation.
+    """
+    try:
+        summary = collect_verdicts(deps.state_store, Path(deps.output_dir))
+    except Exception as exc:
+        logger.exception("retro collect step raised unexpectedly")
+        return _StepOutcome(False, f"unexpected error: {exc}")
+    return _StepOutcome(
+        True,
+        _retro_step_detail(
+            f"collected {summary.collected_run_count}/{summary.scanned_run_count} run(s), "
+            f"{summary.verdict_count} verdict(s)",
+            summary.notes,
+        ),
+    )
+
+
+def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+    """P8-30: classify the verdicts whose horizons matured by `as_of` (fail-soft).
+
+    Deterministic and idempotent: each slice's row is keyed by its own
+    maturity session (`verdict_outcomes.as_of`, decision D7), so evaluating
+    daily produces exactly the rows a manual batch would, without missed or
+    double-counted slices. Reads only prices dated `<= as_of`.
+    """
+    try:
+        summary = evaluate_verdicts(
+            deps.market_store,
+            deps.state_store,
+            as_of,
+            deps.settings.postmortem,
+            deps.settings.backtest.benchmark,
+        )
+    except Exception as exc:
+        logger.exception("retro evaluate step raised unexpectedly")
+        return _StepOutcome(False, f"unexpected error: {exc}")
+    return _StepOutcome(
+        True,
+        _retro_step_detail(
+            f"evaluated {summary.evaluated_slice_count} slice(s), "
+            f"{summary.pending_slice_count} pending, "
+            f"{summary.outcome_count} outcome(s)",
+            summary.notes,
+        ),
+    )
 
 
 def _run_step_excursions(deps: DailyDependencies, as_of: date) -> _StepOutcome:

@@ -232,10 +232,13 @@ class TestHappyPath:
             "8_output",
             "mae_mfe",
             "postmortem",
+            "retro_collect",
+            "retro_evaluate",
         ]
         # 1/3/4/8 succeed outright; 2/5/6/7 are deliberate skips (no
-        # optional clients configured); postmortem (P2-11) succeeds with
-        # nothing to look back at yet — none of these are failures.
+        # optional clients configured); postmortem (P2-11) and the retro
+        # collect/evaluate steps (P8-30) succeed with nothing to look back at
+        # yet — none of these are failures.
         assert all(status in {"success", "skipped"} for _step, status in steps)
 
         bars = deps.market_store.read_bars(
@@ -365,9 +368,10 @@ class TestIdempotency:
             second_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(second.run_id)]
             ).fetchone()
-        # 8 pre-existing steps + local postmortem and MAE/MFE steps.
-        assert first_steps == (10,)
-        assert second_steps == (10,)
+        # 8 pre-existing steps + local postmortem, MAE/MFE, and the two
+        # retro (collect/evaluate) steps.
+        assert first_steps == (12,)
+        assert second_steps == (12,)
 
 
 class TestFatalStepFailure:

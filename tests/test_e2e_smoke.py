@@ -263,6 +263,8 @@ class TestFiveSymbolEndToEnd:
             "8_output",
             "mae_mfe",
             "postmortem",
+            "retro_collect",
+            "retro_evaluate",
         ]
         assert dict(steps) == {
             "1_prices": "success",
@@ -275,6 +277,8 @@ class TestFiveSymbolEndToEnd:
             "8_output": "success",
             "mae_mfe": "skipped",
             "postmortem": "success",
+            "retro_collect": "success",
+            "retro_evaluate": "success",
         }
 
     def test_markdown_contains_every_candidate_and_the_pending_analysis_placeholder(

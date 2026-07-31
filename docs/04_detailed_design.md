@@ -1352,7 +1352,7 @@ DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録な
 
 ### 3.23 `retro/` と `copilot-retro`（P8-30〜P8-33、roadmap §5 P8）
 
-定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）は一切変更せず、独立したループとして人間が数日おきに手動起動する。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
+定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。このうちオフラインで冪等な`collect`と`evaluate`だけは、日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）の`postmortem`に続くfail-softステップ（`retro_collect`／`retro_evaluate`）として毎日走る。未評価のrunが評価窓から抜け落ちるのを防ぎ、DuckDBに入らない唯一の原本である`reports/<date>/<run_id>/analysis_result.json`を恒久化するためで、いずれも冪等なので日次の反復で結果は変わらない。外部APIを叩く`export`と`swing-retro`スキル、そして`ingest`は従来どおり独立したループとして人間が数日おきに手動起動する（`prepare`は3つの直列呼び出しのままで、日次ステップと重複して走っても害はない）。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
 
 `analysis/`に同居させず新パッケージにした理由は、`analysis/`が「ネットワークもDBも触らない検証専用境界」という憲章を持つのに対し、retroはDuckDBを読み書きし（`collect`/`evaluate`/`export`）、鮮度データ取得で外部APIも叩くため（決定D8）。`copilot-ingest-analysis`がDBに触れない不変条件はそのまま維持される。エントリポイントは`copilot-retro = "swing_copilot.retro.cli:main"`の1行追加。CLIの操作面は`docs/reference.md`が正本。
 
@@ -1388,7 +1388,7 @@ src/swing_copilot/retro/
 
 #### 3.23.2 満期セマンティクスと`as_of`の意味（決定D7・重要）
 
-**`verdict_outcomes.as_of`は満期営業日であり、`signal_outcomes.as_of`（観測日）とは意図的に異なる。** 3.21aのpostmortemは毎日走り「今日ちょうどN営業日前のrunはどれか」を問うのに対し、retroは数日おきのバッチなので問いを反転させる。取り込み済みの各runについて、run_dateから5/20営業日**先**の取引日（満期日）を求め、`満期日 <= as_of`のものだけを評価し、確定した満期日を`as_of`列に記録する。
+**`verdict_outcomes.as_of`は満期営業日であり、`signal_outcomes.as_of`（観測日）とは意図的に異なる。** 3.21aのpostmortemは「今日ちょうどN営業日前のrunはどれか」を問うのに対し、retroの`evaluate`は実行間隔を前提にできない（日次ステップとして毎日走ることも、数日おきの手動バッチとして走ることもある）ので問いを反転させる。取り込み済みの各runについて、run_dateから5/20営業日**先**の取引日（満期日）を求め、`満期日 <= as_of`のものだけを評価し、確定した満期日を`as_of`列に記録する。
 
 この相違が効くのは冪等性である。観測日を記録すると、同じ`(run, horizon)`でも実行日によって行の内容が変わる。満期日を記録すれば、いつ振り返りを回しても同じ行が再現され、実行間隔が空いても評価漏れ・二重評価が構造的に起きない。
 

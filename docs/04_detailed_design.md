@@ -736,11 +736,23 @@ def fetch_company_news(symbol: str, since: "date") -> list["NewsItem"]:
 def fetch_recent_filings_text(symbol: str) -> list["FilingText"]:
     """EdgarClient.fetch_recent_filings()の結果から8-K/10-Qの本文テキストを取得する。"""
 
-def fetch_calendar_events(start: "date", end: "date") -> list["CalendarEvent"]:
-    """FRED APIから経済指標カレンダーを取得する。"""
+def fetch_calendar_events(start: "date", end: "date", *, as_of: "date") -> list["CalendarEvent"]:
+    """FRED APIから経済指標カレンダーを取得し、直近実績値・前回値を要約に載せる。"""
 ```
 
-**エラー処理**: Finnhubニュース、FRED、EDGAR境界は接続・タイムアウト・HTTP 408/429/5xxだけを固定バックオフ1秒・2秒で最大3回まで再試行する。Finnhubの60コール/分制限とEDGARの10リクエスト/秒制限は各試行前に適用する。その他の4xxとパース・検証エラーは即時に伝播する。銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)は`skipped`、(7)(8)は縮退版で継続する（FR-12）。
+**P8-82実装時追記（Issue #82）**: `fred/releases/dates`は`release_id`/`date`/`release_name`しか返さないため、`TextItem.title`と`content_text`が同一値になり、`analysis_input.json`の`calendar_events[]`は`title`と`summary`が完全に重複していた。リリース名だけでは実績値・前回値が分からず、定性分析側の判断材料にならない。
+
+対策として`FredCalendarClient`は各リリースに対して**`fred/release/series` → `fred/series/observations`のAPI連鎖**を追加し、要約を「日程 + 代表系列の直近実績値・前回値・差分」で構成する。設計上の制約は次のとおり。
+
+- **代表系列の選定**: `release/series`を`order_by=popularity&sort_order=desc&limit=1`で引き、そのリリースで最も参照される系列1本を代表とする
+- **as-of境界**: `series/observations`に`observation_end=<as_of>`を渡したうえで、アダプタ側でも`date <= as_of`を再判定する（境界は**含む**）。`as_of`は`pipeline/daily.py`から明示的に渡され、壁時計から推定しない。値欠測（`"."`）の行は捨てる
+- **要約は必ずtitleと異なる**: 要約は`Scheduled for <date>: <release_name> (FRED release <id>).`で始め、リリース名を先頭に置かない。`max_calendar_chars_per_item`で切り詰められても`title`とバイト一致しない
+- **市場予想（コンセンサス）はFREDに存在しない**ため、値を発明せず`Market consensus is not published by FRED.`と明示する
+- **外部I/Oの上限**: 全リクエスト（リトライの各試行を含む）をFREDの120リクエスト/分に合わせて0.5秒間隔でスロットルする。値取得は1回の呼び出し内でリリース単位にメモ化し、さらに新しい発表日から数えて`max_enriched_releases`（既定20）件までに限定する。取得範囲を広げても外部呼び出しが際限なく増えない
+- **フェイルソフト**: 値取得の失敗（トランスポート・HTTP・応答形状）はイベントを落とさず、`Latest and prior values are unavailable: ...`と欠落理由を明示した要約に縮退する。`releases/dates`本体の失敗だけは従来どおり伝播し、ステップ(5)のフェイルソフト判定に委ねる
+- **シークレット**: FREDはHTTPエラーメッセージにAPIキー入りのリクエストURLをそのまま埋め込むため、縮退時のログは`logging.exception()`ではなく`api_key=***`へ置換した1行の警告として出す
+
+**エラー処理**: Finnhubニュース、FRED、EDGAR境界は接続・タイムアウト・HTTP 408/429/5xxだけを固定バックオフ1秒・2秒で最大3回まで再試行する。Finnhubの60コール/分制限、EDGARの10リクエスト/秒制限、FREDの120リクエスト/分制限は各試行前に適用する。その他の4xxとパース・検証エラーは即時に伝播する。銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)は`skipped`、(7)(8)は縮退版で継続する（FR-12）。
 
 **P6-26実装時追記（roadmap §5 P6-26）**: 実際の`fetch_recent_filings_text(edgar_client, symbol, form_types, as_of, bounds: FilingLookbackBounds)`は、上記の擬似シグネチャに`bounds`（`lookback_days`/`limit`をまとめたfrozen dataclass。5引数ガイドライン順守のためグルーピング）を追加している。`since = as_of - bounds.lookback_days`を計算し`data/edgar.py::EdgarClient.fetch_filing_texts()`へ`since`/`limit`として渡す。`pipeline/daily.py::_fetch_symbol_text_items()`は`settings.analysis.filing_lookback_days`/`max_filings_per_symbol`（既定90日・3件、ニュース側`max_news_items_per_symbol`と対称。P7で`settings.llm.*`から移設）から`FilingLookbackBounds`を組み立てて呼び出す。
 

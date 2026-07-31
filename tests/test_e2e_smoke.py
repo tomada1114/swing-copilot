@@ -133,8 +133,8 @@ class FakeNewsClient:
 
 
 class FakeCalendarClient:
-    def fetch_calendar_events(self, start, end):
-        del start, end
+    def fetch_calendar_events(self, start, end, *, as_of):
+        del start, end, as_of
         return []
 
 

@@ -1,4 +1,4 @@
-"""Tests for FredCalendarClient (FR-07)."""
+"""Tests for FredCalendarClient (FR-07, Issue #82)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,17 @@ from typing import Any
 import httpx
 import pytest
 
-from swing_copilot.text.calendar_fred import FredCalendarClient, _real_http_get
+from swing_copilot.text.calendar_fred import (
+    FRED_RELEASE_DATES_URL,
+    FRED_RELEASE_SERIES_URL,
+    FRED_SERIES_OBSERVATIONS_URL,
+    FredCalendarClient,
+    FredCalendarTiming,
+    _real_http_get,
+)
+
+AS_OF = date(2027, 2, 1)
+RANGE_END = date(2027, 2, 28)
 
 
 class FakeClock:
@@ -19,7 +29,36 @@ class FakeClock:
         return date(2027, 2, 1)
 
 
-def _fake_response(*_args, **_kwargs):
+class SpacedRateClock:
+    """Monotonic clock whose every tick is past the throttle interval.
+
+    Keeps rate limiting inert so retry-backoff assertions stay readable; the
+    throttle itself is asserted separately with a clock returning close ticks.
+    """
+
+    def __init__(self, step: float = 10.0) -> None:
+        self._now = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._now += self._step
+        return self._now
+
+
+class ScriptedRateClock:
+    """Returns the scripted ticks in order, then repeats the last one."""
+
+    def __init__(self, ticks: list[float]) -> None:
+        self._ticks = list(ticks)
+        self._last = ticks[-1]
+
+    def __call__(self) -> float:
+        if self._ticks:
+            self._last = self._ticks.pop(0)
+        return self._last
+
+
+def _release_dates_payload() -> dict[str, Any]:
     return {
         "release_dates": [
             {
@@ -31,13 +70,95 @@ def _fake_response(*_args, **_kwargs):
     }
 
 
+SERIES_PAYLOAD = {
+    "seriess": [
+        {
+            "id": "PAYEMS",
+            "title": "All Employees, Total Nonfarm",
+            "units_short": "Thous. of Persons",
+        }
+    ]
+}
+
+OBSERVATIONS_PAYLOAD = {
+    "observations": [
+        {"date": "2027-01-01", "value": "158200.0"},
+        {"date": "2026-12-01", "value": "158000.0"},
+    ]
+}
+
+
+class FakeFred:
+    """Offline stand-in for the three FRED endpoints, recording every call."""
+
+    def __init__(
+        self,
+        *,
+        release_dates: dict[str, Any] | None = None,
+        series: dict[str, Any] | None = None,
+        observations: dict[str, Any] | None = None,
+        fail_on: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._payloads = {
+            FRED_RELEASE_DATES_URL: release_dates or _release_dates_payload(),
+            FRED_RELEASE_SERIES_URL: series if series is not None else SERIES_PAYLOAD,
+            FRED_SERIES_OBSERVATIONS_URL: (
+                observations if observations is not None else OBSERVATIONS_PAYLOAD
+            ),
+        }
+        self._fail_on = fail_on
+        self._error = error or httpx.ConnectError("boom")
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((url, params))
+        if self._fail_on == url:
+            raise self._error
+        return self._payloads[url]
+
+    def params_for(self, url: str) -> dict[str, Any]:
+        return next(params for called, params in self.calls if called == url)
+
+    def urls(self) -> list[str]:
+        return [url for url, _ in self.calls]
+
+
+class _FailFirstFred(FakeFred):
+    """Fails the first `releases/dates` attempt, then behaves normally."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._has_failed = False
+
+    def __call__(self, url, params):
+        if url == FRED_RELEASE_DATES_URL and not self._has_failed:
+            self._has_failed = True
+            self.calls.append((url, params))
+            msg = "boom"
+            raise httpx.ConnectError(msg)
+        return super().__call__(url, params)
+
+
+def _client(http_get: Any, **kwargs: Any) -> FredCalendarClient:
+    """Build a client whose clocks are fake and whose throttle stays inert."""
+    return FredCalendarClient(
+        "test-key",
+        http_get=http_get,
+        timing=FredCalendarTiming(
+            clock=FakeClock(),
+            rate_clock=SpacedRateClock(),
+            sleep_fn=kwargs.pop("sleep_fn", lambda _seconds: None),
+        ),
+        **kwargs,
+    )
+
+
 class TestFetchCalendarEvents:
     def test_normalizes_to_text_item_schema(self):
-        client = FredCalendarClient(
-            "test-key", http_get=_fake_response, clock=FakeClock()
-        )
+        client = _client(FakeFred())
 
-        items = client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+        items = client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert len(items) == 1
         item = items[0]
@@ -49,24 +170,295 @@ class TestFetchCalendarEvents:
         assert item.fetched_at == datetime(2027, 2, 1, 12, tzinfo=UTC)
 
     def test_passes_date_range_as_query_params(self):
-        captured = {}
+        fred = FakeFred(release_dates={"release_dates": []})
 
-        def capturing_get(url, params):
-            captured["params"] = params
-            return {"release_dates": []}
+        _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
-        client = FredCalendarClient("test-key", http_get=capturing_get)
-        client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+        params = fred.params_for(FRED_RELEASE_DATES_URL)
+        assert params["realtime_start"] == "2027-02-01"
+        assert params["realtime_end"] == "2027-02-28"
+        assert params["api_key"] == "test-key"
 
-        assert captured["params"]["realtime_start"] == "2027-02-01"
-        assert captured["params"]["realtime_end"] == "2027-02-28"
-        assert captured["params"]["api_key"] == "test-key"
+    def test_empty_response_returns_empty_list_without_value_lookups(self):
+        fred = FakeFred(release_dates={"release_dates": []})
 
-    def test_empty_response_returns_empty_list(self):
-        client = FredCalendarClient(
-            "test-key", http_get=lambda *_a, **_k: {"release_dates": []}
+        assert _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF) == []
+        assert fred.urls() == [FRED_RELEASE_DATES_URL]
+
+
+class TestSummaryEnrichment:
+    def test_chains_release_series_then_observations_into_the_summary(self):
+        fred = FakeFred()
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert fred.urls() == [
+            FRED_RELEASE_DATES_URL,
+            FRED_RELEASE_SERIES_URL,
+            FRED_SERIES_OBSERVATIONS_URL,
+        ]
+        assert fred.params_for(FRED_RELEASE_SERIES_URL)["release_id"] == 50
+        assert items[0].content_text == (
+            "Scheduled for 2027-02-05: Employment Situation (FRED release 50). "
+            "Representative series PAYEMS (All Employees, Total Nonfarm): "
+            "latest 2027-01-01 = 158200.0 Thous. of Persons, "
+            "prior 2026-12-01 = 158000.0 Thous. of Persons (change +200). "
+            "Market consensus is not published by FRED."
         )
-        assert client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28)) == []
+
+    def test_summary_is_never_identical_to_the_title(self):
+        items = _client(FakeFred()).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert items[0].content_text != items[0].title
+
+    def test_observation_request_is_bounded_by_as_of(self):
+        fred = FakeFred()
+
+        _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        params = fred.params_for(FRED_SERIES_OBSERVATIONS_URL)
+        assert params["observation_end"] == "2027-02-01"
+
+    @pytest.mark.parametrize(
+        ("observed_on", "expected_latest"),
+        [
+            pytest.param("2027-01-31", "2027-01-31", id="just-before-as-of"),
+            pytest.param("2027-02-01", "2027-02-01", id="exactly-at-as-of"),
+            pytest.param("2027-02-02", "2026-12-01", id="just-after-as-of-dropped"),
+        ],
+    )
+    def test_observations_after_as_of_are_excluded(self, observed_on, expected_latest):
+        fred = FakeFred(
+            observations={
+                "observations": [
+                    {"date": observed_on, "value": "158200.0"},
+                    {"date": "2026-12-01", "value": "158000.0"},
+                ]
+            }
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert f"latest {expected_latest} =" in items[0].content_text
+
+    def test_missing_observation_values_are_skipped(self):
+        fred = FakeFred(
+            observations={
+                "observations": [
+                    {"date": "2027-01-01", "value": "."},
+                    {"date": "2026-12-01", "value": "158000.0"},
+                    {"date": "2026-11-01", "value": "157000.0"},
+                ]
+            }
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "latest 2026-12-01 = 158000.0" in items[0].content_text
+        assert "prior 2026-11-01 = 157000.0" in items[0].content_text
+
+    def test_single_observation_reports_prior_as_unavailable(self):
+        fred = FakeFred(
+            observations={"observations": [{"date": "2027-01-01", "value": "3.5"}]}
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "latest 2027-01-01 = 3.5" in items[0].content_text
+        assert "prior value unavailable" in items[0].content_text
+
+    def test_no_visible_observation_is_stated_explicitly(self):
+        fred = FakeFred(observations={"observations": []})
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "has no observation on or before the as-of date" in items[0].content_text
+        assert items[0].content_text != items[0].title
+
+    def test_non_numeric_values_omit_the_change_figure(self):
+        fred = FakeFred(
+            observations={
+                "observations": [
+                    {"date": "2027-01-01", "value": "up"},
+                    {"date": "2026-12-01", "value": "down"},
+                ]
+            }
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "change" not in items[0].content_text
+        assert "latest 2027-01-01 = up" in items[0].content_text
+
+    def test_series_without_title_or_units_still_summarizes(self):
+        fred = FakeFred(series={"seriess": [{"id": "PAYEMS"}]})
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert (
+            "Representative series PAYEMS: latest 2027-01-01 = 158200.0,"
+            in items[0].content_text
+        )
+
+    def test_release_without_name_falls_back_to_the_release_id(self):
+        fred = FakeFred(
+            release_dates={"release_dates": [{"release_id": 50, "date": "2027-02-05"}]}
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert items[0].title is None
+        assert items[0].content_text.startswith(
+            "Scheduled for 2027-02-05: FRED release 50 (FRED release 50)."
+        )
+
+    def test_value_lookup_runs_once_per_release_across_dates(self):
+        fred = FakeFred(
+            release_dates={
+                "release_dates": [
+                    {
+                        "release_id": 50,
+                        "release_name": "Employment Situation",
+                        "date": "2027-02-05",
+                    },
+                    {
+                        "release_id": 50,
+                        "release_name": "Employment Situation",
+                        "date": "2027-02-19",
+                    },
+                ]
+            }
+        )
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert len(items) == 2
+        assert fred.urls().count(FRED_RELEASE_SERIES_URL) == 1
+        assert fred.urls().count(FRED_SERIES_OBSERVATIONS_URL) == 1
+        assert "2027-02-19" in items[1].content_text
+
+    def test_enrichment_is_capped_at_max_enriched_releases(self):
+        fred = FakeFred(
+            release_dates={
+                "release_dates": [
+                    {
+                        "release_id": release_id,
+                        "release_name": f"Release {release_id}",
+                        "date": f"2027-02-{release_id:02d}",
+                    }
+                    for release_id in (5, 6, 7)
+                ]
+            }
+        )
+
+        items = _client(fred, max_enriched_releases=2).fetch_calendar_events(
+            AS_OF, RANGE_END, as_of=AS_OF
+        )
+
+        assert fred.urls().count(FRED_RELEASE_SERIES_URL) == 2
+        # The newest release dates are enriched first; the oldest degrades.
+        oldest = next(item for item in items if item.source_id == "fred:5:2027-02-05")
+        assert "Latest and prior values are unavailable" in oldest.content_text
+
+
+class TestSummaryFailSoft:
+    def test_series_lookup_failure_degrades_without_raising(self, caplog):
+        fred = FakeFred(fail_on=FRED_RELEASE_SERIES_URL)
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert len(items) == 1
+        assert items[0].content_text != items[0].title
+        assert "Latest and prior values are unavailable" in items[0].content_text
+        assert "FRED value lookup failed for release 50" in caplog.text
+
+    def test_observations_failure_degrades_without_raising(self):
+        fred = FakeFred(fail_on=FRED_SERIES_OBSERVATIONS_URL)
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "Latest and prior values are unavailable" in items[0].content_text
+
+    def test_release_without_any_series_skips_the_observation_call(self):
+        fred = FakeFred(series={"seriess": []})
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert FRED_SERIES_OBSERVATIONS_URL not in fred.urls()
+        assert "Latest and prior values are unavailable" in items[0].content_text
+
+    def test_malformed_observation_row_degrades_without_raising(self):
+        fred = FakeFred(observations={"observations": [{"date": "2027-01-01"}]})
+
+        items = _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "Latest and prior values are unavailable" in items[0].content_text
+
+    def test_api_key_is_redacted_from_the_failure_log(self, caplog):
+        url = "https://api.stlouisfed.org/fred/release/series?api_key=super-secret"
+        request = httpx.Request("GET", url)
+        fred = FakeFred(
+            fail_on=FRED_RELEASE_SERIES_URL,
+            error=httpx.HTTPStatusError(
+                f"Server error for url {url}",
+                request=request,
+                response=httpx.Response(500, request=request),
+            ),
+        )
+
+        _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert "super-secret" not in caplog.text
+        assert "api_key=***" in caplog.text
+
+    def test_release_dates_failure_still_propagates(self):
+        fred = FakeFred(fail_on=FRED_RELEASE_DATES_URL)
+
+        with pytest.raises(httpx.ConnectError):
+            _client(fred).fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+
+class TestRateLimiting:
+    def test_throttles_every_request_including_retry_attempts(self):
+        sleeps: list[float] = []
+        # Ticks: `releases/dates` attempt 1 (fails), attempt 2, then the two
+        # enrichment requests -- each only 0.1s after the previous request.
+        client = FredCalendarClient(
+            "test-key",
+            http_get=_FailFirstFred(),
+            timing=FredCalendarTiming(
+                clock=FakeClock(),
+                rate_clock=ScriptedRateClock([0.0, 0.1, 0.2, 0.3]),
+                sleep_fn=sleeps.append,
+            ),
+        )
+
+        client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        # 1.0 is the retry backoff after the first attempt failed; the three
+        # 0.4s throttle the retry attempt and each of the two enrichment calls.
+        assert sleeps == [
+            1.0,
+            pytest.approx(0.4),
+            pytest.approx(0.4),
+            pytest.approx(0.4),
+        ]
+
+    def test_no_throttle_when_requests_are_already_spaced_out(self):
+        sleeps: list[float] = []
+        client = FredCalendarClient(
+            "test-key",
+            http_get=FakeFred(),
+            timing=FredCalendarTiming(
+                clock=FakeClock(),
+                rate_clock=SpacedRateClock(),
+                sleep_fn=sleeps.append,
+            ),
+        )
+
+        client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        assert sleeps == []
 
 
 class TestRealHttpGet:
@@ -123,26 +515,22 @@ class _AlwaysFail:
 
 
 class TestFetchCalendarEventsRetry:
+    """Retry behaviour of the `releases/dates` request itself.
+
+    Enrichment is disabled or the release list is empty, so the recorded sleeps
+    are purely retry backoff.
+    """
+
     def test_transient_failure_twice_then_success_returns_events(self):
         http_get = _CountingFailThenSucceed(
             httpx.ConnectError("boom"),
             fail_times=2,
-            payload={
-                "release_dates": [
-                    {
-                        "release_id": 50,
-                        "release_name": "Employment Situation",
-                        "date": "2027-02-05",
-                    },
-                ]
-            },
+            payload=_release_dates_payload(),
         )
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=http_get, sleep_fn=sleeps.append
-        )
+        client = _client(http_get, sleep_fn=sleeps.append, max_enriched_releases=0)
 
-        items = client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+        items = client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert len(items) == 1
         assert http_get.calls == 3
@@ -151,26 +539,21 @@ class TestFetchCalendarEventsRetry:
     def test_persistent_transient_failure_exhausts_retries_and_propagates(self):
         http_get = _AlwaysFail(httpx.ConnectError("boom"))
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=http_get, sleep_fn=sleeps.append
-        )
+        client = _client(http_get, sleep_fn=sleeps.append)
 
         with pytest.raises(httpx.ConnectError):
-            client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+            client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert http_get.calls == 3
         assert sleeps == [1.0, 2.0]
 
     def test_client_error_status_propagates_without_retry(self):
-        error = _make_status_error("Unauthorized", 401)
-        http_get = _AlwaysFail(error)
+        http_get = _AlwaysFail(_make_status_error("Unauthorized", 401))
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=http_get, sleep_fn=sleeps.append
-        )
+        client = _client(http_get, sleep_fn=sleeps.append)
 
         with pytest.raises(httpx.HTTPStatusError):
-            client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+            client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert http_get.calls == 1
         assert sleeps == []
@@ -182,11 +565,9 @@ class TestFetchCalendarEventsRetry:
             payload={"release_dates": []},
         )
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=http_get, sleep_fn=sleeps.append
-        )
+        client = _client(http_get, sleep_fn=sleeps.append)
 
-        items = client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+        items = client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert items == []
         assert http_get.calls == 3
@@ -199,24 +580,20 @@ class TestFetchCalendarEventsRetry:
             payload={"release_dates": []},
         )
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=http_get, sleep_fn=sleeps.append
-        )
+        client = _client(http_get, sleep_fn=sleeps.append)
 
-        assert client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28)) == []
+        assert client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF) == []
         assert http_get.calls == 2
         assert sleeps == [1.0]
 
-    def test_malformed_response_body_propagates_without_retry(self):
+    def test_malformed_release_dates_row_propagates_without_retry(self):
         def malformed_response(*_args, **_kwargs):
             return {"release_dates": [{"release_id": 50}]}  # missing "date"
 
         sleeps: list[float] = []
-        client = FredCalendarClient(
-            "test-key", http_get=malformed_response, sleep_fn=sleeps.append
-        )
+        client = _client(malformed_response, sleep_fn=sleeps.append)
 
         with pytest.raises(KeyError):
-            client.fetch_calendar_events(date(2027, 2, 1), date(2027, 2, 28))
+            client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert sleeps == []

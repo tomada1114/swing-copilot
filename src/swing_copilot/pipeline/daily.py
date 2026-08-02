@@ -92,6 +92,7 @@ from swing_copilot.text.edgar_filings import (
     FilingLookbackBounds,
     fetch_recent_filings_text,
 )
+from swing_copilot.tracking.update import update_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -1178,6 +1179,38 @@ def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutco
             f"evaluated {summary.evaluated_slice_count} slice(s), "
             f"{summary.pending_slice_count} pending, "
             f"{summary.outcome_count} outcome(s)",
+            summary.notes,
+        ),
+    )
+
+
+def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+    """Carry the verdict-tracking ledger forward to `as_of` (fail-soft).
+
+    Runs right after `retro_evaluate` for the same reason both of those do:
+    it is offline, idempotent, and only reads bars the price step already
+    persisted. Keeping it daily means a `proceed` verdict's virtual position
+    is opened on the day it was made and marked every session afterwards,
+    instead of only when someone remembers to run `copilot-track update`.
+
+    Today's own verdict is not yet collected at this point (the skill writes
+    `analysis_result.json` later), so it is picked up by tomorrow's run --
+    the same one-day lag `retro_collect` already has, and harmless because the
+    entry price is the run day's close either way.
+    """
+    try:
+        summary = update_tracking(
+            deps.state_store, deps.market_store, deps.settings.backtest, as_of=as_of
+        )
+    except Exception as exc:
+        logger.exception("track update step raised unexpectedly")
+        return _StepOutcome(False, f"unexpected error: {exc}")
+    return _StepOutcome(
+        True,
+        _retro_step_detail(
+            f"opened {summary.opened_count}, "
+            f"advanced {summary.advanced_count}, "
+            f"closed {summary.closed_count} position(s)",
             summary.notes,
         ),
     )

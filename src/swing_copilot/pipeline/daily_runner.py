@@ -38,6 +38,7 @@ from swing_copilot.pipeline.daily import (
     _run_step_retro_evaluate,
     _run_step_risk,
     _run_step_screening,
+    _run_step_track_update,
     _run_text_soft_step,
     _RunContext,
     _select_symbols,
@@ -364,19 +365,25 @@ def _run_retro_soft_steps(
     ctx: _RunContext,
     deadline: float,
 ) -> bool:
-    """Run the retrospective's offline, idempotent half inside the daily batch.
+    """Run the offline, idempotent verdict-observation steps in the daily batch.
 
-    Only `collect` and `evaluate` belong here: both are offline and
-    idempotent, and running them daily stops an un-evaluated run from ageing
-    out of the evaluation window while also backing up the archived
-    `analysis_result.json` into DuckDB. `export` (which fetches freshness data
-    over the network) and the `swing-retro` skill stay manual.
+    Only `collect` and `evaluate` belong here out of the retrospective: both
+    are offline and idempotent, and running them daily stops an un-evaluated
+    run from ageing out of the evaluation window while also backing up the
+    archived `analysis_result.json` into DuckDB. `export` (which fetches
+    freshness data over the network) and the `swing-retro` skill stay manual.
 
-    `evaluate` runs even when `collect` failed, because the verdicts collected
-    on previous days are still evaluable.
+    `track_update` joins them for the same reasons -- offline, idempotent,
+    reading only already-persisted bars -- but answers a different question:
+    it carries each `proceed` verdict's virtual position forward under the
+    backtest's exit rules rather than classifying a matured horizon.
+
+    Each step runs even when an earlier one failed: the verdicts collected on
+    previous days remain evaluable, and the tracked positions remain
+    advanceable, regardless of today's scan.
 
     Returns:
-        Whether either step degraded the run.
+        Whether any step degraded the run.
     """
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
@@ -396,7 +403,20 @@ def _run_retro_soft_steps(
         evaluate_outcome = _run_step_retro_evaluate(deps, ctx.run_date)
     _record_step(deps, ctx.run_id, "retro_evaluate", evaluate_outcome, started_at)
 
-    return not collect_outcome.success or not evaluate_outcome.success
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step track_update skipped: time budget exceeded")
+        track_outcome = _TIME_BUDGET_STEP_OUTCOME
+    else:
+        logger.debug("step track_update starting")
+        track_outcome = _run_step_track_update(deps, ctx.run_date)
+    _record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
+
+    return (
+        not collect_outcome.success
+        or not evaluate_outcome.success
+        or not track_outcome.success
+    )
 
 
 def _finalize_output(

@@ -24,6 +24,7 @@ from swing_copilot.storage import (
     paper_records,
     regime_records,
     text_records,
+    tracking_records,
     verdict_records,
 )
 from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_STATEMENTS
@@ -48,6 +49,12 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
+    from swing_copilot.storage.tracking_records import (
+        TrackableVerdict,
+        VerdictPosition,
+        VerdictPositionMark,
+        VerdictPositionNote,
+    )
     from swing_copilot.storage.verdict_records import (
         AnalysisSourceCoverageRecord,
         VerdictCitationRow,
@@ -781,6 +788,81 @@ class StateStore:
         return verdict_records.get_verdict_decision_alignment(
             self._database, window_start, as_of
         )
+
+    def get_untracked_proceed_verdicts(
+        self, as_of: date
+    ) -> tuple[TrackableVerdict, ...]:
+        """Return `proceed` verdicts dated `<= as_of` that have no position yet.
+
+        Args:
+            as_of: Inclusive point-in-time cutoff on the verdict's run date.
+        """
+        return tracking_records.get_untracked_proceed_verdicts(self._database, as_of)
+
+    def delete_orphaned_verdict_positions(self) -> tuple[tuple[UUID, str], ...]:
+        """Drop tracked positions whose `proceed` verdict no longer exists.
+
+        Returns:
+            The deleted positions' `(run_id, symbol)` identities.
+        """
+        return tracking_records.delete_orphaned_verdict_positions(self._database)
+
+    def get_verdict_positions(
+        self, status: str | None = None
+    ) -> tuple[VerdictPosition, ...]:
+        """Return tracked virtual positions, optionally narrowed to one status.
+
+        Args:
+            status: `"open"`, `"closed"`, or `None` for both.
+        """
+        return tracking_records.get_verdict_positions(self._database, status)
+
+    def get_verdict_position(self, run_id: UUID, symbol: str) -> VerdictPosition | None:
+        """Return one tracked position, or `None` when it was never opened."""
+        return tracking_records.get_verdict_position(self._database, run_id, symbol)
+
+    def upsert_verdict_position(
+        self,
+        position: VerdictPosition,
+        marks: Sequence[VerdictPositionMark] = (),
+    ) -> None:
+        """Persist one tracked position's advance and its marks atomically.
+
+        Args:
+            position: The position's state after the advance.
+            marks: Marks produced by the same advance.
+        """
+        tracking_records.upsert_verdict_position(self._database, position, marks)
+
+    def get_verdict_position_marks(
+        self, run_id: UUID, symbol: str
+    ) -> tuple[VerdictPositionMark, ...]:
+        """Return one tracked position's daily marks in trading-date order."""
+        return tracking_records.get_verdict_position_marks(
+            self._database, run_id, symbol
+        )
+
+    def get_latest_verdict_position_marks(
+        self,
+    ) -> dict[tuple[UUID, str], VerdictPositionMark]:
+        """Return each tracked position's most recent mark, keyed by identity."""
+        return tracking_records.get_latest_verdict_position_marks(self._database)
+
+    def upsert_verdict_position_note(self, note: VerdictPositionNote) -> None:
+        """Correction-upsert one dated note on a tracked position."""
+        tracking_records.upsert_verdict_position_note(self._database, note)
+
+    def get_verdict_position_notes(
+        self, run_id: UUID, symbol: str
+    ) -> tuple[VerdictPositionNote, ...]:
+        """Return one tracked position's notes in date order."""
+        return tracking_records.get_verdict_position_notes(
+            self._database, run_id, symbol
+        )
+
+    def get_verdict_reasons_json(self, run_id: UUID, symbol: str) -> str | None:
+        """Return the raw `verdicts.reasons_json` behind a tracked position."""
+        return tracking_records.get_verdict_reasons_json(self._database, run_id, symbol)
 
     def record_text_items(self, items: Sequence[TextItem]) -> None:
         """Persist collected text items, upserted by `source_id`.

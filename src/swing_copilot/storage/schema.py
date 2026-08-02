@@ -255,6 +255,52 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
+    # Verdict tracking: the virtual position a `proceed` verdict implies, the
+    # daily marks that follow it, and the human's notes about it. Deliberately
+    # separate from `positions` (the FR-11/CON-04 paper-trading gate, which
+    # records what a *human* decided to hold) and from `verdict_outcomes` (a
+    # two-point 5/20-session classification): this layer replays the backtest's
+    # own exit rules forward, one trading day at a time.
+    """
+    CREATE TABLE IF NOT EXISTS verdict_positions (
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        no_trade            BOOLEAN NOT NULL,
+        entry_date          DATE NOT NULL,
+        entry_price         DOUBLE NOT NULL,
+        stop_price          DOUBLE,
+        days_held           INTEGER NOT NULL,
+        status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
+        exit_date           DATE,
+        exit_price          DOUBLE,
+        exit_reason         VARCHAR
+            CHECK (exit_reason IN ('stop', 'max_hold', 'manual')),
+        realized_return_pct DOUBLE,
+        last_marked_date    DATE,
+        PRIMARY KEY (run_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verdict_position_marks (
+        run_id                UUID NOT NULL,
+        symbol                VARCHAR NOT NULL,
+        as_of_date            DATE NOT NULL,
+        close                 DOUBLE NOT NULL,
+        stop_price            DOUBLE,
+        unrealized_return_pct DOUBLE NOT NULL,
+        PRIMARY KEY (run_id, symbol, as_of_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verdict_position_notes (
+        run_id     UUID NOT NULL,
+        symbol     VARCHAR NOT NULL,
+        note_date  DATE NOT NULL,
+        note       VARCHAR NOT NULL,
+        PRIMARY KEY (run_id, symbol, note_date)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS regime_snapshots (
         run_id          UUID PRIMARY KEY,
@@ -316,4 +362,17 @@ ALTER_SCHEMA_STATEMENTS = (
     # cannot add a NOT NULL JSON column, so legacy rows retain NULL while new
     # runs always write a canonical JSON object through `StateStore.start_run`.
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata_json JSON",
+    # verdict tracking: `no_trade` proceeds are now tracked too (flagged, not
+    # excluded), so a database created before this change gains the column
+    # lazily. Unconstrained at the DB level for the same reason as the other
+    # entries above (DuckDB rejects `ADD COLUMN` with an inline `NOT NULL`);
+    # `tracking/update.py` always writes an explicit `True`/`False`, never
+    # `NULL`, so application code is the sole enforcement point for rows
+    # added to a pre-existing `verdict_positions` table via this path. Every
+    # row already in such a table was necessarily opened while `no_trade`
+    # verdicts were still excluded, so backfilling `FALSE` is not a guess --
+    # it restates a fact those rows already had, the same way P1-06 backfills
+    # `positions.exit_reason`. Both statements are idempotent.
+    "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN",
+    "UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL",
 )

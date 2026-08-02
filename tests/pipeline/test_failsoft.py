@@ -591,7 +591,81 @@ class TestRetroStepsRunDaily:
         assert result.exit_code == 0
         assert _step_status(state_store, result.run_id, "retro_collect") == "skipped"
         assert _step_status(state_store, result.run_id, "retro_evaluate") == "skipped"
+        assert _step_status(state_store, result.run_id, "track_update") == "skipped"
         assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+
+class TestTrackUpdateStepRunsDaily:
+    """Verdict tracking rides the same offline, idempotent daily slot.
+
+    It follows `retro_evaluate` and answers a different question: where each
+    `proceed` verdict's virtual position stands under the backtest's own exit
+    rules, rather than whether a matured horizon was right.
+    """
+
+    def test_the_step_succeeds_and_opens_the_collected_verdict(
+        self, base_deps: DailyDependencies, state_store: StateStore
+    ) -> None:
+        _write_archived_run(base_deps.output_dir)
+        # The archived run's own risk assessment is where the virtual entry
+        # price comes from, exactly as a real prior run would have left it.
+        with state_store.database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO risk_assessments (
+                    run_id, symbol, status, max_shares, entry_price, stop_price,
+                    reasons_json, warnings_json, sizing_warnings_json
+                ) VALUES (?, 'AAPL', 'approved', 10, 100.0, 95.0, '[]', '[]', '[]')
+                """,
+                [ARCHIVED_RUN_ID],
+            )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _step_status(state_store, result.run_id, "track_update") == "success"
+        # `retro_collect` archived AAPL's `proceed` verdict earlier in the same
+        # run, so the tracker really ran after it, on real collected data.
+        positions = state_store.get_verdict_positions()
+        assert [position.symbol for position in positions] == ["AAPL"]
+
+    def test_a_failure_degrades_the_run_without_failing_it(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "tracking ledger unwritable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "update_tracking", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "track_update") == "failed"
+        assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+    def test_it_still_runs_when_the_retro_steps_failed(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "verdict archive unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(daily_module, "collect_verdicts", _raise)
+        monkeypatch.setattr(daily_module, "evaluate_verdicts", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert _step_status(state_store, result.run_id, "track_update") == "success"
 
 
 class TestUniverseFallbackDegrades:

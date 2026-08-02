@@ -265,6 +265,7 @@ class TestFiveSymbolEndToEnd:
             "postmortem",
             "retro_collect",
             "retro_evaluate",
+            "track_update",
         ]
         assert dict(steps) == {
             "1_prices": "success",
@@ -279,6 +280,7 @@ class TestFiveSymbolEndToEnd:
             "postmortem": "success",
             "retro_collect": "success",
             "retro_evaluate": "success",
+            "track_update": "success",
         }
 
     def test_markdown_contains_every_candidate_and_the_pending_analysis_placeholder(

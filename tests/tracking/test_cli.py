@@ -130,6 +130,7 @@ class TestListCommand:
                     run_id=RUN_ID,
                     symbol=symbol,
                     strategy_key="default",
+                    no_trade=False,
                     entry_date=ENTRY_DATE,
                     entry_price=100.0,
                     stop_price=95.0,
@@ -145,6 +146,39 @@ class TestListCommand:
 
         out = capsys.readouterr().out
         assert out.index("AAA") < out.index("BBB") < out.index("CCC")
+
+    def test_a_no_trade_position_is_flagged_in_the_ledger(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # CASH_PRIORITY (or any regime the run itself calls no_trade) must
+        # still show up in `list`, but visibly marked apart from an ordinary
+        # proceed that was actually on offer as a buy.
+        path = tmp_path / "no_trade.duckdb"
+        state_store = StateStore(Database(path))
+        state_store.init_schema()
+        seed_verdict(state_store, symbol="NTR", no_trade=True)
+        seed_risk(state_store, symbol="NTR")
+        market_store = MarketStore(Database(path), parquet_root=path.parent / "bars")
+        write_bars(market_store, flat_prelude(symbol="NTR"))
+        main(["update", "--as-of", ENTRY_DATE.isoformat(), "--db", str(path)])
+        capsys.readouterr()
+
+        main(["list", "--db", str(path)])
+
+        out = capsys.readouterr().out
+        assert "NTR" in out
+        assert "no_trade" in out
+
+    def test_an_ordinary_position_shows_no_no_trade_flag(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
+        capsys.readouterr()
+
+        main(["list", "--db", str(db_path)])
+
+        out = capsys.readouterr().out
+        assert "no_trade" not in out
 
     def test_status_open_hides_a_closed_position(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
@@ -214,6 +248,24 @@ class TestShowCommand:
         out = capsys.readouterr().out
         assert SYMBOL in out
         assert "verdict:" not in out
+
+    def test_a_no_trade_position_shows_the_run_level_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "no_trade.duckdb"
+        state_store = StateStore(Database(path))
+        state_store.init_schema()
+        seed_verdict(state_store, symbol="NTR", no_trade=True)
+        seed_risk(state_store, symbol="NTR")
+        market_store = MarketStore(Database(path), parquet_root=path.parent / "bars")
+        write_bars(market_store, flat_prelude(symbol="NTR"))
+        main(["update", "--as-of", ENTRY_DATE.isoformat(), "--db", str(path)])
+        capsys.readouterr()
+
+        main(["show", "--symbol", "NTR", "--db", str(path)])
+
+        out = capsys.readouterr().out
+        assert "no_trade run" in out
 
     def test_an_unknown_symbol_says_it_is_not_tracked(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]

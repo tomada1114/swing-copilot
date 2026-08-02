@@ -37,6 +37,7 @@ def _position(**overrides: object) -> VerdictPosition:
         run_id=RUN_ID,
         symbol=SYMBOL,
         strategy_key="default",
+        no_trade=False,
         entry_date=ENTRY_DATE,
         entry_price=100.0,
         stop_price=95.0,
@@ -59,7 +60,9 @@ def _mark(as_of_date: date, close: float, **overrides: object) -> VerdictPositio
     return replace(base, **overrides)  # type: ignore[arg-type]
 
 
-def _seed_verdict(state_store: StateStore, *, recommendation: str = "proceed") -> None:
+def _seed_verdict(
+    state_store: StateStore, *, recommendation: str = "proceed", no_trade: bool = False
+) -> None:
     state_store.replace_run_verdicts(
         RUN_ID,
         [
@@ -70,7 +73,7 @@ def _seed_verdict(state_store: StateStore, *, recommendation: str = "proceed") -
                 strategy_key="default",
                 recommendation=recommendation,
                 reasons=(VerdictReasonRecord(text="出来高が伴う", source_ids=()),),
-                no_trade=False,
+                no_trade=no_trade,
             )
         ],
         [],
@@ -255,6 +258,15 @@ class TestUntrackedVerdicts:
         rows = state_store.get_untracked_proceed_verdicts(ENTRY_DATE)
 
         assert [(row.entry_price, row.stop_price) for row in rows] == [(None, None)]
+
+    def test_a_no_trade_proceed_verdict_is_listed_with_the_flag_set(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store, no_trade=True)
+
+        rows = state_store.get_untracked_proceed_verdicts(ENTRY_DATE)
+
+        assert [(row.symbol, row.no_trade) for row in rows] == [(SYMBOL, True)]
 
     def test_an_already_tracked_verdict_disappears_from_the_list(
         self, state_store: StateStore

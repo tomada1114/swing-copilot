@@ -204,13 +204,23 @@ copilot-track close --run-id <UUID> --symbol AAPL --note "決算をまたがな�
 copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 ```
 
-`update`は`verdicts`の`recommendation='proceed' AND no_trade=false`のうち未追跡の
-ものを建玉し、保有中を`--as-of`まで1取引日ずつ前進させる。エントリー価格は
+`update`は`verdicts`の`recommendation='proceed'`のうち未追跡のものを建玉し、
+保有中を`--as-of`まで1取引日ずつ前進させる。`no_trade`（そのrun全体が当日
+エントリー非推奨だった判断）は**除外しない**——実運用ではレジームが
+`CASH_PRIORITY`のrunで全verdictが`no_trade=true`になることがあり、除外すると
+台帳が空になって定性判断の質を測る材料が集まらないため、`verdicts.no_trade`を
+そのまま`verdict_positions.no_trade`へ引き継いで建玉する。エントリー価格は
 `risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
 NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`で代替する。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
 省略したときだけ、CLI境界で`SystemClock().today()`を使う。
+
+`list`は`⚠`列で`no_trade`を示し、フラグが立つ行は`no_trade`と表示する
+（立たない行は空欄）。`show`はさらに一文で「銘柄単体は`proceed`だが、run全体は
+当日エントリー非推奨だった（実際に提案された買いとは区別して読む）」と明示する。
+いずれも判定の質を測る材料として台帳に残す一方、実際に提案された買いではない
+ことを一目で区別できるようにするためである。
 
 日次前進はバックテストと同じ順序を守る: その日の手仕舞い判定は**前日までの**stopで
 行い、生き残った日の終値で初めてstopをラチェット更新する（翌日から有効）。

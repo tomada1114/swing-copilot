@@ -89,9 +89,13 @@ uv run copilot-track update
 uv run copilot-track list --status open
 ```
 
-列は symbol / run_id / entry_date / entry / stop / last close / 含み損益 / 保有・上限 /
-残（営業日）/ exit_date / 理由 / 確定損益。open 行が entry_date 降順で先、
+列は symbol / ⚠ / run_id / entry_date / entry / stop / last close / 含み損益 /
+保有・上限 / 残（営業日）/ exit_date / 理由 / 確定損益。open 行が entry_date 降順で先、
 closed 行が exit_date 降順で後に並ぶ。
+
+`⚠` 列が `no_trade` の行は、銘柄単体の判定は proceed だが run 全体は当日
+エントリー非推奨（no_trade）だった中の proceed である。判定の質を測る材料としては
+有効だが、「実際に提案された買い」とは区別して読む。
 
 **優先的に取り上げるもの**（★を付けて報告する）:
 
@@ -113,6 +117,10 @@ uv run copilot-track show --symbol <SYM> [--run-id <UUID>]
 
 verdict の proceed 理由（当時の読み）・日次マーク履歴（close / stop / 含み損益）・
 既存ノートが出る。同一銘柄が複数 run で建っている場合は `--run-id` で 1 本に絞る。
+
+`⚠ no_trade run` と表示された場合は、その proceed が出た run 全体では当日
+エントリー非推奨だったことを踏まえて読む。以降の突き合わせでは判定の質の
+材料として扱い、「その日実際に買いが提案されていた」という前提では読まない。
 
 **当時の理由と現状を 1 行ずつ突き合わせる。** 価格の善し悪しではなく、
 「proceed の根拠が今も立っているか」を見る。判断枠は次の 2 つ:

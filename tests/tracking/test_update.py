@@ -92,16 +92,14 @@ class TestOpening:
             (ENTRY_DATE, 0.0)
         ]
 
-    def test_skip_and_no_trade_verdicts_are_never_tracked(
+    def test_a_skip_verdict_is_never_tracked(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: BacktestConfig,
     ) -> None:
         seed_verdict(state_store, symbol="SKP", recommendation="skip")
-        seed_verdict(state_store, run_id=uuid4(), symbol="NTR", no_trade=True)
         write_bars(market_store, flat_prelude(symbol="SKP"))
-        write_bars(market_store, flat_prelude(symbol="NTR"))
 
         result = update_tracking(
             state_store, market_store, backtest_config, as_of=ENTRY_DATE
@@ -109,6 +107,30 @@ class TestOpening:
 
         assert result.opened_count == 0
         assert state_store.get_verdict_positions() == ()
+
+    def test_a_no_trade_proceed_verdict_is_tracked_with_the_flag_carried_through(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # CASH_PRIORITY (or any regime that sets the run-level no_trade flag)
+        # must not leave the ledger empty: the symbol's own proceed is still
+        # useful as a judgement-quality data point, just never an actual buy.
+        no_trade_run_id = uuid4()
+        seed_verdict(state_store, run_id=no_trade_run_id, symbol="NTR", no_trade=True)
+        seed_risk(state_store, run_id=no_trade_run_id, symbol="NTR")
+        write_bars(market_store, flat_prelude(symbol="NTR"))
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        assert result.opened_count == 1
+        position = state_store.get_verdict_position(no_trade_run_id, "NTR")
+        assert position is not None
+        assert position.no_trade is True
+        assert position.status == "open"
 
     def test_missing_entry_price_skips_the_symbol_and_reopens_on_the_next_update(
         self,

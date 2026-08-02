@@ -1517,7 +1517,7 @@ src/swing_copilot/tracking/
 
 | テーブル | 主キー | 役割 |
 |---|---|---|
-| `verdict_positions` | `(run_id, symbol)` | 仮想建玉1件。`entry_date`（verdictのas_of）/ `entry_price` / `stop_price`（現在のトレーリングストップ、NULL可）/ `days_held` / `status` CHECK `open`\|`closed` / `exit_date` / `exit_price` / `exit_reason` CHECK `stop`\|`max_hold`\|`manual` / `realized_return_pct` / `last_marked_date`（再開位置） |
+| `verdict_positions` | `(run_id, symbol)` | 仮想建玉1件。`no_trade`（verdictの同名フラグをそのまま継承。runの相場環境が当日エントリー非推奨だった中のproceedかどうか）/ `entry_date`（verdictのas_of）/ `entry_price` / `stop_price`（現在のトレーリングストップ、NULL可）/ `days_held` / `status` CHECK `open`\|`closed` / `exit_date` / `exit_price` / `exit_reason` CHECK `stop`\|`max_hold`\|`manual` / `realized_return_pct` / `last_marked_date`（再開位置） |
 | `verdict_position_marks` | `(run_id, symbol, as_of_date)` | 日次スナップショット。`close` / `stop_price` / `unrealized_return_pct` |
 | `verdict_position_notes` | `(run_id, symbol, note_date)` | 判断メモ |
 
@@ -1527,7 +1527,7 @@ src/swing_copilot/tracking/
 
 `update_tracking(state_store, market_store, backtest_config, *, as_of)`。すべて明示`as_of`で、`date.today()`は呼ばず、ネットワークにも触れない。バーは日次runの`1_prices`が保存済みのものだけを読む。
 
-1. **建玉**: `verdicts`のうち`recommendation='proceed' AND no_trade=false`かつ`as_of <= 指定as_of`で、まだ`verdict_positions`に無いものを開く。`no_trade`を除くのは、そのrun自体が「今日は建てるな」と言っている判断だからである。
+1. **建玉**: `verdicts`のうち`recommendation='proceed'`かつ`as_of <= 指定as_of`で、まだ`verdict_positions`に無いものを開く。`no_trade`（runの相場環境が当日エントリー非推奨だった判断）は**除外しない**——実運用ではCASH_PRIORITY等のレジームで当日の全verdictが`no_trade=true`になるrunもあり、除外すると台帳が空になって定性判断の質を測る材料が集まらない。代わりに`verdicts.no_trade`をそのまま`verdict_positions.no_trade`へ引き継ぎ、`list`/`show`が「銘柄単体はproceedだがrun全体は当日エントリー非推奨だった」ことを視覚的に区別して示す（CLIの表示詳細は`docs/reference.md`が正本）。
    - `entry_price` := `risk_assessments.entry_price`（= run日終値）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
    - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − exit_atr_multiple × ATR14(entry_date時点)`。ATR14も算出不能（14セッション未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
    - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
@@ -1757,6 +1757,7 @@ CREATE TABLE IF NOT EXISTS verdict_positions (
     run_id              UUID NOT NULL,
     symbol              VARCHAR NOT NULL,
     strategy_key        VARCHAR NOT NULL,
+    no_trade            BOOLEAN NOT NULL,
     entry_date          DATE NOT NULL,
     entry_price         DOUBLE NOT NULL,
     stop_price          DOUBLE,
@@ -1789,7 +1790,7 @@ CREATE TABLE IF NOT EXISTS verdict_position_notes (
 );
 ```
 
-`verdict_positions`系3テーブル（3.24節）は新規追加なのでマイグレーション不要で、`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけで足りる。`positions`（人間の紙トレ）とも`verdict_outcomes`（満期2点の当否分類）とも意図的に別テーブルであり、棲み分けの理由は3.24.1に記す。`stop_price`がNULLになりうるのは、リスク評価がstopを出せず（`CASH_PRIORITY`／`not_calculable`）ATR14も算出できない場合で、そのポジションは最大保有日数のみで手仕舞い判定される。
+`verdict_positions`系3テーブル（3.24節）は新規追加なのでマイグレーション不要で、`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけで足りる——ただし`no_trade`列は導入時点で`verdict_positions`が既に作成済みのDBが存在するため例外で、`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN`（DuckDBの制約上CHECK/NOT NULL無し）に続けて`UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL`を実行する。追加前に存在した行は「`no_trade`のverdictを除外していた」時代に開かれたものだけなので、`FALSE`への後付けは推測ではなく事実の復元であり、`exit_reason`の`unknown`後付け（下段）と同型のパターンである。`positions`（人間の紙トレ）とも`verdict_outcomes`（満期2点の当否分類）とも意図的に別テーブルであり、棲み分けの理由は3.24.1に記す。`stop_price`がNULLになりうるのは、リスク評価がstopを出せず（`CASH_PRIORITY`／`not_calculable`）ATR14も算出できない場合で、そのポジションは最大保有日数のみで手仕舞い判定される。
 
 `exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
 

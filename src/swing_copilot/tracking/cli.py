@@ -196,6 +196,7 @@ def _run_list(
     table = Table(title="verdict 追跡台帳")
     for column in (
         "symbol",
+        "⚠",
         "run_id",
         "entry_date",
         "entry",
@@ -215,6 +216,7 @@ def _run_list(
         is_open = position.status == OPEN
         table.add_row(
             position.symbol,
+            "no_trade" if position.no_trade else "",
             str(position.run_id),
             position.entry_date.isoformat(),
             _fmt_price(position.entry_price),
@@ -260,6 +262,12 @@ def _print_position_detail(
         f"strategy={position.strategy_key} status={position.status} "
         f"entry={position.entry_date.isoformat()} @ {position.entry_price:.2f}"
     )
+    if position.no_trade:
+        console.print(
+            "  [yellow]⚠ no_trade run: 銘柄単体は proceed だが、"
+            "run 全体は当日エントリー非推奨だった"
+            "（実際に提案された買いとは区別して読む）[/yellow]"
+        )
     if position.status == CLOSED:
         console.print(
             f"  手仕舞い: {_fmt_date(position.exit_date)} "

@@ -27,12 +27,13 @@ if TYPE_CHECKING:
 
 _UPSERT_POSITION = """
     INSERT INTO verdict_positions (
-        run_id, symbol, strategy_key, entry_date, entry_price, stop_price,
-        days_held, status, exit_date, exit_price, exit_reason,
+        run_id, symbol, strategy_key, no_trade, entry_date, entry_price,
+        stop_price, days_held, status, exit_date, exit_price, exit_reason,
         realized_return_pct, last_marked_date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (run_id, symbol) DO UPDATE SET
         strategy_key = EXCLUDED.strategy_key,
+        no_trade = EXCLUDED.no_trade,
         entry_date = EXCLUDED.entry_date,
         entry_price = EXCLUDED.entry_price,
         stop_price = EXCLUDED.stop_price,
@@ -63,8 +64,8 @@ _UPSERT_NOTE = """
 """
 
 _POSITION_COLUMNS = """
-    run_id, symbol, strategy_key, entry_date, entry_price, stop_price,
-    days_held, status, exit_date, exit_price, exit_reason,
+    run_id, symbol, strategy_key, no_trade, entry_date, entry_price,
+    stop_price, days_held, status, exit_date, exit_price, exit_reason,
     realized_return_pct, last_marked_date
 """
 
@@ -80,11 +81,19 @@ class VerdictPosition:
     assessment had none and there were too few bars for ATR(14)); the exit
     rules then fall back to max-hold only. `last_marked_date` is the last
     trading day already replayed, which is where the next update resumes.
+
+    `no_trade` carries the verdict's own run-level flag forward: `True` means
+    this symbol's `proceed` came from a run whose overall regime told the
+    human not to trade that day (e.g. `CASH_PRIORITY`). The position is still
+    opened and tracked -- withholding it would leave the ledger empty on any
+    day the regime says no trade -- but `list`/`show` mark it so a reader
+    never mistakes it for a buy that was actually put on offer.
     """
 
     run_id: UUID
     symbol: str
     strategy_key: str
+    no_trade: bool
     entry_date: date
     entry_price: float
     stop_price: float | None
@@ -126,12 +135,18 @@ class TrackableVerdict:
     `entry_price`/`stop_price` come from `risk_assessments` and are both
     nullable: a `CASH_PRIORITY` regime or a `not_calculable` assessment leaves
     them unset, and the tracker then falls back to the bars (design 3.24).
+
+    `no_trade` is the verdict's own run-level flag, carried through to the
+    position that gets opened from it (design 3.24.3): a symbol can be
+    `proceed` while its run overall was `no_trade` (e.g. `CASH_PRIORITY`), and
+    the ledger tracks it anyway rather than going empty on such a day.
     """
 
     run_id: UUID
     symbol: str
     as_of: date
     strategy_key: str
+    no_trade: bool
     entry_price: float | None
     stop_price: float | None
 
@@ -141,9 +156,12 @@ def get_untracked_proceed_verdicts(
 ) -> tuple[TrackableVerdict, ...]:
     """Return tradeable `proceed` verdicts dated `<= as_of` with no position yet.
 
-    `no_trade` verdicts are excluded: the run itself told the human not to
-    trade, so opening a virtual position from it would track a decision that
-    was never on offer.
+    `no_trade` verdicts are included, not excluded: a run's overall regime
+    (e.g. `CASH_PRIORITY`) telling the human not to trade that day does not
+    mean an individual symbol's `proceed` is meaningless as a data point on
+    the analysis's judgement quality, only that it was never actually on
+    offer as a buy. `TrackableVerdict.no_trade` carries the flag through so
+    the position, and later `list`/`show`, can mark it as such.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -155,7 +173,7 @@ def get_untracked_proceed_verdicts(
     with database.connect() as conn:
         rows = conn.execute(
             """
-            SELECT v.run_id, v.symbol, v.as_of, v.strategy_key,
+            SELECT v.run_id, v.symbol, v.as_of, v.strategy_key, v.no_trade,
                    ra.entry_price, ra.stop_price
             FROM verdicts v
             LEFT JOIN risk_assessments ra
@@ -163,7 +181,6 @@ def get_untracked_proceed_verdicts(
             LEFT JOIN verdict_positions vp
               ON vp.run_id = v.run_id AND vp.symbol = v.symbol
             WHERE v.recommendation = 'proceed'
-              AND v.no_trade = FALSE
               AND v.as_of <= ?
               AND vp.run_id IS NULL
             ORDER BY v.as_of, v.run_id, v.symbol
@@ -176,8 +193,9 @@ def get_untracked_proceed_verdicts(
             symbol=row[1],
             as_of=row[2],
             strategy_key=row[3],
-            entry_price=row[4],
-            stop_price=row[5],
+            no_trade=bool(row[4]),
+            entry_price=row[5],
+            stop_price=row[6],
         )
         for row in rows
     )
@@ -228,18 +246,19 @@ def _position(row: Sequence[object]) -> VerdictPosition:
         run_id=UUID(str(row[0])),
         symbol=str(row[1]),
         strategy_key=str(row[2]),
-        entry_date=row[3],  # type: ignore[arg-type]
-        entry_price=float(row[4]),  # type: ignore[arg-type]
-        stop_price=None if row[5] is None else float(row[5]),  # type: ignore[arg-type]
-        days_held=int(row[6]),  # type: ignore[call-overload]
-        status=str(row[7]),
-        exit_date=row[8],  # type: ignore[arg-type]
-        exit_price=None if row[9] is None else float(row[9]),  # type: ignore[arg-type]
-        exit_reason=None if row[10] is None else str(row[10]),
+        no_trade=bool(row[3]),
+        entry_date=row[4],  # type: ignore[arg-type]
+        entry_price=float(row[5]),  # type: ignore[arg-type]
+        stop_price=None if row[6] is None else float(row[6]),  # type: ignore[arg-type]
+        days_held=int(row[7]),  # type: ignore[call-overload]
+        status=str(row[8]),
+        exit_date=row[9],  # type: ignore[arg-type]
+        exit_price=None if row[10] is None else float(row[10]),  # type: ignore[arg-type]
+        exit_reason=None if row[11] is None else str(row[11]),
         realized_return_pct=(
-            None if row[11] is None else float(row[11])  # type: ignore[arg-type]
+            None if row[12] is None else float(row[12])  # type: ignore[arg-type]
         ),
-        last_marked_date=row[12],  # type: ignore[arg-type]
+        last_marked_date=row[13],  # type: ignore[arg-type]
     )
 
 
@@ -275,6 +294,7 @@ def upsert_verdict_position(
                 str(position.run_id),
                 position.symbol,
                 position.strategy_key,
+                position.no_trade,
                 position.entry_date,
                 position.entry_price,
                 position.stop_price,

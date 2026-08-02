@@ -65,6 +65,26 @@ _PRE_P1_06_POSITIONS_TABLE = """
     )
 """
 
+_PRE_NO_TRADE_VERDICT_POSITIONS_TABLE = """
+    CREATE TABLE IF NOT EXISTS verdict_positions (
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        entry_date          DATE NOT NULL,
+        entry_price         DOUBLE NOT NULL,
+        stop_price          DOUBLE,
+        days_held           INTEGER NOT NULL,
+        status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
+        exit_date           DATE,
+        exit_price          DOUBLE,
+        exit_reason         VARCHAR
+            CHECK (exit_reason IN ('stop', 'max_hold', 'manual')),
+        realized_return_pct DOUBLE,
+        last_marked_date    DATE,
+        PRIMARY KEY (run_id, symbol)
+    )
+"""
+
 _PRE_I57_RUNS_TABLE = """
     CREATE TABLE IF NOT EXISTS runs (
         run_id          UUID PRIMARY KEY,
@@ -130,6 +150,41 @@ class TestInitSchema:
                 [str(run_id)],
             ).fetchone()
         assert row == ("trade_risk", 200, 500)
+
+    def test_init_schema_adds_no_trade_to_a_pre_existing_verdict_positions_table(
+        self, tmp_path
+    ):
+        # A database that already has `verdict_positions` from before this
+        # change (no `no_trade` column at all): every row in it was
+        # necessarily opened while `no_trade` verdicts were excluded, so the
+        # migration both adds the column and backfills it to `FALSE` rather
+        # than leaving it `NULL`.
+        database = Database(tmp_path / "pre_no_trade.duckdb")
+        run_id = uuid4()
+        with database.connect() as conn:
+            conn.execute(_PRE_NO_TRADE_VERDICT_POSITIONS_TABLE)
+            conn.execute(
+                """
+                INSERT INTO verdict_positions (
+                    run_id, symbol, strategy_key, entry_date, entry_price,
+                    stop_price, days_held, status, last_marked_date
+                ) VALUES (?, 'AAPL', 'default', ?, 100.0, 95.0, 0, 'open', ?)
+                """,
+                [str(run_id), date(2026, 7, 1), date(2026, 7, 1)],
+            )
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        position = store.get_verdict_position(run_id, "AAPL")
+        assert position is not None
+        assert position.no_trade is False
+
+        # Idempotent: re-running must not disturb the backfilled row.
+        store.init_schema()
+        position_again = store.get_verdict_position(run_id, "AAPL")
+        assert position_again is not None
+        assert position_again.no_trade is False
 
     def test_init_schema_backfills_unknown_exit_reason_for_closed_rows_only(
         self, tmp_path

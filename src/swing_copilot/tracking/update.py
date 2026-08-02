@@ -207,6 +207,7 @@ def _seed_position(
         run_id=candidate.run_id,
         symbol=candidate.symbol,
         strategy_key=candidate.strategy_key,
+        no_trade=candidate.no_trade,
         entry_date=candidate.as_of,
         entry_price=entry_price,
         stop_price=stop_price,

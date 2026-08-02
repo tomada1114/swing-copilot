@@ -266,6 +266,7 @@ INIT_SCHEMA_STATEMENTS = (
         run_id              UUID NOT NULL,
         symbol              VARCHAR NOT NULL,
         strategy_key        VARCHAR NOT NULL,
+        no_trade            BOOLEAN NOT NULL,
         entry_date          DATE NOT NULL,
         entry_price         DOUBLE NOT NULL,
         stop_price          DOUBLE,
@@ -361,4 +362,17 @@ ALTER_SCHEMA_STATEMENTS = (
     # cannot add a NOT NULL JSON column, so legacy rows retain NULL while new
     # runs always write a canonical JSON object through `StateStore.start_run`.
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata_json JSON",
+    # verdict tracking: `no_trade` proceeds are now tracked too (flagged, not
+    # excluded), so a database created before this change gains the column
+    # lazily. Unconstrained at the DB level for the same reason as the other
+    # entries above (DuckDB rejects `ADD COLUMN` with an inline `NOT NULL`);
+    # `tracking/update.py` always writes an explicit `True`/`False`, never
+    # `NULL`, so application code is the sole enforcement point for rows
+    # added to a pre-existing `verdict_positions` table via this path. Every
+    # row already in such a table was necessarily opened while `no_trade`
+    # verdicts were still excluded, so backfilling `FALSE` is not a guess --
+    # it restates a fact those rows already had, the same way P1-06 backfills
+    # `positions.exit_reason`. Both statements are idempotent.
+    "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN",
+    "UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL",
 )

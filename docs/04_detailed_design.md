@@ -1531,14 +1531,21 @@ src/swing_copilot/tracking/
    - `entry_price` := `risk_assessments.entry_price`（= run日終値）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
    - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − exit_atr_multiple × ATR14(entry_date時点)`。ATR14も算出不能（14セッション未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
    - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
+   - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
+   - **孤児の削除**: 建玉に先立ち、対応する`proceed` verdictが存在しない`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、`proceed`から`skip`へ訂正された銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
 2. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
+   - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
+   - ATR14は1ポジションにつき1パス（`backtest/exits.py::atr14_by_date`）で全セッション分を求め、日ごとに`atr14_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
+   - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは4のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
 3. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
 4. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
 
 手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間14はエンジンと同じくハードコード（`settings.backtest.exit_atr_period`は未配線のまま。3.19の既知事項）。
 
-手動操作は2つだけである。`close_manually()`は`exit_reason='manual'`・`exit_price`=`as_of`の終値（バーが無ければ最終マークの終値）でクローズし、`record_note()`は日付付きのメモを残す。存在しない／既にクローズ済みのポジション、エントリー日より前のクローズ、空メモはいずれも`TrackingError`で拒否する。
+手動操作は2つだけである。`close_manually()`は`exit_reason='manual'`・`exit_price`=`as_of`の終値（バーが無ければ最終マークの終値）でクローズし、`record_note()`は日付付きのメモを残す。存在しない／既にクローズ済みのポジション、エントリー日より前のクローズ、**最終マーク日より前のクローズ**、空メモはいずれも`TrackingError`で拒否する。最終マーク日より前を弾くのは、`exit_date`だけ過去に置かれて日次マーク・`days_held`・再開位置が先の日付を指したままになり、`list`/`show`が自己矛盾した行を表示するのを防ぐためである。
+
+メモ本文は`copilot-track show`がそのまま表示するスキル生成テキストであり、他のスキル出力と同じ**出力境界**として扱う。`record_note()`は空チェックに加えて`analysis/safety.check_display_texts`（中央のCON-03ガード）を通し、売買を命じる表現を含むメモを`TrackingError`で拒否する。`close_manually(note=...)`はこの検査を**書き込み前**に行うので、拒否されたメモが「理由の無いクローズ」だけを残すことはない。スキルへの指示だけでは不十分という原則（`analysis/`と同じ）を、この新しい経路でも再確立するためである。
 
 #### 3.24.4 日次fail-softステップ`track_update`
 

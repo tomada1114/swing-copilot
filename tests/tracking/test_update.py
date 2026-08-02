@@ -706,3 +706,164 @@ class TestManualWrites:
             record_note(
                 state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="所感"
             )
+
+    @pytest.mark.usefixtures("opened")
+    def test_closing_before_the_last_marked_session_is_rejected(
+        self, state_store: StateStore, market_store: MarketStore
+    ) -> None:
+        # DAY_1 is already replayed and marked. Closing at ENTRY_DATE would
+        # leave exit_date behind last_marked_date, days_held, and a mark dated
+        # after the position's own exit.
+        with pytest.raises(TrackingError, match="最終マーク日"):
+            close_manually(
+                state_store,
+                market_store,
+                run_id=RUN_ID,
+                symbol=SYMBOL,
+                as_of=ENTRY_DATE,
+            )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+
+    @pytest.mark.usefixtures("opened")
+    def test_a_note_with_imperative_trading_language_is_rejected(
+        self, state_store: StateStore
+    ) -> None:
+        # A note is skill-authored text that `show` prints verbatim, so it
+        # goes through the same CON-03 guard as every other skill output.
+        with pytest.raises(TrackingError, match="CON-03"):
+            record_note(
+                state_store,
+                run_id=RUN_ID,
+                symbol=SYMBOL,
+                note_date=DAY_1,
+                note="AAA は今すぐ買うべきである",
+            )
+
+        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
+
+    @pytest.mark.usefixtures("opened")
+    def test_a_manual_close_with_a_forbidden_note_writes_nothing(
+        self, state_store: StateStore, market_store: MarketStore
+    ) -> None:
+        with pytest.raises(TrackingError, match="CON-03"):
+            close_manually(
+                state_store,
+                market_store,
+                run_id=RUN_ID,
+                symbol=SYMBOL,
+                as_of=DAY_1,
+                note="ここは売るべき",
+            )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
+
+
+class TestVerdictReconciliation:
+    def test_a_retracted_proceed_verdict_removes_what_it_opened(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [_rise(DAY_1, 102.0)])
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+        record_note(
+            state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="様子見"
+        )
+
+        # Re-ingesting a corrected analysis_result.json replaces the run's
+        # verdicts wholesale; AAA is demoted from proceed to skip.
+        seed_verdict(state_store, recommendation="skip")
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_2
+        )
+
+        assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
+        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
+        assert any("取り消された" in note for note in result.notes)
+        assert result.opened_count == 0
+
+    def test_a_standing_proceed_verdict_keeps_its_position(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        assert state_store.get_verdict_position(RUN_ID, SYMBOL) is not None
+        assert result.notes == ()
+
+
+class TestDataQuality:
+    def test_a_position_without_any_stored_bar_is_reported_every_update(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # The risk row prices the entry, so the position opens -- but the
+        # symbol goes dark straight afterwards (delisting, universe exit), so
+        # it can never advance and max-hold can never fire.
+        seed_verdict(state_store)
+        seed_risk(state_store)
+
+        opening = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+        later = update_tracking(state_store, market_store, backtest_config, as_of=DAY_2)
+
+        assert opening.opened_count == 1
+        assert any("バーが1本も無い" in note for note in opening.notes)
+        assert any("バーが1本も無い" in note for note in later.notes)
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+
+    def test_a_non_finite_stored_close_is_never_used_as_an_entry_price(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # No risk assessment, so the entry falls back to the run day's close.
+        # An infinite close passes `<= 0` but would poison every later return.
+        seed_verdict(state_store)
+        write_bars(market_store, flat_prelude(sessions=19))
+        write_bars(
+            market_store,
+            [
+                bar(
+                    ENTRY_DATE,
+                    open_price=FLAT_CLOSE,
+                    high=FLAT_CLOSE + 1.0,
+                    low=FLAT_CLOSE - 1.0,
+                    close=math.inf,
+                )
+            ],
+        )
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        assert result.opened_count == 0
+        assert state_store.get_verdict_positions() == ()
+        assert any("エントリー価格を解決できない" in note for note in result.notes)

@@ -80,6 +80,29 @@ def _seed_verdict(
     )
 
 
+class _FlakyConnection:
+    """Delegates to a real connection, raising on the `fail_on`-th `execute`."""
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection, fail_on: int) -> None:
+        self._conn = conn
+        self._fail_on = fail_on
+        self._calls = 0
+
+    def execute(
+        self, query: str, parameters: list[object] | None = None
+    ) -> duckdb.DuckDBPyConnection:
+        self._calls += 1
+        if self._calls == self._fail_on:
+            msg = "injected failure after an earlier delete succeeded"
+            raise RuntimeError(msg)
+        if parameters is None:
+            return self._conn.execute(query)
+        return self._conn.execute(query, parameters)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 class TestPositionWrites:
     def test_reading_back_a_position_returns_every_stored_field(
         self, state_store: StateStore
@@ -297,3 +320,65 @@ class TestVerdictReasons:
         self, state_store: StateStore
     ) -> None:
         assert state_store.get_verdict_reasons_json(RUN_ID, SYMBOL) is None
+
+
+class TestOrphanReconciliation:
+    def test_a_position_whose_verdict_is_gone_is_deleted_with_its_marks_and_notes(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+        state_store.upsert_verdict_position_note(
+            VerdictPositionNote(
+                run_id=RUN_ID, symbol=SYMBOL, note_date=ENTRY_DATE, note="様子見"
+            )
+        )
+        # Re-ingesting a corrected result replaces the run's verdicts wholesale.
+        _seed_verdict(state_store, recommendation="skip")
+
+        deleted = state_store.delete_orphaned_verdict_positions()
+
+        assert deleted == ((RUN_ID, SYMBOL),)
+        assert state_store.get_verdict_positions() == ()
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
+        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
+
+    def test_a_position_backed_by_a_standing_proceed_verdict_is_kept(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+        position = _position()
+        state_store.upsert_verdict_position(position, [_mark(ENTRY_DATE, 100.0)])
+
+        assert state_store.delete_orphaned_verdict_positions() == ()
+        assert state_store.get_verdict_positions() == (position,)
+
+    def test_an_empty_ledger_deletes_nothing(self, state_store: StateStore) -> None:
+        assert state_store.delete_orphaned_verdict_positions() == ()
+
+    def test_a_partial_delete_rolls_back_after_an_earlier_row_already_went(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No verdicts at all, so both positions are orphans. The second one's
+        # first DELETE fails once the first has already been removed inside
+        # the transaction: a half-reconciled ledger is worse than none.
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+        state_store.upsert_verdict_position(
+            _position(symbol="BBB"),
+            [replace(_mark(ENTRY_DATE, 100.0), symbol="BBB")],
+        )
+        real_connect = state_store.database.connect
+        monkeypatch.setattr(
+            state_store.database,
+            "connect",
+            lambda: _FlakyConnection(real_connect(), fail_on=6),
+        )
+
+        with pytest.raises(RuntimeError, match="injected failure"):
+            state_store.delete_orphaned_verdict_positions()
+        monkeypatch.undo()
+
+        assert {
+            position.symbol for position in state_store.get_verdict_positions()
+        } == {SYMBOL, "BBB"}
+        assert len(state_store.get_verdict_position_marks(RUN_ID, SYMBOL)) == 1

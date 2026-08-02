@@ -792,12 +792,20 @@ class StateStore:
     def get_untracked_proceed_verdicts(
         self, as_of: date
     ) -> tuple[TrackableVerdict, ...]:
-        """Return tradeable `proceed` verdicts dated `<= as_of` with no position.
+        """Return `proceed` verdicts dated `<= as_of` that have no position yet.
 
         Args:
             as_of: Inclusive point-in-time cutoff on the verdict's run date.
         """
         return tracking_records.get_untracked_proceed_verdicts(self._database, as_of)
+
+    def delete_orphaned_verdict_positions(self) -> tuple[tuple[UUID, str], ...]:
+        """Drop tracked positions whose `proceed` verdict no longer exists.
+
+        Returns:
+            The deleted positions' `(run_id, symbol)` identities.
+        """
+        return tracking_records.delete_orphaned_verdict_positions(self._database)
 
     def get_verdict_positions(
         self, status: str | None = None

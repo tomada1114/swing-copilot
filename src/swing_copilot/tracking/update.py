@@ -14,8 +14,11 @@ mechanically, where would the position stand today, and what would close it.
 
 Everything here takes an explicit `as_of` and reads only stored bars: no
 clock, no network. Bars are whatever `copilot-daily`'s price step already
-persisted; a symbol without them is reported as data quality and retried on
-the next update rather than guessed at.
+persisted, and a symbol without them is reported as data quality rather than
+guessed at: a position that has no bars at all is retried on every update
+until one arrives, while a single unusable session inside an otherwise good
+history is skipped and noted (design 3.24.3-2; replaying already-marked days
+against corrected bars is the out-of-scope `--rebuild`, 3.24.3-4).
 """
 
 from __future__ import annotations
@@ -26,9 +29,11 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
 from swing_copilot.backtest.exits import (
     ATR_PERIOD,
     atr14_as_of,
+    atr14_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
@@ -42,6 +47,7 @@ from swing_copilot.storage.tracking_records import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import date
     from uuid import UUID
 
@@ -124,9 +130,21 @@ def update_tracking(
         Counts plus one note per symbol that could not be processed.
     """
     notes: list[str] = []
+    for run_id, symbol in state_store.delete_orphaned_verdict_positions():
+        notes.append(
+            f"{symbol} ({run_id}): proceed verdict が取り消されたため"
+            "追跡ポジションを削除した"
+        )
+
+    candidates = state_store.get_untracked_proceed_verdicts(as_of)
+    open_positions = state_store.get_verdict_positions(OPEN)
+    if not candidates and not open_positions:
+        return TrackingUpdateResult(0, 0, 0, tuple(notes))
+    bars = _read_bars(market_store, candidates, open_positions, as_of)
+
     pending: list[_Work] = []
-    for candidate in state_store.get_untracked_proceed_verdicts(as_of):
-        work = _seed_position(market_store, backtest_config, candidate, as_of, notes)
+    for candidate in candidates:
+        work = _seed_position(bars, backtest_config, candidate, notes)
         if work is not None:
             pending.append(work)
     opened_count = len(pending)
@@ -134,10 +152,10 @@ def update_tracking(
     pending.extend(
         _Work(
             position=position,
-            bars=_read_bars(market_store, position.symbol, position.entry_date, as_of),
+            bars=_position_bars(bars, position.symbol, position.entry_date),
             seed_marks=(),
         )
-        for position in state_store.get_verdict_positions(OPEN)
+        for position in open_positions
     )
 
     advanced_count = closed_count = 0
@@ -158,19 +176,46 @@ def update_tracking(
 
 
 def _read_bars(
-    market_store: MarketStore, symbol: str, entry_date: date, as_of: date
+    market_store: MarketStore,
+    candidates: Sequence[TrackableVerdict],
+    positions: Sequence[VerdictPosition],
+    as_of: date,
 ) -> pd.DataFrame:
-    """Read one symbol's bars once, with enough lookback for ATR(14)."""
+    """Read every tracked symbol's bars in a single query.
+
+    One read rather than one per position: `MarketStore.read_bars` opens a
+    connection and rebuilds the `bars` view on each call, a cost a ledger
+    holding a hundred positions would otherwise pay a hundred times over
+    inside the daily batch's time budget. Each position's own window is cut
+    back out of the result by `_position_bars`.
+    """
+    starts = [candidate.as_of for candidate in candidates]
+    starts.extend(position.entry_date for position in positions)
+    symbols = {candidate.symbol for candidate in candidates}
+    symbols.update(position.symbol for position in positions)
     return market_store.read_bars(
-        [symbol], entry_date - timedelta(days=_LOOKBACK_DAYS), as_of, as_of
+        sorted(symbols), min(starts) - timedelta(days=_LOOKBACK_DAYS), as_of, as_of
     )
 
 
+def _position_bars(bars: pd.DataFrame, symbol: str, entry_date: date) -> pd.DataFrame:
+    """Cut one position's own window out of the batched frame.
+
+    The start bound stays per position rather than shared. Wilder ATR is
+    smoothed over whatever history it is handed, so letting a late entrant see
+    an earlier position's warm-up would move the very stop the ledger has to
+    agree with the backtest on.
+    """
+    return bars[
+        (bars["symbol"] == symbol)
+        & (bars["date"] >= entry_date - timedelta(days=_LOOKBACK_DAYS))
+    ]
+
+
 def _seed_position(
-    market_store: MarketStore,
+    all_bars: pd.DataFrame,
     config: BacktestConfig,
     candidate: TrackableVerdict,
-    as_of: date,
     notes: list[str],
 ) -> _Work | None:
     """Build the entry state for a `proceed` verdict not yet tracked.
@@ -180,7 +225,7 @@ def _seed_position(
     leaves it unset -- the run day's stored close stands in. With neither, the
     verdict simply stays untracked and the next update tries again.
     """
-    bars = _read_bars(market_store, candidate.symbol, candidate.as_of, as_of)
+    bars = _position_bars(all_bars, candidate.symbol, candidate.as_of)
     entry_price = candidate.entry_price
     if entry_price is None:
         entry_price = _close_on(bars, candidate.symbol, candidate.as_of)
@@ -240,8 +285,18 @@ def _advance(
     marks = list(work.seed_marks)
     resume_after = position.last_marked_date or position.entry_date
     day_count = 0
+    if work.bars.empty:
+        notes.append(
+            f"{position.symbol} {position.entry_date.isoformat()}: "
+            "保存済みバーが1本も無いため前進も手仕舞い判定もできない"
+            "（上場廃止・ユニバース離脱の可能性。手動クローズを検討する）"
+        )
+    sessions = _sessions(work.bars, position.symbol, resume_after, as_of)
+    # One smoothing pass for the whole replay, and none at all on the common
+    # rerun where `last_marked_date` already sits on `as_of`.
+    atr_by_date = atr14_by_date(work.bars, position.symbol, as_of) if sessions else {}
 
-    for record in _sessions(work.bars, position.symbol, resume_after, as_of):
+    for record in sessions:
         session_date: date = record["date"]
         ohlc = _ohlc(record)
         if ohlc is None:
@@ -277,7 +332,7 @@ def _advance(
             break
 
         stop_price = position.stop_price
-        atr = atr14_as_of(work.bars, position.symbol, session_date)
+        atr = atr_by_date.get(session_date)
         if atr is not None:
             stop_price = next_trailing_stop(
                 current_stop=stop_price,
@@ -358,7 +413,7 @@ def _close_on(bars: pd.DataFrame, symbol: str, session_date: date) -> float | No
     if selected.empty:
         return None
     close = float(selected["close"].to_numpy()[-1])
-    return None if math.isnan(close) else close
+    return close if math.isfinite(close) else None
 
 
 # PLR0913: two stores plus the position's identity and the closing session.
@@ -387,9 +442,14 @@ def close_manually(  # noqa: PLR0913
         The closed position as persisted.
 
     Raises:
-        TrackingError: The position does not exist, is already closed, or the
-            requested close predates its entry.
+        TrackingError: The position does not exist, is already closed, the
+            requested close predates its entry or its last replayed session,
+            or the accompanying memo is unusable. The memo is checked before
+            anything is written, so a rejected one never leaves the position
+            closed without the reasoning that was meant to explain it.
     """
+    if note is not None:
+        _check_note(note)
     position = _require_position(state_store, run_id, symbol)
     if position.status != OPEN:
         msg = f"{symbol} ({run_id}) は既に {position.exit_date} に手仕舞い済みである"
@@ -398,6 +458,17 @@ def close_manually(  # noqa: PLR0913
         msg = (
             f"手仕舞い日 {as_of.isoformat()} は "
             f"エントリー日 {position.entry_date.isoformat()} より前にできない"
+        )
+        raise TrackingError(msg)
+    # Back-dating past an already replayed session would leave the position
+    # closed on one date while its marks, `days_held`, and resume position all
+    # describe a later one -- a row that contradicts itself in `list`/`show`.
+    last_marked_date = position.last_marked_date or position.entry_date
+    if as_of < last_marked_date:
+        msg = (
+            f"手仕舞い日 {as_of.isoformat()} は "
+            f"最終マーク日 {last_marked_date.isoformat()} より前にできない"
+            "（前進済みの日次マークと矛盾するため）"
         )
         raise TrackingError(msg)
 
@@ -421,7 +492,7 @@ def close_manually(  # noqa: PLR0913
         exit_price=exit_price,
         exit_reason=MANUAL,
         realized_return_pct=realized_return_pct,
-        last_marked_date=max(position.last_marked_date or position.entry_date, as_of),
+        last_marked_date=as_of,
     )
     state_store.upsert_verdict_position(
         closed,
@@ -453,6 +524,13 @@ def record_note(
 ) -> None:
     """Record one dated judgement memo against a tracked position.
 
+    A note is skill-authored text that `copilot-track show` prints verbatim,
+    which makes this an output boundary like every other skill-to-user text
+    channel: it goes through the same central CON-03 guard
+    (`analysis/safety.check_display_texts`) rather than trusting the skill's
+    instructions, and a violating memo is rejected outright rather than
+    stored and rendered.
+
     Args:
         state_store: Tracking-ledger source and target.
         run_id: The run whose verdict opened the position.
@@ -461,17 +539,38 @@ def record_note(
         note: The memo text.
 
     Raises:
-        TrackingError: The position does not exist, or the memo is blank.
+        TrackingError: The memo is blank, carries prohibited imperative
+            trading language (CON-03), or names a position that is not tracked.
     """
-    if not note.strip():
-        msg = "ノート本文が空である"
-        raise TrackingError(msg)
+    _check_note(note)
     _require_position(state_store, run_id, symbol)
     state_store.upsert_verdict_position_note(
         VerdictPositionNote(
             run_id=run_id, symbol=symbol, note_date=note_date, note=note
         )
     )
+
+
+def _check_note(note: str) -> None:
+    """Reject a memo that must never be stored, before anything is written.
+
+    Shared by `record_note` and `close_manually` so the CON-03 boundary
+    documented on the former cannot be bypassed through `close --note`.
+
+    Args:
+        note: The memo text.
+
+    Raises:
+        TrackingError: The memo is blank or violates CON-03.
+    """
+    if not note.strip():
+        msg = "ノート本文が空である"
+        raise TrackingError(msg)
+    try:
+        check_display_texts([note])
+    except ForbiddenLanguageError as exc:
+        msg = f"ノート本文が出力ポリシー(CON-03)に違反している: {exc}"
+        raise TrackingError(msg) from exc
 
 
 def _require_position(

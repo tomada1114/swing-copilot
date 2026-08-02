@@ -18,6 +18,7 @@ from swing_copilot.backtest.exits import (
     ATR_PERIOD,
     ExitDecision,
     atr14_as_of,
+    atr14_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
@@ -313,3 +314,62 @@ def test_atr14_as_of_ignores_bars_after_cutoff() -> None:
 
     assert before == pytest.approx(2.0)
     assert at_cutoff == pytest.approx(2.0 + 8.0 / 14.0)
+
+
+# --- atr14_by_date -----------------------------------------------------------
+
+
+def test_atr14_by_date_matches_atr14_as_of_for_every_session() -> None:
+    # The one-pass map is the contract: a caller replaying a position day by
+    # day must get exactly what a per-day `atr14_as_of` call would return, or
+    # the ledger's trailing stop drifts away from the engine's.
+    days = _days(21)
+    rows = _flat_rows(days[:20])
+    rows.append(
+        {
+            "symbol": "AAA",
+            "date": days[20],
+            "open": 100.0,
+            "high": 110.0,
+            "low": 100.0,
+            "close": 105.0,
+        }
+    )
+    frame = _frame(rows)
+
+    by_date = atr14_by_date(frame, "AAA", days[-1])
+
+    assert by_date == {
+        day: pytest.approx(atr14_as_of(frame, "AAA", day))
+        for day in days
+        if atr14_as_of(frame, "AAA", day) is not None
+    }
+
+
+def test_atr14_by_date_omits_sessions_without_enough_history() -> None:
+    days = _days(ATR_PERIOD + 1)
+
+    by_date = atr14_by_date(_frame(_flat_rows(days)), "AAA", days[-1])
+
+    # `min_periods=ATR_PERIOD`: the first value lands on the 14th session.
+    assert sorted(by_date) == days[ATR_PERIOD - 1 :]
+
+
+def test_atr14_by_date_ignores_bars_after_cutoff() -> None:
+    days = _days(21)
+
+    by_date = atr14_by_date(_frame(_flat_rows(days)), "AAA", days[15])
+
+    assert max(by_date) == days[15]
+
+
+def test_atr14_by_date_insufficient_history_returns_empty() -> None:
+    days = _days(ATR_PERIOD - 1)
+
+    assert atr14_by_date(_frame(_flat_rows(days)), "AAA", days[-1]) == {}
+
+
+def test_atr14_by_date_unknown_symbol_returns_empty() -> None:
+    days = _days(20)
+
+    assert atr14_by_date(_frame(_flat_rows(days)), "ZZZ", days[-1]) == {}

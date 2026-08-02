@@ -213,8 +213,18 @@ copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 `risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
 NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`で代替する。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
-（fail-soft）。日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
+（fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
+前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
+手動`close`以外に台帳から消える経路が無いことを利用者に知らせるためである。
+日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
 省略したときだけ、CLI境界で`SystemClock().today()`を使う。
+
+`update`は建玉の前に、**verdictを失った建玉を削除する**。`copilot-ingest-analysis`の
+再取り込みはrunのverdictを丸ごと置き換えるため（`replace_run_verdicts`）、
+`proceed`から`skip`へ訂正された銘柄の仮想建玉が孤児として残り、取り消された判断の
+損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、対応する`proceed`が
+消えたポジションはマーク・ノートごと1トランザクションで削除し、削除した銘柄を
+noteに出す。
 
 `list`は`⚠`列で`no_trade`を示し、フラグが立つ行は`no_trade`と表示する
 （立たない行は空欄）。`show`はさらに一文で「銘柄単体は`proceed`だが、run全体は
@@ -234,7 +244,16 @@ NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`�
 
 スキルからの書き込みは`close`（`exit_reason='manual'`で確定）と`note`
 （日付キーのcorrection upsert）の2つだけである。存在しない／既にクローズ済みの
-ポジション、エントリー日より前のクローズ、空メモはいずれも非0終了で拒否する。
+ポジション、エントリー日より前のクローズ、**最終マーク日より前のクローズ**
+（前進済みの日次マーク・`days_held`・再開位置と矛盾するため）、空メモは
+いずれも非0終了で拒否する。
+
+メモ本文（`note --text`と`close --note`）は`copilot-track show`がそのまま表示する
+スキル生成テキストなので、他のスキル出力と同じく`analysis/safety.py`の中央
+CON-03ガードを通す。売買を命じる表現を含むメモは保存されず非0終了になり、
+`close --note`ではポジションを閉じる前に検査するため、拒否されたメモが
+「理由の無いクローズ」を残すこともない。スキルへの指示だけでは不十分、という
+本プロジェクトの原則をこの経路でも守るためである。
 
 retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤであり、
 paperの`positions`（人間が実際に持つと決めたFR-11の検証ゲート）とも混ぜない。

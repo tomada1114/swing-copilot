@@ -119,3 +119,34 @@ def atr14_as_of(bars: pd.DataFrame, symbol: str, as_of: date) -> float | None:
         -1
     ]
     return None if math.isnan(atr) else float(atr)
+
+
+def atr14_by_date(bars: pd.DataFrame, symbol: str, as_of: date) -> dict[date, float]:
+    """Return every session's Wilder ATR(14) up to `as_of`, in one smoothing pass.
+
+    `atr14_as_of` re-smooths the whole history to answer for a single day, so a
+    caller that walks a position forward day by day pays a quadratic cost for
+    values one pass already produces. Wilder smoothing is causal
+    (`adjust=False`), so the value this returns for day *d* is exactly what
+    `atr14_as_of(bars, symbol, d)` returns; it lives here, beside that
+    function, so the two cannot drift apart.
+
+    Args:
+        bars: Tidy OHLCV bars (`symbol, date, open, high, low, close, ...`).
+        symbol: Ticker to select.
+        as_of: Point-in-time cutoff (inclusive); later bars are never read.
+
+    Returns:
+        Session date to ATR. Days whose smoothed value is not yet a number
+        (fewer than `ATR_PERIOD` observations) are absent, so a plain `.get()`
+        reproduces `atr14_as_of`'s `None`.
+    """
+    series = symbol_bars(bars, symbol, as_of)
+    if series is None or len(series) < ATR_PERIOD:
+        return {}
+    atr = wilder_atr(series["high"], series["low"], series["close"], ATR_PERIOD)
+    return {
+        session_date: float(value)
+        for session_date, value in zip(series["date"], atr, strict=True)
+        if not math.isnan(value)
+    }

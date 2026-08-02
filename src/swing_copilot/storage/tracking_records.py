@@ -11,6 +11,10 @@ Write discipline, following `paper_records.upsert_position_excursions`:
 * Marks and notes are correction upserts on their natural key, never
   `ON CONFLICT DO NOTHING`: re-running a day against corrected bars must
   update the stored figures rather than silently keep the stale ones.
+* The ledger is derived state, so a correction that removes a `proceed`
+  verdict must remove what that verdict opened
+  (`delete_orphaned_verdict_positions`); a position outliving its own verdict
+  would keep publishing P&L as evidence about a judgement nobody made.
 """
 
 from __future__ import annotations
@@ -154,7 +158,12 @@ class TrackableVerdict:
 def get_untracked_proceed_verdicts(
     database: Database, as_of: date
 ) -> tuple[TrackableVerdict, ...]:
-    """Return tradeable `proceed` verdicts dated `<= as_of` with no position yet.
+    """Return `proceed` verdicts dated `<= as_of` that have no position yet.
+
+    The only filter is the verdict's own recommendation (design 3.24.3): the
+    ledger measures the qualitative layer's judgement, so what the risk layer
+    later did with a candidate -- including rejecting it on a sector cap --
+    does not change whether that judgement is worth tracking.
 
     `no_trade` verdicts are included, not excluded: a run's overall regime
     (e.g. `CASH_PRIORITY`) telling the human not to trade that day does not
@@ -199,6 +208,70 @@ def get_untracked_proceed_verdicts(
         )
         for row in rows
     )
+
+
+_ORPHANED_POSITIONS = """
+    SELECT vp.run_id, vp.symbol
+    FROM verdict_positions vp
+    LEFT JOIN verdicts v
+      ON v.run_id = vp.run_id
+     AND v.symbol = vp.symbol
+     AND v.recommendation = 'proceed'
+    WHERE v.run_id IS NULL
+    ORDER BY vp.entry_date, vp.run_id, vp.symbol
+"""
+
+
+def delete_orphaned_verdict_positions(
+    database: Database,
+) -> tuple[tuple[UUID, str], ...]:
+    """Drop every tracked position whose `proceed` verdict no longer exists.
+
+    Re-ingesting a corrected `analysis_result.json` replaces a run's verdicts
+    wholesale (`verdict_records.replace_run_verdicts`), so a symbol demoted
+    from `proceed` to `skip` -- or dropped from the result entirely -- leaves
+    behind a position that nothing else would ever close. Left alone it keeps
+    being advanced and keeps being listed, attributing a P&L to a judgement
+    the analysis has since retracted, with `show` unable to print a single
+    reason for it.
+
+    The position, its marks, and its notes go in one transaction: a position
+    whose marks survived it would reappear in `list`'s "last close" column
+    without a row to explain itself.
+
+    Args:
+        database: Shared DuckDB connection owner.
+
+    Returns:
+        The deleted positions' identities, ordered by `(entry_date, run_id,
+        symbol)`, so the caller can report what it removed.
+    """
+    conn = database.connect()
+    try:
+        orphans = tuple(
+            (UUID(str(row[0])), str(row[1]))
+            for row in conn.execute(_ORPHANED_POSITIONS).fetchall()
+        )
+        if not orphans:
+            return ()
+        conn.execute("BEGIN TRANSACTION")
+        for run_id, symbol in orphans:
+            for table in (
+                "verdict_position_notes",
+                "verdict_position_marks",
+                "verdict_positions",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
+                    [str(run_id), symbol],
+                )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return orphans
 
 
 def get_verdict_positions(

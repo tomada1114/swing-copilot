@@ -1,11 +1,13 @@
 """Deterministic multi-symbol portfolio simulator (FR-10).
 
 Reuses `risk.position_sizing.calc_position_size` for sizing and
-`screening.indicators.wilder_atr` for the trailing stop, per
-`docs/04_detailed_design.md` 2.1 #5 ("reuse the same logic, don't
-reimplement it for backtesting"). Candidate generation itself is injected
-(`candidates_fn`) rather than hardcoded to `ScreeningPipeline`, so the fill/
-stop/hold mechanics here can be unit-tested in isolation while
+`backtest.exits` (itself built on `screening.indicators.wilder_atr`) for the
+trailing stop and exit trigger, per `docs/04_detailed_design.md` 2.1 #5
+("reuse the same logic, don't reimplement it for backtesting"). Those exit
+rules live in a separate pure module so other consumers apply identical
+semantics. Candidate generation itself is injected (`candidates_fn`) rather
+than hardcoded to `ScreeningPipeline`, so the fill/stop/hold mechanics here
+can be unit-tested in isolation while
 `backtest/runner.py` wires in the real production `ScreeningPipeline` for
 actual use — both paths share this one engine.
 
@@ -19,13 +21,12 @@ Per-day order of operations (never looks past the current day's own bars):
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
+from swing_copilot.backtest.exits import atr14_as_of, evaluate_exit, next_trailing_stop
 from swing_copilot.risk.position_sizing import calc_position_size
-from swing_copilot.screening.indicators import symbol_bars, wilder_atr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,7 +44,6 @@ SURVIVORSHIP_BIAS_NOTE = (
     "Removed or delisted symbols may be absent, overstating historical "
     "performance (survivorship bias)."
 )
-_ATR_PERIOD = 14
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,16 +143,6 @@ def _latest_bar(
         "low": float(row["low"]),
         "close": float(row["close"]),
     }
-
-
-def _atr14_as_of(bars: pd.DataFrame, symbol: str, as_of: date) -> float | None:
-    series = symbol_bars(bars, symbol, as_of)
-    if series is None or len(series) < _ATR_PERIOD:
-        return None
-    atr = wilder_atr(series["high"], series["low"], series["close"], _ATR_PERIOD).iloc[
-        -1
-    ]
-    return None if math.isnan(atr) else float(atr)
 
 
 class BacktestEngine:
@@ -324,22 +314,23 @@ class BacktestEngine:
             )
 
     def _process_exits(self, day: date, bars: pd.DataFrame, state: _SimState) -> None:
-        for symbol, position in list(state.open_positions.items()):
-            bar = _bar(bars, symbol, day)
+        for position in list(state.open_positions.values()):
+            bar = _bar(bars, position.symbol, day)
             if bar is None:
                 continue
 
-            exit_price: float | None = None
-            exit_reason = ""
-            if bar["open"] <= position.stop_price:
-                exit_price, exit_reason = bar["open"], "stop"
-            elif bar["low"] <= position.stop_price:
-                exit_price, exit_reason = position.stop_price, "stop"
-            elif position.days_held + 1 >= self._backtest_config.max_hold_days:
-                exit_price, exit_reason = bar["close"], "max_hold"
-
-            if exit_price is not None:
-                self._settle_exit(state, position, day, exit_price, exit_reason)
+            decision = evaluate_exit(
+                open_price=bar["open"],
+                low=bar["low"],
+                close=bar["close"],
+                stop_price=position.stop_price,
+                days_held=position.days_held,
+                max_hold_days=self._backtest_config.max_hold_days,
+            )
+            if decision is not None:
+                self._settle_exit(
+                    state, position, day, decision.exit_price, decision.reason
+                )
             else:
                 position.days_held += 1
 
@@ -376,13 +367,15 @@ class BacktestEngine:
     ) -> None:
         for position in state.open_positions.values():
             bar = _bar(bars, position.symbol, day)
-            atr14 = _atr14_as_of(bars, position.symbol, day)
+            atr14 = atr14_as_of(bars, position.symbol, day)
             if bar is None or atr14 is None:
                 continue
-            candidate_stop = (
-                bar["close"] - self._backtest_config.exit_atr_multiple * atr14
+            position.stop_price = next_trailing_stop(
+                current_stop=position.stop_price,
+                close=bar["close"],
+                atr=atr14,
+                exit_atr_multiple=self._backtest_config.exit_atr_multiple,
             )
-            position.stop_price = max(position.stop_price, candidate_stop)
 
     def _mark_to_market(self, state: _SimState, bars: pd.DataFrame, day: date) -> float:
         total = 0.0

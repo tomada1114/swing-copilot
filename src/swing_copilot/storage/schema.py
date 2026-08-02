@@ -255,6 +255,51 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
+    # Verdict tracking: the virtual position a `proceed` verdict implies, the
+    # daily marks that follow it, and the human's notes about it. Deliberately
+    # separate from `positions` (the FR-11/CON-04 paper-trading gate, which
+    # records what a *human* decided to hold) and from `verdict_outcomes` (a
+    # two-point 5/20-session classification): this layer replays the backtest's
+    # own exit rules forward, one trading day at a time.
+    """
+    CREATE TABLE IF NOT EXISTS verdict_positions (
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        entry_date          DATE NOT NULL,
+        entry_price         DOUBLE NOT NULL,
+        stop_price          DOUBLE,
+        days_held           INTEGER NOT NULL,
+        status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
+        exit_date           DATE,
+        exit_price          DOUBLE,
+        exit_reason         VARCHAR
+            CHECK (exit_reason IN ('stop', 'max_hold', 'manual')),
+        realized_return_pct DOUBLE,
+        last_marked_date    DATE,
+        PRIMARY KEY (run_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verdict_position_marks (
+        run_id                UUID NOT NULL,
+        symbol                VARCHAR NOT NULL,
+        as_of_date            DATE NOT NULL,
+        close                 DOUBLE NOT NULL,
+        stop_price            DOUBLE,
+        unrealized_return_pct DOUBLE NOT NULL,
+        PRIMARY KEY (run_id, symbol, as_of_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verdict_position_notes (
+        run_id     UUID NOT NULL,
+        symbol     VARCHAR NOT NULL,
+        note_date  DATE NOT NULL,
+        note       VARCHAR NOT NULL,
+        PRIMARY KEY (run_id, symbol, note_date)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS regime_snapshots (
         run_id          UUID PRIMARY KEY,

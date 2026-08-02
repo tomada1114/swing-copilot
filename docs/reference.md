@@ -187,6 +187,48 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 触らない」憲章を持つのに対し、retroはDBを読み書きするためである。
 `copilot-ingest-analysis`がDBに触れない不変条件はこれで維持される。
 
+## `copilot-track`とverdict追跡台帳
+
+`tracking/cli.py`（`copilot-track`）は、`proceed`と判定された銘柄を「そのrunの
+終値で仮想的に買った」とみなして日次追跡する台帳のCLIである。手仕舞いルールは
+`backtest/exits.py`の純関数（ATRトレーリングストップ + 最大保有日数）を
+**バックテストと共有**しており、台帳が示す「いくらになったら手仕舞いか」は
+シミュレータの挙動とずれない。ネットワークには接続せず、設定・コード・
+決定論的なスクリーニング／サイジング値を書き換える経路も持たない。
+
+```bash
+copilot-track update --as-of 2027-03-21          # 建玉と日次前進
+copilot-track list --status open                 # 含み損益・stop・残営業日
+copilot-track show --symbol AAPL                 # verdict理由・日次マーク・ノート
+copilot-track close --run-id <UUID> --symbol AAPL --note "決算をまたがない"
+copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
+```
+
+`update`は`verdicts`の`recommendation='proceed' AND no_trade=false`のうち未追跡の
+ものを建玉し、保有中を`--as-of`まで1取引日ずつ前進させる。エントリー価格は
+`risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
+NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`で代替する。
+どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
+（fail-soft）。`--as-of`省略時のみCLI境界で`SystemClock().today()`を使う。
+
+日次前進はバックテストと同じ順序を守る: その日の手仕舞い判定は**前日までの**stopで
+行い、生き残った日の終値で初めてstopをラチェット更新する（翌日から有効）。
+ギャップダウンは寄り付き約定、日中安値タッチはstop価格約定、同日にstopと
+最大保有日数の両方が成立したときは常にstopが優先される。`last_marked_date`が
+再開位置なので、同じ`--as-of`での再実行は何も変えない。
+
+`update`は`copilot-daily`のfail-softステップ`track_update`としても
+`retro_evaluate`の直後に毎日走る。したがって手動実行は取りこぼしの補完と
+即時反映のためのものになる。
+
+スキルからの書き込みは`close`（`exit_reason='manual'`で確定）と`note`
+（日付キーのcorrection upsert）の2つだけである。存在しない／既にクローズ済みの
+ポジション、エントリー日より前のクローズ、空メモはいずれも非0終了で拒否する。
+
+retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤであり、
+paperの`positions`（人間が実際に持つと決めたFR-11の検証ゲート）とも混ぜない。
+棲み分けの理由は`docs/04_detailed_design.md` 3.24.1にある。
+
 > **P7（スキル移行）で廃止**: Anthropic API直呼びのLLM統合（`llm/`パッケージ、
 > `llm_calls`テーブル、月次予算ゲート・実行単位の呼び出し上限、応答キャッシュと
 > near-stale警告）はすべて削除した。表示専用だった`catalyst_quality`と

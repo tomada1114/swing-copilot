@@ -1493,6 +1493,61 @@ statusライフサイクルは`proposed` → `applied`（PR番号を記録）/ `
 | 構造的観察の自問 | 手順の規律としてのみ記述（§6手順4） | `retro-result-v1`の必須フィールド`structural_review_note` | 規律を機械が検出できる形にした（3.23.5） |
 | 重大外し率のウォッチ水準 | 15%（要検証、config化を示唆） | コード定数`PROCEED_SEVERE_MISS_WATCH_RATE` | `settings.retro`はD6に従い意図的に小さく保つ。この水準を動かす提案自体が本機構の対象なので、変更はL1提案としてコード修正＋PRを経る |
 
+### 3.24 `tracking/` と `copilot-track`（verdict追跡台帳）
+
+`proceed`と判定された銘柄を「そのrunの終値で仮想的に買った」とみなし、**バックテストと同一の手仕舞いルール**で日次追跡する台帳。利用者が毎朝「含み損益 / いくらになったら手仕舞いか / 残り何営業日か / 確定損益」を1画面で見て、当時の判断を振り返るための戦術ループである。定性レイヤの改善材料を集めることが目的であり、発注も推奨もしない。
+
+```text
+src/swing_copilot/tracking/
+├── cli.py     # copilot-track: update / list / show / close / note
+└── update.py  # 建玉・日次前進・手仕舞い判定・手動クローズ・ノート
+```
+
+#### 3.24.1 既存3レイヤとの棲み分け
+
+| レイヤ | 問い | 主キー |
+|---|---|---|
+| `verdict_outcomes`（3.23、retro） | その判断は当たったか（5/20営業日の2点分類） | `(run_id, symbol, horizon_days)` |
+| `positions`（3.20、paper。FR-11/CON-04） | **人間が**実際に何を持つと決めたか | `position_id` |
+| `verdict_positions`（本節） | 判断に機械的に従っていたら**いま**どうなっていて、何がそれを閉じるか | `(run_id, symbol)` |
+
+3つは意図的に別テーブルである。retroの当否は満期日で確定する固定2点の観測なので、日々変わるトレーリングストップと保有日数を載せる場所がない。`positions`は人間の意思決定ゲートであり、仮想建玉を混ぜると「紙トレで検証した実績」と「判断に従っていたら」の区別が失われる（FR-11の検証ゲートが壊れる）。逆に本レイヤは人間の決定を一切要求せず、`proceed`が出た時点で自動的に開く。
+
+#### 3.24.2 データモデル（新テーブル3つ）
+
+| テーブル | 主キー | 役割 |
+|---|---|---|
+| `verdict_positions` | `(run_id, symbol)` | 仮想建玉1件。`entry_date`（verdictのas_of）/ `entry_price` / `stop_price`（現在のトレーリングストップ、NULL可）/ `days_held` / `status` CHECK `open`\|`closed` / `exit_date` / `exit_price` / `exit_reason` CHECK `stop`\|`max_hold`\|`manual` / `realized_return_pct` / `last_marked_date`（再開位置） |
+| `verdict_position_marks` | `(run_id, symbol, as_of_date)` | 日次スナップショット。`close` / `stop_price` / `unrealized_return_pct` |
+| `verdict_position_notes` | `(run_id, symbol, note_date)` | 判断メモ |
+
+書き込みは`storage/tracking_records.py`のプレーン関数＋`StateStore`の1行デリゲート。1ポジションの前進（position行＋その日に生じた全マーク）は**1トランザクション**で、途中で失敗すれば全ロールバックする——`last_marked_date`だけ進んでマークが無い状態を作らないためである。マーク・ノートはいずれも自然キーの**correction upsert**（`ON CONFLICT DO UPDATE`）で、株価訂正後の再取り込みが黙って無視されることはない。
+
+#### 3.24.3 更新セマンティクス（`tracking/update.py`）
+
+`update_tracking(state_store, market_store, backtest_config, *, as_of)`。すべて明示`as_of`で、`date.today()`は呼ばず、ネットワークにも触れない。バーは日次runの`1_prices`が保存済みのものだけを読む。
+
+1. **建玉**: `verdicts`のうち`recommendation='proceed' AND no_trade=false`かつ`as_of <= 指定as_of`で、まだ`verdict_positions`に無いものを開く。`no_trade`を除くのは、そのrun自体が「今日は建てるな」と言っている判断だからである。
+   - `entry_price` := `risk_assessments.entry_price`（= run日終値）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
+   - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − exit_atr_multiple × ATR14(entry_date時点)`。ATR14も算出不能（14セッション未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
+   - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
+2. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
+   `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
+3. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
+4. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
+
+手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間14はエンジンと同じくハードコード（`settings.backtest.exit_atr_period`は未配線のまま。3.19の既知事項）。
+
+手動操作は2つだけである。`close_manually()`は`exit_reason='manual'`・`exit_price`=`as_of`の終値（バーが無ければ最終マークの終値）でクローズし、`record_note()`は日付付きのメモを残す。存在しない／既にクローズ済みのポジション、エントリー日より前のクローズ、空メモはいずれも`TrackingError`で拒否する。
+
+#### 3.24.4 日次fail-softステップ`track_update`
+
+`retro_evaluate`の直後に同じ時間予算ゲートで走る（`pipeline/daily_runner.py::_run_retro_soft_steps`）。オフライン・冪等・保存済みバーのみという性質が`retro_collect`/`retro_evaluate`と同じだからで、失敗は`run_steps`に`failed`として記録されrunを`DEGRADED`にするだけで、レポート生成は止めない。進捗表示の`_VISIBLE_PIPELINE_STEPS`には**入れない**（利用者に見せる8ステップの外側にある背景集計である）。
+
+当日のrun自身のverdictはこの時点ではまだ`analysis_result.json`が書かれておらず取り込まれていないため、建玉されるのは翌日のrunである。`retro_collect`が既に持つのと同じ1日の遅れで、エントリー価格はどちらにせよそのrun日の終値なので影響はない。
+
+CLIの操作面は`docs/reference.md`が正本。エントリポイントは`copilot-track = "swing_copilot.tracking.cli:main"`の1行追加。
+
 ---
 
 ## 4. データスキーマ定義
@@ -1697,7 +1752,44 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
     session         VARCHAR NOT NULL,
     fetched_at      TIMESTAMPTZ NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS verdict_positions (
+    run_id              UUID NOT NULL,
+    symbol              VARCHAR NOT NULL,
+    strategy_key        VARCHAR NOT NULL,
+    entry_date          DATE NOT NULL,
+    entry_price         DOUBLE NOT NULL,
+    stop_price          DOUBLE,
+    days_held           INTEGER NOT NULL,
+    status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
+    exit_date           DATE,
+    exit_price          DOUBLE,
+    exit_reason         VARCHAR CHECK (exit_reason IN ('stop', 'max_hold', 'manual')),
+    realized_return_pct DOUBLE,
+    last_marked_date    DATE,
+    PRIMARY KEY (run_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS verdict_position_marks (
+    run_id                UUID NOT NULL,
+    symbol                VARCHAR NOT NULL,
+    as_of_date            DATE NOT NULL,
+    close                 DOUBLE NOT NULL,
+    stop_price            DOUBLE,
+    unrealized_return_pct DOUBLE NOT NULL,
+    PRIMARY KEY (run_id, symbol, as_of_date)
+);
+
+CREATE TABLE IF NOT EXISTS verdict_position_notes (
+    run_id     UUID NOT NULL,
+    symbol     VARCHAR NOT NULL,
+    note_date  DATE NOT NULL,
+    note       VARCHAR NOT NULL,
+    PRIMARY KEY (run_id, symbol, note_date)
+);
 ```
+
+`verdict_positions`系3テーブル（3.24節）は新規追加なのでマイグレーション不要で、`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけで足りる。`positions`（人間の紙トレ）とも`verdict_outcomes`（満期2点の当否分類）とも意図的に別テーブルであり、棲み分けの理由は3.24.1に記す。`stop_price`がNULLになりうるのは、リスク評価がstopを出せず（`CASH_PRIORITY`／`not_calculable`）ATR14も算出できない場合で、そのポジションは最大保有日数のみで手仕舞い判定される。
 
 `exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
 

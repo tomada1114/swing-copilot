@@ -44,6 +44,8 @@ from swing_copilot.tracking.update import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from swing_copilot.storage.tracking_records import VerdictPosition
 
 DEFAULT_SETTINGS_PATH = "config/settings.yaml"
@@ -150,21 +152,33 @@ def _fmt_date(value: date | None) -> str:
     return _NOT_AVAILABLE if value is None else value.isoformat()
 
 
+def _newest_first(
+    positions: Iterable[VerdictPosition], key: Callable[[VerdictPosition], date]
+) -> list[VerdictPosition]:
+    """Sort by `key` descending, breaking ties by symbol *ascending*.
+
+    Two passes rather than one reversed compound key: reversing a
+    `(date, symbol)` tuple would also reverse the symbol order, which reads
+    as arbitrary in a table someone scans by ticker.
+    """
+    by_symbol = sorted(positions, key=lambda row: row.symbol)
+    return sorted(by_symbol, key=key, reverse=True)
+
+
 def _sorted_for_display(
     positions: tuple[VerdictPosition, ...],
 ) -> list[VerdictPosition]:
     """Open positions first (newest entry first), then closed (newest exit first)."""
-    open_rows = sorted(
-        (row for row in positions if row.status == OPEN),
-        key=lambda row: (row.entry_date, row.symbol),
-        reverse=True,
-    )
-    closed_rows = sorted(
-        (row for row in positions if row.status != OPEN),
-        key=lambda row: (row.exit_date or row.entry_date, row.symbol),
-        reverse=True,
-    )
-    return [*open_rows, *closed_rows]
+    return [
+        *_newest_first(
+            (row for row in positions if row.status == OPEN),
+            lambda row: row.entry_date,
+        ),
+        *_newest_first(
+            (row for row in positions if row.status != OPEN),
+            lambda row: row.exit_date or row.entry_date,
+        ),
+    ]
 
 
 def _run_list(

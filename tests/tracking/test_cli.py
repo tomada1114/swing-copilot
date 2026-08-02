@@ -11,6 +11,7 @@ from swing_copilot.clock import SystemClock
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.tracking import cli as cli_module
 from swing_copilot.tracking.cli import main
 from tests.tracking.conftest import (
@@ -118,6 +119,32 @@ class TestListCommand:
         assert "+2.00%" in out
         assert "1/60" in out
         assert "59" in out
+
+    def test_open_rows_precede_closed_ones_with_ties_broken_by_symbol(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state_store = _store(db_path)
+        for symbol, status in (("BBB", "open"), ("AAA", "open"), ("CCC", "closed")):
+            state_store.upsert_verdict_position(
+                VerdictPosition(
+                    run_id=RUN_ID,
+                    symbol=symbol,
+                    strategy_key="default",
+                    entry_date=ENTRY_DATE,
+                    entry_price=100.0,
+                    stop_price=95.0,
+                    days_held=0,
+                    status=status,
+                    exit_date=DAY_1 if status == "closed" else None,
+                    exit_reason="manual" if status == "closed" else None,
+                    last_marked_date=ENTRY_DATE,
+                )
+            )
+
+        main(["list", "--db", str(db_path)])
+
+        out = capsys.readouterr().out
+        assert out.index("AAA") < out.index("BBB") < out.index("CCC")
 
     def test_status_open_hides_a_closed_position(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]

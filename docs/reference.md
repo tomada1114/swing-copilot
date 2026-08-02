@@ -209,7 +209,8 @@ copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 `risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
 NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`で代替する。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
-（fail-soft）。`--as-of`省略時のみCLI境界で`SystemClock().today()`を使う。
+（fail-soft）。日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
+省略したときだけ、CLI境界で`SystemClock().today()`を使う。
 
 日次前進はバックテストと同じ順序を守る: その日の手仕舞い判定は**前日までの**stopで
 行い、生き残った日の終値で初めてstopをラチェット更新する（翌日から有効）。

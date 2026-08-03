@@ -9,6 +9,7 @@ never corrupt state for a subsequent successful rerun.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -29,7 +30,12 @@ from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline import daily as daily_module
-from swing_copilot.pipeline.daily import DailyDependencies, run_daily
+from swing_copilot.pipeline import daily_runner
+from swing_copilot.pipeline.daily import (
+    DailyDependencies,
+    _run_step_risk,
+    run_daily,
+)
 from swing_copilot.report.markdown_report import (
     LatestMarkdownUpdateError,
     write_markdown_report,
@@ -43,6 +49,7 @@ from swing_copilot.screening import (
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
@@ -769,6 +776,167 @@ class TestHeldSymbolGetsTextCoverage:
         # TSLA is held but not part of `universe`/today's screening candidates.
         assert "TSLA" in symbols_covered
         assert {"AAPL", "MSFT"} <= symbols_covered
+
+
+def _seed_virtual_position(state_store: StateStore, symbol: str) -> None:
+    """Open one `status='open'` virtual position in the verdict ledger."""
+    state_store.upsert_verdict_position(
+        VerdictPosition(
+            run_id=uuid4(),
+            symbol=symbol,
+            strategy_key="default",
+            no_trade=False,
+            entry_date=AS_OF - timedelta(days=5),
+            entry_price=100.0,
+            stop_price=95.0,
+            days_held=1,
+            status="open",
+            last_marked_date=AS_OF - timedelta(days=1),
+        )
+    )
+
+
+def _news_covered_symbols(state_store: StateStore) -> set[str]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            "SELECT symbol FROM text_items WHERE source_type = 'news'"
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _candidate_symbols(state_store: StateStore, run_id: UUID) -> set[str]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            "SELECT symbol FROM candidates WHERE run_id = ?", [str(run_id)]
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+class TestVirtualLedgerPositionsCountAsHeld:
+    """The verdict ledger is the second source of "held" (design 3.14/3.24).
+
+    Real trading has not started, so `positions` is empty and the only record
+    of a notional holding is the tracked virtual position. Held-symbol news
+    must fire off that ledger too, because company-news cannot be backfilled.
+    """
+
+    def test_a_virtual_open_position_gets_the_same_text_coverage_as_a_holding(
+        self, base_deps, state_store
+    ):
+        _seed_virtual_position(state_store, "NVDA")
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        # NVDA is in neither `universe` nor `positions`: only the ledger.
+        assert "NVDA" in _news_covered_symbols(state_store)
+
+    def test_real_and_virtual_positions_are_unioned_not_replaced(
+        self, base_deps, state_store
+    ):
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol="TSLA",
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+            )
+        )
+        _seed_virtual_position(state_store, "NVDA")
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert {"TSLA", "NVDA"} <= _news_covered_symbols(state_store)
+
+    def test_a_virtual_position_survives_the_universe_limit_like_a_holding(
+        self, base_deps, state_store
+    ):
+        _seed_virtual_position(state_store, "MSFT")
+
+        result = run_daily(DailyRunOptions(is_dry_run=True, limit=1), deps=base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        # `limit=1` truncates the universe to AAPL; MSFT is only screened
+        # because the ledger says it is held.
+        assert {"AAPL", "MSFT"} <= _candidate_symbols(state_store, result.run_id)
+
+    def test_without_the_ledger_the_universe_limit_still_truncates(
+        self, base_deps, state_store
+    ):
+        result = run_daily(DailyRunOptions(is_dry_run=True, limit=1), deps=base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _candidate_symbols(state_store, result.run_id) == {"AAPL"}
+
+    def test_a_virtual_position_never_reaches_the_risk_step_portfolio(
+        self, base_deps, state_store, monkeypatch
+    ):
+        _seed_virtual_position(state_store, "NVDA")
+        seen: list[list[Position]] = []
+
+        def _spy(deps, request):
+            seen.append(list(request.portfolio))
+            return _run_step_risk(deps, request)
+
+        monkeypatch.setattr(daily_runner, "_run_step_risk", _spy)
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), base_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        # Sizing, concentration, and correlation see the real book only.
+        assert seen == [[]]
+
+    def test_a_historical_replay_leaves_the_held_set_empty(
+        self, base_deps, state_store
+    ):
+        _seed_virtual_position(state_store, "NVDA")
+
+        held = daily_runner._held_symbols(base_deps, [], is_historical=True)  # noqa: SLF001
+
+        assert held == set()
+
+    def test_a_live_run_reads_the_ledger_for_the_same_inputs(
+        self, base_deps, state_store
+    ):
+        _seed_virtual_position(state_store, "NVDA")
+
+        held = daily_runner._held_symbols(base_deps, [], is_historical=False)  # noqa: SLF001
+
+        assert held == {"NVDA"}
+
+    def test_an_unreadable_ledger_warns_and_keeps_the_real_positions(
+        self, base_deps, state_store, monkeypatch, caplog
+    ):
+        def _raise(_status=None):
+            msg = "ledger unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(state_store, "get_verdict_positions", _raise)
+        portfolio = [
+            Position(
+                position_id=uuid4(),
+                symbol="TSLA",
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+            )
+        ]
+
+        with caplog.at_level(logging.WARNING):
+            held = daily_runner._held_symbols(  # noqa: SLF001
+                base_deps, portfolio, is_historical=False
+            )
+
+        assert held == {"TSLA"}
+        assert "verdict tracking ledger unreadable" in caplog.text
 
 
 class TestNotifyFailureDegrades:

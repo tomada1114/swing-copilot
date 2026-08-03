@@ -135,6 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 日次runの「保有銘柄」が実オープンポジション（`positions`）だけを見ており、
+  実売買前で常に0行のため保有銘柄のニュース・開示収集が一度も発火していなかった
+  問題を解消。`pipeline/daily_runner.py::_held_symbols()`が実オープンポジションと
+  verdict追跡台帳`verdict_positions`の`status='open'`な仮想建玉の**和集合**を
+  保有集合とする。Finnhubの`company-news`は遡及取得できないため、この欠落は
+  その都度恒久的なデータ損失になっていた。影響するのは収集・分析の対象集合だけで、
+  リスクチェック（サイジング・集中度・相関）へ渡すポートフォリオは従来どおり
+  実ポジションのみ。`--as-of`の再現runは台帳を読まず（現在状態であり時点再現性が
+  無いため）、台帳の読み取り失敗は警告のみのfail-soft
 - ニュース枠に関連度の選別が無く、対象銘柄への言及が名目的なだけの記事
   （セクター横断記事・他社記事・定型マーケットサマリ）が判断価値のある記事を
   `max_news_items_per_symbol`の枠から押し出していた問題を解消。

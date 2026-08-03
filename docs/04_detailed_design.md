@@ -729,6 +729,17 @@ rejectした段が保持する**。`check()`は sizing/regime → 決算ガー�
 
 ニュース取得・EDGAR新着開示取得（およびこれらに続くFR-08の分析入力エクスポート）の対象銘柄は、保有銘柄＋当日のスクリーニング候補銘柄の合計最大30銘柄に限定する（NFR-03: 35分以内の実現方針）。経済指標カレンダー取得（FRED）は銘柄に依存しないため対象外。
 
+ここでの「保有銘柄」は、`positions`の実オープンポジション（`get_open_positions(is_paper=True)`）と、
+verdict追跡台帳`verdict_positions`の`status='open'`な仮想ポジション（3.24節）の**和集合**である
+（`pipeline/daily_runner.py::_held_symbols()`）。実売買を始める前は`positions`が常に空で、
+実質的に注視している銘柄は仮想台帳にしか存在しない——台帳を読まなければ保有銘柄の
+ニュース収集が一度も発火せず、Finnhubの`company-news`は遡及取得できないため欠落が
+恒久的なデータ損失になる。逆に和集合にしておけば、実売買が始まっても両方が覆われる。
+この和集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
+だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。仮想建玉を
+サイジング・集中度・相関へ混ぜてはならない（3.24.1節の棲み分け）。台帳の読み取り失敗は
+fail-softで、警告ログを残して仮想側を空として続行する。
+
 ```python
 def fetch_company_news(symbol: str, since: "date") -> list["NewsItem"]:
     """Finnhub company-newsエンドポイントから指定銘柄の直近ニュースを取得する。60コール/分を超えないようレート制限する。"""
@@ -1216,7 +1227,10 @@ run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
 明示`--as-of`では、現在状態しか持たない`get_open_positions()`をrun開始時にも
-risk step内にも呼ばない。保有集合を空として価格・テキスト対象へ追加せず、risk stepへ
+risk step内にも呼ばない。同じ理由で`verdict_positions`の仮想オープンポジション
+（3.14節の保有集合のもう一方）も読まない——台帳も「現在の」建玉状態であり、
+`as_of`時点の状態を再現できないため、読めば時点可視性が壊れる。保有集合を空として
+価格・テキスト対象へ追加せず、risk stepへ
 現在ポジションを渡さず、`mae_mfe` stepも`skipped`にする。これは空のポートフォリオを
 過去の事実として確定する意味ではなく、`NO_POSITION_DATA` noticeで時点状態が不明で
 あることを明示する縮退である。同様に決算予定は`collect_earnings_calendar(...,
@@ -1990,7 +2004,7 @@ notification:
 
 `settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
 
-`copilot-daily --limit N`の`N`は非負整数である。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄だけを価格取得・リスク監視の対象に残す。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
+`copilot-daily --limit N`の`N`は非負整数である。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 

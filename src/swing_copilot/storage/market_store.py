@@ -104,6 +104,11 @@ def _empty_bars_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(BARS_COLUMNS))
 
 
+def _as_date(value: object) -> date:
+    """Normalize a DuckDB date scalar (date or timestamp) to `datetime.date`."""
+    return pd.Timestamp(value).date()  # type: ignore[arg-type] # pandas accepts any date-like scalar
+
+
 class MarketStore:
     """Parquet bars + DuckDB fundamentals, backed by one shared `Database`."""
 
@@ -216,6 +221,33 @@ class MarketStore:
             result = conn.execute(query, [*symbols, start, effective_end]).df()
         result["date"] = pd.to_datetime(result["date"]).dt.date
         return result
+
+    def earliest_bar_dates(self, symbols: list[str]) -> dict[str, date]:
+        """Return each symbol's oldest stored bar date, for backfill resume.
+
+        Deliberately not `as_of`-filtered: this answers "how far back does the
+        local history already reach", a storage-coverage question, not a
+        point-in-time visibility one. No caller feeds it into screening.
+
+        Args:
+            symbols: Ticker symbols to inspect.
+
+        Returns:
+            `{symbol: oldest bar date}`, omitting symbols with no stored bars.
+        """
+        if not symbols or not self._has_partition_files():
+            return {}
+
+        placeholders = ",".join("?" for _ in symbols)
+        query = f"""
+            SELECT symbol, MIN(date) AS earliest
+            FROM bars
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+        """  # noqa: S608 - placeholders are bound parameters, not interpolated values
+        with self.get_connection() as conn:
+            rows = conn.execute(query, list(symbols)).fetchall()
+        return {str(symbol): _as_date(earliest) for symbol, earliest in rows}
 
     def upsert_fundamentals(self, records: Sequence[FundamentalsRecord]) -> None:
         """Upsert fundamentals records, keyed by `accession_no`.

@@ -114,11 +114,11 @@ class TestListCommand:
 
         out = capsys.readouterr().out
         assert SYMBOL in out
-        # entry 100.00, unrealized +2.00% on the 102.00 close, 1 of 60 sessions
-        # held, so 59 remain.
+        # entry 100.00, unrealized +2.00% on the 102.00 close, 1 of 25 sessions
+        # held, so 24 remain.
         assert "+2.00%" in out
-        assert "1/60" in out
-        assert "59" in out
+        assert "1/25" in out
+        assert "24" in out
 
     def test_open_rows_precede_closed_ones_with_ties_broken_by_symbol(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]

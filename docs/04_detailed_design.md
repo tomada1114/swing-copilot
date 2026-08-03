@@ -1080,7 +1080,7 @@ def run_backtest(
 
 - 当日終値確定後の候補を翌営業日寄付で約定する。買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`、売り約定単価=`raw_exit * (1 - slippage_pct)`、売りcash増加=`shares * exit_execution * (1 - commission_pct)`とし、すべてのexit path（stop、max-hold、最終強制清算）へ同じ式を適用する。
 - 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。
-- トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。60営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
+- トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。25営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
 - `start`以前のバーはスクリーニング指標のウォームアップ（最大325取引バー）にのみ使い、注文生成と約定日は`start..end`の取引日に限定する。
 - `copilot-backtest`は`end`以前の最新`universe_membership`を優先する。ただし日ごとの歴史的membershipは復元しないため、履歴が無い場合のcurrent-universeフォールバックを含め、単一構成銘柄集合を全期間へ適用する限界と生存者バイアスを結果へ必ず表示する。
@@ -1946,7 +1946,7 @@ backtest:
   entry: "next_open"           # シグナル翌日寄付
   exit_atr_multiple: 2.5
   exit_atr_period: 14
-  max_hold_days: 60
+  max_hold_days: 25
   commission_pct: 0.001
   slippage_pct: 0.001
   benchmark: "SPY"
@@ -2092,7 +2092,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | 項目 | 値 | 設定キー |
 |---|---|---|
 | エントリー | シグナル翌日寄付 | `backtest.entry="next_open"` |
-| イグジット | ATRトレーリングストップ(2.5×ATR14) または60営業日 | `backtest.exit_atr_multiple=2.5`, `exit_atr_period=14`, `max_hold_days=60` |
+| イグジット | ATRトレーリングストップ(2.5×ATR14) または25営業日 | `backtest.exit_atr_multiple=2.5`, `exit_atr_period=14`, `max_hold_days=25`（出典: 2026-08-03 戦略パラメータレビュー、下記解決ログ参照） |
 | 手数料 | 0.1% | `backtest.commission_pct=0.001` |
 | スリッページ | 0.1% | `backtest.slippage_pct=0.001` |
 | 比較対象 | SPYバイ&ホールド | `backtest.benchmark="SPY"` |
@@ -2234,3 +2234,4 @@ P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本�
 7. **解決済み: 冪等性**: 2.1節と4.2節の自然キー、run_idに従う（LLMキャッシュはP7で廃止）。
 8. **解決済み: 統合テスト銘柄**: AAPL, MSFT, JPM, XOM, JNJを固定fixtureとして使う。
 9. **解決済み: 監視**: CLIとMarkdown末尾にrun_id、run status、ステップ要約を表示する。別ダッシュボードは作らない。
+10. **解決済み: 戦略パラメータレビュー（ユニバースと最大保有期間、2026-08-03）**: `max_hold_days`を60→25に変更した。根拠: (1) 主exitは2.5×ATRトレーリングストップであり、既存バックテスト実績（n=4）は全トレードが6〜13営業日でストップ決済、max_holdは非バインドだった。(2) 保有長期化によるthesis decay（エントリー根拠の陳腐化）への曝露上限をスイングの時間軸に整合させる。(3) 分析対象銘柄の上限（`_TEXT_SYMBOL_LIMIT = 30`、保有優先）を仮想ポジションが食い潰すのを防ぎ、保有銘柄の分析収集を有効化する前提を作る。変更時点の実ポジションは0、仮想台帳のオープンポジションへの強制クローズ影響はない。ユニバースはS&P 500を維持する（Nasdaq-100差し替え・S&P 400追加・セクターフィルタはいずれも不採用）。根拠: 候補が低ボラに偏る原因はユニバースではなくスクリーニング構造にあることを2026-07-30 runの実測で確認した——候補5銘柄のATR14%中央値2.23%はユニバース第13パーセンタイル（ユニバース中央値3.11%）であり、ATR%上位33銘柄は全件棄却されていた（財務フィルタ19件、`pullback_rsi`のRSI≤45で12件）。`pullback_rsi`のSMA50±3%（絶対値）帯は低ボラ銘柄を高ボラ銘柄の約4.5倍通過させる事実上のローボラフィルタとして機能しており、ユニバースを変えても同じ選別が再現される。是正はシグナルのATR正規化とランキング重みの見直し（バックテスト検証付き）として別途実施予定。

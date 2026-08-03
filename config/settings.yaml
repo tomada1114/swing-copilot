@@ -72,7 +72,7 @@ backtest:
   entry: "next_open"
   exit_atr_multiple: 2.5
   exit_atr_period: 14
-  max_hold_days: 60
+  max_hold_days: 25
   commission_pct: 0.001
   slippage_pct: 0.001
   benchmark: "SPY"

@@ -25,7 +25,12 @@ from swing_copilot.screening.base import (
     RejectionRecord,
     RejectionStage,
 )
-from swing_copilot.screening.indicators import sma, symbol_bars, wilder_rsi
+from swing_copilot.screening.indicators import (
+    sma,
+    symbol_bars,
+    wilder_atr,
+    wilder_rsi,
+)
 
 if TYPE_CHECKING:
     from swing_copilot.config import Settings
@@ -337,7 +342,16 @@ def _classify_trend_sma(
 def _classify_pullback_rsi(
     symbol: str, series: pd.DataFrame, settings: Settings
 ) -> RejectionRecord:
-    """Mirror `PullbackRSISignal.evaluate()`'s condition."""
+    """Mirror `PullbackRSISignal.evaluate()`'s two conditions.
+
+    The signal requires both a low RSI *and* a close inside the SMA50 band, so
+    a symbol whose RSI cleared the threshold was rejected by the band. Saying
+    `SIGNAL_RSI_NOT_MET` there would print a reason the attached RSI value
+    itself contradicts. The ledger's reason codes are a fixed set enforced by
+    a DB CHECK constraint, so the band case reuses the established generic
+    technical code with the real cause in the detail, matching
+    `_classify_minervini_stage2`.
+    """
     config = settings.technical_signals.pullback
     required_bars = max(config.rsi_period, _PULLBACK_SMA_WINDOW)
     rsi = wilder_rsi(series["close"], config.rsi_period)
@@ -345,11 +359,42 @@ def _classify_pullback_rsi(
     if pd.isna(rsi.iloc[-1]) or pd.isna(sma50.iloc[-1]):
         return _insufficient_history(symbol, len(series), required_bars)
 
+    if rsi.iloc[-1] < config.rsi_threshold:
+        return _pullback_band_rejection(symbol, series, settings, float(sma50.iloc[-1]))
     return RejectionRecord(
         symbol,
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_RSI_NOT_MET,
         {"rsi14": float(rsi.iloc[-1]), "threshold": config.rsi_threshold},
+    )
+
+
+def _pullback_band_rejection(
+    symbol: str, series: pd.DataFrame, settings: Settings, last_sma50: float
+) -> RejectionRecord:
+    """Mirror `PullbackRSISignal._within_band()`'s two exclusive modes."""
+    config = settings.technical_signals.pullback
+    distance = abs(float(series["close"].iloc[-1]) - last_sma50)
+    detail: dict[str, float | int | str | None] = {
+        "signal": "pullback_rsi",
+        "reason": "sma_band",
+        "distance": distance,
+        "sma50": last_sma50,
+    }
+    if config.band_atr_multiple is None:
+        detail["band_pct"] = distance / last_sma50
+        detail["sma_band_pct"] = config.sma_band_pct
+    else:
+        atr14 = wilder_atr(series["high"], series["low"], series["close"]).iloc[-1]
+        # Mirrors the signal's fail-closed branch: an undefined ATR leaves the
+        # normalized distance undefined, so the band closes.
+        detail["atr14"] = None if pd.isna(atr14) else float(atr14)
+        detail["band_atr_multiple"] = config.band_atr_multiple
+    return RejectionRecord(
+        symbol,
+        RejectionStage.TECHNICAL_SIGNAL,
+        RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+        detail,
     )
 
 

@@ -81,20 +81,35 @@ class ReportMeta:
     missing_data_symbols: Sequence[str]
 
 
-def _add_common_args(parser: argparse.ArgumentParser) -> None:
+def _add_common_args(
+    parser: argparse.ArgumentParser, *, is_subcommand: bool = False
+) -> None:
     # Not `required=True`: with subparsers, argparse enforces a *parent*
     # parser's own required options even when a subcommand (e.g. `grid`)
     # consumes the actual values, since they're set on the shared Namespace
     # only after the parent's own requirements are checked. `_validate_args`
     # enforces presence explicitly instead, uniformly for both commands.
-    parser.add_argument("--strategy", default=None)
-    parser.add_argument("--start", type=date.fromisoformat, default=None)
-    parser.add_argument("--end", type=date.fromisoformat, default=None)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
-    parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
-    parser.add_argument("--strategies", default=DEFAULT_STRATEGIES_PATH)
+    #
+    # The subcommand copy uses `SUPPRESS` for every default: argparse parses a
+    # subcommand into a fresh namespace and then copies *all* of it onto the
+    # shared one, so a real default here would overwrite a value the operator
+    # already passed before the subcommand. `--strategy`/`--start`/`--end`
+    # would merely be reset to `None` and caught by `_validate_args`, but
+    # `--settings`/`--strategies` would silently snap back to the repository
+    # defaults and the grid would measure the baseline while reporting the
+    # variant. `SUPPRESS` leaves the key out of the sub-namespace entirely
+    # unless it was actually given, so the parent's value survives.
+    def default(value: object) -> object:
+        return argparse.SUPPRESS if is_subcommand else value
+
+    parser.add_argument("--strategy", default=default(None))
+    parser.add_argument("--start", type=date.fromisoformat, default=default(None))
+    parser.add_argument("--end", type=date.fromisoformat, default=default(None))
+    parser.add_argument("--limit", type=int, default=default(None))
+    parser.add_argument("--output", type=Path, default=default(None))
+    parser.add_argument("--db", type=Path, default=default(DEFAULT_DB_PATH))
+    parser.add_argument("--settings", default=default(DEFAULT_SETTINGS_PATH))
+    parser.add_argument("--strategies", default=default(DEFAULT_STRATEGIES_PATH))
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -106,7 +121,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     grid_parser = subparsers.add_parser(
         "grid", help="パラメータ感応度グリッド（ATRストップ倍率 x 最大保有日数）"
     )
-    _add_common_args(grid_parser)
+    _add_common_args(grid_parser, is_subcommand=True)
     parser.set_defaults(command="run")
 
     return parser.parse_args(argv)
@@ -244,6 +259,27 @@ def _exit_breakdown_rows(result: BacktestResult) -> list[tuple[str, str]]:
         )
     )
     return rows
+
+
+def _exit_breakdown_comparison_rows(
+    normal: BacktestResult, pessimistic: BacktestResult
+) -> list[tuple[str, str, str]]:
+    """`_exit_breakdown_rows` for both scenarios, aligned on a shared label set.
+
+    A higher slippage assumption moves trades between exit reasons (a stop
+    that used to miss now fires), so the two results can carry different
+    reason labels. Missing labels render as `0` rather than being dropped,
+    keeping the comparison's rows one-to-one.
+    """
+    normal_rows = dict(_exit_breakdown_rows(normal))
+    pessimistic_rows = dict(_exit_breakdown_rows(pessimistic))
+    labels = list(normal_rows) + [
+        label for label in pessimistic_rows if label not in normal_rows
+    ]
+    return [
+        (label, normal_rows.get(label, "0"), pessimistic_rows.get(label, "0"))
+        for label in labels
+    ]
 
 
 def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
@@ -403,6 +439,18 @@ def render_terminal_comparison(
         )
     console.print(table)
 
+    exit_table = Table(
+        title="Exit breakdown: normal vs pessimistic", header_style="bold"
+    )
+    exit_table.add_column("Exit")
+    exit_table.add_column("Normal (x1.0)", justify="right")
+    exit_table.add_column("Pessimistic", justify="right")
+    for label, normal_value, pessimistic_value in _exit_breakdown_comparison_rows(
+        normal, pessimistic
+    ):
+        exit_table.add_row(label, normal_value, pessimistic_value)
+    console.print(exit_table)
+
     if meta.missing_data_symbols:
         console.print(
             "[yellow]データ不足のためスキップ: "
@@ -434,6 +482,20 @@ def render_markdown_comparison(
         f"| {label} | {_metric_value(normal, field)} | "
         f"{_metric_value(pessimistic, field)} |"
         for label, field in _METRIC_ROWS
+    ]
+    lines.append("")
+
+    lines += [
+        "## Exit breakdown",
+        "",
+        "| Exit | Normal (x1.0) | Pessimistic |",
+        "|---|---:|---:|",
+    ]
+    lines += [
+        f"| {label} | {normal_value} | {pessimistic_value} |"
+        for label, normal_value, pessimistic_value in _exit_breakdown_comparison_rows(
+            normal, pessimistic
+        )
     ]
     lines.append("")
 

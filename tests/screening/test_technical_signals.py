@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import date
 
 import pandas as pd
 
 from swing_copilot.screening.base import ScreeningInput
+from swing_copilot.screening.indicators import wilder_atr
 from swing_copilot.screening.technical_signals import (
     MinAverageVolumeFilter,
     PullbackRSISignal,
@@ -154,16 +156,33 @@ class TestPullbackATRBand:
 
         assert [hit.symbol for hit in hits] == ["AAPL"]
 
-    def test_a_flat_series_with_zero_atr_is_rejected_fail_safe(self, settings):
-        # A perfectly constant close makes ATR14 zero; the ATR-normalized
-        # distance is then undefined, so the band must not open up.
-        bars = make_bars("AAPL", [100.0] * 70, start=date(2026, 1, 1))
-        for column in ("high", "low", "open"):
-            bars[column] = 100.0
+    def test_a_zero_atr_is_rejected_fail_safe(self, settings):
+        # ATR14 is exactly zero when every bar's high and low sit on the prior
+        # close, which leaves the ATR-normalized distance undefined.
+        #
+        # The closes are the ones the percentage band admits, so the control
+        # assertion below proves the RSI and SMA50 conditions both pass and
+        # the symbol reaches the band check -- a constant close instead makes
+        # RSI 100 and the signal short-circuits before the ATR branch is ever
+        # evaluated, which is what made the previous version of this test
+        # vacuous. `simplefilter("error")` pins the guard itself: without it
+        # the divisor is zero and numpy raises a RuntimeWarning.
+        bars = make_bars("AAPL", self._LEGACY_HIT_CLOSES, start=date(2026, 1, 1))
+        previous_close = bars["close"].shift(1).fillna(bars["close"])
+        for column in ("high", "low"):
+            bars[column] = previous_close
         data = _screening_input(bars)
-        configured = _with_band_atr_multiple(settings, 2.0)
+        atr14 = wilder_atr(bars["high"], bars["low"], bars["close"]).iloc[-1]
+        assert atr14 == 0.0
 
-        assert PullbackRSISignal(configured).evaluate(data, {"AAPL"}) == []
+        legacy_hits = PullbackRSISignal(settings).evaluate(data, {"AAPL"})
+        configured = _with_band_atr_multiple(settings, 2.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            atr_hits = PullbackRSISignal(configured).evaluate(data, {"AAPL"})
+
+        assert [hit.symbol for hit in legacy_hits] == ["AAPL"]
+        assert atr_hits == []
 
     def test_a_nan_atr_is_rejected_fail_safe(self, settings):
         # A symbol with no high/low data at all leaves ATR14 undefined. The

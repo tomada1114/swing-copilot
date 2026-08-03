@@ -418,6 +418,54 @@ class TestSignalReasons:
         assert rejection.reason_code is RejectionReasonCode.SIGNAL_RSI_NOT_MET
         assert rejection.detail == {"rsi14": 52.0, "threshold": 45.0}
 
+    def test_a_passing_rsi_is_never_reported_as_rsi_not_met(
+        self, settings, monkeypatch
+    ):
+        # The signal needs a low RSI *and* a close inside the SMA50 band, so a
+        # symbol whose RSI cleared the threshold was rejected by the band.
+        # Recording SIGNAL_RSI_NOT_MET there prints a reason the RSI value
+        # attached to it contradicts.
+        rows = _healthy_fundamentals("ABC")
+        bars = _liquid_bars("ABC")
+        hit_for_trend = [SignalHit("ABC", "trend_sma", "long", 1.0, {})]
+        monkeypatch.setattr(
+            "swing_copilot.screening.rejection_classifier.wilder_rsi",
+            lambda series, _period: pd.Series([12.0] * len(series), index=series.index),
+        )
+        data = _input((_member("ABC"),), rows, bars)
+
+        [rejection] = _classify(data, settings, hits_by_signal=[hit_for_trend, []])
+
+        assert rejection.reason_code is not RejectionReasonCode.SIGNAL_RSI_NOT_MET
+        assert rejection.detail["signal"] == "pullback_rsi"
+        assert rejection.detail["reason"] == "sma_band"
+        assert "sma_band_pct" in rejection.detail
+
+    def test_the_atr_band_mode_reports_the_atr_it_measured(self, settings, monkeypatch):
+        # In `band_atr_multiple` mode the ledger must name the ATR-normalized
+        # band, including the fail-closed branch where ATR is undefined --
+        # otherwise a zero/NaN-ATR rejection is indistinguishable from an
+        # ordinary miss.
+        rows = _healthy_fundamentals("ABC")
+        bars = _liquid_bars("ABC")
+        hit_for_trend = [SignalHit("ABC", "trend_sma", "long", 1.0, {})]
+        monkeypatch.setattr(
+            "swing_copilot.screening.rejection_classifier.wilder_rsi",
+            lambda series, _period: pd.Series([12.0] * len(series), index=series.index),
+        )
+        pullback = settings.technical_signals.pullback.model_copy(
+            update={"band_atr_multiple": 0.01}
+        )
+        technical = settings.technical_signals.model_copy(update={"pullback": pullback})
+        configured = settings.model_copy(update={"technical_signals": technical})
+        data = _input((_member("ABC"),), rows, bars)
+
+        [rejection] = _classify(data, configured, hits_by_signal=[hit_for_trend, []])
+
+        assert rejection.detail["reason"] == "sma_band"
+        assert rejection.detail["band_atr_multiple"] == 0.01
+        assert "sma_band_pct" not in rejection.detail
+
     def test_insufficient_bars_for_trend_signal_is_data_quality(self, settings):
         rows = _healthy_fundamentals("XYZ")
         bars = make_bars(
@@ -498,10 +546,19 @@ class TestPriorityOrder:
         for result in results:
             [rejection] = result
             assert rejection.reason_code is RejectionReasonCode.SIGNAL_TREND_NOT_MET
+            # Both classifiers can emit this code, so pin the detail that
+            # identifies `trend_sma` as the one that produced the record.
+            assert "sma_long" in rejection.detail
 
     def test_reversed_signal_order_changes_the_winning_reason(self, settings):
         # Same symbol, same failure on both signals: with pullback_rsi first
-        # in the configured order, that reason now wins instead.
+        # in the configured order, that classifier's record now wins instead.
+        #
+        # This series declines steadily, so its RSI is well *below* the
+        # pullback threshold and the band is what rejects it. Both classifiers
+        # therefore land on the ledger's one generic technical code -- the
+        # fixed reason-code set has no band-specific member -- and the detail
+        # is what identifies the signal that produced the record.
         rows = _healthy_fundamentals("XYZ")
         closes = list(reversed(_uptrend_closes(210)))
         bars = make_bars("XYZ", closes, start=date(2026, 1, 1), volume=2_000_000)
@@ -511,7 +568,9 @@ class TestPriorityOrder:
             data, settings, signal_order=("pullback_rsi", "trend_sma")
         )
 
-        assert rejection.reason_code is RejectionReasonCode.SIGNAL_RSI_NOT_MET
+        assert rejection.reason_code is RejectionReasonCode.SIGNAL_TREND_NOT_MET
+        assert rejection.detail["signal"] == "pullback_rsi"
+        assert rejection.detail["reason"] == "sma_band"
 
 
 class TestBoundaryConditions:

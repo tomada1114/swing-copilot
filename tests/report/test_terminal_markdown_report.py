@@ -57,6 +57,7 @@ def _brief() -> DailyBrief:
                 score_rsi_pullback=0.167,
                 score_trend_quality=0.300,
                 score_liquidity=0.160,
+                score_atr_pct=0.000,
                 signals=("RSI押し目",),
                 fundamentals=BriefFundamentals(
                     per="41.2x", fcf="$12,000", equity_ratio="52%", eps="$4.16"
@@ -638,6 +639,7 @@ def test_markdown_shows_score_column_and_breakdown_table() -> None:
     assert "| rsi_pullback | 0.167 |" in output
     assert "| trend_quality | 0.300 |" in output
     assert "| liquidity | 0.160 |" in output
+    assert "| atr_pct | 0.000 |" in output
 
 
 def _brief_with_past_decisions() -> DailyBrief:
@@ -783,6 +785,7 @@ def _brief_with_missing_score() -> DailyBrief:
         score_rsi_pullback=None,
         score_trend_quality=None,
         score_liquidity=None,
+        score_atr_pct=None,
     )
     return replace(brief, candidates=(candidate,))
 

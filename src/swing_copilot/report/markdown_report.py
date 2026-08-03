@@ -388,6 +388,7 @@ def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
         or candidate.score_rsi_pullback is None
         or candidate.score_trend_quality is None
         or candidate.score_liquidity is None
+        or candidate.score_atr_pct is None
     ):
         return []
     return [
@@ -401,6 +402,7 @@ def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
         f"| rsi_pullback | {candidate.score_rsi_pullback:.3f} |",
         f"| trend_quality | {candidate.score_trend_quality:.3f} |",
         f"| liquidity | {candidate.score_liquidity:.3f} |",
+        f"| atr_pct | {candidate.score_atr_pct:.3f} |",
     ]
 
 

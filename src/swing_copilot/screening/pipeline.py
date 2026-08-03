@@ -291,7 +291,10 @@ class ScreeningPipeline:
         Computed independently of whichever signals happen to be configured,
         so ranking and report metrics are always available and consistent
         (docs/04_detailed_design.md 2.1 #4). A symbol with any NaN metric
-        (e.g. insufficient history) is dropped from the candidate set.
+        (e.g. insufficient history) is dropped from the candidate set, as is
+        one whose last close is non-positive: `_score_rows` divides by it, so
+        a corrupt or placeholder row would otherwise abort the entire run
+        rather than costing the one bad symbol.
         """
         series = symbol_bars(data.bars, symbol, data.as_of)
         if series is None or len(series) < max(
@@ -315,6 +318,8 @@ class ScreeningPipeline:
             or pd.isna(sma50)
             or pd.isna(sma200)
         ):
+            return None
+        if close <= 0:
             return None
         return {
             "rsi14": float(rsi14),

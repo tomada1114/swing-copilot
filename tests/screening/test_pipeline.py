@@ -345,6 +345,24 @@ class TestCandidateAggregationAndRanking:
 
         assert candidates == []
 
+    def test_symbol_dropped_when_the_last_close_is_zero(self, settings):
+        # `_score_rows`'s `atr_pct` component divides by the close, so a
+        # corrupt or placeholder row would abort the whole run -- every
+        # symbol's screening, not just the bad one -- instead of costing the
+        # one symbol. The NaN guard alone does not cover it: 0.0 is not NaN.
+        bars = _uptrend_bars("AAPL")
+        bars.loc[bars.index[-1], "close"] = 0.0
+        universe = (_member("AAPL"),)
+        data = ScreeningInput(
+            as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
+        )
+
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        assert pipeline.run(data) == []
+
     def test_same_input_produces_identical_candidates_across_runs(self, settings):
         bars = pd.concat(
             [
@@ -625,6 +643,7 @@ class TestCompositeScoring:
             "score_rsi_pullback",
             "score_trend_quality",
             "score_liquidity",
+            "score_atr_pct",
         } <= candidates[0].metrics.keys()
 
     def test_empty_candidate_set_produces_no_error(self, settings, monkeypatch):

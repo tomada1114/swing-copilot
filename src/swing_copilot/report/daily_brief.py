@@ -303,6 +303,7 @@ class BriefCandidate:
     score_rsi_pullback: float | None
     score_trend_quality: float | None
     score_liquidity: float | None
+    score_atr_pct: float | None
     signals: tuple[str, ...]
     fundamentals: BriefFundamentals
     risk: BriefRisk
@@ -572,6 +573,7 @@ def _candidate_brief(
         score_rsi_pullback=candidate.metrics.get("score_rsi_pullback"),
         score_trend_quality=candidate.metrics.get("score_trend_quality"),
         score_liquidity=candidate.metrics.get("score_liquidity"),
+        score_atr_pct=candidate.metrics.get("score_atr_pct"),
         signals=tuple(
             _signal_label(name, candidate.metrics)
             for name in candidate.signal_names

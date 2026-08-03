@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -11,6 +11,7 @@ import pytest
 from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.pipeline.backfill import (
     CHUNK_SLEEP_SECONDS,
+    COVERAGE_TOLERANCE_DAYS,
     SYMBOL_CHUNK_SIZE,
     BarsBackfillDeps,
     FundamentalsBackfillDeps,
@@ -20,6 +21,7 @@ from swing_copilot.pipeline.backfill import (
 from swing_copilot.pipeline.backfill import main as backfill_main
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -201,6 +203,55 @@ class TestBackfillBarsResume:
         assert result.skipped_symbols == ("AAA",)
         assert provider.calls[0][0] == ["BBB"]
 
+    def test_skips_a_symbol_whose_first_bar_is_the_trading_day_after_start(
+        self, market_store: MarketStore
+    ) -> None:
+        # `--start` is a calendar date the operator picks and the documented
+        # example (2019-01-01) is a market holiday, so the oldest bar that can
+        # exist is 2019-01-02. Requiring the stored history to reach *on or
+        # before* `--start` would make resume dead for that invocation and
+        # refetch the whole universe on every rerun.
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        **_bar_row("AAA", _START + timedelta(days=1)),
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                ]
+            )
+        )
+        provider = _RecordingProvider()
+
+        result = backfill_bars(_deps(provider, market_store, []), ["AAA"], _START, _END)
+
+        assert result.skipped_symbols == ("AAA",)
+        assert provider.calls == []
+
+    def test_refetches_a_symbol_whose_first_bar_is_past_the_tolerance(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        **_bar_row(
+                            "AAA", _START + timedelta(days=COVERAGE_TOLERANCE_DAYS + 1)
+                        ),
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                ]
+            )
+        )
+        provider = _RecordingProvider()
+
+        result = backfill_bars(_deps(provider, market_store, []), ["AAA"], _START, _END)
+
+        assert result.skipped_symbols == ()
+        assert provider.calls[0][0] == ["AAA"]
+
     def test_refetches_a_symbol_whose_history_starts_after_start(
         self, market_store: MarketStore
     ) -> None:
@@ -318,7 +369,16 @@ class TestBackfillFundamentals:
         symbol, as_of, lookback_days = client.calls[0]
         assert symbol == "AAA"
         assert as_of.date() == _NOW.date()
-        assert lookback_days == (_NOW.date() - _START).days
+        # `fetch_fundamentals` bounds the window at `as_of - lookback_days`
+        # and `as_of` is an end-of-day instant, so asserting the raw day count
+        # would let the lower bound land at the *end* of `--start` and drop
+        # every filing made during that day. Assert the boundary instead: a
+        # filing at 00:00 on `--start` must still be inside the window.
+        earliest = as_of - timedelta(days=lookback_days)
+        assert earliest < datetime.combine(_START, time.min, tzinfo=UTC)
+        assert earliest >= datetime.combine(
+            _START - timedelta(days=1), time.min, tzinfo=UTC
+        )
 
     def test_persists_records_and_reports_failed_symbols(
         self, market_store: MarketStore
@@ -399,6 +459,17 @@ class TestBackfillCli:
         monkeypatch.setattr(
             "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
         )
+        # The real resolver reads `settings.universe.snapshot_path`, a
+        # gitignored CSV that only exists on a machine that has run the
+        # fetcher. What this test owns is the `--symbols`-absent branch and
+        # `--limit`, not snapshot parsing, so the membership is injected.
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.get_sp500_universe",
+            lambda _as_of, **_kwargs: tuple(
+                UniverseMember(symbol, symbol, "Information Technology", symbol)
+                for symbol in ("AAA", "BBB", "CCC", "DDD")
+            ),
+        )
 
         backfill_main(
             [
@@ -415,6 +486,38 @@ class TestBackfillCli:
         )
 
         assert len(provider.calls[0][0]) == 3
+
+    def test_exits_non_zero_when_every_symbol_failed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Nothing stored, nothing fetched: a zero exit status here would let a
+        # chained `copilot-backfill ... && copilot-backtest ...` run against a
+        # database that is exactly as empty as before.
+        provider = _RecordingProvider(failing_symbols=frozenset({"AAA", "BBB"}))
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            backfill_main(
+                [
+                    "bars",
+                    "--start",
+                    "2019-01-01",
+                    "--end",
+                    "2026-07-30",
+                    "--db",
+                    str(tmp_path / "copilot.duckdb"),
+                    "--symbols",
+                    "AAA,BBB",
+                ]
+            )
+
+        assert excinfo.value.code == 1
+        assert "全銘柄の取得に失敗" in capsys.readouterr().err
 
     def test_rejects_a_start_after_end(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit):

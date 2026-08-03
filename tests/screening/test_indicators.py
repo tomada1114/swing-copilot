@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from swing_copilot.screening.indicators import (
+    _symbol_index_cache,
     percentile_ranks,
     sma,
     symbol_bars,
@@ -167,6 +168,37 @@ class TestSymbolBarsMatchesTheNaiveImplementation:
         assert third is not None
         pd.testing.assert_frame_equal(first, second)
         assert len(third) == 5
+
+    def test_appending_rows_to_a_looked_up_frame_invalidates_the_index(
+        self, multi_symbol_bars
+    ):
+        # The index is keyed on frame identity, which an in-place append does
+        # not change, so the row count is what tells the cache the frame it
+        # indexed is no longer the frame it was handed.
+        before = symbol_bars(multi_symbol_bars, "AAA", date(2026, 1, 10))
+        assert before is not None
+        appended = before.iloc[0].copy()
+        appended["date"] = date(2026, 1, 9)
+        multi_symbol_bars.loc[len(multi_symbol_bars)] = appended
+
+        after = symbol_bars(multi_symbol_bars, "AAA", date(2026, 1, 10))
+
+        assert after is not None
+        assert len(after) == len(before) + 1
+
+    def test_releasing_a_frame_drops_its_cached_index(self, multi_symbol_bars):
+        # Each cached index retains a full per-symbol copy of its frame, so an
+        # entry whose frame the caller has released must not stay reachable
+        # until FIFO eviction happens to reach it.
+        released = multi_symbol_bars.copy()
+        symbol_bars(released, "AAA", date(2026, 1, 10))
+        key = id(released)
+        assert key in _symbol_index_cache
+        del released
+
+        symbol_bars(multi_symbol_bars, "AAA", date(2026, 1, 10))
+
+        assert key not in _symbol_index_cache
 
     def test_an_empty_frame_yields_none(self):
         empty = pd.DataFrame(columns=["symbol", "date", "close"])

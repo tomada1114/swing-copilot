@@ -889,6 +889,32 @@ class TestExitBreakdownRendering:
         assert "Exit breakdown" in text
         assert "max_hold binding rate" in text
 
+    def test_pessimistic_comparison_renders_the_exit_breakdown_for_both(self):
+        # A higher slippage assumption is exactly where the stop-vs-max_hold
+        # split matters, so the comparison report must not drop it.
+        normal = _result(trades=self._TRADES)
+        pessimistic = _result(trades=(_exit_trade("stop", 3),))
+
+        text = render_terminal_comparison(normal, pessimistic, _meta())
+        markdown = render_markdown_comparison(normal, pessimistic, _meta())
+
+        assert "Exit breakdown: normal vs pessimistic" in text
+        assert "## Exit breakdown" in markdown
+        assert "| Exit | Normal (x1.0) | Pessimistic |" in markdown
+        assert "| stop | 2 | 1 |" in markdown
+
+    def test_a_reason_only_one_scenario_produced_renders_as_zero(self):
+        # `max_hold` never fires in the pessimistic run here. It must still
+        # occupy a row with an explicit 0, so the reader can tell "the higher
+        # slippage stopped everything out first" from "this scenario's report
+        # simply omits the reason".
+        normal = _result(trades=self._TRADES)
+        pessimistic = _result(trades=(_exit_trade("stop", 3),))
+
+        markdown = render_markdown_comparison(normal, pessimistic, _meta())
+
+        assert "| max_hold | 1 | 0 |" in markdown
+
 
 @pytest.mark.usefixtures("two_symbol_universe")
 class TestSettingsOverride:
@@ -917,6 +943,35 @@ class TestSettingsOverride:
         )
 
         assert args.settings == str(override)
+
+    def test_settings_given_before_the_grid_subcommand_survive(self, tmp_path):
+        # argparse parses a subcommand into a fresh namespace and copies all
+        # of it onto the shared one, so a real default on the subparser would
+        # silently snap these back to the repository files and the grid would
+        # measure the baseline while its report named the variant.
+        settings_override = tmp_path / "settings.yaml"
+        strategies_override = tmp_path / "strategies.yaml"
+
+        args = _parse_args(
+            [
+                "--settings",
+                str(settings_override),
+                "--strategies",
+                str(strategies_override),
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+
+        assert args.settings == str(settings_override)
+        assert args.strategies == str(strategies_override)
+        assert args.command == "grid"
+        assert args.strategy == "default"
 
     def test_overridden_settings_reach_the_backtest_result(
         self, seeded_db, tmp_path, capsys

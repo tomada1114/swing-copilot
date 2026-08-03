@@ -17,15 +17,21 @@ Two behaviors matter more than throughput here:
   written exactly once at the end rather than once per chunk.
 
 Reruns are safe and cheap: a symbol whose stored history already reaches back
-to `--start` is skipped without a network call. A symbol that simply did not
-trade that early (a later IPO) never satisfies that test and is refetched on
-every run — accepted, because the alternative is recording per-symbol
-"known-empty" state this one-off tool has no reason to own.
+to `--start` is skipped without a network call. "Reaches back to `--start`"
+allows `COVERAGE_TOLERANCE_DAYS` of slack, because `--start` is a calendar
+date the operator picks (the documented example, 2019-01-01, is a market
+holiday) while the oldest bar that can exist is the first *trading* day at or
+after it. Without that slack no symbol would ever qualify and every rerun
+would refetch the whole universe. A symbol that simply did not trade that
+early (a later IPO) still never satisfies the test and is refetched on every
+run — accepted, because the alternative is recording per-symbol "known-empty"
+state this one-off tool has no reason to own.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -54,8 +60,15 @@ if TYPE_CHECKING:
 
 SYMBOL_CHUNK_SIZE = 50
 CHUNK_SLEEP_SECONDS = 2.0
+# Slack allowed between `--start` and a symbol's oldest stored bar before the
+# symbol counts as uncovered. Sized to exceed the longest US-market closure
+# (a holiday adjoining a weekend is 4 calendar days) without being large
+# enough to mask a genuinely short history.
+COVERAGE_TOLERANCE_DAYS = 7
 _PROVIDER_NAME = "yfinance"
 _DEFAULT_SETTINGS_PATH = "config/settings.yaml"
+
+logger = logging.getLogger(__name__)
 
 
 class BackfillError(SwingCopilotError):
@@ -144,8 +157,11 @@ def backfill_bars(
         how many rows were written, and every per-symbol fetch failure.
     """
     covered = deps.market_store.earliest_bar_dates(list(symbols))
+    coverage_bound = start + timedelta(days=COVERAGE_TOLERANCE_DAYS)
     skipped = tuple(
-        symbol for symbol in symbols if symbol in covered and covered[symbol] <= start
+        symbol
+        for symbol in symbols
+        if symbol in covered and covered[symbol] <= coverage_bound
     )
     already_covered = set(skipped)
     pending = [symbol for symbol in symbols if symbol not in already_covered]
@@ -207,7 +223,12 @@ def backfill_fundamentals(
     Returns:
         How many records were persisted and which symbols failed outright.
     """
-    lookback_days = (as_of - start).days
+    # `fetch_fundamentals` bounds the window at `as_of_cutoff - lookback_days`,
+    # and `as_of_cutoff` is an end-of-day instant. Counting whole days would
+    # therefore put the lower bound at the *end* of `start` and drop every
+    # filing made during the boundary day the operator explicitly asked for;
+    # the extra day moves the bound to just before `start`'s midnight.
+    lookback_days = (as_of - start).days + 1
     as_of_cutoff = _end_of_day(as_of)
     written = 0
     failed: list[str] = []
@@ -217,6 +238,10 @@ def backfill_fundamentals(
                 symbol, as_of_cutoff, lookback_days=lookback_days
             )
         except (SwingCopilotError, OSError, ValueError):
+            # Fail-soft per symbol, but never silent: an EDGAR outage and a
+            # programming error land in the same branch and are otherwise
+            # indistinguishable in the operator's summary line.
+            logger.exception("fundamentals backfill failed for %s", symbol)
             failed.append(symbol)
             continue
         deps.market_store.upsert_fundamentals(records)
@@ -302,6 +327,12 @@ def _run_bars(args: argparse.Namespace, end: date, symbols: list[str]) -> None:
     if result.failures:
         failed = ", ".join(sorted({failure.symbol for failure in result.failures}))
         sys.stdout.write(f"失敗した銘柄: {failed}\n")
+    if result.failures and not result.fetched_symbols and not result.skipped_symbols:
+        # Nothing was covered already and nothing could be fetched: the store
+        # is exactly as empty as before. Exiting 0 here would let a chained
+        # `copilot-backfill ... && copilot-backtest ...` run against it.
+        msg = "bars: 全銘柄の取得に失敗したため書き込みは行われませんでした。"
+        raise BackfillError(msg)
 
 
 def _run_fundamentals(args: argparse.Namespace, end: date, symbols: list[str]) -> None:

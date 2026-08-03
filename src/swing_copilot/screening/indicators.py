@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 # frame clone the whole per-symbol grouping -- worse than the scan it replaces.
 # Keyed on `id()` with a weak reference alongside it, because `id` values are
 # reused after garbage collection; the identity re-check rejects a stale hit.
+#
+# Caching an index at all assumes the frame is treated as immutable once it
+# has been handed to `symbol_bars` -- see that function's docstring. The row
+# count stored beside the weak reference catches the one mutation that is
+# cheap to detect (rows appended or dropped); an in-place *value* edit cannot
+# be detected without re-reading the frame, which is the cost the cache exists
+# to avoid.
 _SYMBOL_INDEX_CACHE_SIZE = 4
 
 
@@ -83,7 +90,7 @@ class _SymbolIndex:
 
 
 _symbol_index_cache: dict[
-    int, tuple[weakref.ReferenceType[pd.DataFrame], _SymbolIndex]
+    int, tuple[weakref.ReferenceType[pd.DataFrame], int, _SymbolIndex]
 ] = {}
 
 
@@ -92,16 +99,26 @@ def _symbol_index(bars: pd.DataFrame) -> _SymbolIndex:
     key = id(bars)
     cached = _symbol_index_cache.get(key)
     if cached is not None:
-        frame_ref, index = cached
-        if frame_ref() is bars:
+        frame_ref, row_count, index = cached
+        if frame_ref() is bars and row_count == len(bars):
             return index
 
     index = _SymbolIndex(bars)
+    # Drop entries whose frame the caller has already released: each one pins
+    # a full per-symbol copy of a frame that is otherwise garbage, and the
+    # FIFO cap alone would keep up to `_SYMBOL_INDEX_CACHE_SIZE` of them alive
+    # for the process lifetime.
+    for dead_key in [
+        cached_key
+        for cached_key, (cached_ref, _rows, _index) in _symbol_index_cache.items()
+        if cached_ref() is None
+    ]:
+        del _symbol_index_cache[dead_key]
     if len(_symbol_index_cache) >= _SYMBOL_INDEX_CACHE_SIZE:
         # Plain FIFO eviction: callers reuse one frame at a time, so the cache
         # exists to serve the current run, not to retain history.
         _symbol_index_cache.pop(next(iter(_symbol_index_cache)))
-    _symbol_index_cache[key] = (weakref.ref(bars), index)
+    _symbol_index_cache[key] = (weakref.ref(bars), len(bars), index)
     return index
 
 
@@ -112,6 +129,12 @@ def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | 
     it always applies the `as_of` cutoff. Callers therefore may hand it a frame
     that extends past `as_of` (the backtest does, to keep one cacheable frame
     for the whole run) without leaking look-ahead.
+
+    The per-symbol index built from `bars` is cached against the frame's
+    identity, so a frame handed to this function must be treated as immutable
+    from then on. A row-count change is detected and rebuilds the index, but
+    an in-place *value* edit (correcting a close) is not, and is served from
+    the pre-edit index; build a new frame instead.
 
     Args:
         bars: Tidy bars (`symbol, date, open, high, low, close, volume, ...`).

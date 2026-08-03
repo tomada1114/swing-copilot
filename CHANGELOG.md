@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ローリング窓しか取らないため、複数レジームをまたぐ検証に足る履歴が
   ローカルに存在しなかった。50銘柄チャンク＋チャンク間2秒スリープで取得し、
   `write_bars`は年パーティション全書き直しのコストを避けるため最後に1回だけ
-  呼ぶ。既存バーが`--start`以前まで届いている銘柄はネットワークを叩かずに
-  スキップし、銘柄単位の失敗はfail-softで集約報告する。
+  呼ぶ。既存バーが`--start`まで届いている銘柄はネットワークを叩かずに
+  スキップする（`--start`は暦日で市場休日を指しうるため、判定には
+  `COVERAGE_TOLERANCE_DAYS`=7暦日の猶予がある）。銘柄単位の失敗は
+  fail-softで集約報告し、`logging.exception`でトレースを残す。
+  1銘柄も取得できず書き込みが0行だった場合のみ終了コード1で落ちる。
   **ベンチマーク／レジーム系（`SPY`・`QQQ`・`^VIX`・`^TNX`）はS&P 500
   ユニバースに含まれないため`--symbols`で別途取得が必要**——特に`SPY`は
   バックテストの取引日カレンダーそのものである
@@ -23,15 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   不変）。`technical_signals.pullback.band_atr_multiple`（既定`null`）は
   SMA50からの距離をATR14単位で測るモードで、絶対3%帯が低ボラ銘柄を高ボラ銘柄の
   約4.5倍通過させていた事実上のローボラフィルタを解消する。ATRがNaNまたは0の
-  ときは距離が定義できないため帯を閉じる。`ranking.score_weights.atr_pct`
+  ときは距離が定義できないため帯を閉じる。帯で落ちた銘柄は却下台帳でも
+  帯が理由だと分かる（RSIが閾値を通っているのに`SIGNAL_RSI_NOT_MET`と
+  記録されない）。`ranking.score_weights.atr_pct`
   （既定`0.0`）はATR%が高いほど高得点の成分で、ATR% 6%満点の絶対正規化
-  （候補n≈5のパーセンタイルは小標本ノイズを再生産するため採らない）
-- バックテストレポートに`Exit breakdown`セクション。決済理由の内訳
+  （候補n≈5のパーセンタイルは小標本ノイズを再生産するため採らない）。
+  加重後の値は`score_atr_pct`としてスコア内訳（レポート・`analysis_input.json`
+  の`<score_breakdown>`）にも出る——合計と内訳行が食い違わないようにするため
+- バックテスト`run`レポート（`--pessimistic`の通常vs悲観比較を含む）に
+  `Exit breakdown`セクション。決済理由の内訳
   （発火0件の理由も0として必ず表示）、`max_hold`バインド率、実保有日数の
   中央値と四分位。感応度グリッドのMaxHold列が全て同値だったとき「効かない」のか
   「一度も発火していない」のかを区別するための計器。`Trade.days_held`を追加
 - `copilot-backtest`の`--settings` / `--strategies`。リポジトリの設定を
-  書き換えずに設定バリアントを比較するための入り口
+  書き換えずに設定バリアントを比較するための入り口。`grid`サブコマンドの
+  前後どちらに置いても効く（サブパーサ側の既定値でリポジトリ設定に
+  巻き戻らない）
 
 ### Changed
 

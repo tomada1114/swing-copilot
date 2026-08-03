@@ -286,3 +286,14 @@ class TestHoldingDaysStats:
         assert holding_days_stats((_exit_trade("stop", 6),)) == HoldingDaysStats(
             median=6.0, p25=6.0, p75=6.0
         )
+
+
+def test_exit_reason_breakdown_keeps_an_unknown_reason_so_counts_stay_complete():
+    # A future exit rule must not silently vanish from the report: the
+    # breakdown has to keep summing to the number of trades.
+    trades = (_exit_trade("stop", 2), _exit_trade("stall", 9))
+
+    breakdown = exit_reason_breakdown(trades)
+
+    assert breakdown["stall"] == 1
+    assert sum(breakdown.values()) == len(trades)

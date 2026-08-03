@@ -159,18 +159,19 @@ def exit_reason_breakdown(trades: tuple[Trade, ...]) -> dict[str, int]:
 
     Absent reasons are reported as `0` rather than omitted: "no position ever
     reached max-hold" is the interesting reading, and a missing key would
-    force every caller to re-state the default.
+    force every caller to re-state the default. A reason outside
+    `EXIT_REASONS` (a newly added exit rule) gets its own key rather than
+    being dropped, so the counts always sum to `len(trades)`.
 
     Args:
         trades: Closed trades to tally.
 
     Returns:
-        `{reason: count}` over exactly `EXIT_REASONS`.
+        `{reason: count}`, covering `EXIT_REASONS` plus any reason observed.
     """
     counts = dict.fromkeys(EXIT_REASONS, 0)
     for trade in trades:
-        if trade.exit_reason in counts:
-            counts[trade.exit_reason] += 1
+        counts[trade.exit_reason] = counts.get(trade.exit_reason, 0) + 1
     return counts
 
 

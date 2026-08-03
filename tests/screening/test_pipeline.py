@@ -638,15 +638,115 @@ def _metrics(
     avg_volume: float = 10.0,
     sma50: float = 100.0,
     sma200: float = 100.0,
+    atr14: float = 1.0,
 ) -> dict[str, float]:
     return {
         "rsi14": rsi14,
-        "atr14": 1.0,
+        "atr14": atr14,
         "avg_volume": avg_volume,
         "close": 100.0,
         "sma50": sma50,
         "sma200": sma200,
     }
+
+
+_ATR_PCT_RANKING = {
+    "score_weights": {
+        "rsi_pullback": 0.3,
+        "trend_quality": 0.3,
+        "liquidity": 0.2,
+        "atr_pct": 0.2,
+    }
+}
+
+
+@pytest.mark.usefixtures("score_test_signal")
+class TestAtrPctScoreComponent:
+    """The volatility ranking component added to counter the low-vol bias."""
+
+    @pytest.fixture
+    def score_test_signal(self):
+        @register_signal("score_test_signal")
+        class _AlwaysHitSignal:
+            name = "score_test_signal"
+
+            def __init__(self, settings: object) -> None:
+                pass
+
+            def evaluate(
+                self, _data: ScreeningInput, symbols: set[str]
+            ) -> list[SignalHit]:
+                return [
+                    SignalHit(
+                        symbol=symbol,
+                        signal_name=self.name,
+                        direction="long",
+                        strength=1.0,
+                        metrics={},
+                    )
+                    for symbol in sorted(symbols)
+                ]
+
+        yield "score_test_signal"
+        del SIGNAL_REGISTRY["score_test_signal"]
+
+    def test_default_weight_is_zero_so_existing_scores_are_unchanged(
+        self, settings, monkeypatch
+    ):
+        # A 3%-ATR name under the repository's default weights must score
+        # exactly as it did before the component existed.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, sma50=110.0, atr14=3.0)}
+        candidates = _score_pipeline(settings, monkeypatch, metrics_by_symbol)
+
+        aapl = candidates[0]
+        expected_rsi_pullback = (45.0 - 30.0) / 45.0
+        expected_score = 0.5 * expected_rsi_pullback + 0.3 * 1.0 + 0.2 * 0.5
+        assert aapl.metrics["score"] == pytest.approx(expected_score)
+        assert aapl.metrics["score_atr_pct"] == pytest.approx(0.0)
+
+    def test_score_matches_hand_calculation_with_the_component_weighted(
+        self, settings, monkeypatch
+    ):
+        # atr14=3.0 on close=100.0 -> ATR% 3%, half of the 6% full-marks
+        # normalization -> raw component 0.5.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, sma50=110.0, atr14=3.0)}
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        aapl = candidates[0]
+        expected_rsi_pullback = (45.0 - 30.0) / 45.0
+        expected_atr_pct = (3.0 / 100.0) / 0.06
+        expected_score = (
+            0.3 * expected_rsi_pullback + 0.3 * 1.0 + 0.2 * 0.5 + 0.2 * expected_atr_pct
+        )
+        assert aapl.metrics["score"] == pytest.approx(expected_score)
+        assert aapl.metrics["score_atr_pct"] == pytest.approx(0.2 * expected_atr_pct)
+
+    def test_the_component_saturates_at_the_full_marks_volatility(
+        self, settings, monkeypatch
+    ):
+        # ATR% 9% is above the 6% normalization, so the component clamps to
+        # 1.0 rather than scoring above full marks.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, atr14=9.0)}
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        assert candidates[0].metrics["score_atr_pct"] == pytest.approx(0.2)
+
+    def test_a_higher_volatility_name_outranks_an_otherwise_identical_one(
+        self, settings, monkeypatch
+    ):
+        metrics_by_symbol = {
+            "CALM": _metrics(rsi14=30.0, atr14=1.0),
+            "WILD": _metrics(rsi14=30.0, atr14=4.0),
+        }
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        assert [candidate.symbol for candidate in candidates] == ["WILD", "CALM"]
 
 
 class TestExtensibility:

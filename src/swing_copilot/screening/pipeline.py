@@ -50,6 +50,10 @@ _SMA_LONG_WINDOW = 200
 # Composite ranking score (P1-01, roadmap §5): normalization width for the
 # trend_quality component's (sma50/sma200 - 1) ratio.
 _TREND_QUALITY_NORMALIZATION = 0.10
+# Full marks for the atr_pct component: an ATR14 of 6% of price. Chosen well
+# above the S&P 500 median (~3.1%) so the component still discriminates among
+# the genuinely volatile names rather than saturating across the universe.
+_ATR_PCT_NORMALIZATION = 0.06
 _DAMAGED_MAX_D = -3.0
 _FAIR_MAX_D = 2.0
 _EXTENDED_MAX_D = 4.0
@@ -232,6 +236,12 @@ class ScreeningPipeline:
         current candidate set, not the full universe): ascending by
         `avg_volume`, lowest gets 0.0 and highest gets 1.0. A single-row set
         gets the fixed midpoint 0.5 (no population to rank against).
+
+        `atr_pct` is deliberately *not* a within-set percentile: with a
+        candidate set of roughly five names, a percentile would reproduce the
+        same small-population noise `liquidity` already suffers from. It is
+        normalized against a fixed ATR% instead, so the same volatility always
+        earns the same component value across runs.
         """
         weights = self._score_weights
         rsi_threshold = self._rsi_threshold
@@ -245,15 +255,25 @@ class ScreeningPipeline:
                 (metrics["sma50"] / metrics["sma200"] - 1)
                 / _TREND_QUALITY_NORMALIZATION
             )
+            atr_pct = _clamp01(
+                (metrics["atr14"] / metrics["close"]) / _ATR_PCT_NORMALIZATION
+            )
             score_rsi_pullback = weights.rsi_pullback * rsi_pullback
             score_trend_quality = weights.trend_quality * trend_quality
             score_liquidity = weights.liquidity * liquidity
+            score_atr_pct = weights.atr_pct * atr_pct
             metrics.update(
                 {
-                    "score": score_rsi_pullback + score_trend_quality + score_liquidity,
+                    "score": (
+                        score_rsi_pullback
+                        + score_trend_quality
+                        + score_liquidity
+                        + score_atr_pct
+                    ),
                     "score_rsi_pullback": score_rsi_pullback,
                     "score_trend_quality": score_trend_quality,
                     "score_liquidity": score_liquidity,
+                    "score_atr_pct": score_atr_pct,
                 }
             )
 

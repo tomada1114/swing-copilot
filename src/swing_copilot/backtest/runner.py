@@ -139,7 +139,14 @@ def run_backtest(
     )
 
     def candidates_fn(day: date) -> list[Candidate]:
-        point_in_time_bars = bars[bars["date"] <= day]
+        # Bars are handed over whole, not pre-sliced to `day`. Screening reads
+        # price history only through `indicators.symbol_bars`, which always
+        # applies the `as_of` cutoff itself, so this cannot leak look-ahead --
+        # `tests/backtest/test_runner.py` pins that equivalence. Reusing one
+        # frame lets `symbol_bars` cache its per-symbol index across the whole
+        # run; re-slicing per day would rebuild it on every simulated day and
+        # was the dominant cost of a multi-year backtest.
+        point_in_time_bars = bars
         # `filed_at` is TIMESTAMPTZ; a bare `date` can't be compared against
         # it directly (pandas raises TypeError). Match
         # `screening/fundamental_filters.py`'s end-of-day-UTC cutoff idiom for

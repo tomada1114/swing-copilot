@@ -118,7 +118,14 @@ class ScreeningPipeline:
             composite score (`score = sum(weight_i * component_i)`, P1-01),
             with symbol ascending as the deterministic tiebreak (REQ-010).
         """
-        return self.run_with_rejections(data).candidates
+        # Deliberately not `run_with_rejections(data).candidates`: classifying
+        # why every *rejected* symbol was rejected is report-facing work whose
+        # result this method discards, and it cannot influence the candidates
+        # (they are already decided by `_build_candidates`). Paying for it here
+        # made it roughly half the cost of a backtest, which calls this once
+        # per simulated day. `run_with_rejections` is unchanged for the daily
+        # path that actually renders the reasons.
+        return self._build_candidates(data)[0]
 
     def run_with_rejections(self, data: ScreeningInput) -> ScreeningResult:
         """Run the two-stage screen and also classify every rejected symbol.

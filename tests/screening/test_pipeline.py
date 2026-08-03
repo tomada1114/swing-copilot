@@ -950,3 +950,105 @@ class TestRunWithRejections:
 
         assert result.candidates == []
         assert result.rejections == []
+
+
+class TestNoLookAheadFromUnslicedBars:
+    """The backtest hands the pipeline bars extending past `as_of`.
+
+    `screening/indicators.symbol_bars` is the only way screening reads price
+    history and always applies the cutoff, so passing a whole frame must give
+    byte-identical results to passing one pre-sliced to `as_of`. If a future
+    filter or signal ever reads `data.bars` directly, this test fails instead
+    of silently introducing look-ahead into every backtest.
+    """
+
+    def test_full_frame_and_pre_sliced_frame_produce_identical_candidates(
+        self, settings
+    ):
+        as_of = date(2026, 1, 1)
+        # 500 daily bars from 2025-01-01: ~365 on or before as_of (enough for
+        # SMA200) and ~135 after it, so the unsliced frame genuinely contains
+        # future rows the pipeline must ignore.
+        closes = [100.0 + i for i in range(500)]
+        bars = pd.concat(
+            [
+                make_bars("AAA", closes, start=date(2025, 1, 1)),
+                make_bars("BBB", closes[::-1], start=date(2025, 1, 1)),
+            ],
+            ignore_index=True,
+        )
+        universe = tuple(_member(symbol) for symbol in ("AAA", "BBB"))
+        pipeline = ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+        sliced = bars[bars["date"] <= as_of].copy()
+        from_sliced = pipeline.run(
+            ScreeningInput(
+                as_of=as_of,
+                universe=universe,
+                fundamentals=pd.DataFrame(),
+                bars=sliced,
+            )
+        )
+        from_full = pipeline.run(
+            ScreeningInput(
+                as_of=as_of,
+                universe=universe,
+                fundamentals=pd.DataFrame(),
+                bars=bars.copy(),
+            )
+        )
+
+        assert [(c.symbol, c.rank, c.metrics) for c in from_full] == [
+            (c.symbol, c.rank, c.metrics) for c in from_sliced
+        ]
+        assert bars["date"].max() > as_of  # the frame really did extend past as_of
+
+
+class TestRunMatchesRunWithRejections:
+    def test_run_returns_exactly_the_candidates_of_run_with_rejections(self, settings):
+        """`run()` skips rejection classification; it must still agree."""
+        closes = [100.0 + i for i in range(400)]
+        bars = pd.concat(
+            [
+                make_bars("AAA", closes, start=date(2025, 1, 1)),
+                make_bars("BBB", closes[::-1], start=date(2025, 1, 1)),
+                make_bars("CCC", [100.0] * 400, start=date(2025, 1, 1)),
+            ],
+            ignore_index=True,
+        )
+        data = ScreeningInput(
+            as_of=date(2026, 1, 1),
+            universe=tuple(_member(s) for s in ("AAA", "BBB", "CCC")),
+            fundamentals=pd.DataFrame(),
+            bars=bars,
+        )
+        pipeline = ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+        assert [(c.symbol, c.rank, c.metrics) for c in pipeline.run(data)] == [
+            (c.symbol, c.rank, c.metrics)
+            for c in pipeline.run_with_rejections(data).candidates
+        ]

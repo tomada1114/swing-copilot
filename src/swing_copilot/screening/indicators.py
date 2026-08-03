@@ -7,13 +7,26 @@ same values (`docs/04_detailed_design.md` 2.1 #5, 3.11; `docs/05_ui_design.md`
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import date
+
+# Identity-keyed cache of `_SymbolIndex`, so a caller that reuses one frame
+# across many `as_of` values (the backtest loop) pays the grouping cost once
+# instead of once per lookup.
+#
+# Deliberately NOT stored on `bars.attrs`: pandas deep-copies `attrs` in
+# pandas' own `__finalize__`, so parking the index there makes every derived
+# frame clone the whole per-symbol grouping -- worse than the scan it replaces.
+# Keyed on `id()` with a weak reference alongside it, because `id` values are
+# reused after garbage collection; the identity re-check rejects a stale hit.
+_SYMBOL_INDEX_CACHE_SIZE = 4
 
 
 def percentile_ranks(values: Mapping[str, float]) -> dict[str, float]:
@@ -38,8 +51,67 @@ def percentile_ranks(values: Mapping[str, float]) -> dict[str, float]:
     return ranks
 
 
+class _SymbolIndex:
+    """Date-sorted per-symbol views of one bars frame, cut by binary search.
+
+    The naive lookup masks the whole frame twice per call. A backtest asks for
+    every symbol on every simulated day, so that is O(days x symbols x rows) --
+    for a multi-year S&P 500 run, on the order of 10^11 row comparisons, which
+    is what made full-period backtests unrunnable. Grouping once and slicing by
+    `searchsorted` makes each lookup O(log n) without changing what is returned.
+    """
+
+    __slots__ = ("_groups",)
+
+    def __init__(self, bars: pd.DataFrame) -> None:
+        self._groups: dict[str, tuple[pd.DataFrame, np.ndarray]] = {}
+        # `kind="stable"` so rows sharing a date keep their original relative
+        # order, matching the previous mask-then-sort behavior.
+        ordered = bars.sort_values(["symbol", "date"], kind="stable")
+        for symbol, group in ordered.groupby("symbol", sort=False):
+            dates = pd.to_datetime(group["date"]).to_numpy()
+            self._groups[str(symbol)] = (group, dates)
+
+    def slice_to(self, symbol: str, as_of: date) -> pd.DataFrame | None:
+        """Return `symbol`'s rows dated at or before `as_of`, or `None`."""
+        entry = self._groups.get(symbol)
+        if entry is None:
+            return None
+        group, dates = entry
+        cut = int(np.searchsorted(dates, np.datetime64(pd.Timestamp(as_of)), "right"))
+        return group.iloc[:cut] if cut else None
+
+
+_symbol_index_cache: dict[
+    int, tuple[weakref.ReferenceType[pd.DataFrame], _SymbolIndex]
+] = {}
+
+
+def _symbol_index(bars: pd.DataFrame) -> _SymbolIndex:
+    """Return `bars`' cached symbol index, building it on first use."""
+    key = id(bars)
+    cached = _symbol_index_cache.get(key)
+    if cached is not None:
+        frame_ref, index = cached
+        if frame_ref() is bars:
+            return index
+
+    index = _SymbolIndex(bars)
+    if len(_symbol_index_cache) >= _SYMBOL_INDEX_CACHE_SIZE:
+        # Plain FIFO eviction: callers reuse one frame at a time, so the cache
+        # exists to serve the current run, not to retain history.
+        _symbol_index_cache.pop(next(iter(_symbol_index_cache)))
+    _symbol_index_cache[key] = (weakref.ref(bars), index)
+    return index
+
+
 def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | None:
     """Return `symbol`'s bars up to `as_of`, sorted by date, or `None` if empty.
+
+    This is the single gateway through which screening reads price history, and
+    it always applies the `as_of` cutoff. Callers therefore may hand it a frame
+    that extends past `as_of` (the backtest does, to keep one cacheable frame
+    for the whole run) without leaking look-ahead.
 
     Args:
         bars: Tidy bars (`symbol, date, open, high, low, close, volume, ...`).
@@ -49,10 +121,9 @@ def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | 
     Returns:
         The symbol's bars, sorted by date, or `None` if there are none.
     """
-    subset = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)].sort_values(
-        "date"
-    )
-    return subset if not subset.empty else None
+    if bars.empty:
+        return None
+    return _symbol_index(bars).slice_to(symbol, as_of)
 
 
 def sma(series: pd.Series, window: int) -> pd.Series:

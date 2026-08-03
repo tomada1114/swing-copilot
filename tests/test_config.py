@@ -316,6 +316,14 @@ def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
             {"technical_signals": {"pullback": {"sma_band_pct": 1.01}}},
             id="sma-band-over-one",
         ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"band_atr_multiple": 0.0}}},
+            id="band-atr-multiple-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"band_atr_multiple": -1.0}}},
+            id="band-atr-multiple-negative",
+        ),
     ],
 )
 def test_settings_rejects_out_of_range_screening_ratios_and_thresholds(overrides):
@@ -505,3 +513,17 @@ class TestRetroConfig:
         for duplicated in ("neutral_threshold_pct", "preliminary_sample_threshold"):
             with pytest.raises(ValidationError):
                 Settings.model_validate({"retro": {duplicated: 1.0}})
+
+
+def test_band_atr_multiple_defaults_to_none_so_screening_behavior_is_unchanged():
+    settings = load_settings("config/settings.yaml")
+
+    assert settings.technical_signals.pullback.band_atr_multiple is None
+
+
+def test_band_atr_multiple_accepts_a_positive_multiple():
+    settings = Settings.model_validate(
+        {"technical_signals": {"pullback": {"band_atr_multiple": 2.0}}}
+    )
+
+    assert settings.technical_signals.pullback.band_atr_multiple == pytest.approx(2.0)

@@ -339,9 +339,7 @@ class PullbackRSISignal:
                 continue
             last_close = series["close"].iloc[-1]
             last_sma50 = float(sma50.iloc[-1])
-            within_band = (
-                abs(last_close - last_sma50) / last_sma50 <= self._config.sma_band_pct
-            )
+            within_band = self._within_band(series, last_close, last_sma50)
             if rsi.iloc[-1] < self._config.rsi_threshold and within_band:
                 hits.append(
                     SignalHit(
@@ -353,6 +351,28 @@ class PullbackRSISignal:
                     )
                 )
         return hits
+
+    def _within_band(
+        self, series: pd.DataFrame, last_close: float, last_sma50: float
+    ) -> bool:
+        """Whether the close sits inside the pullback band around SMA50.
+
+        Two exclusive modes. The default measures the gap as a fixed
+        percentage of SMA50; `band_atr_multiple` instead measures it in ATR14
+        units, matching how `execution.fair_max_d` already reasons about
+        distance from SMA50 elsewhere in the pipeline. An ATR that is NaN or
+        zero leaves the distance undefined, so the band closes rather than
+        admitting a symbol whose volatility cannot be measured.
+        """
+        distance = abs(last_close - last_sma50)
+        multiple = self._config.band_atr_multiple
+        if multiple is None:
+            return distance / last_sma50 <= self._config.sma_band_pct
+
+        atr14 = wilder_atr(series["high"], series["low"], series["close"]).iloc[-1]
+        if pd.isna(atr14) or atr14 <= 0:
+            return False
+        return distance / float(atr14) <= multiple
 
 
 @register_filter("volume_min")

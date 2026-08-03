@@ -145,6 +145,13 @@ class PullbackSignalConfig(_StrictModel):
     rsi_period: int = Field(default=14, ge=1)
     rsi_threshold: float = Field(default=45.0, ge=0.0, le=100.0)
     sma_band_pct: float = Field(default=0.03, ge=0.0, le=1.0)
+    # When set, the distance from SMA50 is measured in ATR14 units instead of
+    # as a fixed percentage, and `sma_band_pct` is ignored. A fixed 3% band
+    # admits low-volatility names roughly 4.5x as often as high-volatility
+    # ones, which is the low-volatility bias this mode exists to remove. Left
+    # at None so the default screening behavior is unchanged; adopting it is
+    # a human decision made against the comparison report.
+    band_atr_multiple: float | None = Field(default=None, gt=0.0)
 
 
 class VolumeFilterConfig(_StrictModel):

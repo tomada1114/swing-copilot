@@ -7,7 +7,7 @@ your development environment and submit changes.
 
 Install these tools:
 
-- [Python 3.12+](https://www.python.org/)
+- [Python 3.14+](https://www.python.org/)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Just](https://just.systems/man/en/installation.html) (optional — you can run
   `uv run` commands directly)

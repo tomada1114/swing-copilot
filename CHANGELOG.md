@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- サポートするPythonを3.14単一に引き上げ（`requires-python = ">=3.14"`）。
+  ローカル（`.python-version`）・lint・build・docs・pip-audit・releaseは元々
+  すべて3.12固定で、テストマトリクスだけが3.12/3.13/3.14に広がっており、
+  「実際に開発・リリースしている版」と「テストしている版の集合」が一致して
+  いなかった。ruffの`target-version`とmypyの`python_version`も3.14へ揃える。
+  PEP 758により`except`の括弧が不要になったため、`ruff format`が3箇所を
+  `except A, B:`へ整形する（Python 2の構文に見えるが3.14の正式な文法）。
+  CIの`test`ジョブはマトリクスを廃して単一ジョブになり、あわせて3.12だけに
+  付いていたcodecovアップロードの条件分岐（他バージョンより所要時間が
+  長くなる原因だった）も不要になった。将来的な複数バージョン検証は
+  `matrix.python-version`を戻すだけで再開できる
 - 感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(80,90,100,110,120)%`から
   `(40,70,100,140,200)%`へ拡張。ATR軸が±50%を探索するのに時間軸だけ±20%という
   非対称では、そのパラメータが効かないのか振り足りないのかを区別できない

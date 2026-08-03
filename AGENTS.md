@@ -9,7 +9,7 @@ document for Claude Code skills to interpret, ingests their sourced answer, and
 produces reports. It never calls a model API itself, and it never places
 orders; a human makes every buy/sell decision.
 
-The project uses Python 3.12+, uv, hatchling, a strict `src/` layout, ruff,
+The project uses Python 3.14+, uv, hatchling, a strict `src/` layout, ruff,
 mypy strict, pytest, DuckDB, and Parquet.
 
 ## Quick Reference

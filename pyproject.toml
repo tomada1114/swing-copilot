@@ -7,7 +7,7 @@ name = "swing-copilot"
 version = "0.1.0"
 description = "Decision-support batch pipeline for US equity swing/position trading."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "tomada", email = "tmasuyama1114@gmail.com" }]
@@ -16,8 +16,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
@@ -84,7 +82,7 @@ packages = ["src/swing_copilot"]
 # --------------------------------------------------------------------------- #
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 88
 src = ["src", "tests", "scripts"]
 
@@ -183,7 +181,7 @@ indent-style = "space"
 # --------------------------------------------------------------------------- #
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 warn_return_any = true
 warn_unused_configs = true

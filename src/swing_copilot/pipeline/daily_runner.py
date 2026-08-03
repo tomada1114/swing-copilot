@@ -48,6 +48,7 @@ from swing_copilot.pipeline.daily import (
     _warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
+from swing_copilot.storage.tracking_records import OPEN
 
 logger = logging.getLogger(__name__)
 _HISTORICAL_POSITION_NOTICE = (
@@ -57,9 +58,10 @@ _HISTORICAL_POSITION_NOTICE = (
 __all__ = ["DailyDependencies", "run_daily"]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from swing_copilot.data.base import BarFetchResult
+    from swing_copilot.models import Position
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
@@ -67,6 +69,54 @@ if TYPE_CHECKING:
     from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate, RejectionRecord
+
+
+def _held_symbols(
+    deps: DailyDependencies,
+    portfolio: Sequence[Position],
+    *,
+    is_historical: bool,
+) -> set[str]:
+    """Union the real open positions with the tracked open virtual ones.
+
+    This set only decides what gets *collected and analysed* -- the held-first
+    text/filing targets of `docs/04_detailed_design.md` 3.14. It is deliberately
+    not the `portfolio` passed to the risk step: a virtual position must never
+    reach sizing, concentration, or correlation as if the account held it.
+
+    Until real trading starts, `positions` is always empty, and the only record
+    of what is notionally held is `verdict_positions`, the virtual ledger of
+    past `proceed` verdicts. Without reading it, held-symbol news collection
+    never fires at all, and Finnhub company-news cannot be fetched
+    retroactively, so every missed day is permanent data loss.
+
+    A historical replay (`--as-of`) deliberately skips the ledger and keeps the
+    held set to the (empty) real positions: the ledger records the *current*
+    position state with no point-in-time history, so reading it would leak
+    today's knowledge into a past as-of date.
+
+    A ledger read failure is fail-soft: it is logged and the virtual side is
+    treated as empty rather than failing the run over an analysis-scope input.
+
+    Args:
+        deps: Dependency bundle supplying the `state_store` to read.
+        portfolio: Real open positions (empty on a historical replay).
+        is_historical: Whether this run replays an explicit `--as-of` date.
+
+    Returns:
+        Symbols to prioritise as held for collection and analysis.
+    """
+    symbols = {position.symbol for position in portfolio}
+    if is_historical:
+        return symbols
+    try:
+        tracked = deps.state_store.get_verdict_positions(OPEN)
+    except Exception:
+        logger.exception(
+            "verdict tracking ledger unreadable: continuing without virtual positions"
+        )
+        return symbols
+    return symbols | {position.symbol for position in tracked}
 
 
 def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionally linear
@@ -88,7 +138,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     portfolio = (
         [] if is_historical else deps.state_store.get_open_positions(is_paper=True)
     )
-    held_symbols = {position.symbol for position in portfolio}
+    held_symbols = _held_symbols(deps, portfolio, is_historical=is_historical)
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
     # The market strip is never screened but must be fetched for report context.
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})

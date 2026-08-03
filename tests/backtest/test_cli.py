@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from swing_copilot.backtest import cli as cli_module
 from swing_copilot.backtest.cli import (
+    DEFAULT_SETTINGS_PATH,
     BacktestCliError,
     ReportMeta,
     _atomic_write,
@@ -819,6 +821,15 @@ def test_real_settings_and_strategies_load():
     assert settings.backtest.benchmark == "SPY"
 
 
+def _settings_copy(tmp_path: Path, *, initial_cash_usd: int) -> Path:
+    """A real settings.yaml with one backtest value replaced, for --settings."""
+    raw = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
+    raw["backtest"]["initial_cash_usd"] = initial_cash_usd
+    override = tmp_path / "settings-variant.yaml"
+    override.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return override
+
+
 def _meta() -> ReportMeta:
     return ReportMeta(strategy="default", start=_D0, end=_D1, missing_data_symbols=[])
 
@@ -876,3 +887,88 @@ class TestExitBreakdownRendering:
 
         assert "Exit breakdown" in text
         assert "max_hold binding rate" in text
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestSettingsOverride:
+    def test_settings_flag_defaults_to_the_repository_settings_path(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+
+        assert args.settings == DEFAULT_SETTINGS_PATH
+
+    def test_grid_subcommand_accepts_its_own_settings_override(self, tmp_path):
+        override = tmp_path / "settings.yaml"
+
+        args = _parse_args(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+                "--settings",
+                str(override),
+            ]
+        )
+
+        assert args.settings == str(override)
+
+    def test_overridden_settings_reach_the_backtest_result(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        override = _settings_copy(tmp_path, initial_cash_usd=50_000)
+        output_path = tmp_path / "out" / "report.md"
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--settings",
+                str(override),
+            ]
+        )
+
+        # No trades fire in this 10-day window, so final equity is exactly the
+        # overridden starting cash -- not the repository default of 100,000.
+        assert "| final_equity | $50,000.00 |" in output_path.read_text(
+            encoding="utf-8"
+        )
+        assert "$100,000.00" not in capsys.readouterr().out
+
+    def test_a_missing_settings_file_fails_before_any_backtest_runs(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "report.md"),
+                    "--settings",
+                    str(tmp_path / "nope.yaml"),
+                ]
+            )
+
+        assert not (tmp_path / "report.md").exists()

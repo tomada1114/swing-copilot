@@ -38,7 +38,7 @@ from swing_copilot.backtest.sensitivity import (
     judge_grid,
 )
 from swing_copilot.config import load_settings, load_strategies
-from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
@@ -57,6 +57,10 @@ if TYPE_CHECKING:
     from swing_copilot.universe import UniverseMember
 
 _DEFAULT_OUTPUT_DIR = Path("reports/backtests")
+# Overridable so a configuration variant can be compared against the baseline
+# without editing the repository's own settings.yaml (`tracking/cli.py` sets
+# the same precedent).
+DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 _CONSOLE_WIDTH = 200
 
 
@@ -86,6 +90,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -694,7 +699,11 @@ def _run_grid_command(
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse args, run the backtest or grid, print + write the report."""
     args = _parse_args(argv)
-    settings = load_settings()
+    try:
+        settings = load_settings(args.settings)
+    except ConfigError as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(1) from exc
     strategies = load_strategies()
 
     if args.command == "grid":

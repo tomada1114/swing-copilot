@@ -65,7 +65,7 @@ def _git_tracked_files(repo_root: Path) -> list[Path] | None:
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError, subprocess.CalledProcessError:
         return None
 
     files = []
@@ -114,7 +114,7 @@ def _replace_placeholders_in_file(path: Path, replacements: dict[str, str]) -> b
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
+    except UnicodeDecodeError, OSError:
         return False
 
     new_text = text

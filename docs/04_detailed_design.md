@@ -126,7 +126,7 @@ pipeline/cli (composition root, imperative shell)
 
 ## 3. モジュール別詳細
 
-以下、各モジュールについて「責務」「主要クラス/関数のシグネチャとdocstring」「依存」「エラー処理」を示す。型ヒントはPython 3.12構文（`list[str]`等）を用いる。DataFrameライブラリは、yfinance・edgartoolsとの境界変換を増やさないためpandas（`pd`）へ統一する。
+以下、各モジュールについて「責務」「主要クラス/関数のシグネチャとdocstring」「依存」「エラー処理」を示す。型ヒントはPython 3.14構文（`list[str]`等）を用いる。DataFrameライブラリは、yfinance・edgartoolsとの境界変換を増やさないためpandas（`pd`）へ統一する。
 
 ### 3.1 `config.py`
 

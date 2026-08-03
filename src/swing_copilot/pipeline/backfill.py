@@ -237,7 +237,7 @@ def backfill_fundamentals(
             records = deps.edgar_client.fetch_fundamentals(
                 symbol, as_of_cutoff, lookback_days=lookback_days
             )
-        except (SwingCopilotError, OSError, ValueError):
+        except SwingCopilotError, OSError, ValueError:
             # Fail-soft per symbol, but never silent: an EDGAR outage and a
             # programming error land in the same branch and are otherwise
             # indistinguishable in the operator's summary line.

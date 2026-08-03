@@ -500,11 +500,11 @@ class TestRenderGrid:
     def test_terminal_shows_verdict_matrix_and_gray_marker(self):
         gray_cell = GridCell(
             atr_multiplier_pct=50,
-            max_hold_pct=80,
+            max_hold_pct=40,
             expectancy_per_trade=1.0,
             trade_count=5,
         )
-        grid = _grid_result(cell_overrides={(50, 80): gray_cell})
+        grid = _grid_result(cell_overrides={(50, 40): gray_cell})
         meta = ReportMeta(
             strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
         )

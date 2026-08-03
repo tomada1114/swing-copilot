@@ -2127,7 +2127,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | 項目 | 値 | 設定キー |
 |---|---|---|
 | ATRストップ倍率グリッド | 基準値比{50,75,100,125,150}% | `backtest/sensitivity.py::ATR_MULTIPLIER_PCT_GRID`（固定、要検証ではない） |
-| 最大保有日数グリッド | 基準値比{80,90,100,110,120}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
+| 最大保有日数グリッド | 基準値比{40,70,100,140,200}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
 | 灰色扱い（結論に使わない）の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（P2-07の閾値を再利用） |
 | スパイク（過学習疑い）判定 | 最良セル > 非灰色4近傍の中央値 × 1.5 | `backtest.sensitivity_spike_multiplier=1.5`（要検証） |
 | プラトー（頑健）判定 | 全非灰色セルが最良値の±20%以内 | `backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点=最良セル値） |

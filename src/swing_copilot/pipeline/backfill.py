@@ -174,9 +174,10 @@ def backfill_bars(
     deps.market_store.write_bars(
         _stamp_bars(combined, deps.provider_name, deps.clock.now())
     )
-    fetched = tuple(
-        symbol for symbol in pending if symbol in set(combined["symbol"].unique())
-    )
+    # Build the symbol set once: the comprehension would otherwise rebuild it
+    # from every fetched row for each of the ~500 pending symbols.
+    fetched_symbols = set(combined["symbol"].unique())
+    fetched = tuple(symbol for symbol in pending if symbol in fetched_symbols)
     return BarsBackfillResult(
         skipped_symbols=skipped,
         fetched_symbols=fetched,

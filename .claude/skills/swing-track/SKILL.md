@@ -3,7 +3,7 @@ name: swing-track
 description: >
   Review the verdict-tracking ledger: every past `proceed` verdict treated as a
   virtual position bought at that run's close and carried forward under the same
-  exit rules as the backtest (2.5×ATR14 trailing stop, 60-session max hold).
+  exit rules as the backtest (2.5×ATR14 trailing stop, 25-session max hold).
   Runs `copilot-track update`, reads the ledger with `list` / `show`, pairs each
   position's current state against the reasons the verdict gave at the time, and
   records the conclusion as a dated note or a manual close.
@@ -16,7 +16,7 @@ description: >
 # 仮想ポジション追跡ふりかえり（日次の戦術ループ）
 
 `swing-daily` が `proceed` と判定した銘柄を「その run の終値で仮想的に買った」とみなし、
-backtest と**同一の手仕舞いルール**（2.5×ATR14 トレーリングストップ + 最大保有 60 営業日）で
+backtest と**同一の手仕舞いルール**（2.5×ATR14 トレーリングストップ + 最大保有 25 営業日）で
 追跡した台帳を読む。目的は売買の指示ではなく、**「当時の判断はどうだったか」を頻繁にふりかえる**こと。
 
 台帳の数値・手仕舞い判定はすべて Python の決定論コードが出す。
@@ -174,7 +174,7 @@ uv run copilot-track close --run-id <UUID> --symbol <SYM> --note "<覆した理�
 ## Step 5: 構造的な改善アイデアが出た場合
 
 「ストップ倍率が浅すぎるのでは」「この signal は proceed の根拠として弱いのでは」
-「max_hold 60 日は長すぎるのでは」といった**構造的な観察は、このスキルでは実施しない**。
+「max_hold 25 日は長すぎるのでは」といった**構造的な観察は、このスキルでは実施しない**。
 
 - config / コードを編集しない。バックテストで検証もしない
 - 観察を Step 4 のメモとして台帳に残し（後から証拠になる）、
@@ -198,7 +198,7 @@ uv run copilot-track close --run-id <UUID> --symbol <SYM> --note "<覆した理�
 
 - `config/` および `src/` の編集（改善提案は `swing-retro` の PR フロー経由。
   このスキルに変更権限は無い）
-- 追跡ルールの決定論的な数値（`exit_atr_multiple` = 2.5、`max_hold_days` = 60、
+- 追跡ルールの決定論的な数値（`exit_atr_multiple` = 2.5、`max_hold_days` = 25、
   ATR 期間 14）の書き換え、および台帳の entry_price / stop / 含み損益 /
   確定損益の再計算・訂正（AC1）
 - `copilot-track close` / `note` 以外の書き込み。とくに DuckDB を SQL で直接

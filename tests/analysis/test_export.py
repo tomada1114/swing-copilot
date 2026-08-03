@@ -179,6 +179,7 @@ def _request(
                 "score_rsi_pullback": 0.2,
                 "score_trend_quality": 0.2,
                 "score_liquidity": 0.1,
+                "score_atr_pct": 0.0,
             },
             rank=1,
         ),

@@ -181,6 +181,7 @@ def _context(
             "score_rsi_pullback": 0.167,
             "score_trend_quality": 0.300,
             "score_liquidity": 0.160,
+            "score_atr_pct": 0.000,
         },
         rank=1,
     )

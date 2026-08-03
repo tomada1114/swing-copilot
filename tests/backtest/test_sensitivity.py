@@ -63,16 +63,16 @@ class TestGridParamValues:
         cells = grid_param_values(base_atr_multiplier=2.5, base_max_hold_days=60)
 
         assert len(cells) == 25
-        assert cells[0] == (50, 80, 1.25, 48)
+        assert cells[0] == (50, 40, 1.25, 24)
         assert cells[12] == (100, 100, 2.5, 60)
-        assert cells[24] == (150, 120, 3.75, 72)
+        assert cells[24] == (150, 200, 3.75, 120)
 
     def test_max_hold_days_rounds_and_floors_at_one(self):
         cells = grid_param_values(base_atr_multiplier=1.0, base_max_hold_days=1)
 
-        # 50% of 1 day rounds to 0, floored to the minimum of 1 day.
+        # 40% of 1 day rounds to 0, floored to the minimum of 1 day.
         atr_pct, max_hold_pct, _atr_value, max_hold_days = cells[0]
-        assert (atr_pct, max_hold_pct) == (50, 80)
+        assert (atr_pct, max_hold_pct) == (50, 40)
         assert max_hold_days == 1
 
 

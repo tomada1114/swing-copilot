@@ -35,6 +35,10 @@ technical_signals:
     rsi_period: 14 # >= 1
     rsi_threshold: 45 # closed interval [0, 100]
     sma_band_pct: 0.03 # fraction in [0, 1]
+    # null: 従来どおり sma_band_pct（絶対%）で帯を判定する。
+    # 数値を入れると SMA50 からの距離を ATR14 単位で測り sma_band_pct は無視する
+    # （> 0.0）。既定値の変更＝採用判断は比較レポートを見た人間が行う。
+    band_atr_multiple: null
   volume:
     avg_volume_days: 20 # >= 1
     min_avg_volume: 1000000 # >= 0

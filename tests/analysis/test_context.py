@@ -45,6 +45,7 @@ def _full_score_metrics() -> dict[str, float]:
         "score_rsi_pullback": 0.401,
         "score_trend_quality": 0.251,
         "score_liquidity": 0.160,
+        "score_atr_pct": 0.000,
     }
 
 
@@ -73,10 +74,17 @@ class TestScoreBreakdown:
         assert "rsi_pullback（加重後）: 0.401" in block
         assert "trend_quality（加重後）: 0.251" in block
         assert "liquidity（加重後）: 0.160" in block
+        assert "atr_pct（加重後）: 0.000" in block
 
     @pytest.mark.parametrize(
         "missing",
-        ["score", "score_rsi_pullback", "score_trend_quality", "score_liquidity"],
+        [
+            "score",
+            "score_rsi_pullback",
+            "score_trend_quality",
+            "score_liquidity",
+            "score_atr_pct",
+        ],
     )
     def test_any_missing_component_degrades_to_an_empty_block(self, missing):
         metrics = _full_score_metrics()

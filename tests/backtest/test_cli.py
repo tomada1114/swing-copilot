@@ -8,9 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from swing_copilot.backtest import cli as cli_module
 from swing_copilot.backtest.cli import (
+    DEFAULT_SETTINGS_PATH,
+    DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
     _atomic_write,
@@ -30,6 +33,11 @@ from swing_copilot.backtest.cli import (
     render_terminal_comparison,
 )
 from swing_copilot.backtest.engine import BacktestResult, Trade
+from swing_copilot.backtest.metrics import (
+    exit_reason_breakdown,
+    holding_days_stats,
+    max_hold_binding_rate,
+)
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
     MAX_HOLD_PCT_GRID,
@@ -74,6 +82,9 @@ def _result(
         expectancy_per_trade=80.0 if trades else None,
         avg_r_multiple=0.5 if trades else None,
         warnings=warnings,
+        exit_reason_counts=tuple(exit_reason_breakdown(trades).items()),
+        max_hold_binding_rate=max_hold_binding_rate(trades),
+        holding_days=holding_days_stats(trades),
     )
 
 
@@ -492,11 +503,11 @@ class TestRenderGrid:
     def test_terminal_shows_verdict_matrix_and_gray_marker(self):
         gray_cell = GridCell(
             atr_multiplier_pct=50,
-            max_hold_pct=80,
+            max_hold_pct=40,
             expectancy_per_trade=1.0,
             trade_count=5,
         )
-        grid = _grid_result(cell_overrides={(50, 80): gray_cell})
+        grid = _grid_result(cell_overrides={(50, 40): gray_cell})
         meta = ReportMeta(
             strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
         )
@@ -809,3 +820,286 @@ def test_real_settings_and_strategies_load():
     strategies = load_strategies()
     assert "default" in strategies.strategies
     assert settings.backtest.benchmark == "SPY"
+
+
+def _settings_copy(tmp_path: Path, *, initial_cash_usd: int) -> Path:
+    """A real settings.yaml with one backtest value replaced, for --settings."""
+    raw = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
+    raw["backtest"]["initial_cash_usd"] = initial_cash_usd
+    override = tmp_path / "settings-variant.yaml"
+    override.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return override
+
+
+def _meta() -> ReportMeta:
+    return ReportMeta(strategy="default", start=_D0, end=_D1, missing_data_symbols=[])
+
+
+def _exit_trade(reason: str, days_held: int) -> Trade:
+    return Trade(
+        symbol="AAA",
+        entry_date=_D0,
+        entry_price=100.0,
+        exit_date=_D1,
+        exit_price=104.0,
+        shares=10,
+        exit_reason=reason,
+        days_held=days_held,
+    )
+
+
+class TestExitBreakdownRendering:
+    _TRADES = (
+        _exit_trade("stop", 3),
+        _exit_trade("stop", 5),
+        _exit_trade("max_hold", 25),
+        _exit_trade("end_of_backtest", 7),
+    )
+
+    def test_markdown_has_an_exit_breakdown_section_with_every_reason(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        assert "## Exit breakdown" in markdown
+        assert "| stop | 2 |" in markdown
+        assert "| max_hold | 1 |" in markdown
+        assert "| end_of_backtest | 1 |" in markdown
+
+    def test_markdown_reports_the_max_hold_binding_rate(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        assert "| max_hold binding rate | 25.00% |" in markdown
+
+    def test_markdown_reports_holding_day_quartiles(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        # Sorted holding days 3, 5, 7, 25 -> p25 4.5, median 6.0, p75 11.5
+        assert "| holding days (median) | 6.0 |" in markdown
+        assert "| holding days (p25 / p75) | 4.5 / 11.5 |" in markdown
+
+    def test_markdown_marks_every_exit_statistic_unavailable_without_trades(self):
+        markdown = render_markdown(_result(), _meta())
+
+        assert "## Exit breakdown" in markdown
+        assert "| max_hold binding rate | N/A |" in markdown
+        assert "| holding days (median) | N/A |" in markdown
+
+    def test_terminal_renders_the_exit_breakdown_table(self):
+        text = render_terminal(_result(trades=self._TRADES), _meta())
+
+        assert "Exit breakdown" in text
+        assert "max_hold binding rate" in text
+
+    def test_pessimistic_comparison_renders_the_exit_breakdown_for_both(self):
+        # A higher slippage assumption is exactly where the stop-vs-max_hold
+        # split matters, so the comparison report must not drop it.
+        normal = _result(trades=self._TRADES)
+        pessimistic = _result(trades=(_exit_trade("stop", 3),))
+
+        text = render_terminal_comparison(normal, pessimistic, _meta())
+        markdown = render_markdown_comparison(normal, pessimistic, _meta())
+
+        assert "Exit breakdown: normal vs pessimistic" in text
+        assert "## Exit breakdown" in markdown
+        assert "| Exit | Normal (x1.0) | Pessimistic |" in markdown
+        assert "| stop | 2 | 1 |" in markdown
+
+    def test_a_reason_only_one_scenario_produced_renders_as_zero(self):
+        # `max_hold` never fires in the pessimistic run here. It must still
+        # occupy a row with an explicit 0, so the reader can tell "the higher
+        # slippage stopped everything out first" from "this scenario's report
+        # simply omits the reason".
+        normal = _result(trades=self._TRADES)
+        pessimistic = _result(trades=(_exit_trade("stop", 3),))
+
+        markdown = render_markdown_comparison(normal, pessimistic, _meta())
+
+        assert "| max_hold | 1 | 0 |" in markdown
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestSettingsOverride:
+    def test_settings_flag_defaults_to_the_repository_settings_path(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+
+        assert args.settings == DEFAULT_SETTINGS_PATH
+
+    def test_grid_subcommand_accepts_its_own_settings_override(self, tmp_path):
+        override = tmp_path / "settings.yaml"
+
+        args = _parse_args(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+                "--settings",
+                str(override),
+            ]
+        )
+
+        assert args.settings == str(override)
+
+    def test_settings_given_before_the_grid_subcommand_survive(self, tmp_path):
+        # argparse parses a subcommand into a fresh namespace and copies all
+        # of it onto the shared one, so a real default on the subparser would
+        # silently snap these back to the repository files and the grid would
+        # measure the baseline while its report named the variant.
+        settings_override = tmp_path / "settings.yaml"
+        strategies_override = tmp_path / "strategies.yaml"
+
+        args = _parse_args(
+            [
+                "--settings",
+                str(settings_override),
+                "--strategies",
+                str(strategies_override),
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+
+        assert args.settings == str(settings_override)
+        assert args.strategies == str(strategies_override)
+        assert args.command == "grid"
+        assert args.strategy == "default"
+
+    def test_overridden_settings_reach_the_backtest_result(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        override = _settings_copy(tmp_path, initial_cash_usd=50_000)
+        output_path = tmp_path / "out" / "report.md"
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--settings",
+                str(override),
+            ]
+        )
+
+        # No trades fire in this 10-day window, so final equity is exactly the
+        # overridden starting cash -- not the repository default of 100,000.
+        assert "| final_equity | $50,000.00 |" in output_path.read_text(
+            encoding="utf-8"
+        )
+        assert "$100,000.00" not in capsys.readouterr().out
+
+    def test_a_missing_settings_file_fails_before_any_backtest_runs(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "report.md"),
+                    "--settings",
+                    str(tmp_path / "nope.yaml"),
+                ]
+            )
+
+        assert not (tmp_path / "report.md").exists()
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestStrategiesOverride:
+    """`--strategies`: score_weights variants live in strategies.yaml, not settings."""
+
+    def test_strategies_flag_defaults_to_the_repository_strategies_path(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+
+        assert args.strategies == DEFAULT_STRATEGIES_PATH
+
+    def test_an_overridden_strategy_name_is_accepted(self, seeded_db, tmp_path):
+        db_path, days = seeded_db
+        override = tmp_path / "strategies-variant.yaml"
+        override.write_text(
+            "strategies:\n"
+            "  volatility_tilt:\n"
+            "    filters_all: []\n"
+            "    signals_all: [pullback_rsi]\n"
+            "    candidate_limit: 5\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.3\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        atr_pct: 0.2\n",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "out" / "report.md"
+
+        main(
+            [
+                "--strategy",
+                "volatility_tilt",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--strategies",
+                str(override),
+            ]
+        )
+
+        assert "# Backtest: volatility_tilt" in output_path.read_text(encoding="utf-8")
+
+    def test_a_missing_strategies_file_fails_before_any_backtest_runs(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "report.md"),
+                    "--strategies",
+                    str(tmp_path / "nope.yaml"),
+                ]
+            )
+
+        assert not (tmp_path / "report.md").exists()

@@ -145,6 +145,13 @@ class PullbackSignalConfig(_StrictModel):
     rsi_period: int = Field(default=14, ge=1)
     rsi_threshold: float = Field(default=45.0, ge=0.0, le=100.0)
     sma_band_pct: float = Field(default=0.03, ge=0.0, le=1.0)
+    # When set, the distance from SMA50 is measured in ATR14 units instead of
+    # as a fixed percentage, and `sma_band_pct` is ignored. A fixed 3% band
+    # admits low-volatility names roughly 4.5x as often as high-volatility
+    # ones, which is the low-volatility bias this mode exists to remove. Left
+    # at None so the default screening behavior is unchanged; adopting it is
+    # a human decision made against the comparison report.
+    band_atr_multiple: float | None = Field(default=None, gt=0.0)
 
 
 class VolumeFilterConfig(_StrictModel):
@@ -452,6 +459,11 @@ class ScoreWeights(_StrictModel):
     rsi_pullback: float = Field(default=0.5, ge=0.0)
     trend_quality: float = Field(default=0.3, ge=0.0)
     liquidity: float = Field(default=0.2, ge=0.0)
+    # Rewards volatility, countering `rsi_pullback`'s structural preference
+    # for quiet names ("the lower the RSI, the higher the score"). Defaults to
+    # 0.0 so no shipped strategy's ranking changes; adopting it is a human
+    # decision made against the comparison report.
+    atr_pct: float = Field(default=0.0, ge=0.0)
 
 
 class RankingConfig(_StrictModel):
@@ -491,7 +503,12 @@ class StrategiesConfig(_StrictModel):
     def _require_score_weights_sum_to_one(self) -> StrategiesConfig:
         for key, spec in self.strategies.items():
             weights = spec.ranking.score_weights
-            total = weights.rsi_pullback + weights.trend_quality + weights.liquidity
+            total = (
+                weights.rsi_pullback
+                + weights.trend_quality
+                + weights.liquidity
+                + weights.atr_pct
+            )
             if not math.isclose(total, 1.0, abs_tol=_SCORE_WEIGHT_SUM_TOLERANCE):
                 msg = (
                     f"strategy '{key}': ranking.score_weights must sum to "

@@ -28,6 +28,7 @@ _SCORE_METRIC_KEYS = (
     "score_rsi_pullback",
     "score_trend_quality",
     "score_liquidity",
+    "score_atr_pct",
 )
 
 
@@ -105,6 +106,7 @@ def format_score_breakdown(candidate: Candidate) -> str:
         f"rsi_pullback（加重後）: {values['score_rsi_pullback']:.3f}\n"
         f"trend_quality（加重後）: {values['score_trend_quality']:.3f}\n"
         f"liquidity（加重後）: {values['score_liquidity']:.3f}\n"
+        f"atr_pct（加重後）: {values['score_atr_pct']:.3f}\n"
         "</score_breakdown>\n"
     )
 

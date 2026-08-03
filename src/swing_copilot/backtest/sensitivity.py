@@ -19,7 +19,11 @@ if TYPE_CHECKING:
 # Grid points as a percentage of the strategy's base (`settings.backtest`)
 # value. Fixed by roadmap §5 P2-10 -- not a (要検証) threshold, so not config.
 ATR_MULTIPLIER_PCT_GRID: tuple[int, ...] = (50, 75, 100, 125, 150)
-MAX_HOLD_PCT_GRID: tuple[int, ...] = (80, 90, 100, 110, 120)
+# Widened from the original +/-20% band: with the ATR axis sweeping +/-50%,
+# a time axis that only reached +/-20% could not tell "max-hold does not
+# matter" apart from "max-hold was never varied enough to bind". At the
+# configured 25-session base these are 10/18/25/35/50 sessions.
+MAX_HOLD_PCT_GRID: tuple[int, ...] = (40, 70, 100, 140, 200)
 _GRID_COLS = len(MAX_HOLD_PCT_GRID)
 
 SPIKE = "SPIKE"

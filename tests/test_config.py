@@ -166,6 +166,56 @@ class TestLoadStrategies:
         assert weights.trend_quality == pytest.approx(0.2)
         assert weights.liquidity == pytest.approx(0.2)
 
+    def test_atr_pct_defaults_to_zero_so_shipped_rankings_are_unchanged(self):
+        strategies = load_strategies("config/strategies.yaml")
+
+        for spec in strategies.strategies.values():
+            assert spec.ranking.score_weights.atr_pct == pytest.approx(0.0)
+
+    def test_atr_pct_counts_toward_the_sum_to_one_requirement(self, tmp_path):
+        # The other three weights already sum to 1.0, so adding atr_pct must
+        # be rejected rather than silently accepted alongside them.
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.5\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        atr_pct: 0.2\n"
+        )
+
+        with pytest.raises(ConfigError, match="default") as exc_info:
+            load_strategies(str(bad))
+        assert "1.2" in str(exc_info.value)
+
+    def test_score_weights_including_atr_pct_that_sum_to_one_are_accepted(
+        self, tmp_path
+    ):
+        good = tmp_path / "strategies.yaml"
+        good.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.3\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        atr_pct: 0.2\n"
+        )
+
+        weights = load_strategies(str(good)).strategies["default"].ranking.score_weights
+
+        assert weights.atr_pct == pytest.approx(0.2)
+
 
 class TestLoadSecrets:
     def test_loads_without_dotenv_file(self, tmp_path, monkeypatch):
@@ -315,6 +365,14 @@ def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
         pytest.param(
             {"technical_signals": {"pullback": {"sma_band_pct": 1.01}}},
             id="sma-band-over-one",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"band_atr_multiple": 0.0}}},
+            id="band-atr-multiple-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"pullback": {"band_atr_multiple": -1.0}}},
+            id="band-atr-multiple-negative",
         ),
     ],
 )
@@ -505,3 +563,17 @@ class TestRetroConfig:
         for duplicated in ("neutral_threshold_pct", "preliminary_sample_threshold"):
             with pytest.raises(ValidationError):
                 Settings.model_validate({"retro": {duplicated: 1.0}})
+
+
+def test_band_atr_multiple_defaults_to_none_so_screening_behavior_is_unchanged():
+    settings = load_settings("config/settings.yaml")
+
+    assert settings.technical_signals.pullback.band_atr_multiple is None
+
+
+def test_band_atr_multiple_accepts_a_positive_multiple():
+    settings = Settings.model_validate(
+        {"technical_signals": {"pullback": {"band_atr_multiple": 2.0}}}
+    )
+
+    assert settings.technical_signals.pullback.band_atr_multiple == pytest.approx(2.0)

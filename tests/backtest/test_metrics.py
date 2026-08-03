@@ -11,6 +11,7 @@ import pytest
 from swing_copilot.backtest.engine import Trade
 from swing_copilot.backtest.metrics import (
     LOOKAHEAD_SUSPICION_WARNING,
+    HoldingDaysStats,
     compute_avg_r_multiple,
     compute_expectancy_per_trade,
     compute_max_drawdown_pct,
@@ -18,6 +19,9 @@ from swing_copilot.backtest.metrics import (
     compute_reliability_warnings,
     compute_sharpe,
     compute_win_rate,
+    exit_reason_breakdown,
+    holding_days_stats,
+    max_hold_binding_rate,
 )
 from swing_copilot.config import BacktestConfig
 
@@ -204,3 +208,92 @@ class TestComputeReliabilityWarnings:
         config = BacktestConfig()
         warnings = compute_reliability_warnings(200, 0.5, max_drawdown_pct, config)
         assert (LOOKAHEAD_SUSPICION_WARNING in warnings) is expect_warning
+
+
+def _exit_trade(reason: str, days_held: int) -> Trade:
+    return Trade(
+        symbol="AAA",
+        entry_date=_D0,
+        entry_price=100.0,
+        exit_date=_D1,
+        exit_price=101.0,
+        shares=10,
+        exit_reason=reason,
+        days_held=days_held,
+    )
+
+
+class TestExitReasonBreakdown:
+    def test_counts_every_reason_including_the_absent_ones(self):
+        trades = (
+            _exit_trade("stop", 3),
+            _exit_trade("stop", 4),
+            _exit_trade("max_hold", 25),
+        )
+
+        assert exit_reason_breakdown(trades) == {
+            "stop": 2,
+            "max_hold": 1,
+            "end_of_backtest": 0,
+        }
+
+    def test_reports_all_zeros_for_an_empty_trade_log(self):
+        assert exit_reason_breakdown(()) == {
+            "stop": 0,
+            "max_hold": 0,
+            "end_of_backtest": 0,
+        }
+
+    def test_counts_the_forced_final_liquidation_separately(self):
+        trades = (_exit_trade("stop", 1), _exit_trade("end_of_backtest", 12))
+
+        assert exit_reason_breakdown(trades)["end_of_backtest"] == 1
+
+
+class TestMaxHoldBindingRate:
+    def test_is_the_max_hold_share_of_all_exits(self):
+        trades = (
+            _exit_trade("max_hold", 25),
+            _exit_trade("stop", 4),
+            _exit_trade("stop", 5),
+            _exit_trade("end_of_backtest", 9),
+        )
+
+        assert max_hold_binding_rate(trades) == 0.25
+
+    def test_is_none_without_trades(self):
+        assert max_hold_binding_rate(()) is None
+
+    def test_is_one_when_every_exit_hit_max_hold(self):
+        trades = (_exit_trade("max_hold", 25), _exit_trade("max_hold", 25))
+
+        assert max_hold_binding_rate(trades) == 1.0
+
+
+class TestHoldingDaysStats:
+    def test_returns_hand_calculated_median_and_quartiles(self):
+        # Sorted holding days: 1, 3, 5, 7, 9 -> median 5, p25 3, p75 7
+        trades = tuple(_exit_trade("stop", days) for days in (5, 1, 9, 3, 7))
+
+        assert holding_days_stats(trades) == HoldingDaysStats(
+            median=5.0, p25=3.0, p75=7.0
+        )
+
+    def test_is_none_without_trades(self):
+        assert holding_days_stats(()) is None
+
+    def test_a_single_trade_collapses_every_quantile_onto_it(self):
+        assert holding_days_stats((_exit_trade("stop", 6),)) == HoldingDaysStats(
+            median=6.0, p25=6.0, p75=6.0
+        )
+
+
+def test_exit_reason_breakdown_keeps_an_unknown_reason_so_counts_stay_complete():
+    # A future exit rule must not silently vanish from the report: the
+    # breakdown has to keep summing to the number of trades.
+    trades = (_exit_trade("stop", 2), _exit_trade("stall", 9))
+
+    breakdown = exit_reason_breakdown(trades)
+
+    assert breakdown["stall"] == 1
+    assert sum(breakdown.values()) == len(trades)

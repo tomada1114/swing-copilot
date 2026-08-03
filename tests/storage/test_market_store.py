@@ -508,3 +508,36 @@ class TestHasFundamentalsFetchedOn:
         )
 
         assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+
+
+class TestEarliestBarDates:
+    def test_returns_oldest_stored_date_per_symbol(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAPL", "2019-01-02", 1.0, 1.0, 1.0, 1.0, 1),
+                    ("AAPL", "2020-01-02", 1.0, 1.0, 1.0, 1.0, 1),
+                    ("MSFT", "2021-06-01", 1.0, 1.0, 1.0, 1.0, 1),
+                ]
+            )
+        )
+
+        assert market_store.earliest_bar_dates(["AAPL", "MSFT"]) == {
+            "AAPL": date(2019, 1, 2),
+            "MSFT": date(2021, 6, 1),
+        }
+
+    def test_omits_symbols_with_no_stored_bars(self, market_store):
+        market_store.write_bars(_bars([("AAPL", "2019-01-02", 1.0, 1.0, 1.0, 1.0, 1)]))
+
+        assert market_store.earliest_bar_dates(["AAPL", "NVDA"]) == {
+            "AAPL": date(2019, 1, 2)
+        }
+
+    def test_returns_empty_mapping_before_any_partition_exists(self, market_store):
+        assert market_store.earliest_bar_dates(["AAPL"]) == {}
+
+    def test_returns_empty_mapping_for_empty_symbol_list(self, market_store):
+        market_store.write_bars(_bars([("AAPL", "2019-01-02", 1.0, 1.0, 1.0, 1.0, 1)]))
+
+        assert market_store.earliest_bar_dates([]) == {}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,6 +22,12 @@ _TRADING_DAYS_PER_YEAR = 252
 # roadmap §5 P2-07: "日次リターンが1件以下ならNone" -- need at least 2 daily
 # returns (i.e. 3 equity points) for a defined sample standard deviation.
 _MIN_RETURNS_FOR_SHARPE = 2
+
+MAX_HOLD_REASON = "max_hold"
+# Every reason `engine._settle_exit` can stamp on a Trade. Kept here, next to
+# the breakdown that reports it, so a new exit rule fails this list loudly
+# instead of silently vanishing from the report.
+EXIT_REASONS = ("stop", MAX_HOLD_REASON, "end_of_backtest")
 
 LOOKAHEAD_SUSPICION_WARNING = (
     "ルックアヘッド疑い（勝率が極端に高い、または最大ドローダウンが極小）"
@@ -136,3 +143,71 @@ def compute_reliability_warnings(
         warnings.append(LOOKAHEAD_SUSPICION_WARNING)
 
     return tuple(warnings)
+
+
+@dataclass(frozen=True, slots=True)
+class HoldingDaysStats:
+    """Holding-period distribution across a trade log, in sessions."""
+
+    median: float
+    p25: float
+    p75: float
+
+
+def exit_reason_breakdown(trades: tuple[Trade, ...]) -> dict[str, int]:
+    """Count exits per reason, always reporting every reason the engine can emit.
+
+    Absent reasons are reported as `0` rather than omitted: "no position ever
+    reached max-hold" is the interesting reading, and a missing key would
+    force every caller to re-state the default. A reason outside
+    `EXIT_REASONS` (a newly added exit rule) gets its own key rather than
+    being dropped, so the counts always sum to `len(trades)`.
+
+    Args:
+        trades: Closed trades to tally.
+
+    Returns:
+        `{reason: count}`, covering `EXIT_REASONS` plus any reason observed.
+    """
+    counts = dict.fromkeys(EXIT_REASONS, 0)
+    for trade in trades:
+        counts[trade.exit_reason] = counts.get(trade.exit_reason, 0) + 1
+    return counts
+
+
+def max_hold_binding_rate(trades: tuple[Trade, ...]) -> float | None:
+    """Share of exits that fired because max-hold elapsed, not because of a stop.
+
+    A near-zero rate means the configured `max_hold_days` is not binding, so
+    tuning it cannot change the result — the question the exit instrumentation
+    exists to answer.
+
+    Args:
+        trades: Closed trades to tally.
+
+    Returns:
+        The fraction in `[0, 1]`, or `None` when there are no trades.
+    """
+    if not trades:
+        return None
+    binding = sum(1 for trade in trades if trade.exit_reason == MAX_HOLD_REASON)
+    return binding / len(trades)
+
+
+def holding_days_stats(trades: tuple[Trade, ...]) -> HoldingDaysStats | None:
+    """Median and quartiles of realized holding periods.
+
+    Args:
+        trades: Closed trades to summarize.
+
+    Returns:
+        The distribution, or `None` when there are no trades. With a single
+        trade every quantile collapses onto that trade's holding period.
+    """
+    if not trades:
+        return None
+    held = sorted(float(trade.days_held) for trade in trades)
+    if len(held) == 1:
+        return HoldingDaysStats(median=held[0], p25=held[0], p75=held[0])
+    p25, median, p75 = statistics.quantiles(held, n=4, method="inclusive")
+    return HoldingDaysStats(median=median, p25=p25, p75=p75)

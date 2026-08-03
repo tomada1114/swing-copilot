@@ -345,6 +345,24 @@ class TestCandidateAggregationAndRanking:
 
         assert candidates == []
 
+    def test_symbol_dropped_when_the_last_close_is_zero(self, settings):
+        # `_score_rows`'s `atr_pct` component divides by the close, so a
+        # corrupt or placeholder row would abort the whole run -- every
+        # symbol's screening, not just the bad one -- instead of costing the
+        # one symbol. The NaN guard alone does not cover it: 0.0 is not NaN.
+        bars = _uptrend_bars("AAPL")
+        bars.loc[bars.index[-1], "close"] = 0.0
+        universe = (_member("AAPL"),)
+        data = ScreeningInput(
+            as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
+        )
+
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        assert pipeline.run(data) == []
+
     def test_same_input_produces_identical_candidates_across_runs(self, settings):
         bars = pd.concat(
             [
@@ -625,6 +643,7 @@ class TestCompositeScoring:
             "score_rsi_pullback",
             "score_trend_quality",
             "score_liquidity",
+            "score_atr_pct",
         } <= candidates[0].metrics.keys()
 
     def test_empty_candidate_set_produces_no_error(self, settings, monkeypatch):
@@ -638,15 +657,115 @@ def _metrics(
     avg_volume: float = 10.0,
     sma50: float = 100.0,
     sma200: float = 100.0,
+    atr14: float = 1.0,
 ) -> dict[str, float]:
     return {
         "rsi14": rsi14,
-        "atr14": 1.0,
+        "atr14": atr14,
         "avg_volume": avg_volume,
         "close": 100.0,
         "sma50": sma50,
         "sma200": sma200,
     }
+
+
+_ATR_PCT_RANKING = {
+    "score_weights": {
+        "rsi_pullback": 0.3,
+        "trend_quality": 0.3,
+        "liquidity": 0.2,
+        "atr_pct": 0.2,
+    }
+}
+
+
+@pytest.mark.usefixtures("score_test_signal")
+class TestAtrPctScoreComponent:
+    """The volatility ranking component added to counter the low-vol bias."""
+
+    @pytest.fixture
+    def score_test_signal(self):
+        @register_signal("score_test_signal")
+        class _AlwaysHitSignal:
+            name = "score_test_signal"
+
+            def __init__(self, settings: object) -> None:
+                pass
+
+            def evaluate(
+                self, _data: ScreeningInput, symbols: set[str]
+            ) -> list[SignalHit]:
+                return [
+                    SignalHit(
+                        symbol=symbol,
+                        signal_name=self.name,
+                        direction="long",
+                        strength=1.0,
+                        metrics={},
+                    )
+                    for symbol in sorted(symbols)
+                ]
+
+        yield "score_test_signal"
+        del SIGNAL_REGISTRY["score_test_signal"]
+
+    def test_default_weight_is_zero_so_existing_scores_are_unchanged(
+        self, settings, monkeypatch
+    ):
+        # A 3%-ATR name under the repository's default weights must score
+        # exactly as it did before the component existed.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, sma50=110.0, atr14=3.0)}
+        candidates = _score_pipeline(settings, monkeypatch, metrics_by_symbol)
+
+        aapl = candidates[0]
+        expected_rsi_pullback = (45.0 - 30.0) / 45.0
+        expected_score = 0.5 * expected_rsi_pullback + 0.3 * 1.0 + 0.2 * 0.5
+        assert aapl.metrics["score"] == pytest.approx(expected_score)
+        assert aapl.metrics["score_atr_pct"] == pytest.approx(0.0)
+
+    def test_score_matches_hand_calculation_with_the_component_weighted(
+        self, settings, monkeypatch
+    ):
+        # atr14=3.0 on close=100.0 -> ATR% 3%, half of the 6% full-marks
+        # normalization -> raw component 0.5.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, sma50=110.0, atr14=3.0)}
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        aapl = candidates[0]
+        expected_rsi_pullback = (45.0 - 30.0) / 45.0
+        expected_atr_pct = (3.0 / 100.0) / 0.06
+        expected_score = (
+            0.3 * expected_rsi_pullback + 0.3 * 1.0 + 0.2 * 0.5 + 0.2 * expected_atr_pct
+        )
+        assert aapl.metrics["score"] == pytest.approx(expected_score)
+        assert aapl.metrics["score_atr_pct"] == pytest.approx(0.2 * expected_atr_pct)
+
+    def test_the_component_saturates_at_the_full_marks_volatility(
+        self, settings, monkeypatch
+    ):
+        # ATR% 9% is above the 6% normalization, so the component clamps to
+        # 1.0 rather than scoring above full marks.
+        metrics_by_symbol = {"AAPL": _metrics(rsi14=30.0, atr14=9.0)}
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        assert candidates[0].metrics["score_atr_pct"] == pytest.approx(0.2)
+
+    def test_a_higher_volatility_name_outranks_an_otherwise_identical_one(
+        self, settings, monkeypatch
+    ):
+        metrics_by_symbol = {
+            "CALM": _metrics(rsi14=30.0, atr14=1.0),
+            "WILD": _metrics(rsi14=30.0, atr14=4.0),
+        }
+        candidates = _score_pipeline(
+            settings, monkeypatch, metrics_by_symbol, ranking=_ATR_PCT_RANKING
+        )
+
+        assert [candidate.symbol for candidate in candidates] == ["WILD", "CALM"]
 
 
 class TestExtensibility:
@@ -850,3 +969,105 @@ class TestRunWithRejections:
 
         assert result.candidates == []
         assert result.rejections == []
+
+
+class TestNoLookAheadFromUnslicedBars:
+    """The backtest hands the pipeline bars extending past `as_of`.
+
+    `screening/indicators.symbol_bars` is the only way screening reads price
+    history and always applies the cutoff, so passing a whole frame must give
+    byte-identical results to passing one pre-sliced to `as_of`. If a future
+    filter or signal ever reads `data.bars` directly, this test fails instead
+    of silently introducing look-ahead into every backtest.
+    """
+
+    def test_full_frame_and_pre_sliced_frame_produce_identical_candidates(
+        self, settings
+    ):
+        as_of = date(2026, 1, 1)
+        # 500 daily bars from 2025-01-01: ~365 on or before as_of (enough for
+        # SMA200) and ~135 after it, so the unsliced frame genuinely contains
+        # future rows the pipeline must ignore.
+        closes = [100.0 + i for i in range(500)]
+        bars = pd.concat(
+            [
+                make_bars("AAA", closes, start=date(2025, 1, 1)),
+                make_bars("BBB", closes[::-1], start=date(2025, 1, 1)),
+            ],
+            ignore_index=True,
+        )
+        universe = tuple(_member(symbol) for symbol in ("AAA", "BBB"))
+        pipeline = ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+        sliced = bars[bars["date"] <= as_of].copy()
+        from_sliced = pipeline.run(
+            ScreeningInput(
+                as_of=as_of,
+                universe=universe,
+                fundamentals=pd.DataFrame(),
+                bars=sliced,
+            )
+        )
+        from_full = pipeline.run(
+            ScreeningInput(
+                as_of=as_of,
+                universe=universe,
+                fundamentals=pd.DataFrame(),
+                bars=bars.copy(),
+            )
+        )
+
+        assert [(c.symbol, c.rank, c.metrics) for c in from_full] == [
+            (c.symbol, c.rank, c.metrics) for c in from_sliced
+        ]
+        assert bars["date"].max() > as_of  # the frame really did extend past as_of
+
+
+class TestRunMatchesRunWithRejections:
+    def test_run_returns_exactly_the_candidates_of_run_with_rejections(self, settings):
+        """`run()` skips rejection classification; it must still agree."""
+        closes = [100.0 + i for i in range(400)]
+        bars = pd.concat(
+            [
+                make_bars("AAA", closes, start=date(2025, 1, 1)),
+                make_bars("BBB", closes[::-1], start=date(2025, 1, 1)),
+                make_bars("CCC", [100.0] * 400, start=date(2025, 1, 1)),
+            ],
+            ignore_index=True,
+        )
+        data = ScreeningInput(
+            as_of=date(2026, 1, 1),
+            universe=tuple(_member(s) for s in ("AAA", "BBB", "CCC")),
+            fundamentals=pd.DataFrame(),
+            bars=bars,
+        )
+        pipeline = ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+        assert [(c.symbol, c.rank, c.metrics) for c in pipeline.run(data)] == [
+            (c.symbol, c.rank, c.metrics)
+            for c in pipeline.run_with_rejections(data).candidates
+        ]

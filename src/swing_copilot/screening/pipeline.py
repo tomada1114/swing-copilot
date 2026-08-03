@@ -50,6 +50,10 @@ _SMA_LONG_WINDOW = 200
 # Composite ranking score (P1-01, roadmap §5): normalization width for the
 # trend_quality component's (sma50/sma200 - 1) ratio.
 _TREND_QUALITY_NORMALIZATION = 0.10
+# Full marks for the atr_pct component: an ATR14 of 6% of price. Chosen well
+# above the S&P 500 median (~3.1%) so the component still discriminates among
+# the genuinely volatile names rather than saturating across the universe.
+_ATR_PCT_NORMALIZATION = 0.06
 _DAMAGED_MAX_D = -3.0
 _FAIR_MAX_D = 2.0
 _EXTENDED_MAX_D = 4.0
@@ -114,7 +118,14 @@ class ScreeningPipeline:
             composite score (`score = sum(weight_i * component_i)`, P1-01),
             with symbol ascending as the deterministic tiebreak (REQ-010).
         """
-        return self.run_with_rejections(data).candidates
+        # Deliberately not `run_with_rejections(data).candidates`: classifying
+        # why every *rejected* symbol was rejected is report-facing work whose
+        # result this method discards, and it cannot influence the candidates
+        # (they are already decided by `_build_candidates`). Paying for it here
+        # made it roughly half the cost of a backtest, which calls this once
+        # per simulated day. `run_with_rejections` is unchanged for the daily
+        # path that actually renders the reasons.
+        return self._build_candidates(data)[0]
 
     def run_with_rejections(self, data: ScreeningInput) -> ScreeningResult:
         """Run the two-stage screen and also classify every rejected symbol.
@@ -232,6 +243,12 @@ class ScreeningPipeline:
         current candidate set, not the full universe): ascending by
         `avg_volume`, lowest gets 0.0 and highest gets 1.0. A single-row set
         gets the fixed midpoint 0.5 (no population to rank against).
+
+        `atr_pct` is deliberately *not* a within-set percentile: with a
+        candidate set of roughly five names, a percentile would reproduce the
+        same small-population noise `liquidity` already suffers from. It is
+        normalized against a fixed ATR% instead, so the same volatility always
+        earns the same component value across runs.
         """
         weights = self._score_weights
         rsi_threshold = self._rsi_threshold
@@ -245,15 +262,25 @@ class ScreeningPipeline:
                 (metrics["sma50"] / metrics["sma200"] - 1)
                 / _TREND_QUALITY_NORMALIZATION
             )
+            atr_pct = _clamp01(
+                (metrics["atr14"] / metrics["close"]) / _ATR_PCT_NORMALIZATION
+            )
             score_rsi_pullback = weights.rsi_pullback * rsi_pullback
             score_trend_quality = weights.trend_quality * trend_quality
             score_liquidity = weights.liquidity * liquidity
+            score_atr_pct = weights.atr_pct * atr_pct
             metrics.update(
                 {
-                    "score": score_rsi_pullback + score_trend_quality + score_liquidity,
+                    "score": (
+                        score_rsi_pullback
+                        + score_trend_quality
+                        + score_liquidity
+                        + score_atr_pct
+                    ),
                     "score_rsi_pullback": score_rsi_pullback,
                     "score_trend_quality": score_trend_quality,
                     "score_liquidity": score_liquidity,
+                    "score_atr_pct": score_atr_pct,
                 }
             )
 
@@ -264,7 +291,10 @@ class ScreeningPipeline:
         Computed independently of whichever signals happen to be configured,
         so ranking and report metrics are always available and consistent
         (docs/04_detailed_design.md 2.1 #4). A symbol with any NaN metric
-        (e.g. insufficient history) is dropped from the candidate set.
+        (e.g. insufficient history) is dropped from the candidate set, as is
+        one whose last close is non-positive: `_score_rows` divides by it, so
+        a corrupt or placeholder row would otherwise abort the entire run
+        rather than costing the one bad symbol.
         """
         series = symbol_bars(data.bars, symbol, data.as_of)
         if series is None or len(series) < max(
@@ -288,6 +318,8 @@ class ScreeningPipeline:
             or pd.isna(sma50)
             or pd.isna(sma200)
         ):
+            return None
+        if close <= 0:
             return None
         return {
             "rsi14": float(rsi14),

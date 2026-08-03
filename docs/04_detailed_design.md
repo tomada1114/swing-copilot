@@ -533,7 +533,7 @@ class ScreeningPipeline:
         """
 ```
 
-**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidityの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
+**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidity/atr_pctの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
@@ -1112,7 +1112,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **P2-09実装時追記（roadmap §5 P2-09）**: `backtest.slippage_multiplier`（既定1.0）を追加し、`BacktestEngine`は`slippage_pct * slippage_multiplier`を単一の`self._slippage_pct`としてエントリー・エグジット（強制清算含む、`_settle_exit`が全exit経路の共通ハンドラのため自動的に両方へ効く）両方に適用する。悲観プリセットは`backtest.pessimistic_slippage_multiplier=1.75`（出典: backtest-expertの1.5〜2.0帯の中央値、要検証）。`BacktestCostOverrides`に`slippage_multiplier: float | None`を追加し、`copilot-backtest --pessimistic`は同一`BacktestRequest`を通常(×1.0)・悲観(×1.75)の2回`run_backtest`実行し、`render_terminal_comparison`/`render_markdown_comparison`（`ReportMeta`共有）で指標差分表を出力する。両レンダー関数は引数過多(PLR0913)回避のため`render_terminal`/`render_markdown`も含め`ReportMeta`（strategy/start/end/missing_data_symbols）dataclassへ統一した。乗数1.0は既存デフォルト計算と完全一致（`test_multiplier_one_matches_default_entry_and_exit_prices`で回帰確認）し、悲観側`final_equity`は通常側以下になることをテストで保証する。
 
-**P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{80,90,100,110,120}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
+**P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{40,70,100,140,200}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）
 
@@ -1568,6 +1568,29 @@ src/swing_copilot/tracking/
 当日のrun自身のverdictはこの時点ではまだ`analysis_result.json`が書かれておらず取り込まれていないため、建玉されるのは翌日のrunである。`retro_collect`が既に持つのと同じ1日の遅れで、エントリー価格はどちらにせよそのrun日の終値なので影響はない。
 
 CLIの操作面は`docs/reference.md`が正本。エントリポイントは`copilot-track = "swing_copilot.tracking.cli:main"`の1行追加。
+
+### 3.25 `pipeline/backfill.py` と低ボラバイアス是正（`copilot-backfill`）
+
+日次runが取る価格履歴は400暦日のローリング窓であり、複数レジーム（2020年暴落・2022年弱気・2021/2023-24強気）をまたぐバックテストには足りない。`pipeline/backfill.py`（`copilot-backfill`）は、その履歴を一度だけまとめて取り込む一回限りのツールである。日次経路とは独立に置き、既存のアダプタ（`YFinanceProvider`・`EdgarClient`）とリポジトリ（`MarketStore`）を通す——生の`yf.download`を直接叩く経路を作らないのは、タイムアウト・リトライ・レート制限の契約を迂回しないためである。
+
+チャンク分割（50銘柄）とチャンク間スリープ（2秒）はyfinance側にレート制限が無いことへの配慮で、`write_bars`の呼び出しを最後の1回に集約するのは年パーティション全書き直しのコストを銘柄数に比例させないためである。レジューム条件は「既存バーの最古日が`--start`以前」であり、後年上場の銘柄は毎回再取得される（銘柄単位の「取得済みだが空」台帳を持たない割り切り）。操作面は`docs/reference.md`が正本。
+
+このフェーズの是正対象は、スクリーニング候補が構造的に低ボラ銘柄へ偏る2つの機構である。
+
+1. `pullback_rsi`の帯`|close − SMA50| / SMA50 ≤ 0.03`が事実上のローボラフィルタとして働く（ATR% < 2.5%の通過率44.0%に対し、ATR% > 5%は9.7%）
+2. ランキング最大重み`rsi_pullback: 0.5`が「RSIが低いほど高得点」である
+
+いずれも**既定では無効**なスイッチとして是正手段だけを追加した。`PullbackSignalConfig.band_atr_multiple`（既定`null`）はSMA50からの距離をATR14単位で測るモードで、`sma_band_pct`とは排他である。距離をATR単位で測る発想はパイプラインに既にあり、`execution.fair_max_d: 2.0`と`screening/pipeline.py`の`_execution_distance = (close - sma50) / atr14`が同じ尺度を使っている。プルバック帯だけが無関係な絶対%を使っていた内部不整合の解消でもある。ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
+
+`ScoreWeights.atr_pct`（既定`0.0`）はATR%が高いほど高得点の成分で、`_ATR_PCT_NORMALIZATION = 0.06`を満点とする絶対正規化である。候補集合内パーセンタイルを採らないのは、候補が5件程度の集合では`liquidity`成分が既に抱える小標本ノイズを再生産するためである。`score_weights`の合計1.0検証（フィールド名直書き）にも加算する。
+
+旧モードを消さずに両方残しているのは、採用判断を比較実験の結果に基づいて人間が行うためで、先に既定を差し替えるとA/B比較そのものが不能になる。バックテスト側の`--settings` / `--strategies`は、この比較をリポジトリの設定を書き換えずに回すための入り口である（`score_weights`は`strategies.yaml`側にあるので、`--settings`だけでは重みバリアントを表現できない）。
+
+決済側の計器として`Trade.days_held`と`BacktestResult`の3フィールド（決済理由内訳・`max_hold`バインド率・保有日数の中央値/四分位）を追加し、感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(40, 70, 100, 140, 200)%`へ広げた。ATR軸が±50%を探索するのに時間軸だけ±20%では、「そのパラメータが効かない」のか「一度も発火していない」のかを区別できないためである。
+
+なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない。
+
+---
 
 ---
 
@@ -2127,7 +2150,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | 項目 | 値 | 設定キー |
 |---|---|---|
 | ATRストップ倍率グリッド | 基準値比{50,75,100,125,150}% | `backtest/sensitivity.py::ATR_MULTIPLIER_PCT_GRID`（固定、要検証ではない） |
-| 最大保有日数グリッド | 基準値比{80,90,100,110,120}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
+| 最大保有日数グリッド | 基準値比{40,70,100,140,200}% | `backtest/sensitivity.py::MAX_HOLD_PCT_GRID`（固定、要検証ではない） |
 | 灰色扱い（結論に使わない）の閾値 | trade_count < 30 | `backtest.insufficient_trade_count_threshold=30`（P2-07の閾値を再利用） |
 | スパイク（過学習疑い）判定 | 最良セル > 非灰色4近傍の中央値 × 1.5 | `backtest.sensitivity_spike_multiplier=1.5`（要検証） |
 | プラトー（頑健）判定 | 全非灰色セルが最良値の±20%以内 | `backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点=最良セル値） |

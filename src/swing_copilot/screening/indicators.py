@@ -7,13 +7,33 @@ same values (`docs/04_detailed_design.md` 2.1 #5, 3.11; `docs/05_ui_design.md`
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import date
+
+# Identity-keyed cache of `_SymbolIndex`, so a caller that reuses one frame
+# across many `as_of` values (the backtest loop) pays the grouping cost once
+# instead of once per lookup.
+#
+# Deliberately NOT stored on `bars.attrs`: pandas deep-copies `attrs` in
+# pandas' own `__finalize__`, so parking the index there makes every derived
+# frame clone the whole per-symbol grouping -- worse than the scan it replaces.
+# Keyed on `id()` with a weak reference alongside it, because `id` values are
+# reused after garbage collection; the identity re-check rejects a stale hit.
+#
+# Caching an index at all assumes the frame is treated as immutable once it
+# has been handed to `symbol_bars` -- see that function's docstring. The row
+# count stored beside the weak reference catches the one mutation that is
+# cheap to detect (rows appended or dropped); an in-place *value* edit cannot
+# be detected without re-reading the frame, which is the cost the cache exists
+# to avoid.
+_SYMBOL_INDEX_CACHE_SIZE = 4
 
 
 def percentile_ranks(values: Mapping[str, float]) -> dict[str, float]:
@@ -38,8 +58,83 @@ def percentile_ranks(values: Mapping[str, float]) -> dict[str, float]:
     return ranks
 
 
+class _SymbolIndex:
+    """Date-sorted per-symbol views of one bars frame, cut by binary search.
+
+    The naive lookup masks the whole frame twice per call. A backtest asks for
+    every symbol on every simulated day, so that is O(days x symbols x rows) --
+    for a multi-year S&P 500 run, on the order of 10^11 row comparisons, which
+    is what made full-period backtests unrunnable. Grouping once and slicing by
+    `searchsorted` makes each lookup O(log n) without changing what is returned.
+    """
+
+    __slots__ = ("_groups",)
+
+    def __init__(self, bars: pd.DataFrame) -> None:
+        self._groups: dict[str, tuple[pd.DataFrame, np.ndarray]] = {}
+        # `kind="stable"` so rows sharing a date keep their original relative
+        # order, matching the previous mask-then-sort behavior.
+        ordered = bars.sort_values(["symbol", "date"], kind="stable")
+        for symbol, group in ordered.groupby("symbol", sort=False):
+            dates = pd.to_datetime(group["date"]).to_numpy()
+            self._groups[str(symbol)] = (group, dates)
+
+    def slice_to(self, symbol: str, as_of: date) -> pd.DataFrame | None:
+        """Return `symbol`'s rows dated at or before `as_of`, or `None`."""
+        entry = self._groups.get(symbol)
+        if entry is None:
+            return None
+        group, dates = entry
+        cut = int(np.searchsorted(dates, np.datetime64(pd.Timestamp(as_of)), "right"))
+        return group.iloc[:cut] if cut else None
+
+
+_symbol_index_cache: dict[
+    int, tuple[weakref.ReferenceType[pd.DataFrame], int, _SymbolIndex]
+] = {}
+
+
+def _symbol_index(bars: pd.DataFrame) -> _SymbolIndex:
+    """Return `bars`' cached symbol index, building it on first use."""
+    key = id(bars)
+    cached = _symbol_index_cache.get(key)
+    if cached is not None:
+        frame_ref, row_count, index = cached
+        if frame_ref() is bars and row_count == len(bars):
+            return index
+
+    index = _SymbolIndex(bars)
+    # Drop entries whose frame the caller has already released: each one pins
+    # a full per-symbol copy of a frame that is otherwise garbage, and the
+    # FIFO cap alone would keep up to `_SYMBOL_INDEX_CACHE_SIZE` of them alive
+    # for the process lifetime.
+    for dead_key in [
+        cached_key
+        for cached_key, (cached_ref, _rows, _index) in _symbol_index_cache.items()
+        if cached_ref() is None
+    ]:
+        del _symbol_index_cache[dead_key]
+    if len(_symbol_index_cache) >= _SYMBOL_INDEX_CACHE_SIZE:
+        # Plain FIFO eviction: callers reuse one frame at a time, so the cache
+        # exists to serve the current run, not to retain history.
+        _symbol_index_cache.pop(next(iter(_symbol_index_cache)))
+    _symbol_index_cache[key] = (weakref.ref(bars), len(bars), index)
+    return index
+
+
 def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | None:
     """Return `symbol`'s bars up to `as_of`, sorted by date, or `None` if empty.
+
+    This is the single gateway through which screening reads price history, and
+    it always applies the `as_of` cutoff. Callers therefore may hand it a frame
+    that extends past `as_of` (the backtest does, to keep one cacheable frame
+    for the whole run) without leaking look-ahead.
+
+    The per-symbol index built from `bars` is cached against the frame's
+    identity, so a frame handed to this function must be treated as immutable
+    from then on. A row-count change is detected and rebuilds the index, but
+    an in-place *value* edit (correcting a close) is not, and is served from
+    the pre-edit index; build a new frame instead.
 
     Args:
         bars: Tidy bars (`symbol, date, open, high, low, close, volume, ...`).
@@ -49,10 +144,9 @@ def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | 
     Returns:
         The symbol's bars, sorted by date, or `None` if there are none.
     """
-    subset = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)].sort_values(
-        "date"
-    )
-    return subset if not subset.empty else None
+    if bars.empty:
+        return None
+    return _symbol_index(bars).slice_to(symbol, as_of)
 
 
 def sma(series: pd.Series, window: int) -> pd.Series:

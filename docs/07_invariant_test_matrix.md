@@ -46,6 +46,25 @@
 | #58 | 重複取引日は相関係数を算出せず data-quality 警告にする | duplicate date を行番号で結合する | `tests/risk/test_checks.py::TestCorrelationWarnings::test_duplicate_dates_produce_data_quality_warning_without_correlation` |
 | #59 | result symbol/source ID/no-trade 契約を strict に検証する | 同一 source ID または空白 no-trade 理由を受理する | `tests/analysis/test_schemas.py::TestUniqueAnalysisEntities::test_duplicate_source_ids_within_a_candidate_are_rejected` |
 
+## 履歴バックフィルと低ボラバイアス是正
+
+要件 ID を持たない、このフェーズで追加した経路の不変条件。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `copilot-backfill` | 年パーティション全書き直しを避けるため、全チャンクを1回の `write_bars` に集約する | チャンクごとに書き、書き直し回数が銘柄数に比例する | `tests/pipeline/test_backfill.py::TestBackfillBarsChunking::test_writes_every_chunk_in_a_single_write_bars_call` |
+| `copilot-backfill` | 既に `--start` 以前まで届いている銘柄はネットワークを叩かない | 再実行でユニバース全銘柄を取り直す | `tests/pipeline/test_backfill.py::TestBackfillBarsResume::test_skips_symbols_already_covered_from_before_start` |
+| `copilot-backfill` | `--start` の直後の取引日が最古のバーである銘柄も「届いている」と判定する | `--start` が市場休日だと resume が全銘柄で成立せず毎回全取得になる | `tests/pipeline/test_backfill.py::TestBackfillBarsResume::test_skips_a_symbol_whose_first_bar_is_the_trading_day_after_start` |
+| `copilot-backfill` | 銘柄単位の取得失敗は他銘柄の取得を止めない | 1銘柄の失敗でバックフィル全体が中断する | `tests/pipeline/test_backfill.py::TestBackfillBarsFailSoft::test_a_failing_chunk_does_not_stop_later_chunks` |
+| `copilot-backfill` | 全銘柄が失敗し 0 行しか書けなかった run は非ゼロ終了する | 後続の `&& copilot-backtest` が空のDBに対して走る | `tests/pipeline/test_backfill.py::TestBackfillCli::test_exits_non_zero_when_every_symbol_failed` |
+| ランキング | 終値が 0 の銘柄はその銘柄だけ落ちる | `atr_pct` の除算が run 全体を落とす | `tests/screening/test_pipeline.py::TestCandidateAggregationAndRanking::test_symbol_dropped_when_the_last_close_is_zero` |
+| 却下台帳 | RSI が閾値を通った銘柄は `SIGNAL_RSI_NOT_MET` と記録されない | 帯で落ちた銘柄に、通過した RSI 値付きで矛盾した理由が付く | `tests/screening/test_rejection_classifier.py::TestSignalReasons::test_a_passing_rsi_is_never_reported_as_rsi_not_met` |
+| `pullback_rsi` | ATR が NaN または 0 のとき ATR 正規化帯は閉じる | 距離を測れない銘柄を帯の内側として通す | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_a_zero_atr_is_rejected_fail_safe` |
+| `pullback_rsi` | `band_atr_multiple` 未設定時の判定は従来どおりである | 追加したモードが既定挙動を書き換える | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_none_keeps_the_legacy_percentage_band_hit` |
+| ランキング | `atr_pct` は既定 0.0 で、出荷中のスコアを変えない | 新成分が既定で合成スコアに混入する | `tests/screening/test_pipeline.py::TestAtrPctScoreComponent::test_default_weight_is_zero_so_existing_scores_are_unchanged` |
+| ランキング | `atr_pct` も score_weights 合計 1.0 検証の対象である | 新成分を足しても合計 1.0 とみなされる | `tests/test_config.py::TestLoadStrategies::test_atr_pct_counts_toward_the_sum_to_one_requirement` |
+| バックテスト | 発火 0 件の決済理由も 0 として必ず報告する | 一度も出ていない理由がレポートから消える | `tests/backtest/test_metrics.py::TestExitReasonBreakdown::test_counts_every_reason_including_the_absent_ones` |
+
 ## 日次統合 E2E の境界
 
 通常経路は `DailyDependencies` の全外部 port を fake にした offline E2E で、価格・

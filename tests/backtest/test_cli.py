@@ -13,6 +13,7 @@ import yaml
 from swing_copilot.backtest import cli as cli_module
 from swing_copilot.backtest.cli import (
     DEFAULT_SETTINGS_PATH,
+    DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
     _atomic_write,
@@ -967,6 +968,81 @@ class TestSettingsOverride:
                     "--output",
                     str(tmp_path / "report.md"),
                     "--settings",
+                    str(tmp_path / "nope.yaml"),
+                ]
+            )
+
+        assert not (tmp_path / "report.md").exists()
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestStrategiesOverride:
+    """`--strategies`: score_weights variants live in strategies.yaml, not settings."""
+
+    def test_strategies_flag_defaults_to_the_repository_strategies_path(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+
+        assert args.strategies == DEFAULT_STRATEGIES_PATH
+
+    def test_an_overridden_strategy_name_is_accepted(self, seeded_db, tmp_path):
+        db_path, days = seeded_db
+        override = tmp_path / "strategies-variant.yaml"
+        override.write_text(
+            "strategies:\n"
+            "  volatility_tilt:\n"
+            "    filters_all: []\n"
+            "    signals_all: [pullback_rsi]\n"
+            "    candidate_limit: 5\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.3\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        atr_pct: 0.2\n",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "out" / "report.md"
+
+        main(
+            [
+                "--strategy",
+                "volatility_tilt",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--strategies",
+                str(override),
+            ]
+        )
+
+        assert "# Backtest: volatility_tilt" in output_path.read_text(encoding="utf-8")
+
+    def test_a_missing_strategies_file_fails_before_any_backtest_runs(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "report.md"),
+                    "--strategies",
                     str(tmp_path / "nope.yaml"),
                 ]
             )

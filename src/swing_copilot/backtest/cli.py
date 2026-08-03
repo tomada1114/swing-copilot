@@ -61,6 +61,9 @@ _DEFAULT_OUTPUT_DIR = Path("reports/backtests")
 # without editing the repository's own settings.yaml (`tracking/cli.py` sets
 # the same precedent).
 DEFAULT_SETTINGS_PATH = "config/settings.yaml"
+# Ranking score_weights live here, not in settings.yaml, so comparing a
+# weighting variant needs its own override alongside --settings.
+DEFAULT_STRATEGIES_PATH = "config/strategies.yaml"
 _CONSOLE_WIDTH = 200
 
 
@@ -91,6 +94,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
+    parser.add_argument("--strategies", default=DEFAULT_STRATEGIES_PATH)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -701,10 +705,10 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     try:
         settings = load_settings(args.settings)
+        strategies = load_strategies(args.strategies)
     except ConfigError as exc:
         sys.stderr.write(f"{exc}\n")
         raise SystemExit(1) from exc
-    strategies = load_strategies()
 
     if args.command == "grid":
         _run_grid_command(args, settings, strategies)

@@ -30,6 +30,11 @@ from swing_copilot.backtest.cli import (
     render_terminal_comparison,
 )
 from swing_copilot.backtest.engine import BacktestResult, Trade
+from swing_copilot.backtest.metrics import (
+    exit_reason_breakdown,
+    holding_days_stats,
+    max_hold_binding_rate,
+)
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
     MAX_HOLD_PCT_GRID,
@@ -74,6 +79,9 @@ def _result(
         expectancy_per_trade=80.0 if trades else None,
         avg_r_multiple=0.5 if trades else None,
         warnings=warnings,
+        exit_reason_counts=tuple(exit_reason_breakdown(trades).items()),
+        max_hold_binding_rate=max_hold_binding_rate(trades),
+        holding_days=holding_days_stats(trades),
     )
 
 
@@ -809,3 +817,62 @@ def test_real_settings_and_strategies_load():
     strategies = load_strategies()
     assert "default" in strategies.strategies
     assert settings.backtest.benchmark == "SPY"
+
+
+def _meta() -> ReportMeta:
+    return ReportMeta(strategy="default", start=_D0, end=_D1, missing_data_symbols=[])
+
+
+def _exit_trade(reason: str, days_held: int) -> Trade:
+    return Trade(
+        symbol="AAA",
+        entry_date=_D0,
+        entry_price=100.0,
+        exit_date=_D1,
+        exit_price=104.0,
+        shares=10,
+        exit_reason=reason,
+        days_held=days_held,
+    )
+
+
+class TestExitBreakdownRendering:
+    _TRADES = (
+        _exit_trade("stop", 3),
+        _exit_trade("stop", 5),
+        _exit_trade("max_hold", 25),
+        _exit_trade("end_of_backtest", 7),
+    )
+
+    def test_markdown_has_an_exit_breakdown_section_with_every_reason(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        assert "## Exit breakdown" in markdown
+        assert "| stop | 2 |" in markdown
+        assert "| max_hold | 1 |" in markdown
+        assert "| end_of_backtest | 1 |" in markdown
+
+    def test_markdown_reports_the_max_hold_binding_rate(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        assert "| max_hold binding rate | 25.00% |" in markdown
+
+    def test_markdown_reports_holding_day_quartiles(self):
+        markdown = render_markdown(_result(trades=self._TRADES), _meta())
+
+        # Sorted holding days 3, 5, 7, 25 -> p25 4.5, median 6.0, p75 11.5
+        assert "| holding days (median) | 6.0 |" in markdown
+        assert "| holding days (p25 / p75) | 4.5 / 11.5 |" in markdown
+
+    def test_markdown_marks_every_exit_statistic_unavailable_without_trades(self):
+        markdown = render_markdown(_result(), _meta())
+
+        assert "## Exit breakdown" in markdown
+        assert "| max_hold binding rate | N/A |" in markdown
+        assert "| holding days (median) | N/A |" in markdown
+
+    def test_terminal_renders_the_exit_breakdown_table(self):
+        text = render_terminal(_result(trades=self._TRADES), _meta())
+
+        assert "Exit breakdown" in text
+        assert "max_hold binding rate" in text

@@ -65,6 +65,11 @@ class Trade:
     # entry_price/exit_price; commission is tracked separately so every
     # trade-level metric reconciles to the cash ledger.
     commission_usd: float = 0.0
+    # Sessions the position survived, as the engine counts them: 0 means it
+    # closed on the very session it was filled. Defaulted so trade fixtures
+    # that only exercise P&L metrics need not restate it; the engine itself
+    # always passes the real count.
+    days_held: int = 0
 
     @property
     def pnl(self) -> float:
@@ -89,6 +94,12 @@ class BacktestResult:
     expectancy_per_trade: float | None
     avg_r_multiple: float | None
     warnings: tuple[str, ...]
+    # Exit instrumentation: which rule actually closed positions, and how long
+    # they were held. Answers whether `max_hold_days` binds at all -- a
+    # parameter no amount of tuning can matter for if it never fires.
+    exit_reason_counts: tuple[tuple[str, int], ...]
+    max_hold_binding_rate: float | None
+    holding_days: metrics.HoldingDaysStats | None
     survivorship_bias_note: str = SURVIVORSHIP_BIAS_NOTE
 
 
@@ -262,6 +273,9 @@ class BacktestEngine:
             warnings=metrics.compute_reliability_warnings(
                 len(trades), win_rate, max_drawdown_pct, self._backtest_config
             ),
+            exit_reason_counts=tuple(metrics.exit_reason_breakdown(trades).items()),
+            max_hold_binding_rate=metrics.max_hold_binding_rate(trades),
+            holding_days=metrics.holding_days_stats(trades),
         )
 
     def _fill_pending_entries(
@@ -358,6 +372,7 @@ class BacktestEngine:
                 exit_reason=exit_reason,
                 initial_stop_price=position.initial_stop_price,
                 commission_usd=position.entry_commission_usd + exit_commission,
+                days_held=position.days_held,
             )
         )
         del state.open_positions[position.symbol]

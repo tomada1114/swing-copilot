@@ -220,6 +220,23 @@ def _metric_value(result: BacktestResult, field: str) -> str:
     return _fmt_ratio(value)
 
 
+def _exit_breakdown_rows(result: BacktestResult) -> list[tuple[str, str]]:
+    """Label/value rows shared by the terminal and markdown exit sections."""
+    rows = [(reason, str(count)) for reason, count in result.exit_reason_counts]
+    rows.append(("max_hold binding rate", _fmt_pct(result.max_hold_binding_rate)))
+    held = result.holding_days
+    rows.append(
+        ("holding days (median)", "N/A" if held is None else f"{held.median:.1f}")
+    )
+    rows.append(
+        (
+            "holding days (p25 / p75)",
+            "N/A" if held is None else f"{held.p25:.1f} / {held.p75:.1f}",
+        )
+    )
+    return rows
+
+
 def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
     if not result.equity_curve:
         return ["Equity curve: (no trading days)"]
@@ -250,6 +267,13 @@ def render_terminal(result: BacktestResult, meta: ReportMeta) -> str:
     for label, field in _METRIC_ROWS:
         metrics_table.add_row(label, _metric_value(result, field))
     console.print(metrics_table)
+
+    exit_table = Table(title="Exit breakdown", header_style="bold")
+    exit_table.add_column("Exit")
+    exit_table.add_column("Value", justify="right")
+    for label, value in _exit_breakdown_rows(result):
+        exit_table.add_row(label, value)
+    console.print(exit_table)
 
     for warning in result.warnings:
         console.print(f"[yellow]{warning}[/yellow]")
@@ -307,6 +331,10 @@ def render_markdown(result: BacktestResult, meta: ReportMeta) -> str:
     lines += [
         f"| {label} | {_metric_value(result, field)} |" for label, field in _METRIC_ROWS
     ]
+    lines.append("")
+
+    lines += ["## Exit breakdown", "", "| Exit | Value |", "|---|---:|"]
+    lines += [f"| {label} | {value} |" for label, value in _exit_breakdown_rows(result)]
     lines.append("")
 
     if result.warnings:

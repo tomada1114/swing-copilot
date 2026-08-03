@@ -1569,6 +1569,29 @@ src/swing_copilot/tracking/
 
 CLIの操作面は`docs/reference.md`が正本。エントリポイントは`copilot-track = "swing_copilot.tracking.cli:main"`の1行追加。
 
+### 3.25 `pipeline/backfill.py` と低ボラバイアス是正（`copilot-backfill`）
+
+日次runが取る価格履歴は400暦日のローリング窓であり、複数レジーム（2020年暴落・2022年弱気・2021/2023-24強気）をまたぐバックテストには足りない。`pipeline/backfill.py`（`copilot-backfill`）は、その履歴を一度だけまとめて取り込む一回限りのツールである。日次経路とは独立に置き、既存のアダプタ（`YFinanceProvider`・`EdgarClient`）とリポジトリ（`MarketStore`）を通す——生の`yf.download`を直接叩く経路を作らないのは、タイムアウト・リトライ・レート制限の契約を迂回しないためである。
+
+チャンク分割（50銘柄）とチャンク間スリープ（2秒）はyfinance側にレート制限が無いことへの配慮で、`write_bars`の呼び出しを最後の1回に集約するのは年パーティション全書き直しのコストを銘柄数に比例させないためである。レジューム条件は「既存バーの最古日が`--start`以前」であり、後年上場の銘柄は毎回再取得される（銘柄単位の「取得済みだが空」台帳を持たない割り切り）。操作面は`docs/reference.md`が正本。
+
+このフェーズの是正対象は、スクリーニング候補が構造的に低ボラ銘柄へ偏る2つの機構である。
+
+1. `pullback_rsi`の帯`|close − SMA50| / SMA50 ≤ 0.03`が事実上のローボラフィルタとして働く（ATR% < 2.5%の通過率44.0%に対し、ATR% > 5%は9.7%）
+2. ランキング最大重み`rsi_pullback: 0.5`が「RSIが低いほど高得点」である
+
+いずれも**既定では無効**なスイッチとして是正手段だけを追加した。`PullbackSignalConfig.band_atr_multiple`（既定`null`）はSMA50からの距離をATR14単位で測るモードで、`sma_band_pct`とは排他である。距離をATR単位で測る発想はパイプラインに既にあり、`execution.fair_max_d: 2.0`と`screening/pipeline.py`の`_execution_distance = (close - sma50) / atr14`が同じ尺度を使っている。プルバック帯だけが無関係な絶対%を使っていた内部不整合の解消でもある。ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
+
+`ScoreWeights.atr_pct`（既定`0.0`）はATR%が高いほど高得点の成分で、`_ATR_PCT_NORMALIZATION = 0.06`を満点とする絶対正規化である。候補集合内パーセンタイルを採らないのは、候補が5件程度の集合では`liquidity`成分が既に抱える小標本ノイズを再生産するためである。`score_weights`の合計1.0検証（フィールド名直書き）にも加算する。
+
+旧モードを消さずに両方残しているのは、採用判断を比較実験の結果に基づいて人間が行うためで、先に既定を差し替えるとA/B比較そのものが不能になる。バックテスト側の`--settings` / `--strategies`は、この比較をリポジトリの設定を書き換えずに回すための入り口である（`score_weights`は`strategies.yaml`側にあるので、`--settings`だけでは重みバリアントを表現できない）。
+
+決済側の計器として`Trade.days_held`と`BacktestResult`の3フィールド（決済理由内訳・`max_hold`バインド率・保有日数の中央値/四分位）を追加し、感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(40, 70, 100, 140, 200)%`へ広げた。ATR軸が±50%を探索するのに時間軸だけ±20%では、「そのパラメータが効かない」のか「一度も発火していない」のかを区別できないためである。
+
+なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない。
+
+---
+
 ---
 
 ## 4. データスキーマ定義

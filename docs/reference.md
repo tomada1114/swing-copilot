@@ -274,3 +274,100 @@ paperの`positions`（人間が実際に持つと決めたFR-11の検証ゲー�
 > `llm_calls`テーブル、月次予算ゲート・実行単位の呼び出し上限、応答キャッシュと
 > near-stale警告）はすべて削除した。表示専用だった`catalyst_quality`と
 > `guidance_direction`も新しい分析契約には含まれない。
+
+## `copilot-backfill`と履歴バックフィル
+
+`pipeline/backfill.py`（`copilot-backfill`）は、バックテストに必要な過去データを
+一度だけまとめて取り込むツールである。日次runの価格ステップは400暦日の
+ローリング窓しか取らないため、これを走らせるまでローカルには複数レジームを
+またぐ検証に足る履歴が存在しない。
+
+```bash
+copilot-backfill bars --start 2019-01-01                   # ユニバース全銘柄の日足
+copilot-backfill bars --start 2019-01-01 --symbols SPY,QQQ # 個別指定
+copilot-backfill fundamentals --start 2019-01-01           # 10-K/10-Qの過去分
+```
+
+`--end`を省略した場合だけCLI境界で`SystemClock().today()`を使う。ドメイン関数へは
+常に明示的な日付を渡す。
+
+`bars`は既存の`YFinanceProvider`を**50銘柄チャンク**で呼び、チャンク間に2秒の
+スリープを挟む。yfinance側にレート制限の実装が無いための配慮である。取得した
+バーはメモリに蓄積し、最後に`MarketStore.write_bars`を**1回だけ**呼ぶ——
+`write_bars`は年パーティションを丸ごと書き直すので、チャンクごとに呼ぶと
+書き直し回数が銘柄数に比例して増えるためである。
+
+再実行は安全かつ安価で、既存バーが`--start`以前まで届いている銘柄は
+ネットワークを叩かずにスキップする（`MarketStore.earliest_bar_dates`）。
+逆に、その時期にまだ上場していなかった銘柄はこの条件を満たしようがないため
+毎回再取得される。銘柄単位の「取得済みだが空」状態を持たないという設計上の
+割り切りで、一回限りのツールにその台帳を持たせるほどの価値が無いと判断した。
+銘柄単位の失敗はfail-softで、失敗した銘柄名を集約して最後に報告し、
+他の銘柄の取得は続行する。
+
+**ベンチマーク・レジーム系のシンボル（`SPY`・`QQQ`・`^VIX`・`^TNX`）は
+S&P 500ユニバースに含まれないので、`--symbols`で別途バックフィルする必要が
+ある。**特に`SPY`はバックテストの取引日カレンダーそのもの
+（`backtest/runner.py::_trading_days`）なので、これを取り込まないと
+バックテスト期間はSPYのバーがある範囲まで黙って縮む。
+
+`fundamentals`は`EdgarClient.fetch_fundamentals`の`lookback_days`を`--start`まで
+広げて呼ぶ。EDGARのbulk company-factsは常に全履歴を返すので、追加のアダプタ
+改修なしに過去四半期を`filed_at`付きで取り込める。`EDGAR_IDENTITY`が未設定なら
+何もせず非0終了する。
+
+## バックテストの設定バリアント比較
+
+`copilot-backtest`は`--settings`と`--strategies`でそれぞれ`config/settings.yaml`と
+`config/strategies.yaml`を差し替えられる。リポジトリの設定を書き換えずに
+A/B比較を回すための入り口である。ランキング重み（`score_weights`）は
+`strategies.yaml`側にあるため、重みバリアントの比較には`--strategies`が要る。
+
+```bash
+copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
+  --settings /tmp/variant/settings.yaml --strategies /tmp/variant/strategies.yaml
+```
+
+レポートには`Exit breakdown`セクションが出る。決済理由の内訳（`stop` /
+`max_hold` / `end_of_backtest`、発火0件の理由も0として必ず表示）、
+`max_hold binding rate`（全決済に占める`max_hold`の割合）、実保有日数の
+中央値と四分位である。感応度グリッドのMaxHold列が全て同値だったとき、
+「そのパラメータが効かない」のか「一度も発火していない」のかを区別するために
+ある。binding rateが0%に近ければ、`max_hold_days`をどう振っても結果は動かない。
+
+## 低ボラバイアス是正の2つのスイッチ
+
+スクリーニング候補が構造的に低ボラ銘柄へ偏る原因は2つあり、それぞれに
+**既定では無効**なスイッチを用意した。既定値の変更＝採用は、比較レポートを見た
+人間が行う。
+
+| 設定 | 場所 | 既定 | 効果 |
+| --- | --- | --- | --- |
+| `technical_signals.pullback.band_atr_multiple` | `settings.yaml` | `null` | `\|close − SMA50\| / ATR14 ≤ 倍率`で帯を判定し、`sma_band_pct`を無視する |
+| `ranking.score_weights.atr_pct` | `strategies.yaml` | `0.0` | ATR%が高いほど高得点の成分を合成スコアへ加える |
+
+`band_atr_multiple`が無ければ帯は`|close − SMA50| / SMA50 ≤ 0.03`という
+絶対3%で、これは低ボラ銘柄を高ボラ銘柄の約4.5倍通過させる事実上の
+ローボラフィルタとして働く。ATR単位で測れば、パイプラインが既に執行距離に
+使っている`execution.fair_max_d`（SMA50からATR 2.0個分）と同じ尺度になる。
+ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
+
+`atr_pct`成分は候補集合内のパーセンタイルではなく、ATR% 6%を満点とする
+**絶対正規化**である。候補が5件程度しかない集合でパーセンタイルを取ると、
+`liquidity`成分が既に抱えている小標本ノイズを再生産するためである。
+`score_weights`の合計1.0検証にも加算されるので、`atr_pct`を入れるときは
+他の重みを必ず下げることになる。
+
+## 決算日エントリー回避（実装済み）
+
+決算をまたぐエントリーの回避は**すでにrisk層に実装されている**。
+`RiskChecker._apply_earnings_guard`が`risk.earnings_block_business_days`（既定2）
+以内の決算予定を`binding_constraint="earnings"`でrejectedにし、
+`earnings_warn_business_days`（既定5）以内なら警告を出す。予定日は日次runの
+riskステップがFinnhubから取得する。
+
+ただし**バックテスト経路にこのガードは無い**。`backtest/engine.py`は
+`RiskChecker`を通らず`position_sizing`だけを使い、加えて`earnings_calendar`は
+symbol主キーの上書き保存で履歴を持たないため、過去時点で「当時知られていた
+予定日」を復元できない。したがって決算ルールの効果はバックテストでは
+測れない、というのが現状の制約である。

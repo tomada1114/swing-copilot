@@ -114,6 +114,15 @@ regime:
   dd_decline_pct: -0.002
   stall_abs_change_pct: 0.001
   recovery_pct: 0.05
+  # roadmap §5 P3-13（要検証）: Distribution Day level-classification
+  # boundaries. Order constraints: dd_severe_d25 > dd_high_d25 >
+  # dd_caution_d25; dd_severe_d15 > dd_high_d15.
+  dd_severe_d25: 6
+  dd_severe_d15: 4
+  dd_high_d25: 5
+  dd_high_d15: 3
+  dd_high_d5: 2
+  dd_caution_d25: 3
   reduce_only_risk_multiplier: 0.5 # REDUCE_ONLY trade-risk multiplier (要検証)
   # roadmap §5 P3-16（要検証）: FTD is display-only, never an exposure input.
   ftd_correction_decline_pct: 0.03

@@ -10,6 +10,7 @@ import pytest
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
+    DistributionThresholds,
     calculate_distribution_days,
     distribution_level,
 )
@@ -96,3 +97,64 @@ class TestDistributionDays:
         self, d25: float, d15: float, d5: float, expected: DistributionLevel
     ) -> None:
         assert distribution_level(d25, d15, d5) is expected
+
+    @pytest.mark.parametrize(
+        ("d25", "d15", "d5", "expected"),
+        [
+            (6.0, 0.0, 0.0, DistributionLevel.SEVERE),
+            (0.0, 4.0, 0.0, DistributionLevel.SEVERE),
+            (5.0, 0.0, 0.0, DistributionLevel.HIGH),
+            (0.0, 3.0, 0.0, DistributionLevel.HIGH),
+            (0.0, 0.0, 2.0, DistributionLevel.HIGH),
+            (3.0, 0.0, 0.0, DistributionLevel.CAUTION),
+            (2.0, 0.0, 0.0, DistributionLevel.NORMAL),
+        ],
+    )
+    def test_default_thresholds_match_previous_hardcoded_boundaries(
+        self, d25: float, d15: float, d5: float, expected: DistributionLevel
+    ) -> None:
+        """Default `DistributionThresholds` preserve the prior module constants."""
+        assert distribution_level(d25, d15, d5) is expected
+        assert (
+            distribution_level(d25, d15, d5, thresholds=DistributionThresholds())
+            is expected
+        )
+
+    def test_custom_thresholds_change_the_level_boundary(self) -> None:
+        thresholds = DistributionThresholds(caution_d25=10, high_d25=12, severe_d25=14)
+
+        # d25=6 stays NORMAL under raised thresholds, unlike the defaults.
+        assert (
+            distribution_level(6.0, 0.0, 0.0, thresholds=thresholds)
+            is DistributionLevel.NORMAL
+        )
+        # Exactly at the raised caution boundary, it enters CAUTION (>=).
+        assert (
+            distribution_level(10.0, 0.0, 0.0, thresholds=thresholds)
+            is DistributionLevel.CAUTION
+        )
+        # Exactly at the raised severe boundary, it enters SEVERE (>=).
+        assert (
+            distribution_level(14.0, 0.0, 0.0, thresholds=thresholds)
+            is DistributionLevel.SEVERE
+        )
+
+    def test_calculate_distribution_days_applies_custom_level_thresholds(self) -> None:
+        closes = [100.0] * 26
+        volumes = [100] * 26
+        # Two distribution days: index 5 and index 10.
+        closes[5], volumes[5] = 99.8, 101
+        closes[10], volumes[10] = 99.7, 102
+
+        default_result = calculate_distribution_days(
+            _bars(closes, volumes), date(2026, 1, 26)
+        )
+        assert default_result.d25 == pytest.approx(2.0)
+        assert default_result.level is DistributionLevel.NORMAL
+
+        lowered = DistributionThresholds(caution_d25=2)
+        lowered_result = calculate_distribution_days(
+            _bars(closes, volumes), date(2026, 1, 26), thresholds=lowered
+        )
+        assert lowered_result.d25 == pytest.approx(2.0)
+        assert lowered_result.level is DistributionLevel.CAUTION

@@ -738,6 +738,12 @@ def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSn
             dd_decline_pct=config.dd_decline_pct,
             stall_abs_change_pct=config.stall_abs_change_pct,
             recovery_pct=config.recovery_pct,
+            severe_d25=config.dd_severe_d25,
+            severe_d15=config.dd_severe_d15,
+            high_d25=config.dd_high_d25,
+            high_d15=config.dd_high_d15,
+            high_d5=config.dd_high_d5,
+            caution_d25=config.dd_caution_d25,
         ),
     )
     return calculate_regime_snapshot(

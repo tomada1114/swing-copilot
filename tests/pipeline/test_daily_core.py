@@ -377,7 +377,7 @@ class TestIdempotency:
 
 class TestFatalStepFailure:
     def test_price_fetch_failure_marks_run_failed_and_stops(
-        self, settings, market_store, state_store
+        self, settings, market_store, state_store, tmp_path
     ):
         universe = (_member("AAPL"),)
         empty_bars = pd.DataFrame(
@@ -391,6 +391,7 @@ class TestFatalStepFailure:
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
             clock=FakeClock(),
+            output_dir=str(tmp_path),
         )
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), failing_deps)
@@ -409,7 +410,7 @@ class TestFatalStepFailure:
         assert run_row == ("failed",)
 
     def test_failed_run_can_be_followed_by_a_successful_rerun(
-        self, settings, market_store, state_store
+        self, settings, market_store, state_store, tmp_path
     ):
         universe = (_member("AAPL"), _member("MSFT"))
         empty_bars = pd.DataFrame(
@@ -423,6 +424,7 @@ class TestFatalStepFailure:
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
             clock=FakeClock(),
+            output_dir=str(tmp_path),
         )
         failed_result = run_daily(
             DailyRunOptions(as_of=AS_OF, is_dry_run=True), failing_deps
@@ -437,6 +439,7 @@ class TestFatalStepFailure:
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
             clock=FakeClock(),
+            output_dir=str(tmp_path),
         )
         retry_result = run_daily(
             DailyRunOptions(as_of=AS_OF, is_dry_run=True), working_deps

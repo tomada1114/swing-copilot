@@ -346,13 +346,16 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 ## 低ボラバイアス是正の2つのスイッチ
 
 スクリーニング候補が構造的に低ボラ銘柄へ偏る原因は2つあり、それぞれに
-**既定では無効**なスイッチを用意した。既定値の変更＝採用は、比較レポートを見た
-人間が行う。
+スイッチを用意した。採用は比較レポート
+（`reports/backtests/2026-07-30-strategy-comparison.md`）を見た人間が判断する。
+`band_atr_multiple`は2026-08-04にR2の結果（期待値・PF・Sharpe改善、DD同等）を
+根拠に`2.0`で**採用済み**。`atr_pct`はR3でR2比の上積みが観測されなかったため
+**見送り**（`0.0`のまま）。
 
-| 設定 | 場所 | 既定 | 効果 |
+| 設定 | 場所 | 現在値 | 効果 |
 | --- | --- | --- | --- |
-| `technical_signals.pullback.band_atr_multiple` | `settings.yaml` | `null` | `\|close − SMA50\| / ATR14 ≤ 倍率`で帯を判定し、`sma_band_pct`を無視する |
-| `ranking.score_weights.atr_pct` | `strategies.yaml` | `0.0` | ATR%が高いほど高得点の成分を合成スコアへ加える |
+| `technical_signals.pullback.band_atr_multiple` | `settings.yaml` | `2.0`（キー削除で旧モードに戻る） | `\|close − SMA50\| / ATR14 ≤ 倍率`で帯を判定し、`sma_band_pct`を無視する |
+| `ranking.score_weights.atr_pct` | `strategies.yaml` | `0.0`（無効） | ATR%が高いほど高得点の成分を合成スコアへ加える |
 
 `band_atr_multiple`が無ければ帯は`|close − SMA50| / SMA50 ≤ 0.03`という
 絶対3%で、これは低ボラ銘柄を高ボラ銘柄の約4.5倍通過させる事実上の

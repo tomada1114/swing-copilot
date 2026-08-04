@@ -565,8 +565,18 @@ class TestRetroConfig:
                 Settings.model_validate({"retro": {duplicated: 1.0}})
 
 
-def test_band_atr_multiple_defaults_to_none_so_screening_behavior_is_unchanged():
+def test_band_atr_multiple_is_adopted_in_the_repo_settings():
+    # 2026-08-04 adoption based on the R2 result in
+    # reports/backtests/2026-07-30-strategy-comparison.md.
     settings = load_settings("config/settings.yaml")
+
+    assert settings.technical_signals.pullback.band_atr_multiple == pytest.approx(2.0)
+
+
+def test_band_atr_multiple_defaults_to_none_when_absent():
+    # Absence keeps the legacy percentage band, so older/external settings
+    # files keep their behavior.
+    settings = Settings.model_validate({})
 
     assert settings.technical_signals.pullback.band_atr_multiple is None
 

@@ -39,8 +39,13 @@ from swing_copilot.screening.rejection_classifier import (
 )
 
 if TYPE_CHECKING:
-    from swing_copilot.config import ExecutionStateConfig, ScoreWeights, Settings
-    from swing_copilot.screening.base import ScreeningInput, SignalHit
+    from swing_copilot.config import (
+        ExecutionStateConfig,
+        ScoreWeights,
+        Settings,
+        StrategySpec,
+    )
+    from swing_copilot.screening.base import Filter, ScreeningInput, Signal, SignalHit
     from swing_copilot.storage.market_store import MarketStore
 
 _RSI_WINDOW = 14
@@ -80,6 +85,39 @@ class _BuildOutcome:
     truncated: list[TruncatedCandidate]
 
 
+def build_strategy_components(
+    spec: StrategySpec, settings: Settings
+) -> tuple[list[Filter], list[Signal]]:
+    """Instantiate one strategy's configured Filters and Signals, in configured order.
+
+    Shared by `ScreeningPipeline` and `filter_matrix.evaluate_filter_matrix`, so
+    the registry lookup and `minervini_stage2`'s strategy-specific
+    `min_criteria` wiring exist in exactly one place: a diagnostic that
+    composed its own components could silently measure a different strategy
+    than the one the daily run screens with.
+
+    Args:
+        spec: One validated `strategies.yaml` entry.
+        settings: Loaded application settings, passed to every component.
+
+    Returns:
+        The configured filters and signals, each in `strategies.yaml` order.
+
+    Raises:
+        KeyError: A configured filter/signal key is not registered.
+    """
+    filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
+    signals = [
+        cast("Any", SIGNAL_REGISTRY[key])(
+            settings, min_criteria=spec.minervini.min_criteria
+        )
+        if key == "minervini_stage2" and spec.minervini is not None
+        else SIGNAL_REGISTRY[key](settings)
+        for key in spec.signals_all
+    ]
+    return filters, signals
+
+
 class ScreeningPipeline:
     """Runs Filter -> Signal -> deterministic Candidate ranking for one strategy."""
 
@@ -113,15 +151,7 @@ class ScreeningPipeline:
         )
         spec = typed_config.strategies[strategy_key]
 
-        self._filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
-        self._signals = [
-            cast("Any", SIGNAL_REGISTRY[key])(
-                settings, min_criteria=spec.minervini.min_criteria
-            )
-            if key == "minervini_stage2" and spec.minervini is not None
-            else SIGNAL_REGISTRY[key](settings)
-            for key in spec.signals_all
-        ]
+        self._filters, self._signals = build_strategy_components(spec, settings)
         self._candidate_limit = spec.candidate_limit
         self._rsi_threshold = settings.technical_signals.pullback.rsi_threshold
         self._score_weights: ScoreWeights = spec.ranking.score_weights

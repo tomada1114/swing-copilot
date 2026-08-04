@@ -10,6 +10,11 @@ detail available even for symbols no configured signal ever touches.
 This module deliberately mirrors the currently registered strategy building
 blocks rather than generalizing arbitrary future Filters/Signals. Adding a
 new configured component requires extending this classifier too.
+
+`classify_rejections` applies those mirrors in first-failure-wins priority
+order. `classify_filter_rejection`/`classify_signal_rejection` expose the same
+per-check question in isolation, which is what `filter_matrix.py` needs to tell
+a data gap apart from a genuine threshold miss for *every* configured check.
 """
 
 from __future__ import annotations
@@ -104,13 +109,13 @@ def _classify_symbol(
     hit_sets: list[set[str]],
 ) -> RejectionRecord:
     for filter_name in plan.filter_order:
-        filter_result = _classify_filter(symbol, data, settings, filter_name)
+        filter_result = classify_filter_rejection(symbol, data, settings, filter_name)
         if filter_result is not None:
             return filter_result
 
     for signal_name, hits in zip(plan.signal_order, hit_sets, strict=True):
         if symbol not in hits:
-            return _classify_signal(symbol, data, settings, signal_name)
+            return classify_signal_rejection(symbol, data, settings, signal_name)
 
     series = symbol_bars(data.bars, symbol, data.as_of)
     available = len(series) if series is not None else 0
@@ -126,12 +131,30 @@ def _classify_symbol(
     )
 
 
-def _classify_filter(
+def classify_filter_rejection(
     symbol: str,
     data: ScreeningInput,
     settings: Settings,
     filter_name: str,
 ) -> RejectionRecord | None:
+    """Classify why `symbol` fails one named Filter, or `None` if it passes.
+
+    Public so a diagnostic can ask the same question per Filter in isolation
+    (`filter_matrix.py`) instead of only through `classify_rejections`'
+    first-failure-wins priority order.
+
+    Args:
+        symbol: Universe symbol to classify.
+        data: Point-in-time screening input.
+        settings: Loaded application settings.
+        filter_name: Registered filter key to mirror.
+
+    Returns:
+        The rejection record, or `None` when `symbol` satisfies the filter.
+
+    Raises:
+        NotImplementedError: `filter_name` has no mirrored logic here.
+    """
     if filter_name == "profitable_positive_fcf_equity":
         return _classify_fundamentals(symbol, data, settings)
     if filter_name == "volume_min":
@@ -277,12 +300,30 @@ def _classify_liquidity(
     return None
 
 
-def _classify_signal(
+def classify_signal_rejection(
     symbol: str,
     data: ScreeningInput,
     settings: Settings,
     signal_name: str,
 ) -> RejectionRecord:
+    """Classify why `symbol` did not hit one named Signal.
+
+    The caller must already know `symbol` is not among that signal's hits;
+    the returned record explains that miss (public for the same reason as
+    `classify_filter_rejection`).
+
+    Args:
+        symbol: Universe symbol to classify.
+        data: Point-in-time screening input.
+        settings: Loaded application settings.
+        signal_name: Registered signal key to mirror.
+
+    Returns:
+        The rejection record for the missed signal.
+
+    Raises:
+        NotImplementedError: `signal_name` has no mirrored logic here.
+    """
     if signal_name == "trend_sma":
         series = symbol_bars(data.bars, symbol, data.as_of)
         if series is None:

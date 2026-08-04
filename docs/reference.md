@@ -343,6 +343,61 @@ S&P 500ユニバースに含まれないので、`--symbols`で別途バック�
 改修なしに過去四半期を`filed_at`付きで取り込める。`EDGAR_IDENTITY`が未設定なら
 何もせず非0終了する。
 
+## `copilot-filter-matrix`とフィルタ独立通過率
+
+落選台帳（`screening_rejections`、PK `(run_id, symbol)`）は**銘柄ごとに最初に
+失敗した1条件だけ**を記録する。優先順位は`strategies.yaml`の
+`filters_all` → `signals_all`の記載順なので、「各条件が単独でどれだけ落として
+いるか」も「複数条件に同時に引っかかる銘柄がどれだけいるか」も台帳からは
+分からない。パラメーターチューニングはまずそこを知りたい。
+
+`copilot-filter-matrix`（`screening/filter_matrix_cli.py`）は、設定済みの
+フィルタとシグナルを**1つずつ独立に全ユニバースへ適用**して、その3つを出す。
+
+```bash
+copilot-filter-matrix --as-of 2026-07-29                        # 既定戦略
+copilot-filter-matrix --as-of 2026-07-29 --strategy vcp_breakout
+copilot-filter-matrix --as-of 2026-07-29 --json reports/filter_matrix.json
+```
+
+| オプション | 既定 | 意味 |
+| --- | --- | --- |
+| `--as-of` | 必須 | 可視性の基準日。バー・ファンダ・スナップショットの全てに効く |
+| `--strategy` | `default` | `strategies.yaml`のキー |
+| `--db` | `data/copilot.duckdb` | Parquetバーの根（`<db>/../bars`）も一緒に決まる |
+| `--settings` / `--strategies` | `config/*.yaml` | 設定を書き換えずに閾値バリアントを試すため |
+| `--json` | なし | 機械可読な集計の書き出し先（同ディレクトリの一時ファイル＋`os.replace`） |
+
+出力は3つの表である。
+
+1. **チェック別 独立通過率**——各チェック単独の通過／落選／データ不足と、
+   「そのチェックだけで落ちている」銘柄数（単独ボトルネック）。
+   単独ボトルネックは「その条件を外せば何銘柄増えるか」そのものである
+2. **落選チェック数の分布**——0個（＝ランキングと`candidate_limit`の適用前の
+   候補相当）・1個・2個以上。1個に寄っていれば条件は互いに独立に効いており、
+   2個以上に寄っていれば緩和は1条件では効かない
+3. **同時落選マトリクス**——チェック対ごとの同時落選数。対角は各チェックの
+   落選合計
+
+**データ不足は落選と別カテゴリで数える。** 履歴不足やファンダ欠損は「閾値が
+厳しすぎるか」を何も語らないためで、`FAILED`／`NO_DATA`の判定には
+`rejection_classifier`の`data_quality`ステージをそのまま使う（同じ銘柄が台帳と
+このコマンドで別カテゴリに落ちることはない）。
+
+シグナルは、パイプラインが渡すフィルタ通過後の部分集合ではなく**全ユニバース**
+に対して評価する。独立通過率は全チェックが同じ母集団で測られて初めて比較
+できるためである。したがってここでのシグナル通過数は、日次runの候補数とは
+一致しない。
+
+チェックの実体は`ScreeningPipeline`と同じ`build_strategy_components`で
+組み立てるので、この診断は日次runが実際に使うのと同一のFilter/Signal
+インスタンスを測る（ロジックのミラーは増やしていない）。
+
+完全にオフラインかつ読み取り専用である。ユニバースは`--as-of`時点で可視な
+永続スナップショット（`snapshot_date <= as_of`）だけを使い、無ければ
+Wikipediaを取りに行かずにエラーで落ちる。`--as-of`当時のmembershipでない
+ものを測っても意味がないからである。DBへは1行も書かない。
+
 ## バックテストの設定バリアント比較
 
 `copilot-backtest`は`--settings`と`--strategies`でそれぞれ`config/settings.yaml`と

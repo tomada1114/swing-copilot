@@ -35,6 +35,9 @@
   `<WORKDIR>` と呼ぶ。Markdown は従来どおり`reports/<run_date>/<run_id>.md`に残る。
 - `copilot-daily` は終了時に `analysis_input.json` の絶対パスをターミナルに出力する。
 - 専門家サブエージェントの中間成果物は `<WORKDIR>/analysis_work/` に置く。
+- `rejections.json` は落選銘柄の明細と candidate_limit 切り捨て銘柄の**診断記録**。
+  読み取り専用で、`analysis_result.json` の入力にはしない（定性分析の対象は
+  `analysis_input.json` の候補のみ）。
 
 ```text
 <WORKDIR>/
@@ -44,6 +47,7 @@
 │   ├── filings-<SYMBOL>.json
 │   └── screening-<SYMBOL>.json
 ├── analysis_result.json         ← swing-daily が断片をマージして生成
+├── rejections.json              ← copilot-daily が生成（読み取り専用・診断用）
 └── report_context.json           ← copilot-daily が生成（読み取り専用）
 ```
 

@@ -432,9 +432,14 @@ class TestSignalReasons:
             "swing_copilot.screening.rejection_classifier.wilder_rsi",
             lambda series, _period: pd.Series([12.0] * len(series), index=series.index),
         )
+        pullback = settings.technical_signals.pullback.model_copy(
+            update={"band_atr_multiple": None}
+        )
+        technical = settings.technical_signals.model_copy(update={"pullback": pullback})
+        legacy = settings.model_copy(update={"technical_signals": technical})
         data = _input((_member("ABC"),), rows, bars)
 
-        [rejection] = _classify(data, settings, hits_by_signal=[hit_for_trend, []])
+        [rejection] = _classify(data, legacy, hits_by_signal=[hit_for_trend, []])
 
         assert rejection.reason_code is not RejectionReasonCode.SIGNAL_RSI_NOT_MET
         assert rejection.detail["signal"] == "pullback_rsi"

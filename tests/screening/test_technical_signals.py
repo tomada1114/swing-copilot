@@ -175,7 +175,8 @@ class TestPullbackATRBand:
         atr14 = wilder_atr(bars["high"], bars["low"], bars["close"]).iloc[-1]
         assert atr14 == 0.0
 
-        legacy_hits = PullbackRSISignal(settings).evaluate(data, {"AAPL"})
+        legacy = _with_band_atr_multiple(settings, None)
+        legacy_hits = PullbackRSISignal(legacy).evaluate(data, {"AAPL"})
         configured = _with_band_atr_multiple(settings, 2.0)
         with warnings.catch_warnings():
             warnings.simplefilter("error")

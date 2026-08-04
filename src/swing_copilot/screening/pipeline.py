@@ -7,6 +7,7 @@ new strategy module needs only a one-line addition to `strategies.yaml`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
@@ -23,6 +24,7 @@ from swing_copilot.screening.base import (
     SIGNAL_REGISTRY,
     Candidate,
     ScreeningResult,
+    TruncatedCandidate,
 )
 from swing_copilot.screening.indicators import (
     percentile_ranks,
@@ -57,6 +59,25 @@ _ATR_PCT_NORMALIZATION = 0.06
 _DAMAGED_MAX_D = -3.0
 _FAIR_MAX_D = 2.0
 _EXTENDED_MAX_D = 4.0
+
+#: `_score_rows`'s per-component contributions, in weight-declaration order.
+_SCORE_COMPONENT_KEYS = (
+    "score_rsi_pullback",
+    "score_trend_quality",
+    "score_liquidity",
+    "score_atr_pct",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _BuildOutcome:
+    """`_build_candidates`'s full output, shared by both public entry points."""
+
+    candidates: list[Candidate]
+    #: Symbols with valid ranking metrics, before `candidate_limit` truncation.
+    rankable_symbols: set[str]
+    hits_by_signal: list[list[SignalHit]]
+    truncated: list[TruncatedCandidate]
 
 
 class ScreeningPipeline:
@@ -125,7 +146,7 @@ class ScreeningPipeline:
         # made it roughly half the cost of a backtest, which calls this once
         # per simulated day. `run_with_rejections` is unchanged for the daily
         # path that actually renders the reasons.
-        return self._build_candidates(data)[0]
+        return self._build_candidates(data).candidates
 
     def run_with_rejections(self, data: ScreeningInput) -> ScreeningResult:
         """Run the two-stage screen and also classify every rejected symbol.
@@ -138,32 +159,29 @@ class ScreeningPipeline:
             every universe symbol that did not pass every configured Filter
             and every configured Signal (P1-02, roadmap §5). See
             `rejection_classifier.classify_rejections` for the exact
-            priority order and its one intentional gap (candidate_limit
-            truncation is not itself a rejection reason).
+            priority order and its one intentional gap: `candidate_limit`
+            truncation is not a rejection reason, so those symbols are
+            reported separately in `truncated`.
         """
-        candidates, rankable_symbols, hits_by_signal = self._build_candidates(data)
+        outcome = self._build_candidates(data)
         rejections = classify_rejections(
             data,
             self._settings,
-            candidate_symbols=rankable_symbols,
+            candidate_symbols=outcome.rankable_symbols,
             plan=RejectionPlan(
                 filter_order=tuple(filter_.name for filter_ in self._filters),
                 signal_order=tuple(signal.name for signal in self._signals),
-                hits_by_signal=tuple(tuple(hits) for hits in hits_by_signal),
+                hits_by_signal=tuple(tuple(hits) for hits in outcome.hits_by_signal),
             ),
         )
-        return ScreeningResult(candidates=candidates, rejections=rejections)
+        return ScreeningResult(
+            candidates=outcome.candidates,
+            rejections=rejections,
+            truncated=outcome.truncated,
+        )
 
-    def _build_candidates(
-        self, data: ScreeningInput
-    ) -> tuple[list[Candidate], set[str], list[list[SignalHit]]]:
-        """Shared filter->signal->rank body for `run()`/`run_with_rejections()`.
-
-        Returns:
-            The ranked, capped candidate list; the pre-limit set of symbols
-            with valid ranking metrics (used by the rejection classifier);
-            and each signal's raw hits, in configured order.
-        """
+    def _build_candidates(self, data: ScreeningInput) -> _BuildOutcome:
+        """Shared filter->signal->rank body for `run()`/`run_with_rejections()`."""
         filtered = {member.symbol for member in data.universe}
         for filter_ in self._filters:
             filtered &= filter_.apply(data)
@@ -214,6 +232,26 @@ class ScreeningPipeline:
             key=lambda row: _state_sort_key(row[3], row[2]["score"], row[0])
         )
         limited = classified_rows[: self._candidate_limit]
+        truncated = [
+            TruncatedCandidate(
+                symbol=symbol,
+                rank=rank,
+                score=metrics["score"],
+                score_breakdown={key: metrics[key] for key in _SCORE_COMPONENT_KEYS},
+                execution_state=execution_state,
+                execution_distance=execution_distance,
+            )
+            for rank, (
+                symbol,
+                _signal_names,
+                metrics,
+                execution_state,
+                execution_distance,
+            ) in enumerate(
+                classified_rows[self._candidate_limit :],
+                start=self._candidate_limit + 1,
+            )
+        ]
         candidates = [
             Candidate(
                 symbol=symbol,
@@ -232,7 +270,12 @@ class ScreeningPipeline:
                 execution_distance,
             ) in enumerate(limited)
         ]
-        return candidates, rankable_symbols, hits_by_signal
+        return _BuildOutcome(
+            candidates=candidates,
+            rankable_symbols=rankable_symbols,
+            hits_by_signal=hits_by_signal,
+            truncated=truncated,
+        )
 
     def _score_rows(
         self, rows: list[tuple[str, tuple[str, ...], dict[str, float]]]

@@ -68,7 +68,11 @@ if TYPE_CHECKING:
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
-    from swing_copilot.screening.base import Candidate, RejectionRecord
+    from swing_copilot.screening.base import (
+        Candidate,
+        RejectionRecord,
+        TruncatedCandidate,
+    )
 
 
 def _held_symbols(
@@ -190,9 +194,12 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     _warn_stale_runs(run_id, stale_run_ids)
 
     empty_run_data: tuple[
-        list[Candidate], list[RejectionRecord], list[RiskAssessment]
-    ] = ([], [], [])
-    candidates, rejections, risk_assessments = empty_run_data
+        list[Candidate],
+        list[RejectionRecord],
+        list[TruncatedCandidate],
+        list[RiskAssessment],
+    ] = ([], [], [], [])
+    candidates, rejections, truncated, risk_assessments = empty_run_data
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
@@ -201,10 +208,11 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
-        nonlocal candidates, rejections
-        outcome, candidates, rejections = _run_step_screening(
-            deps, symbols, run_date, run_id
-        )
+        nonlocal candidates, rejections, truncated
+        outcome, screening = _run_step_screening(deps, symbols, run_date, run_id)
+        candidates = screening.candidates
+        rejections = screening.rejections
+        truncated = screening.truncated
         return outcome
 
     def _step_risk() -> _StepOutcome:
@@ -271,6 +279,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         run_date=run_date,
         candidates=candidates,
         rejections=rejections,
+        truncated=truncated,
         risk_assessments=risk_assessments,
         portfolio_heat=cast("PortfolioHeatResult", portfolio_heat),
         circuit_breaker=cast("CircuitBreakerResult", circuit_breaker),

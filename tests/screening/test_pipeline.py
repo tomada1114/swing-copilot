@@ -971,6 +971,93 @@ class TestRunWithRejections:
         assert result.rejections == []
 
 
+class TestCandidateLimitTruncationIsRecorded:
+    """A `candidate_limit` cut leaves the symbol visible in `truncated`."""
+
+    @staticmethod
+    def _all_passing_data(count: int) -> ScreeningInput:
+        symbols = [f"SYM{i:02d}" for i in range(count)]
+        bars = pd.concat(
+            [_uptrend_bars(symbol, base=100.0 + i) for i, symbol in enumerate(symbols)]
+        )
+        return ScreeningInput(
+            as_of=AS_OF,
+            universe=tuple(_member(symbol) for symbol in symbols),
+            fundamentals=_healthy_fundamentals_df(symbols),
+            bars=bars,
+        )
+
+    @staticmethod
+    def _pipeline(settings: Settings, candidate_limit: int) -> ScreeningPipeline:
+        return ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": ["volume_min"],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": candidate_limit,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+    def test_symbols_cut_by_the_limit_are_reported_with_continuing_ranks(
+        self, settings
+    ):
+        data = self._all_passing_data(15)
+
+        result = self._pipeline(settings, 10).run_with_rejections(data)
+
+        assert [candidate.rank for candidate in result.candidates] == list(range(1, 11))
+        assert [item.rank for item in result.truncated] == [11, 12, 13, 14, 15]
+
+    def test_a_truncated_symbol_is_neither_a_candidate_nor_a_rejection(self, settings):
+        data = self._all_passing_data(15)
+
+        result = self._pipeline(settings, 10).run_with_rejections(data)
+
+        truncated_symbols = {item.symbol for item in result.truncated}
+        assert len(truncated_symbols) == 5
+        assert truncated_symbols.isdisjoint(
+            candidate.symbol for candidate in result.candidates
+        )
+        assert truncated_symbols.isdisjoint(
+            rejection.symbol for rejection in result.rejections
+        )
+
+    def test_no_truncation_when_the_candidate_set_fits_within_the_limit(self, settings):
+        data = self._all_passing_data(10)
+
+        result = self._pipeline(settings, 10).run_with_rejections(data)
+
+        assert len(result.candidates) == 10
+        assert result.truncated == []
+
+    def test_truncated_entries_carry_the_full_score_breakdown(self, settings):
+        data = self._all_passing_data(11)
+
+        result = self._pipeline(settings, 10).run_with_rejections(data)
+
+        item = result.truncated[0]
+        assert set(item.score_breakdown) == {
+            "score_rsi_pullback",
+            "score_trend_quality",
+            "score_liquidity",
+            "score_atr_pct",
+        }
+        assert item.score == pytest.approx(sum(item.score_breakdown.values()))
+
+    def test_run_ignores_truncation_and_still_returns_only_the_capped_list(
+        self, settings
+    ):
+        data = self._all_passing_data(15)
+        pipeline = self._pipeline(settings, 10)
+
+        assert pipeline.run(data) == pipeline.run_with_rejections(data).candidates
+
+
 class TestNoLookAheadFromUnslicedBars:
     """The backtest hands the pipeline bars extending past `as_of`.
 

@@ -431,6 +431,19 @@ def test_circuit_breaker_thresholds_have_documented_defaults():
     assert settings.risk.circuit_cooldown_hours == 24
 
 
+def test_dd_level_thresholds_default_to_previous_hardcoded_constants():
+    # These defaults must reproduce the module constants that used to live in
+    # `regime/distribution.py` (`_SEVERE_D25=6`, `_SEVERE_D15=4`, `_HIGH_D25=5`,
+    # `_HIGH_D15=3`, `_HIGH_D5=2`, `_CAUTION_D25=3`) so behavior is unchanged.
+    settings = load_settings("config/settings.yaml")
+    assert settings.regime.dd_severe_d25 == 6
+    assert settings.regime.dd_severe_d15 == 4
+    assert settings.regime.dd_high_d25 == 5
+    assert settings.regime.dd_high_d15 == 3
+    assert settings.regime.dd_high_d5 == 2
+    assert settings.regime.dd_caution_d25 == 3
+
+
 def test_earnings_warn_threshold_cannot_be_below_block_threshold():
     with pytest.raises(ValidationError, match="earnings_warn_business_days"):
         Settings.model_validate(
@@ -464,6 +477,22 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
         pytest.param(
             {"regime": {"bull_vix_max": 35.0, "bear_vix_min": 30.0}},
             id="vix-order",
+        ),
+        pytest.param(
+            {"regime": {"dd_severe_d25": 5, "dd_high_d25": 5}},
+            id="dd-d25-severe-not-greater-than-high",
+        ),
+        pytest.param(
+            {"regime": {"dd_high_d25": 3, "dd_caution_d25": 3}},
+            id="dd-d25-high-not-greater-than-caution",
+        ),
+        pytest.param(
+            {"regime": {"dd_severe_d15": 3, "dd_high_d15": 3}},
+            id="dd-d15-severe-not-greater-than-high",
+        ),
+        pytest.param(
+            {"regime": {"dd_severe_d25": 0}},
+            id="dd-threshold-below-one",
         ),
         pytest.param(
             {"technical_signals": {"vcp": {"contraction_ratio_max": 1.1}}},

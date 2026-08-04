@@ -393,6 +393,14 @@ class RegimeConfig(_StrictModel):
     dd_decline_pct: float = Field(default=-0.002, le=0.0)
     stall_abs_change_pct: float = Field(default=0.001, ge=0.0)
     recovery_pct: float = Field(default=0.05, ge=0.0)
+    # Distribution Day level-classification boundaries (roadmap §5 P3-13,
+    # 要検証). Defaults reproduce the previously hardcoded module constants.
+    dd_severe_d25: int = Field(default=6, ge=1)
+    dd_severe_d15: int = Field(default=4, ge=1)
+    dd_high_d25: int = Field(default=5, ge=1)
+    dd_high_d15: int = Field(default=3, ge=1)
+    dd_high_d5: int = Field(default=2, ge=1)
+    dd_caution_d25: int = Field(default=3, ge=1)
     # Exposure Ceiling's REDUCE_ONLY multiplier (roadmap §5 P3-14, 要検証).
     reduce_only_risk_multiplier: float = Field(default=0.5, gt=0.0, le=1.0)
     # roadmap §5 P3-16（要検証）: display-only Follow-Through Day thresholds.
@@ -404,6 +412,16 @@ class RegimeConfig(_StrictModel):
     def _validate_vix_threshold_order(self) -> RegimeConfig:
         if self.bear_vix_min < self.bull_vix_max:
             msg = "bear_vix_min must be >= bull_vix_max"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dd_level_order(self) -> RegimeConfig:
+        if not (self.dd_severe_d25 > self.dd_high_d25 > self.dd_caution_d25):
+            msg = "dd_severe_d25 must be > dd_high_d25 > dd_caution_d25"
+            raise ValueError(msg)
+        if not (self.dd_severe_d15 > self.dd_high_d15):
+            msg = "dd_severe_d15 must be > dd_high_d15"
             raise ValueError(msg)
         return self
 

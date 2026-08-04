@@ -42,23 +42,26 @@ class DistributionResult:
 
 @dataclass(frozen=True, slots=True)
 class DistributionThresholds:
-    """Configurable, unvalidated Distribution Day thresholds."""
+    """Configurable, unvalidated Distribution Day thresholds.
+
+    ``severe_*``/``high_*``/``caution_*`` are the level-classification
+    boundaries `distribution_level()` compares counts against; the defaults
+    reproduce the previously hardcoded module constants unchanged.
+    """
 
     window_days: int = 25
     dd_decline_pct: float = -0.002
     stall_abs_change_pct: float = 0.001
     recovery_pct: float = 0.05
+    severe_d25: int = 6
+    severe_d15: int = 4
+    high_d25: int = 5
+    high_d15: int = 3
+    high_d5: int = 2
+    caution_d25: int = 3
 
 
 DEFAULT_DISTRIBUTION_THRESHOLDS = DistributionThresholds()
-
-
-_SEVERE_D25 = 6
-_SEVERE_D15 = 4
-_HIGH_D25 = 5
-_HIGH_D15 = 3
-_HIGH_D5 = 2
-_CAUTION_D25 = 3
 
 
 def calculate_distribution_days(
@@ -114,17 +117,27 @@ def calculate_distribution_days(
         d25,
         d15,
         d5,
-        distribution_level(d25, d15, d5),
+        distribution_level(d25, d15, d5, thresholds=thresholds),
         DataQuality.OK,
     )
 
 
-def distribution_level(d25: float, d15: float, d5: float) -> DistributionLevel:
+def distribution_level(
+    d25: float,
+    d15: float,
+    d5: float,
+    *,
+    thresholds: DistributionThresholds = DEFAULT_DISTRIBUTION_THRESHOLDS,
+) -> DistributionLevel:
     """Return the strictest configured Distribution Day severity."""
-    if d25 >= _SEVERE_D25 or d15 >= _SEVERE_D15:
+    if d25 >= thresholds.severe_d25 or d15 >= thresholds.severe_d15:
         return DistributionLevel.SEVERE
-    if d25 >= _HIGH_D25 or d15 >= _HIGH_D15 or d5 >= _HIGH_D5:
+    if (
+        d25 >= thresholds.high_d25
+        or d15 >= thresholds.high_d15
+        or d5 >= thresholds.high_d5
+    ):
         return DistributionLevel.HIGH
-    if d25 >= _CAUTION_D25:
+    if d25 >= thresholds.caution_d25:
         return DistributionLevel.CAUTION
     return DistributionLevel.NORMAL

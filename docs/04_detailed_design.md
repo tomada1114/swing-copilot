@@ -550,7 +550,12 @@ Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で
 `pipeline/daily.py`だけが`MarketStore`からSPY/QQQ/^VIXの履歴を読み、run単位で
 `StateStore.record_regime_snapshot()`へ補正upsertする。`DailyBrief`は同じsnapshotを
 terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
-roadmap §5 P3-13に従いすべて要検証値として扱う。
+roadmap §5 P3-13に従いすべて要検証値として扱う。`distribution_level()`が
+NORMAL/CAUTION/HIGH/SEVEREを決めるd25/d15/d5の水準境界（`dd_severe_d25`,
+`dd_severe_d15`, `dd_high_d25`, `dd_high_d15`, `dd_high_d5`, `dd_caution_d25`）も
+同じ`regime.*`の設定項目であり、既定値は従来ハードコードされていた定数と同値。
+`RegimeConfig`は`dd_severe_d25 > dd_high_d25 > dd_caution_d25`と
+`dd_severe_d15 > dd_high_d15`の順序をvalidatorで強制する。
 
 ### 3.12b `regime/exposure.py`（P3-14）
 
@@ -2013,6 +2018,12 @@ regime:
   dd_decline_pct: -0.002           # DD下落率（要検証）
   stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
   recovery_pct: 0.05               # DD無効化上昇率（要検証）
+  dd_severe_d25: 6                 # SEVERE判定のd25閾値（要検証）
+  dd_severe_d15: 4                 # SEVERE判定のd15閾値（要検証）
+  dd_high_d25: 5                   # HIGH判定のd25閾値（要検証）
+  dd_high_d15: 3                   # HIGH判定のd15閾値（要検証）
+  dd_high_d5: 2                    # HIGH判定のd5閾値（要検証）
+  dd_caution_d25: 3                # CAUTION判定のd25閾値（要検証）
   ftd_correction_decline_pct: 0.03 # FTD調整確定の高値比下落率、roadmap §5 P3-16（要検証）
   ftd_correction_down_days: 3      # FTD調整確定の連続下落日数、roadmap §5 P3-16（要検証）
   ftd_gain_pct: 0.0125             # FTD確認の前日比上昇率、roadmap §5 P3-16（要検証）

@@ -106,16 +106,41 @@ class RejectionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TruncatedCandidate:
+    """A symbol that cleared every stage but fell outside `candidate_limit`.
+
+    Nothing rejected it, so it has no `RejectionRecord`: `reason_code` is a
+    closed enum backed by a DB CHECK constraint, and inventing a code for
+    "ranked 11th" would conflate a configuration cap with a screening
+    verdict. Recording it separately is what keeps such a symbol visible at
+    all — before this it appeared in neither the candidate list nor the
+    rejection ledger.
+
+    `rank` is the symbol's position in the full pre-truncation ranking, so
+    `rank > candidate_limit` always holds and the near-misses are obvious.
+    """
+
+    symbol: str
+    rank: int
+    score: float
+    score_breakdown: Mapping[str, float]
+    execution_state: str
+    execution_distance: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ScreeningResult:
     """`ScreeningPipeline.run_with_rejections()`'s full output (P1-02).
 
     `candidates` matches `run()`'s existing ranked/capped output exactly;
     `rejections` covers every universe symbol that failed a filter or a
-    configured signal, classified by `rejection_classifier.py`.
+    configured signal, classified by `rejection_classifier.py`; `truncated`
+    covers the symbols that failed nothing and were cut by `candidate_limit`.
     """
 
     candidates: list[Candidate]
     rejections: list[RejectionRecord]
+    truncated: list[TruncatedCandidate]
 
 
 class Filter(Protocol):

@@ -18,6 +18,26 @@ copilot-daily --strategy vcp_breakout
 距離に応じて「即検討可」「様子見」「見送り」へ分類される。各しきい値と
 strategy定義は`config/settings.yaml`および`config/strategies.yaml`を正とする。
 
+## 落選記録アーティファクト（`rejections.json`）
+
+日次runは`reports/<run_date>/<run_id>/rejections.json`（schema `rejections-v1`、
+`report/rejections.py`）を必ず書き出す。Markdownの「落選サマリ」が
+`reason_code`別の件数しか出さないのに対し、こちらは銘柄単位の明細を残す。
+
+| キー | 内容 |
+|---|---|
+| `rejections` | 落選銘柄の`symbol`・`stage`・`reason_code`・`detail`（`symbol`昇順） |
+| `truncated_by_candidate_limit` | 全FilterとSignalを通過しながら`candidate_limit`で順位落ちした銘柄の`symbol`・切り捨て前の通し`rank`・`score`・スコア内訳・`execution_state`・`execution_distance`（`rank`昇順） |
+
+`truncated_by_candidate_limit`はDuckDBの`screening_rejections`には入らない。
+落選理由コードは閉じたenumで、順位落ちは「落選」ではなく設定上の上限だからで
+ある。したがってこのファイルが、上限のすぐ外にいた銘柄を確認できる唯一の
+run成果物になる。`candidate_limit`は`config/strategies.yaml`で戦略ごとに定める。
+
+書き出しはステップ8がMarkdownアーカイブのあとに行い、失敗しても
+`RunStatus.DEGRADED`（終了コード0）に留まる。定性分析の3ファイルとは異なり
+digestで束縛せず、読み戻す経路も持たない診断用の成果物である。
+
 ## 口座レベルリスク
 
 `risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションと承認候補の

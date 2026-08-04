@@ -276,7 +276,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 |---|---|---|---|
 | ① Parquet | `data/bars/`（`year=YYYY`パーティション） | 日足時系列の生データを列指向で永続化。追記・大量読み出しに強い。 | DataProvider（書き込み）、DuckDB（読み出し元） |
 | ② DuckDB | `data/copilot.duckdb` | Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、落選理由、リスク評価、収集テキスト、判断/ポジションを保持する唯一の構造化ストア。 | screening/*, risk/*, paper/*, report/*, pipeline/*, backtest/* |
-| ③ JSONアーティファクト | `reports/<run_date>/` | 定性分析の入出力（`analysis_input.json`／`analysis_result.json`）と再描画用の`report_context.json`。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、同時にそのまま監査証跡になる（NFR-05）。 | analysis/*, Claude Codeスキル |
+| ③ JSONアーティファクト | `reports/<run_date>/` | 定性分析の入出力（`analysis_input.json`／`analysis_result.json`）と再描画用の`report_context.json`。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、同時にそのまま監査証跡になる（NFR-05）。落選明細の`rejections.json`（`report/rejections.py`）も同じディレクトリに並べる。こちらはDuckDBの`screening_rejections`の写しに加え、台帳の閉じたenumでは表現できない`candidate_limit`切り捨て分を持つ。 | analysis/*, report/*, Claude Codeスキル |
 
 使い分けの原則:
 - **時系列の大量データ（株価）はParquet**に列指向で永続化し、DuckDBはその上の「クエリビュー」として振る舞う（DuckDB自体に生データを二重persistしない）。

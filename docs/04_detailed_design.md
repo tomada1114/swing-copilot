@@ -61,6 +61,7 @@ swing-copilot/
 │   │   ├── daily_brief.py    # 表示非依存の共通DailyBrief
 │   │   ├── terminal_report.py # Richによるstdout表示
 │   │   ├── markdown_report.py # Markdown原子保存
+│   │   ├── rejections.py     # rejections.json（落選明細＋candidate_limit切り捨て）
 │   │   └── discord_notify.py # FR-09（オプション機能）
 │   ├── backtest/
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
@@ -1222,8 +1223,8 @@ class PerformanceSummary:
 provider名/data tier、実効ユニバースのsnapshot日・identity、アプリ版・metadata
 schema版とともに`runs`へ保存する。固定8ステップのうちステップ1〜4、ブリーフ生成、
 またはrun固有Markdown保存の失敗は`FAILED`・非ゼロ終了とする。一方、テキスト、
-分析入力エクスポート、通知、`latest.md`更新、`report_context.json`保存の失敗は、
-run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする。主表示はステップ8
+分析入力エクスポート、通知、`latest.md`更新、`report_context.json`・`rejections.json`
+保存の失敗は、run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする。主表示はステップ8
 でstdoutへ出し、終了時の運用サマリにはrun ID、status、exit code、provider/data tier、
 欠損source、成果物パス、`uv run copilot-history run --run-id <UUID>`を一箇所に表示する。
 `prototype` data tier（現行`yfinance`）のCLIブリーフとMarkdownには非公式データに
@@ -1368,6 +1369,20 @@ uv run copilot-history performance [--db PATH]
 | `performance` | `PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/平均MAE・MFE/可能性注記/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
+
+### 3.22a `report/rejections.py`（run成果物 `rejections.json`）
+
+run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（schema `rejections-v1`）を置く。書き出しはステップ8（`_run_step_output()`）が`report_context.json`のあとに行い、`analysis/export.py::write_json_atomically()`を再利用する（一時ファイル＋`os.replace`）。失敗はfail-soft——run固有Markdownは既に残っているので、`RunStatus.DEGRADED`・終了コード0とする。
+
+既存の出力にはギャップが2つあった。ひとつはMarkdown/`report_context.json`の落選サマリが`reason_code`別の**件数**しか持たず、「どの銘柄がなぜ落ちたか」を見るにはDuckDBを引く必要があったこと。もうひとつは、全Filter・全Signalを通過しながら`candidate_limit`で順位落ちした銘柄が候補にも`screening_rejections`にも載らず、**どこにも記録されていなかった**こと（4.2節の`screening_rejections`）。このファイルは両方を1箇所に残す。
+
+| キー | 内容 |
+|---|---|
+| `schema_version` / `run_id` / `as_of` / `strategy_key` | run識別。digestでは束縛しない（読み戻す経路を持たない診断用成果物であり、定性分析の3ファイルとは役割が異なる） |
+| `rejections` | `RejectionRecord`の明細（`symbol`・`stage`・`reason_code`・`detail`）。`symbol`昇順 |
+| `truncated_by_candidate_limit` | `ScreeningResult.truncated`（`symbol`・切り捨て前の通し`rank`・`score`・スコア内訳・`execution_state`・`execution_distance`）。`rank`昇順で、`rank > candidate_limit`が常に成り立つ |
+
+並び順を固定するのは、同じ`as_of`の再実行がバイト一致するファイルを出すためで、2つのrunディレクトリをdiffできるかどうかがこれで決まる。DuckDBスキーマは変更していない——`screening_rejections.reason_code`のenumは閉集合であり、順位落ちに充てられる値がそもそも存在しないためである。回帰は`tests/report/test_rejections.py`と`tests/pipeline/test_failsoft.py::TestRejectionsArtifactReachesTheRunDirectory`、切り捨て検出そのものは`tests/screening/test_pipeline.py::TestCandidateLimitTruncationIsRecorded`が守る。
 
 ### 3.23 `retro/` と `copilot-retro`（P8-30〜P8-33、roadmap §5 P8）
 
@@ -1895,7 +1910,7 @@ CREATE TABLE IF NOT EXISTS text_items (
 
 > **P7（スキル移行）での削除**: `llm_calls`テーブル（call_id / model / prompt_text / prompt_hash / source_ids / status / トークン数 / 単価 / cost_usd / response_json）と、`(model, prompt_hash, schema_version)`一致による成功レスポンス再利用は、LLM API呼び出しの廃止に伴い削除した（`storage/llm_records.py`ごと）。定性分析の監査証跡は`reports/<run_date>/`に残る`analysis_input.json`・`analysis_result.json`・`report_context.json`が担う（NFR-05、3.15〜3.17節）。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、そのまま監査証跡になるためである。
 
-`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は`strategies.yaml`で実際に設定されたFilter順、Signal順、ランキング用データ品質の順で行われ、ランキング指標が欠損した銘柄も`DATA_INSUFFICIENT_HISTORY`として候補・落選のどちらにも出ない状態を避ける。candidate_limitだけで順位落ちした銘柄は落選理由を付けない。将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
+`screening_rejections`（P1-02、roadmap §5）は、スクリーニングで最終候補にならなかったユニバース銘柄1件につき1行を記録する。書き込みは`storage/audit_records.py::record_screening_results()`が担い、同じトランザクション内で`candidates`への書き込みと一緒にcommit/rollbackする（`record_signals`と同じ明示的トランザクションパターン。旧`record_candidates`にはこの保証がなかったのが実際のギャップだった）。理由コードの判定は`screening/rejection_classifier.py::classify_rejections()`が独立に行う——各Filter/Signalの実装を呼び出すのではなく、その閾値ロジックを別モジュールとしてミラーする。判定は`strategies.yaml`で実際に設定されたFilter順、Signal順、ランキング用データ品質の順で行われ、ランキング指標が欠損した銘柄も`DATA_INSUFFICIENT_HISTORY`として候補・落選のどちらにも出ない状態を避ける。candidate_limitだけで順位落ちした銘柄は落選理由を付けない（理由コードは閉じたenumでありCHECK制約で守られている。順位落ちは落選ではなく設定上の上限であって、既存コードのどれを充てても嘘になる）。ただし記録しないわけではなく、`ScreeningResult.truncated`として`rejections.json`へ独立の節で残す（3.22a節）。将来Filter/Signalが追加された場合は列挙とこのモジュールの拡張が別途必要になる（意図的に汎用化していない）。
 
 **Issue #11の仕様からの乖離**: Issue #11が定義する`reason_code`列挙には`{FILTER_NEGATIVE_NET_INCOME, FILTER_NEGATIVE_FCF, FILTER_LOW_EQUITY_RATIO, SIGNAL_TREND_NOT_MET, SIGNAL_RSI_NOT_MET, DATA_INSUFFICIENT_HISTORY}`の6値しかないが、実際の既定戦略（`config/strategies.yaml`）は`volume_min`流動性フィルタも実行しており、この6値のどれにも該当しない却下が発生しうる。リポジトリの実態を優先するプロジェクトの競合解決規約に従い、7番目の値`FILTER_LOW_LIQUIDITY`（`stage='fundamental_filter'`。`Filter`は自己資本比率と流動性を同じ第1段としてグルーピングしているため）を追加している。
 
@@ -1914,6 +1929,8 @@ DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しな
 | `Settings` / `Secrets` | `config.py` | 設定・秘密情報 |
 | `UniverseMember` / `BarFetchResult` / `Candidate` | `models.py` | 内部ドメイン値（frozen dataclass） |
 | `SignalHit` | `screening/base.py` | シグナル評価結果（frozen dataclass） |
+| `TruncatedCandidate` | `screening/base.py` | 全ステージ通過後に`candidate_limit`で切り捨てられた銘柄（frozen dataclass、3.22a節） |
+| `RejectionsArtifact` | `report/rejections.py` | `rejections.json`へ書き出す1run分の落選・切り捨て記録（frozen dataclass） |
 | `RiskAssessment` / `CorrelationWarning` | `risk/checks.py` | リスクチェック結果（frozen dataclass） |
 | `RegimeSnapshot` | `regime/gate.py` | run時点の市場ゲート、SPY/QQQ Distribution Day、データ品質 |
 | `AnalysisInput` / `CandidateInput` / `NewsInput` / `FilingInput` | `analysis/schemas.py` | `analysis_input.json`のstrict境界モデル（FR-08） |

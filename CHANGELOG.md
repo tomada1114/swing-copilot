@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- run成果物`reports/<run_date>/<run_id>/rejections.json`（schema
+  `rejections-v1`、`report/rejections.py`）。落選明細はDuckDBの
+  `screening_rejections`にしかなく、run成果物にはreason_code別の**件数**しか
+  残っていなかったため、「どの銘柄がなぜ落ちたか」を見るにはDBを引く必要が
+  あった。あわせて`truncated_by_candidate_limit`節を持ち、全Filter・全Signalを
+  通過しながら`candidate_limit`で順位落ちした銘柄（`symbol`・切り捨て前の通し
+  `rank`・`score`・スコア内訳・実行状態）を残す。**これらは従来どこにも
+  記録されていなかった**——順位落ちは落選ではないため落選台帳に載らず、上限外
+  なので候補にも載らない。DuckDBスキーマは変更していない（`reason_code`は
+  CHECK制約で守られた閉集合であり、順位落ちに充てられる値が存在しない）。
+  書き出しは一時ファイル＋`os.replace`で原子的に行い、失敗しても
+  `RunStatus.DEGRADED`（終了コード0）に留まる
 - `copilot-backfill`（`pipeline/backfill.py`）。バックテストに必要な過去の
   バー／ファンダメンタルズを一度だけ取り込む一回限りのCLI。日次runは400暦日の
   ローリング窓しか取らないため、複数レジームをまたぐ検証に足る履歴が

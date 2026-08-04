@@ -68,6 +68,7 @@ from swing_copilot.report.markdown_report import (
     LatestMarkdownUpdateError,
     write_markdown_report,
 )
+from swing_copilot.report.rejections import RejectionsArtifact, write_rejections
 from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.retro.evaluate import evaluate_verdicts
 from swing_copilot.risk.checks import (
@@ -118,7 +119,12 @@ if TYPE_CHECKING:
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate, RejectionRecord
+    from swing_copilot.screening.base import (
+        Candidate,
+        RejectionRecord,
+        ScreeningResult,
+        TruncatedCandidate,
+    )
     from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.text.base import TextItem
@@ -273,6 +279,10 @@ class _RunContext:
     run_date: date
     candidates: list[Candidate]
     rejections: list[RejectionRecord]
+    # Symbols that cleared every stage but lost the `candidate_limit` cut.
+    # They are in neither `candidates` nor `rejections`, so `rejections.json`
+    # is the only place a run ever reports them.
+    truncated: list[TruncatedCandidate]
     risk_assessments: list[RiskAssessment]
     portfolio_heat: PortfolioHeatResult
     circuit_breaker: CircuitBreakerResult
@@ -602,7 +612,7 @@ def _run_step_fundamentals(
 
 def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
-) -> tuple[_StepOutcome, list[Candidate], list[RejectionRecord]]:
+) -> tuple[_StepOutcome, ScreeningResult]:
     fundamentals = deps.market_store.read_fundamentals(as_of)
     start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
@@ -630,7 +640,7 @@ def _run_step_screening(
         result.rejections,
         ScreeningRunMeta(run_id, pipeline.strategy_key, as_of),
     )
-    return _StepOutcome(True), result.candidates, result.rejections
+    return _StepOutcome(True), result
 
 
 def _run_step_risk(
@@ -1343,6 +1353,26 @@ def _run_step_output(
                 report_path,
                 brief,
             )
+    try:
+        write_rejections(
+            RejectionsArtifact(
+                run_id=output.run.run_id,
+                as_of=output.run.run_date,
+                strategy_key=deps.strategy_key,
+                rejections=output.run.rejections,
+                truncated=output.run.truncated,
+            ),
+            _run_output_dir(deps, output.run.run_date, output.run.run_id),
+        )
+    except Exception as exc:
+        # Fail-soft like `report_context.json`: the Markdown archive is
+        # already durable, so a diagnostic artifact cannot cost the run.
+        logger.exception("rejections artifact archive failed")
+        return (
+            _StepOutcome(False, f"rejections archive failed: {exc}"),
+            report_path,
+            brief,
+        )
     return _StepOutcome(True), report_path, brief
 
 

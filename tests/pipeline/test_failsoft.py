@@ -40,6 +40,7 @@ from swing_copilot.report.markdown_report import (
     LatestMarkdownUpdateError,
     write_markdown_report,
 )
+from swing_copilot.report.rejections import REJECTIONS_FILENAME
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -1236,6 +1237,98 @@ class TestPerformanceSummaryReachesAnalysisInput:
                 / ANALYSIS_INPUT_FILENAME
             ).resolve()
         )
+
+
+class TestRejectionsArtifactReachesTheRunDirectory:
+    """P1-02 gap: the run directory must show why each symbol did not make it.
+
+    `report_context.json` only carries per-reason *counts*, and a symbol cut by
+    `candidate_limit` is in neither the candidate list nor the rejection
+    ledger, so `rejections.json` is the only run artifact that names either.
+    """
+
+    @staticmethod
+    def _artifact(base_deps, result):
+        path = (
+            Path(base_deps.output_dir)
+            / AS_OF.isoformat()
+            / str(result.run_id)
+            / REJECTIONS_FILENAME
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_rejected_symbol_is_named_with_its_reason_code(self, base_deps):
+        bars = pd.concat(
+            [
+                _uptrending_bars(["AAPL"], AS_OF),
+                _uptrending_bars(["MSFT"], AS_OF).assign(volume=100),
+            ]
+        )
+        deps = replace(base_deps, data_provider=FakeDataProvider(bars))
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        payload = self._artifact(deps, result)
+        assert payload["run_id"] == str(result.run_id)
+        assert payload["as_of"] == AS_OF.isoformat()
+        assert payload["strategy_key"] == "default"
+        assert [
+            (item["symbol"], item["reason_code"]) for item in payload["rejections"]
+        ] == [("MSFT", "FILTER_LOW_LIQUIDITY")]
+
+    def test_a_symbol_cut_by_candidate_limit_is_recorded_separately(self, base_deps):
+        deps = replace(
+            base_deps,
+            strategies_config={
+                "strategies": {
+                    "default": {
+                        "filters_all": ["volume_min"],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 1,
+                    }
+                }
+            },
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        payload = self._artifact(deps, result)
+        assert payload["rejections"] == []
+        truncated = payload["truncated_by_candidate_limit"]
+        assert [(item["symbol"], item["rank"]) for item in truncated] == [("MSFT", 2)]
+        assert set(truncated[0]["score_breakdown"]) == {
+            "score_rsi_pullback",
+            "score_trend_quality",
+            "score_liquidity",
+            "score_atr_pct",
+        }
+
+    def test_a_run_with_no_rejections_writes_the_artifact_with_empty_sections(
+        self, base_deps
+    ):
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        payload = self._artifact(base_deps, result)
+        assert result.status is RunStatus.SUCCESS
+        assert payload["rejections"] == []
+        assert payload["truncated_by_candidate_limit"] == []
+
+    def test_an_archive_failure_degrades_the_run_but_keeps_the_markdown(
+        self, base_deps, state_store, monkeypatch
+    ):
+        def _raise(*_args, **_kwargs):
+            msg = "rejections disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(daily_module, "write_rejections", _raise)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), base_deps)
+
+        assert result.status is RunStatus.DEGRADED
+        assert result.exit_code == 0
+        assert result.report_path is not None
+        assert result.report_path.is_file()
+        assert _step_status(state_store, result.run_id, "8_output") == "failed"
 
 
 class SharedArticleNewsClient:

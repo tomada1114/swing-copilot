@@ -54,6 +54,14 @@ _AVG_VOLUME_WINDOW = 20
 _SMA_SHORT_WINDOW = 50
 _SMA_LONG_WINDOW = 200
 
+#: Calendar days of price history any caller must read back from `as_of` to
+#: give `ranking_metrics` a full `_SMA_LONG_WINDOW` warmup. Public and owned
+#: here (not by `pipeline/daily.py`) because the requirement comes from the
+#: screening indicators, and read-only screening diagnostics must be able to
+#: read the same window without importing the daily orchestration module.
+#: Unrelated to `edgar.py`'s own fundamentals-fetch lookback constant.
+PRICE_HISTORY_LOOKBACK_DAYS = 400
+
 # Composite ranking score (P1-01, roadmap §5): normalization width for the
 # trend_quality component's (sma50/sma200 - 1) ratio.
 _TREND_QUALITY_NORMALIZATION = 0.10
@@ -225,8 +233,8 @@ class ScreeningPipeline:
 
         rows = []
         for symbol in candidate_symbols:
-            ranking_metrics = self._ranking_metrics(data, symbol)
-            if ranking_metrics is None:
+            metrics_for_ranking = ranking_metrics(data, symbol)
+            if metrics_for_ranking is None:
                 continue
             signal_names = tuple(
                 sorted(
@@ -243,7 +251,7 @@ class ScreeningPipeline:
                 for hit in hits:
                     if hit.symbol == symbol:
                         metrics.update(hit.metrics)
-            metrics.update(ranking_metrics)
+            metrics.update(metrics_for_ranking)
             rows.append((symbol, signal_names, metrics))
 
         rankable_symbols = {symbol for symbol, _signal_names, _metrics in rows}
@@ -357,51 +365,62 @@ class ScreeningPipeline:
                 }
             )
 
-    @staticmethod
-    def _ranking_metrics(data: ScreeningInput, symbol: str) -> dict[str, float] | None:
-        """Compute rsi14/atr14/avg_volume/sma50/sma200 from bars, or None if unavailable.
 
-        Computed independently of whichever signals happen to be configured,
-        so ranking and report metrics are always available and consistent
-        (docs/04_detailed_design.md 2.1 #4). A symbol with any NaN metric
-        (e.g. insufficient history) is dropped from the candidate set, as is
-        one whose last close is non-positive: `_score_rows` divides by it, so
-        a corrupt or placeholder row would otherwise abort the entire run
-        rather than costing the one bad symbol.
-        """
-        series = symbol_bars(data.bars, symbol, data.as_of)
-        if series is None or len(series) < max(
-            _RSI_WINDOW, _ATR_WINDOW, _AVG_VOLUME_WINDOW
-        ):
-            return None
+def ranking_metrics(data: ScreeningInput, symbol: str) -> dict[str, float] | None:
+    """Compute rsi14/atr14/avg_volume/sma50/sma200 from bars, or None if unavailable.
 
-        rsi14 = wilder_rsi(series["close"], _RSI_WINDOW).iloc[-1]
-        atr14 = wilder_atr(
-            series["high"], series["low"], series["close"], _ATR_WINDOW
-        ).iloc[-1]
-        avg_volume = series["volume"].tail(_AVG_VOLUME_WINDOW).mean()
-        close = series["close"].iloc[-1]
-        sma50 = sma(series["close"], _SMA_SHORT_WINDOW).iloc[-1]
-        sma200 = sma(series["close"], _SMA_LONG_WINDOW).iloc[-1]
-        if (
-            pd.isna(rsi14)
-            or pd.isna(atr14)
-            or pd.isna(avg_volume)
-            or pd.isna(close)
-            or pd.isna(sma50)
-            or pd.isna(sma200)
-        ):
-            return None
-        if close <= 0:
-            return None
-        return {
-            "rsi14": float(rsi14),
-            "atr14": float(atr14),
-            "avg_volume": float(avg_volume),
-            "close": float(close),
-            "sma50": float(sma50),
-            "sma200": float(sma200),
-        }
+    Computed independently of whichever signals happen to be configured,
+    so ranking and report metrics are always available and consistent
+    (docs/04_detailed_design.md 2.1 #4). A symbol with any NaN metric
+    (e.g. insufficient history) is dropped from the candidate set, as is
+    one whose last close is non-positive: `_score_rows` divides by it, so
+    a corrupt or placeholder row would otherwise abort the entire run
+    rather than costing the one bad symbol.
+
+    Public so a diagnostic can ask "would this symbol have survived the
+    pipeline's ranking gate" without re-deriving the NaN rules
+    (`filter_matrix.py`).
+
+    Args:
+        data: Point-in-time screening input.
+        symbol: Universe symbol to compute metrics for.
+
+    Returns:
+        The ranking metrics, or `None` when the symbol cannot be ranked.
+    """
+    series = symbol_bars(data.bars, symbol, data.as_of)
+    if series is None or len(series) < max(
+        _RSI_WINDOW, _ATR_WINDOW, _AVG_VOLUME_WINDOW
+    ):
+        return None
+
+    rsi14 = wilder_rsi(series["close"], _RSI_WINDOW).iloc[-1]
+    atr14 = wilder_atr(
+        series["high"], series["low"], series["close"], _ATR_WINDOW
+    ).iloc[-1]
+    avg_volume = series["volume"].tail(_AVG_VOLUME_WINDOW).mean()
+    close = series["close"].iloc[-1]
+    sma50 = sma(series["close"], _SMA_SHORT_WINDOW).iloc[-1]
+    sma200 = sma(series["close"], _SMA_LONG_WINDOW).iloc[-1]
+    if (
+        pd.isna(rsi14)
+        or pd.isna(atr14)
+        or pd.isna(avg_volume)
+        or pd.isna(close)
+        or pd.isna(sma50)
+        or pd.isna(sma200)
+    ):
+        return None
+    if close <= 0:
+        return None
+    return {
+        "rsi14": float(rsi14),
+        "atr14": float(atr14),
+        "avg_volume": float(avg_volume),
+        "close": float(close),
+        "sma50": float(sma50),
+        "sma200": float(sma200),
+    }
 
 
 def _execution_distance(metrics: dict[str, float]) -> float | None:

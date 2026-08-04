@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, cast
 
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
 from swing_copilot.pipeline.daily import (
-    _PRICE_HISTORY_LOOKBACK_DAYS,
     _TIME_BUDGET_STEP_OUTCOME,
     DailyDependencies,
     _config_hash,
@@ -48,6 +47,7 @@ from swing_copilot.pipeline.daily import (
     _warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
+from swing_copilot.screening.pipeline import PRICE_HISTORY_LOOKBACK_DAYS
 from swing_copilot.storage.tracking_records import OPEN
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     run_date = fetch_cutoff
     if options.as_of is None:
         try:
-            start = fetch_cutoff - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
+            start = fetch_cutoff - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS)
             prefetched_prices = deps.data_provider.get_daily_bars(
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
             )

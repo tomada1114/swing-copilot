@@ -26,18 +26,28 @@ from itertools import combinations
 from typing import TYPE_CHECKING
 
 from swing_copilot.screening.base import RejectionStage
-from swing_copilot.screening.pipeline import build_strategy_components
+from swing_copilot.screening.pipeline import build_strategy_components, ranking_metrics
 from swing_copilot.screening.rejection_classifier import (
     classify_filter_rejection,
     classify_signal_rejection,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import date
 
     from swing_copilot.config import Settings, StrategySpec
-    from swing_copilot.screening.base import ScreeningInput
+    from swing_copilot.screening.base import ScreeningInput, Signal
+
+
+#: Checks whose own outcome depends on the population they are evaluated
+#: against, not just on the symbol: `MinerviniStage2Signal`'s criterion 7
+#: ranks each symbol's relative strength against exactly the symbol set it is
+#: handed. Measuring them independently over the whole universe (which is the
+#: point of this module) therefore cannot reproduce the pipeline's own counts,
+#: so callers surface them as an explicit caveat rather than letting the
+#: number read as directly comparable.
+POPULATION_DEPENDENT_CHECKS = frozenset({"minervini_stage2"})
 
 
 class CheckKind(Enum):
@@ -103,13 +113,24 @@ class FilterMatrixResult:
     universe_size: int
     checks: tuple[CheckStats, ...]
     #: `(number of blocked checks, symbol count)`, ascending. `0` is the
-    #: candidate-equivalent bucket (before ranking and `candidate_limit`).
+    #: bucket that passes every configured check -- which is *not* the same as
+    #: the candidate set; see `candidate_equivalent_symbols`.
     blocked_count_distribution: tuple[tuple[int, int], ...]
     #: `(first check, second check) -> symbols blocked by both`, keyed in
     #: configured order so the pair appears exactly once.
     co_blocked_counts: Mapping[tuple[str, str], int]
     #: Symbols passing every configured check.
     unblocked_symbols: tuple[str, ...]
+    #: The subset of `unblocked_symbols` that `ScreeningPipeline` would also
+    #: have emitted, i.e. what the daily run produces before `candidate_limit`
+    #: truncates it: empty when the strategy configures no signals (the
+    #: pipeline zeroes the candidate set outright), and never including a
+    #: symbol whose ranking metrics are unavailable (the pipeline drops it,
+    #: and the ledger records it as a data-quality rejection).
+    candidate_equivalent_symbols: tuple[str, ...]
+    #: Configured checks in `POPULATION_DEPENDENT_CHECKS`, so a caller can
+    #: warn that their independent counts are not the pipeline's.
+    population_dependent_checks: tuple[str, ...]
 
 
 def evaluate_filter_matrix(
@@ -125,7 +146,8 @@ def evaluate_filter_matrix(
 
     Returns:
         Per-check counts, the blocked-count distribution, the pairwise
-        co-blocked matrix, and the symbols nothing blocks.
+        co-blocked matrix, the symbols nothing blocks, and the subset of
+        those the pipeline would actually have emitted as candidates.
 
     Raises:
         KeyError: A configured filter/signal key is not registered.
@@ -142,6 +164,13 @@ def evaluate_filter_matrix(
     order: list[str] = []
 
     for filter_ in filters:
+        # A key repeated in `strategies.yaml` builds a second, identical
+        # component. Measuring it twice would double-count the symbols it
+        # blocks in the distribution and the co-blocked matrix, and would stop
+        # `_check_stats` recognizing it as anybody's sole blocker, so each
+        # distinct check is measured exactly once.
+        if filter_.name in outcomes:
+            continue
         passing = filter_.apply(data) & universe
         outcomes[filter_.name] = {
             symbol: CheckOutcome.PASSED
@@ -153,9 +182,13 @@ def evaluate_filter_matrix(
         order.append(filter_.name)
 
     for signal in signals:
+        if signal.name in outcomes:
+            continue
         # Evaluated against the *whole* universe, not the filtered subset the
         # pipeline would hand it: an independent pass rate is only meaningful
-        # against the same population every other check is measured on.
+        # against the same population every other check is measured on. For
+        # `POPULATION_DEPENDENT_CHECKS` that also means the count here is not
+        # the pipeline's -- reported as an explicit caveat below.
         passing = {hit.symbol for hit in signal.evaluate(data, universe)}
         outcomes[signal.name] = {
             symbol: CheckOutcome.PASSED
@@ -177,6 +210,7 @@ def evaluate_filter_matrix(
     for blocked in blocked_by_symbol.values():
         pair_counts.update(combinations(blocked, 2))
 
+    unblocked = tuple(symbol for symbol in symbols if not blocked_by_symbol[symbol])
     return FilterMatrixResult(
         as_of=data.as_of,
         strategy_key=strategy.key,
@@ -191,9 +225,29 @@ def evaluate_filter_matrix(
             )
         ),
         co_blocked_counts=dict(pair_counts),
-        unblocked_symbols=tuple(
-            symbol for symbol in symbols if not blocked_by_symbol[symbol]
+        unblocked_symbols=unblocked,
+        candidate_equivalent_symbols=_candidate_equivalent(unblocked, data, signals),
+        population_dependent_checks=tuple(
+            name for name in order if name in POPULATION_DEPENDENT_CHECKS
         ),
+    )
+
+
+def _candidate_equivalent(
+    unblocked: tuple[str, ...], data: ScreeningInput, signals: Sequence[Signal]
+) -> tuple[str, ...]:
+    """Narrow "passes every check" to what `ScreeningPipeline` would emit.
+
+    Mirrors the two gates `_build_candidates` applies after the checks
+    themselves: a strategy with no signals produces no candidates at all, and
+    a symbol without ranking metrics is dropped (the daily run records it as a
+    data-quality rejection instead). Without this, a symbol could sit in this
+    tool's zero-blocked bucket and in the ledger's rejection list at once.
+    """
+    if not signals:
+        return ()
+    return tuple(
+        symbol for symbol in unblocked if ranking_metrics(data, symbol) is not None
     )
 
 
@@ -220,7 +274,16 @@ def _filter_outcome(
     symbol: str, data: ScreeningInput, settings: Settings, filter_name: str
 ) -> CheckOutcome:
     record = classify_filter_rejection(symbol, data, settings, filter_name)
-    is_data_gap = record is not None and record.stage is RejectionStage.DATA_QUALITY
+    if record is None:
+        # The Filter rejected the symbol but its `rejection_classifier` mirror
+        # says it passes -- the two are deliberately independent, so they can
+        # disagree on degenerate inputs (a NaN average volume rejects in
+        # `MinAverageVolumeFilter` but compares False in `_classify_liquidity`).
+        # A disagreement says nothing about whether the threshold is too
+        # tight, which is exactly what `NO_DATA` means here, so it must not be
+        # counted as a genuine threshold miss.
+        return CheckOutcome.NO_DATA
+    is_data_gap = record.stage is RejectionStage.DATA_QUALITY
     return CheckOutcome.NO_DATA if is_data_gap else CheckOutcome.FAILED
 
 

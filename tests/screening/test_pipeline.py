@@ -421,10 +421,10 @@ def _score_pipeline(
     ranking: Mapping[str, object] | None = None,
     candidate_limit: int = 10,
 ) -> list[Candidate]:
-    """Run the pipeline with `_ranking_metrics` fully controlled per symbol.
+    """Run the pipeline with `ranking_metrics` fully controlled per symbol.
 
     Isolates score-computation/ranking (`run()`) from indicator plumbing
-    (`_ranking_metrics`), which has its own coverage elsewhere.
+    (`ranking_metrics`), which has its own coverage elsewhere.
     """
     strategy: dict[str, object] = {
         "filters_all": [],
@@ -438,8 +438,7 @@ def _score_pipeline(
         strategies_config, market_store=None, settings=settings
     )
     monkeypatch.setattr(
-        pipeline,
-        "_ranking_metrics",
+        "swing_copilot.screening.pipeline.ranking_metrics",
         lambda _data, symbol: metrics_by_symbol.get(symbol),
     )
     universe = tuple(_member(symbol) for symbol in metrics_by_symbol)

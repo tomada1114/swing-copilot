@@ -1,15 +1,19 @@
-"""`copilot-filter-matrix`: read-only per-check screening diagnostics.
+"""`copilot-filter-matrix`: per-check screening diagnostics.
 
 Answers "how much does each configured filter/signal reject on its own, and
 how much of that rejection overlaps" for one `--as-of`, which the rejection
 ledger cannot answer (it stores only each symbol's first failure).
 
-Strictly offline and read-only. The universe comes from the persisted
-snapshot visible at `--as-of` (never a Wikipedia refetch), bars and
-fundamentals come from the existing repositories with their own point-in-time
-cutoffs, and nothing is written to the database. `--json` is the only write,
-and it goes through the same atomic replacement helper the analysis boundary
-uses.
+Strictly offline. The universe comes from the persisted snapshot visible at
+`--as-of` (never a Wikipedia refetch), and bars and fundamentals come from the
+existing repositories with their own point-in-time cutoffs. No screening row
+is written: no schema migration is run, no snapshot is refreshed, and an
+absent `--db` is an error rather than a freshly created database. It is not,
+however, isolated from the daily run -- `MarketStore` opens the shared DuckDB
+file read-write to ensure its own `fundamentals` table and `bars` view, so
+DuckDB's single-writer lock still applies and this must not be run *while*
+`copilot-daily` holds the file. `--json` is the only intended write, and it
+goes through the same atomic replacement helper the analysis boundary uses.
 
 It sits beside `filter_matrix.py` (the pure core there, composition and
 rendering here -- the `backtest/runner.py` + `backtest/cli.py` pairing) rather
@@ -22,30 +26,34 @@ from __future__ import annotations
 
 import sys
 from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import duckdb
 from rich.console import Console
 from rich.table import Table
 
 from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
-from swing_copilot.pipeline.daily import _PRICE_HISTORY_LOOKBACK_DAYS
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.filter_matrix import (
     FilterMatrixResult,
     StrategySelection,
     evaluate_filter_matrix,
 )
+from swing_copilot.screening.pipeline import PRICE_HISTORY_LOOKBACK_DAYS
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseFetchOptions, select_persisted_universe
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from swing_copilot.config import Settings, StrategiesConfig
     from swing_copilot.screening.filter_matrix import CheckStats
 
@@ -62,12 +70,28 @@ class FilterMatrixCliError(SwingCopilotError):
     """Raised for argument/strategy/universe errors, before anything is rendered."""
 
 
+@dataclass(frozen=True, slots=True)
+class MeasuredUniverse:
+    """The screening input actually measured, plus what was left out of it."""
+
+    data: ScreeningInput
+    #: Members of the `--as-of` snapshot, before dropping the ones the local
+    #: store holds neither bars nor filings for.
+    snapshot_size: int
+
+    @property
+    def unstored_count(self) -> int:
+        """Snapshot members excluded for having no locally stored data at all."""
+        return self.snapshot_size - len(self.data.universe)
+
+
 def _parse_args(argv: list[str] | None = None) -> Namespace:
     parser = ArgumentParser(
         prog="copilot-filter-matrix",
         description=(
             "設定済みのフィルタとシグナルを1つずつ全ユニバースへ独立に適用し、"
-            "単独通過率・同時落選・単独ボトルネックを集計する（読み取り専用）。"
+            "単独通過率・同時落選・単独ボトルネックを集計する"
+            "（診断のみ。スクリーニング結果はDBに書かない）。"
         ),
     )
     parser.add_argument("--as-of", type=date.fromisoformat, required=True)
@@ -81,31 +105,61 @@ def _parse_args(argv: list[str] | None = None) -> Namespace:
     return parser.parse_args(argv)
 
 
-def _screening_input(args: Namespace, settings: Settings) -> ScreeningInput:
+def _stored_symbols(frame: pd.DataFrame) -> set[str]:
+    """Symbols the local store actually returned rows for."""
+    if frame.empty or "symbol" not in frame.columns:
+        return set()
+    return set(frame["symbol"])
+
+
+def _screening_input(args: Namespace, settings: Settings) -> MeasuredUniverse:
     """Read the persisted universe, bars, and fundamentals visible at `--as-of`.
 
+    The measured population is narrowed to snapshot members the local store
+    holds *some* data for, mirroring `pipeline/daily.py`'s scoping of
+    `ScreeningInput.universe` to the symbols a run actually fetched. A
+    `--limit`-ed or partially backfilled database otherwise reports hundreds
+    of never-fetched symbols as data gaps in every bar-based check, which
+    measures local coverage rather than the configured thresholds.
+
     Raises:
-        FilterMatrixCliError: No universe snapshot exists at or before
-            `--as-of`. Refetching one would be a network call, and a live
-            membership would not be the membership that `--as-of` saw.
+        FilterMatrixCliError: `--db` does not exist, cannot be read, or holds
+            no universe snapshot at or before `--as-of`. Refetching one would
+            be a network call, and a live membership would not be the
+            membership that `--as-of` saw.
     """
     as_of: date = args.as_of
-    database = Database(args.db)
+    db_path: Path = args.db
+    if not db_path.exists():
+        msg = (
+            f"データベース {db_path} がありません。"
+            "先に copilot-daily を実行してください（この診断は作成しません）。"
+        )
+        raise FilterMatrixCliError(msg)
+
+    database = Database(db_path)
     # Parquet bars live alongside the DuckDB file, mirroring
     # `backtest/cli.py`: `--db` overrides both together, never just the DB.
-    market_store = MarketStore(database, parquet_root=Path(args.db).parent / "bars")
+    market_store = MarketStore(database, parquet_root=db_path.parent / "bars")
     state_store = StateStore(database)
-    state_store.init_schema()
 
-    resolution = select_persisted_universe(
-        as_of,
-        state_store,
-        options=UniverseFetchOptions(
-            snapshot_path=settings.universe.snapshot_path,
-            manual_include=settings.universe.manual_include,
-            manual_exclude=settings.universe.manual_exclude,
-        ),
-    )
+    try:
+        resolution = select_persisted_universe(
+            as_of,
+            state_store,
+            options=UniverseFetchOptions(
+                snapshot_path=settings.universe.snapshot_path,
+                manual_include=settings.universe.manual_include,
+                manual_exclude=settings.universe.manual_exclude,
+            ),
+        )
+    except duckdb.Error as exc:
+        # A locked file (copilot-daily is running) or a database that predates
+        # the universe tables. Neither is worth a raw traceback, and neither
+        # is something a read-only diagnostic may fix by migrating.
+        msg = f"{db_path} を読めません: {exc}"
+        raise FilterMatrixCliError(msg) from exc
+
     if resolution is None:
         msg = (
             f"{as_of.isoformat()} 以前のユニバーススナップショットがありません。"
@@ -114,18 +168,30 @@ def _screening_input(args: Namespace, settings: Settings) -> ScreeningInput:
         raise FilterMatrixCliError(msg)
 
     symbols = [member.symbol for member in resolution.members]
-    return ScreeningInput(
-        as_of=as_of,
-        universe=resolution.members,
-        fundamentals=market_store.read_fundamentals(as_of),
+    try:
+        fundamentals = market_store.read_fundamentals(as_of)
         # The same rolling window the daily screening step reads, so the
         # diagnostic measures the history the pipeline actually screens on.
-        bars=market_store.read_bars(
+        bars = market_store.read_bars(
             symbols,
-            as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS),
+            as_of - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS),
             as_of,
             as_of,
+        )
+    except duckdb.Error as exc:
+        msg = f"{db_path} を読めません: {exc}"
+        raise FilterMatrixCliError(msg) from exc
+
+    stored = _stored_symbols(bars) | _stored_symbols(fundamentals)
+    measured = tuple(member for member in resolution.members if member.symbol in stored)
+    return MeasuredUniverse(
+        data=ScreeningInput(
+            as_of=as_of,
+            universe=measured,
+            fundamentals=fundamentals,
+            bars=bars,
         ),
+        snapshot_size=len(resolution.members),
     )
 
 
@@ -179,6 +245,11 @@ def _render_checks(console: Console, result: FilterMatrixResult) -> None:
     for stats in result.checks:
         table.add_row(*_check_row(stats))
     console.print(table)
+    for name in result.population_dependent_checks:
+        console.print(
+            f"注意: {name} は母集団依存（相対強度の順位）なので、"
+            "全ユニバースで測ったこの通過数は日次runの通過数とは一致しない"
+        )
 
 
 def _render_distribution(console: Console, result: FilterMatrixResult) -> None:
@@ -194,7 +265,7 @@ def _render_distribution(console: Console, result: FilterMatrixResult) -> None:
             _fmt_rate(None if total == 0 else symbol_count / total),
         )
     console.print(table)
-    console.print("0 = 全チェック通過（ランキングと candidate_limit の適用前）")
+    console.print("0 = 全チェック通過（ランキング指標と candidate_limit の適用前）")
 
 
 def _render_matrix(console: Console, result: FilterMatrixResult) -> None:
@@ -213,7 +284,7 @@ def _render_matrix(console: Console, result: FilterMatrixResult) -> None:
     console.print(table)
 
 
-def render_terminal(result: FilterMatrixResult) -> str:
+def render_terminal(result: FilterMatrixResult, measured: MeasuredUniverse) -> str:
     """Render the whole diagnostic as Rich terminal text."""
     buffer = StringIO()
     console = Console(file=buffer, width=_CONSOLE_WIDTH)
@@ -221,20 +292,33 @@ def render_terminal(result: FilterMatrixResult) -> str:
         f"[bold]copilot-filter-matrix[/bold] strategy={result.strategy_key} "
         f"as_of={result.as_of.isoformat()} universe={result.universe_size}"
     )
+    if measured.unstored_count:
+        console.print(
+            f"スナップショット {measured.snapshot_size} 銘柄のうち "
+            f"{measured.unstored_count} 銘柄はバーもファンダも未保存のため除外"
+            "（未取得の銘柄を閾値の落選として数えないため）"
+        )
     _render_checks(console, result)
     _render_distribution(console, result)
     _render_matrix(console, result)
     passed = ", ".join(result.unblocked_symbols) or "なし"
     console.print(f"全チェック通過: {passed}")
+    equivalent = ", ".join(result.candidate_equivalent_symbols) or "なし"
+    console.print(f"候補相当（candidate_limit 適用前）: {equivalent}")
     return buffer.getvalue()
 
 
-def build_payload(result: FilterMatrixResult) -> dict[str, Any]:
+def build_payload(
+    result: FilterMatrixResult, measured: MeasuredUniverse
+) -> dict[str, Any]:
     """Build the `--json` document (the machine-readable form of the tables)."""
     return {
         "as_of": result.as_of.isoformat(),
         "strategy": result.strategy_key,
         "universe_size": result.universe_size,
+        "snapshot_size": measured.snapshot_size,
+        "unstored_symbol_count": measured.unstored_count,
+        "population_dependent_checks": list(result.population_dependent_checks),
         "checks": [
             {
                 "name": stats.name,
@@ -257,6 +341,7 @@ def build_payload(result: FilterMatrixResult) -> dict[str, Any]:
             for (first, second), count in result.co_blocked_counts.items()
         ],
         "unblocked_symbols": list(result.unblocked_symbols),
+        "candidate_equivalent_symbols": list(result.candidate_equivalent_symbols),
     }
 
 
@@ -272,17 +357,29 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         strategy = _select_strategy(args, strategies)
-        data = _screening_input(args, settings)
+        measured = _screening_input(args, settings)
     except FilterMatrixCliError as exc:
         raise SystemExit(str(exc)) from exc
 
-    result = evaluate_filter_matrix(data, settings, strategy)
-    sys.stdout.write(render_terminal(result))
+    try:
+        result = evaluate_filter_matrix(measured.data, settings, strategy)
+    except (KeyError, NotImplementedError) as exc:
+        # An unregistered filter/signal key, or one `rejection_classifier` has
+        # no mirror for. Both are `strategies.yaml` mistakes, so they get the
+        # same one-line message an unknown `--strategy` gets rather than a
+        # traceback out of the middle of the evaluation.
+        msg = (
+            f"戦略 '{strategy.key}' のチェック構成を測定できません: {exc}。"
+            "strategies.yaml の filters_all / signals_all を確認してください。"
+        )
+        raise SystemExit(msg) from exc
+
+    sys.stdout.write(render_terminal(result, measured))
 
     json_path: Path | None = args.json_path
     if json_path is not None:
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_atomically(json_path, build_payload(result))
+        write_json_atomically(json_path, build_payload(result, measured))
         sys.stdout.write(f"\nJSON written to {json_path}\n")
 
 

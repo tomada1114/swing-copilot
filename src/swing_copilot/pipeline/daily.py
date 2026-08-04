@@ -86,7 +86,10 @@ from swing_copilot.risk.circuit_breaker import (
     evaluation_time_for_as_of,
 )
 from swing_copilot.screening.base import ScreeningInput
-from swing_copilot.screening.pipeline import ScreeningPipeline
+from swing_copilot.screening.pipeline import (
+    PRICE_HISTORY_LOOKBACK_DAYS,
+    ScreeningPipeline,
+)
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.text.edgar_filings import (
@@ -130,7 +133,6 @@ if TYPE_CHECKING:
     from swing_copilot.text.base import TextItem
     from swing_copilot.universe import UniverseMember
 
-_PRICE_HISTORY_LOOKBACK_DAYS = 400  # enough for SMA200 warmup; unrelated to edgar.py's own fundamentals-fetch lookback constant
 _TEXT_LOOKBACK_DAYS = 14
 _FILING_FORM_TYPES = ["8-K", "10-Q"]
 _TEXT_SYMBOL_LIMIT = (
@@ -475,7 +477,7 @@ def _run_step_prices(
     prefetched: BarFetchResult | None = None,
 ) -> _StepOutcome:
     if prefetched is None:
-        start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
+        start = as_of - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS)
         result = deps.data_provider.get_daily_bars(
             symbols, start, as_of + timedelta(days=1)
         )
@@ -614,7 +616,7 @@ def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
 ) -> tuple[_StepOutcome, ScreeningResult]:
     fundamentals = deps.market_store.read_fundamentals(as_of)
-    start = as_of - timedelta(days=_PRICE_HISTORY_LOOKBACK_DAYS)
+    start = as_of - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
 
     # Scope `ScreeningInput.universe` to this run's actual `symbols` (which
@@ -731,7 +733,7 @@ def _run_step_risk(
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
     """Calculate the code-owned market regime from point-in-time store reads."""
-    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    history_start = as_of - timedelta(days=2 * PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(
         list(MARKET_STRIP_SYMBOLS), history_start, as_of, as_of
     )
@@ -790,7 +792,7 @@ def _record_ftd_snapshot(
     deps: DailyDependencies, run_id: UUID, as_of: date
 ) -> FtdSnapshot:
     """Calculate and persist display-only FTD transitions for both indices."""
-    history_start = as_of - timedelta(days=2 * _PRICE_HISTORY_LOOKBACK_DAYS)
+    history_start = as_of - timedelta(days=2 * PRICE_HISTORY_LOOKBACK_DAYS)
     bars = deps.market_store.read_bars(["SPY", "QQQ"], history_start, as_of, as_of)
     config = deps.settings.regime
     snapshot = calculate_ftd_snapshot(

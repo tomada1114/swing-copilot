@@ -2,7 +2,7 @@
 
 Mirrors — deliberately does not reuse — `ProfitablePositiveFCFEquityFilter`,
 `MinAverageVolumeFilter`, `TrendSMASignal`, and `PullbackRSISignal`'s own
-threshold logic, the same way `ScreeningPipeline._ranking_metrics()`
+threshold logic, the same way `screening.pipeline.ranking_metrics()`
 independently recomputes ranking metrics from raw bars rather than reusing
 signal internals (`docs/04_detailed_design.md` 2.1 #4). This keeps rejection
 detail available even for symbols no configured signal ever touches.

@@ -116,6 +116,10 @@ the divergence, and update the stale canonical source or request a decision.
 - The default pytest suite is offline. The autouse socket guard must remain in
   place; inject fakes at external ports. Live checks are separately marked and
   never part of the offline success sentinel.
+- The suite must not write operator-owned data. `output_dir` and other
+  repo-relative defaults resolve to real directories, so every filesystem test
+  passes an isolated path. The autouse `reports/` guard must remain in place
+  alongside the socket guard.
 - Qualitative analysis runs in a Claude Code skill, never inside this process.
   The pipeline exports `analysis_input.json` and ingests `analysis_result.json`
   via `copilot-ingest-analysis`; both directions parse under strict

@@ -43,6 +43,14 @@ Python 側（`copilot-retro`）には config / コードを書き換える経路
   `retro_input.json` の `proposals_ledger.path` が正
 - `docs/retro/proposals/RP-NNN-<slug>.md` — 過去提案の全文
 - `<RETRODIR>/retro_result.json` — 任意。存在すれば再入とみなす（Step 2）
+- スクリーニングパラメーター起因の仮説（「そもそも候補に上がらなかった」系）を
+  検証する証拠源 — 任意、必要なときだけ読む:
+  - 各 run の `reports/<run_date>/<run_id>/rejections.json` — 落選銘柄の明細と
+    candidate_limit 切り捨て（score 内訳付き）
+  - `uv run copilot-history rejections --run-id <uuid>` — DuckDB の落選台帳
+    （銘柄ごとに最初に失敗した 1 条件のみ記録される点に注意）
+  - `uv run copilot-filter-matrix --as-of <YYYY-MM-DD>` — 各フィルタ/シグナルを
+    単独適用した独立通過率と重複行列（真のボトルネック特定用）
 
 ## Outputs
 

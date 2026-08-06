@@ -84,8 +84,10 @@ echo "commit: $HEAD_BEFORE / branch: $BRANCH"
 # 無人実行のため permission プロンプトで停止できず bypass する。
 # .claude/hooks/guard.py (PreToolUse) は permission モードに関係なく動作し、
 # uv.lock / .env* / secrets への書き込みや force-push を引き続き遮断する。
+# モデルは明示する。CLI のデフォルトに委ねると、対話セッション側の設定変更で
+# 無人実行の品質が黙って変わる。
 rc=0
-"$CLAUDE_BIN" -p "/swing-daily" --dangerously-skip-permissions || rc=$?
+"$CLAUDE_BIN" -p "/swing-daily" --model opus --dangerously-skip-permissions || rc=$?
 
 # --- 実行後の検証 -----------------------------------------------------------
 # 実行中に別セッションが編集を始めていた場合、前半と後半で別のコードが走って

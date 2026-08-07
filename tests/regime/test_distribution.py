@@ -74,6 +74,33 @@ class TestDistributionDays:
             == 0
         )
 
+    def test_a_gap_after_a_distribution_day_neither_recovers_nor_invalidates_it(
+        self,
+    ) -> None:
+        """A `NaN` close cannot cancel a distribution day by counting as recovery.
+
+        The recovery scan now walks a precomputed running maximum instead of
+        re-slicing the tail, so `NaN` has to be skipped explicitly to keep the
+        `NaN >= threshold` comparison it replaced. A gap must leave the count
+        exactly where a shorter, gap-free history would.
+        """
+        closes: list[float] = [100.0] * 26
+        volumes = [100] * 26
+        closes[5], volumes[5] = 99.8, 101
+        closes[6] = float("nan")
+
+        assert (
+            calculate_distribution_days(_bars(closes, volumes), date(2026, 1, 26)).d25
+            == 1
+        )
+
+        # A real recovery after the gap still invalidates the day.
+        closes[7] = 104.79  # 99.8 * 1.05 exactly
+        assert (
+            calculate_distribution_days(_bars(closes, volumes), date(2026, 1, 26)).d25
+            == 0
+        )
+
     def test_expires_distribution_day_on_its_twenty_fifth_trading_day(self) -> None:
         closes = [100.0] * 26
         volumes = [100] * 26

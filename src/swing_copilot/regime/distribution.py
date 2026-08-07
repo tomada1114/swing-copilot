@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -89,29 +90,42 @@ def calculate_distribution_days(
             DataQuality.INSUFFICIENT,
         )
 
+    # Materialize the two columns once. Per-row `.iloc` lookups rebuild a Series
+    # for every comparison, which made this function ~15x slower and dominated
+    # `scan_forward`, where it is re-evaluated for every observation date.
+    closes = visible["close"].astype(float).tolist()
+    volumes = visible["volume"].astype(float).tolist()
+    total = len(closes)
+    last_index = total - 1
+
+    # `highest_after[i]` is the highest close strictly after `i`, so the
+    # recovery test is one comparison instead of a fresh tail slice per day.
+    # NaN closes are skipped, matching the `NaN >= x` comparison they replace.
+    highest_after = [-math.inf] * total
+    running = -math.inf
+    for index in range(last_index, 0, -1):
+        close = closes[index]
+        if not math.isnan(close) and close > running:
+            running = close
+        highest_after[index - 1] = running
+
     valid_weights: list[tuple[int, float]] = []
-    last_index = len(visible) - 1
-    for index in range(1, len(visible)):
-        previous = visible.iloc[index - 1]
-        current = visible.iloc[index]
-        previous_close = float(previous["close"])
-        if previous_close <= 0 or float(current["volume"]) <= float(previous["volume"]):
+    for index in range(1, total):
+        previous_close = closes[index - 1]
+        if previous_close <= 0 or volumes[index] <= volumes[index - 1]:
             continue
-        change = float(current["close"]) / previous_close - 1.0
+        change = closes[index] / previous_close - 1.0
         weight = 1.0 if change <= thresholds.dd_decline_pct else 0.0
         if weight == 0.0 and abs(change) < thresholds.stall_abs_change_pct:
             weight = 0.5
         if weight == 0.0 or last_index - index >= thresholds.window_days - 1:
             continue
-        later_closes = visible.iloc[index + 1 :]["close"]
-        if (
-            later_closes >= float(current["close"]) * (1.0 + thresholds.recovery_pct)
-        ).any():
+        if highest_after[index] >= closes[index] * (1.0 + thresholds.recovery_pct):
             continue
         valid_weights.append((index, weight))
 
     def count(days: int) -> float:
-        start = max(1, len(visible) - days)
+        start = max(1, total - days)
         return sum(weight for index, weight in valid_weights if index >= start)
 
     d25, d15, d5 = count(25), count(15), count(5)

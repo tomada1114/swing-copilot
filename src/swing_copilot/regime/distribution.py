@@ -46,15 +46,17 @@ class DistributionThresholds:
 
     ``severe_*``/``high_*``/``caution_*`` are the level-classification
     boundaries `distribution_level()` compares counts against; the defaults
-    reproduce the previously hardcoded module constants unchanged.
+    mirror the shipped `config/settings.yaml` values, so a caller that omits
+    `thresholds=` classifies a day exactly as the pipeline does. The severe
+    pair was raised from the original 6/4 to 7/6 on 2026-08-07 (Issue #111).
     """
 
     window_days: int = 25
     dd_decline_pct: float = -0.002
     stall_abs_change_pct: float = 0.001
     recovery_pct: float = 0.05
-    severe_d25: int = 6
-    severe_d15: int = 4
+    severe_d25: int = 7
+    severe_d15: int = 6
     high_d25: int = 5
     high_d15: int = 3
     high_d5: int = 2

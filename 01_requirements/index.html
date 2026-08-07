@@ -1,0 +1,1649 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/01_requirements/">
+      
+      
+        <link rel="prev" href="../00_human_preparation/">
+      
+      
+        <link rel="next" href="../02_project_plan/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Requirements - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#01-swing-copilot" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Requirements
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        背景と目的
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        スコープ
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="スコープ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        対象
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        対象外
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用者・利用シナリオ
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="利用者・利用シナリオ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用者
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用シナリオ（コマンド実行〜判断の流れ）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        機能要件
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="機能要件">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        機能要件一覧
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        各要件の説明と受け入れ基準
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        非機能要件
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非機能要件">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        非機能要件一覧
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        各要件の説明と受け入れ基準
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        制約
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        用語集
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../02_project_plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../03_basic_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../06_reliability_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../07_invariant_test_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        背景と目的
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        スコープ
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="スコープ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        対象
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        対象外
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用者・利用シナリオ
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="利用者・利用シナリオ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用者
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        利用シナリオ（コマンド実行〜判断の流れ）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        機能要件
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="機能要件">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        機能要件一覧
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        各要件の説明と受け入れ基準
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        非機能要件
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="非機能要件">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#_13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        非機能要件一覧
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#_14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        各要件の説明と受け入れ基準
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        制約
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        用語集
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="01-swing-copilot">01. 要件定義書（swing-copilot）<a class="headerlink" href="#01-swing-copilot" title="Permanent link">&para;</a></h1>
+<h2 id="_1">文書情報<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>システム名（仮称）</td>
+<td>swing-copilot</td>
+</tr>
+<tr>
+<td>文書種別</td>
+<td>要件定義書</td>
+</tr>
+<tr>
+<td>版数</td>
+<td>1.3</td>
+</tr>
+<tr>
+<td>作成日</td>
+<td>2026-07-20</td>
+</tr>
+<tr>
+<td>最終更新日</td>
+<td>2026-07-28</td>
+</tr>
+<tr>
+<td>関連文書</td>
+<td>00_human_preparation.md（人間の下準備チェックリスト）、02_project_plan.md（プロジェクト計画書）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_2">背景と目的<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>米国株のスイング〜ポジショントレード（保有数日〜数ヶ月）を対象に、銘柄スクリーニング・分析・レポート作成までを自動化し、投資家本人の<strong>意思決定を支援する</strong>システムを構築する。発注（実際の売買執行）は人間がSBI証券・楽天証券等を通じて手動で行い、完全自動売買はスコープ外とする。</p>
+<p>Part1調査の結論として、本システムは意思決定支援ツールとしては条件付きGoと判断されている。ただし「安定した利益」を実証する根拠は存在しないため、バックテストやペーパートレードで良好な成績が出た場合でも、<strong>ペーパートレード→少額実運用という段階的な検証ゲートを必須</strong>とする。本システムは投資助言を行わず、最終的な売買判断は常に人間が行う。</p>
+<p>実装は最終的にClaude Codeの自律実行（<code>/goal</code>）によって行うことを前提とする。そのため、本文書の全機能要件・非機能要件には、自律実装エージェントが実装完了を判断できるよう、検証可能な受け入れ基準を付す。</p>
+<p>利用者は日本在住の個人投資家1名（Python可）であり、1人で長期にわたり保守できることを最優先の設計方針とする。</p>
+<hr />
+<h2 id="_3">スコープ<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<h3 id="_4">対象<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li>S&amp;P500構成銘柄（約500銘柄）を対象としたユニバース管理、株価・財務・ニュース・経済指標データの取得と保存（各データの取得時点・利用可能時点を保持）</li>
+<li>ファンダメンタル品質フィルタとテクニカルシグナルによる2段階のスクリーニング・エントリー候補抽出</li>
+<li>収集したニュース・開示テキストと決定論的なスクリーニング文脈のエクスポート、Claude Codeスキルによる定性分析（ニュース解釈・開示解釈・スクリーニング評価）と、その結果の機械検証・レポート反映</li>
+<li>日次結果のCLI表示、監査用Markdown保存、Discord Webhookサマリ通知（オプション機能）</li>
+<li>戦略のバックテストとペーパートレードの記録・成績集計</li>
+<li>上記処理を1コマンドで順次実行するオーケストレーション（ローカルでの手動実行）</li>
+</ul>
+<h3 id="_5">対象外<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li>証券会社APIを用いた発注の自動化（CON-01）</li>
+<li>完全自動売買（最終判断・発注は常に人間が行う）</li>
+<li>断定的な売買指示を含む投資助言の提供（CON-03）</li>
+<li>yfinanceを本番のデータ基盤として利用すること（試作限定、CON-02）</li>
+</ul>
+<hr />
+<h2 id="_6">利用者・利用シナリオ<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h2>
+<h3 id="_7">利用者<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h3>
+<p>日本在住の個人投資家1名。Pythonでのコード読解・簡単な修正が可能。証券会社の米国株口座を保有し、発注は自身の判断で手動実施する。開発・保守は基本的に本人が単独で行う。</p>
+<h3 id="_8">利用シナリオ（コマンド実行〜判断の流れ）<a class="headerlink" href="#_8" title="Permanent link">&para;</a></h3>
+<ol>
+<li>利用者は1日1回、任意のタイミングでコマンド（<code>uv run copilot-daily</code>）を実行し、ユニバース更新・データ取得・スクリーニング・シグナル抽出・テキスト収集・分析入力エクスポート・レポート生成までを順次実行させる（FR-12）。この時点のレポートは定性分析欄が「未実施」の状態である。</li>
+<li>利用者はClaude Codeで<code>swing-daily</code>スキルを起動する。スキルは<code>analysis_input.json</code>を読んで定性分析（ニュース解釈・開示解釈・スクリーニング評価）を行い、<code>analysis_result.json</code>を書き出す。<code>uv run copilot-ingest-analysis</code>がその結果を機械検証し、同じレポートの定性欄だけを埋めて再描画する（FR-08）。スキルは手順1のコマンド実行自体も代行できるため、通常運用ではスキル起動1回で手順1〜2が完了する。</li>
+<li>実行完了後、CLIに候補・ファンダ分析・定性分析・銘柄ごとのverdict（見送り推奨／懸念なし）・リスク管理チェック結果が表示され、同内容のMarkdownが保存される（FR-09）。</li>
+<li>利用者はCLIの結論ファーストな一覧と銘柄別詳細を確認する（FR-05〜FR-09）。</li>
+<li>利用者はレポート内容を踏まえて自身で売買判断を行う。verdictはあくまで定性情報に基づく推奨であり、最終判断は常に人間が行う。</li>
+<li>P3（ペーパートレード検証）期間中は、<code>copilot-decision</code>で判断結果（見送り／仮想エントリー等）を記録する（FR-11）。</li>
+<li>本番移行後は、実際にSBI/楽天等で手動発注する（本システムのスコープ外）。</li>
+<li>上記のコマンド実行から判断記録までは1回あたり数分〜10分程度を想定する。Discord通知（オプション機能、FR-09）を有効にしている場合は、通知を先に確認してからレポートを開いてもよい。</li>
+</ol>
+<hr />
+<h2 id="_9">機能要件<a class="headerlink" href="#_9" title="Permanent link">&para;</a></h2>
+<h3 id="_10">機能要件一覧<a class="headerlink" href="#_10" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>要件名</th>
+<th>概要</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-01</td>
+<td>ユニバース管理</td>
+<td>S&amp;P500構成銘柄リストの取得・更新・手動上書き</td>
+</tr>
+<tr>
+<td>FR-02</td>
+<td>株価データ取得・保存</td>
+<td>日足OHLCV（調整済み）の取得・保存、DataProvider抽象化</td>
+</tr>
+<tr>
+<td>FR-03</td>
+<td>ファンダメンタルデータ取得</td>
+<td>EDGAR XBRLデータの取得・正規化・キャッシュ</td>
+</tr>
+<tr>
+<td>FR-04</td>
+<td>スクリーニング</td>
+<td>ファンダ品質フィルタによる母集団絞り込み（第1段）</td>
+</tr>
+<tr>
+<td>FR-05</td>
+<td>テクニカルシグナル</td>
+<td>トレンド＋押し目検出によるエントリー候補抽出（第2段）</td>
+</tr>
+<tr>
+<td>FR-06</td>
+<td>リスク管理チェック</td>
+<td>ポジションサイズ・ストップ距離・セクター集中/相関チェック</td>
+</tr>
+<tr>
+<td>FR-07</td>
+<td>テキスト収集</td>
+<td>銘柄別ニュース、新着8-K/10-Q、経済指標カレンダーの収集</td>
+</tr>
+<tr>
+<td>FR-08</td>
+<td>定性分析（スキル連携）</td>
+<td>分析入力のエクスポート、Claude Codeスキルによる解釈、結果JSONの機械検証とレポート反映</td>
+</tr>
+<tr>
+<td>FR-09</td>
+<td>レポート・通知</td>
+<td>CLI日次ブリーフ＋監査用Markdown＋Discord Webhookサマリ通知（オプション機能）</td>
+</tr>
+<tr>
+<td>FR-10</td>
+<td>バックテスト</td>
+<td>戦略の履歴検証（手数料・スリッページ込み）</td>
+</tr>
+<tr>
+<td>FR-11</td>
+<td>ペーパートレード記録</td>
+<td>シグナル→判断→仮想約定→損益の記録・成績集計</td>
+</tr>
+<tr>
+<td>FR-12</td>
+<td>日次バッチ</td>
+<td>上記処理を順次実行するオーケストレーション（1コマンドでのローカル手動実行）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_11">各要件の説明と受け入れ基準<a class="headerlink" href="#_11" title="Permanent link">&para;</a></h3>
+<p><strong>FR-01 ユニバース管理</strong>
+- 説明: S&amp;P500構成銘柄リストを取得し、CSVキャッシュとDuckDBのスナップショット履歴へ保存する。明示的な<code>as_of</code>では<code>snapshot_date &lt;= as_of</code>の最新履歴だけを使い、未来の構成銘柄を見ない。通常live実行では更新周期に従い再利用または更新し、取得元の一時障害時にも保存済み履歴を安全側に利用できる。利用者は銘柄リストを手動で上書きできる。
+- 受け入れ基準:
+  - 銘柄リスト取得処理を実行するコマンドが存在し、実行後に約500銘柄のティッカーリストが永続化されていることをpytestで検証できる。
+  - 手動上書き用のファイルまたはコマンドが存在し、上書き後の銘柄リストが後続処理（FR-02〜FR-06）に反映されることをテストで確認できる。
+  - <code>--as-of</code>実行は、直前・同日・直後の3つの履歴から<code>snapshot_date &lt;= as_of</code>である最新だけを選び、履歴がなければ価格取得・スクリーニング前に明確なエラーで停止することを検証できる。
+  - live実行は最新履歴の経過日数が<code>universe.refresh_interval_days</code>未満なら外部取得を行わず、同値以上なら1回だけ更新してCSVとDuckDBへ同じ生の構成銘柄を保存することを検証できる。
+  - live更新が失敗しても既存履歴があれば、そのスナップショット日と失敗理由を警告として記録・表示し、runを<code>degraded</code>で完走する。既存履歴もなければfail-fastすることを検証できる。
+  - <code>manual_include</code>/<code>manual_exclude</code>は選択済みの生スナップショットへ決定的に適用し、手動追加銘柄を履歴やCSVへ混入させないことを検証できる。</p>
+<p><strong>FR-02 株価データ取得・保存</strong>
+- 説明: 各銘柄の日足OHLCVを取得し、企業行動調整済みのOHLCを共通の価格基準としてParquetに保存し、DuckDBから参照する。データ取得元は<code>DataProvider</code>インターフェースで抽象化し、試作期のyfinanceから本番移行時のEODHDへ実装を差し替えられること。プロバイダ固有の列構造や調整方式を後続処理へ漏らさない。
+- 受け入れ基準:
+  - <code>DataProvider</code>抽象基底クラス（またはProtocol）が定義され、少なくとも<code>YFinanceProvider</code>実装が存在し、単体テストで日足OHLCVが取得・保存できることを確認できる。
+  - 既存コードを変更せずに新しい<code>DataProvider</code>実装を追加できる設計になっていることを、モック実装を用いたテストで確認できる（差し替え可能性の検証）。
+  - 保存されたデータをDuckDBから再読込し、取得時と同一件数・カラム構成で取得できることをpytestで検証できる。
+  - 株式分割を含むfixtureで、保存後のOHLCが同一の調整基準に揃い、シグナル・チャート・バックテストが同じ価格列を使用することをpytestで検証できる。</p>
+<p><strong>FR-03 ファンダメンタルデータ取得</strong>
+- 説明: SEC EDGAR公式API（edgartools使用）から、売上・利益・キャッシュフロー・自己資本等のXBRLデータを取得し、正規化してキャッシュする。各レコードに会計期間末・提出日時・アクセッション番号を保持し、指定した評価日時点で公表済みの値だけを取得できること。EDGARのレート上限（10リクエスト/秒）とUser-Agentヘッダー必須要件を遵守する。
+- 受け入れ基準:
+  - EDGAR APIへのリクエストがUser-Agentヘッダーを付与して送信されることをテスト（モックHTTPサーバー等）で確認できる。
+  - リクエストレートが10リクエスト/秒を超えないようレート制御されていることを、連続リクエストのタイミングを検証するテストで確認できる。
+  - 取得したXBRLデータが正規化されたスキーマ（売上・利益・CF・自己資本等の共通フィールド）でキャッシュされ、同一銘柄への再取得時にキャッシュが利用されることをテストで確認できる。
+  - <code>as_of</code>直前・同時刻・直後のfixtureにより、<code>filed_at &lt;= as_of</code>だけがスクリーニングおよびバックテストへ入ることを検証できる。
+  - 一時障害は各試行で10リクエスト/秒制限を守りながら合計3回までretryし、既定backoff後に成功する場合と上限到達時の例外伝播をfake clock/sleepで検証できる。設定・入力検証エラーはretryしない。</p>
+<p><strong>FR-04 スクリーニング</strong>
+- 説明: ファンダメンタル品質フィルタ（黒字であること、財務健全性の基準を満たすこと等）と流動性フィルタにより、S&amp;P500ユニバースから母集団を絞り込む（2段構えの第1段）。同じ<code>as_of</code>時点で利用可能なデータだけを使う。
+- 受け入れ基準:
+  - フィルタ条件を満たす銘柄のみが出力されることを、既知の入力データを用いたpytestで検証できる。
+  - フィルタロジックが後述のプラガブルなインターフェース（NFR-07）に準拠し、フィルタの追加・組み合わせがコード変更なしに設定で行えることをテストで確認できる。</p>
+<p><strong>FR-05 テクニカルシグナル</strong>
+- 説明: FR-04で絞り込んだ母集団に対し、トレンド系指標と押し目検出ロジックでエントリー候補を抽出する（2段構えの第2段）。初期実装のSMA・RSI（Wilder方式）・ATRはpandasで実装する。フィルタ・シグナルはプラガブルなインターフェースで実装し、設定でAND条件を明示して組み合わせること。候補は決定的な順位規則で最大10銘柄へ集約する。
+- 受け入れ基準:
+  - 少なくとも1つのトレンド系シグナルと1つの押し目検出シグナルが実装され、既知のOHLCVデータに対する出力をpytestで検証できる。
+  - 新しいシグナルクラスを既存コード変更なしに追加し、既存シグナルと組み合わせて実行できることを統合テストで確認できる。
+  - 同一入力・同一<code>as_of</code>・同一設定では候補の内容と順位が一致し、複数シグナルが同一銘柄の1つの候補へ集約されることをpytestで検証できる。</p>
+<p><strong>FR-06 リスク管理チェック</strong>
+- 説明: 抽出されたエントリー候補に対し、ポジションサイズ計算、ストップ距離の算出、セクター集中度・銘柄間相関のチェックを行う。
+- 受け入れ基準:
+  - ポジションサイズとストップ距離が既知の入力（資金量・ボラティリティ等）から期待される値で算出されることをpytestで検証できる。
+  - セクター集中や高相関銘柄の組み合わせが検出された場合に警告フラグが出力されることをテストで確認できる。
+  - 口座評価額、想定エントリー価格、ATRベースのストップ価格が欠けている場合は、株数を推測せず明示的な「計算不能」結果を返すことをテストで確認できる。
+  - 相関は候補と保有銘柄の日次リターンを取引日でinner joinして計算する。日付ずれ・重複日・必要本数未満・定数系列では誤った相関値を返さずdata-quality警告になることを検証できる。</p>
+<p><strong>FR-07 テキスト収集</strong>
+- 説明: 銘柄別ニュース（Finnhub、60コール/分・ティッカー別）、新着8-K/10-Q（EDGAR）、経済指標カレンダー（FRED）を収集する。ニュースは、ソースが記事に付与した関連ティッカーと分類ラベルを併せて保持し、分析入力の枠を関連度の高い記事から埋める。
+- 受け入れ基準:
+  - Finnhubへのリクエストが60コール/分の上限を超えないようレート制御されていることをテストで確認できる。
+  - 各データソースの取得結果が共通のテキストデータスキーマで保存され、後続の定性分析（FR-08）の分析入力へ渡せることを統合テストで確認できる。
+  - Finnhub応答の<code>related</code>（関連ティッカー）と<code>category</code>（分類ラベル）が正規化して保持され、欠落・空文字・想定外の型では「宣言なし」として空に落ちることをテストで確認できる。
+  - 分析入力のニュース枠は、関連ティッカーに対象銘柄を含む記事を、含まない記事より先に埋める。含まない記事（セクター横断記事・他社記事・定型マーケットサマリ）は<strong>降格であって除外ではない</strong>——関連記事が<code>analysis.max_news_items_per_symbol</code>に満たない銘柄では、降格された記事が残りの枠を埋め、枠が空になることはない。関連ティッカーの宣言が無い記事は降格しない（宣言なしと無関連は別物であり、ティッカーを付さないソースをソースごと不利にしない）。
+  - 同一入力・同一<code>as_of</code>ではニュースの選別結果と順序が一致し、収集順に依存しないことをオフラインのfakeでpytest検証できる。</p>
+<p><strong>FR-08 定性分析（スキル連携）</strong>
+- 説明: ニュース・開示テキストの解釈とスクリーニング結果の定性評価は、PythonからLLM APIを呼ばず、Claude Codeスキル（<code>.claude/skills/swing-daily</code>とその配下の専門家スキル）が担う。Python側の責務は次の3点に限定する。(1) 日次バッチのステップ6で、候補ごとの決定論的文脈（スコア内訳・リスク制約・過去判断）と収集済みの未信頼テキストを<code>analysis_input.json</code>として日付付きレポートディレクトリへ原子的に書き出す。(2) スキルが書いた<code>analysis_result.json</code>を<code>copilot-ingest-analysis</code>が読み、strictスキーマ・provenance・CON-03で機械検証する。(3) 検証を通った定性セクションだけでレポートを再描画する。スキルの出力は一切信頼せず、決定論的な数値（スコア・順位・株数・リスク判定）は分析側から書き換えられない。
+- 受け入れ基準:
+  - <code>analysis_input.json</code>・<code>analysis_result.json</code>が双方向ともpydanticのstrictスキーマ（<code>extra="forbid"</code>）で検証され、未知フィールド・スキーマ違反がエラーとして検出されることをpytestで確認できる。
+  - 出力スキーマが「事実（<code>facts</code>）」と「解釈（<code>interpretation</code>）」を別フィールドとして強制し、<code>facts</code>の各要素が非空・非空白の<code>source_ids</code>を1件以上持つことを検証できる。
+  - 引用された<code>source_ids</code>が、当該銘柄について<code>analysis_input.json</code>で実際に供給したID集合の部分集合であることを検証できる。部分集合でない銘柄はfail-closedで縮退表示となり、リトライしないことをテストで確認できる。
+  - <code>facts</code>の各要素は、その<code>source_ids</code>が指す本文（ニュースなら見出し＋要約、開示なら<code>analysis_input.json</code>が渡した<code>text</code>、カレンダーイベントならタイトル＋要約）からの逐語引用<code>evidence_quote</code>（正規化後12〜300字）を持つことを検証できる。<code>evidence_quote</code>が欠落している場合、または引用元として申告した<code>source_ids</code>のいずれの本文にも（Unicode NFKC正規化・記号統一・空白畳み込み・大小無視のうえで）出現しない場合は、当該銘柄がfail-closedで縮退表示となり、リトライしないことをテストで確認できる。これにより、他銘柄の本文を読みながら自分の正しい<code>source_ids</code>を申告するような取り違えを機械的に検出できる。
+  - 書類種別・提出日・ソースURLといったコード側メタデータは<code>analysis_input.json</code>から解決され、スキル出力の申告値をそのまま採用しないことを確認できる。
+  - facts、interpretation、risk/red flag、YoY変化、スクリーニング評価、verdict理由を含む全ユーザー表示文字列についてCON-03検査をingest時に一元実施し、違反銘柄が表示されず縮退することを検証できる。
+  - <code>analysis_input.json</code>の候補symbolと候補内source_id、<code>analysis_result.json</code>のsymbolがそれぞれ一意であり、resultのsymbol集合がinput候補集合と完全一致しなければrun全体をhard failすることを検証できる。
+  - <code>no_trade=true</code>では非空白の理由を必須、<code>false</code>では理由を<code>null</code>に固定し、Unicode NFKC正規化後にもCON-03の売買命令・義務表現を検出できることを検証できる。
+  - input由来URLは<code>http</code>/<code>https</code>だけをリンク化し、それ以外はattributionなしで安全に縮退することを検証できる。
+  - <code>analysis_result.json</code>の<code>as_of</code>が<code>analysis_input.json</code>の<code>as_of</code>と一致しない場合はrun全体のhard failとし、部分的に読み込まないことを確認できる。
+  - 銘柄ごとのverdict（<code>proceed</code>／<code>skip</code>）と、run全体の<code>no_trade</code>表示がレポートへ反映され、検証未通過・分析未実施の銘柄では「懸念なし」と誤読される表示が出ないことを確認できる。
+  - <code>copilot-ingest-analysis</code>がネットワークアクセスもスクリーニング再計算も行わず、<code>report_context.json</code>に保存済みのブリーフの定性欄だけを差し替えることをテストで確認できる。
+  - 通常のlive当日実行では、同一銘柄・戦略の過去の人間判断を最大3件まで構造化して<code>analysis_input.json</code>へ含められる。過去判断は現在の事実でも指示でもない旨を明記し、専用delimiter内でescapeする。
+  - <code>--dry-run</code>、バックテスト、明示的な<code>--as-of</code>実行では過去判断を分析入力へ渡さず、先読みを防ぐことをテストで確認できる。</p>
+<blockquote>
+<p><strong>仕様変更（P7、スキル移行時）</strong>: 旧LLM統合にあった<code>catalyst_quality</code>（触媒の質、表示専用）と<code>guidance_direction</code>（ガイダンス方向性）は新しい分析契約に含めず廃止した。いずれもランキング・リスク判定へ接続されていない表示専用フィールドであり、必要になれば<code>analysis/schemas.py</code>の任意フィールドとして復活できる。</p>
+</blockquote>
+<p><strong>FR-09 レポート・通知</strong>
+- 説明: 日次結果をCLIへ見やすく表示し、同じ<code>DailyBrief</code>から監査用Markdownを生成する。DuckDBを正本とし、Markdownは再生成可能な派生成果物とする。Discord Webhook通知はオプション機能とする。
+- 受け入れ基準:
+  - <code>copilot-daily</code>が進捗ログをstderr、最終ブリーフをstdoutへ出し、市場概況・候補順位・シグナル・リスク・定性分析（未実施ならその旨）・警告を確認できる。<code>copilot-ingest-analysis</code>は同じ<code>DailyBrief</code>から同じレンダラで再描画する。
+  - <code>reports/&lt;run_date&gt;/&lt;run_id&gt;.md</code>と<code>reports/latest.md</code>を同一ディレクトリの一時ファイルから原子的に置換し、同日再実行の履歴を上書きしない。
+  - CLIとMarkdownが共通の<code>DailyBrief</code>を入力とし、表示形式ごとにデータ取得・判断ロジックを重複させない。
+  - <code>notification.enabled: false</code>（デフォルト）の場合、Discord Webhookへの送信が行われないことをテストで確認できる。<code>notification.enabled: true</code>かつWebhook URLが設定されている場合のみ、モックWebhookエンドポイントに対してサマリ内容を含むペイロードが送信されることをテストで確認できる。
+  - CLI・Markdown・通知内に断定的な売買指示（CON-03）が含まれないことをテストとレビューで確認できる。</p>
+<p><strong>FR-10 バックテスト</strong>
+- 説明: 日次バッチと同じFilter/Signalロジックを使う決定的なポートフォリオシミュレータで戦略の履歴検証を行う。シグナルは当日終値確定後に生成し、約定は翌営業日以降に限る。財務データは提出日時点、価格データは評価日時点で利用可能な情報だけを使い、手数料・スリッページを織り込み、SPYをベンチマークとして比較する。終了日以前のユニバース履歴があればそれを使い、履歴が不足する場合は現在の構成銘柄へフォールバックして、生存者バイアスの限界をレポートに明記する。
+- 受け入れ基準:
+  - バックテスト実行コマンドで、手数料・スリッページを反映した損益曲線とS&amp;P500ベンチマーク比較が出力されることを確認できる。
+  - 同一の入力データ・戦略設定でバックテストを再実行した場合、同一の結果が再現されることをpytestで検証できる（再現性の確認）。
+  - 手計算可能な1取引fixtureで、買いと売りの双方へ不利なスリッページと手数料が適用され、強制清算後の最終資産が厳密に一致することを検証できる。stopと最大保有日が同日に成立する場合はstopを優先する。
+  - $0構成期間中のバックテストレポートに生存者バイアスの限界に関する注記が含まれることを確認できる。
+  - バックテストの終了日より後のユニバース履歴を選ばず、履歴がない場合も現在構成銘柄で処理を継続して生存者バイアス注記を残すことを検証できる。
+  - 将来の価格・提出前の財務情報を参照しないこと、ギャップを含むストップ約定規則、最大保有日数、同時保有上限、資金不足時の候補順位をfixtureで検証できる。</p>
+<p><strong>FR-11 ペーパートレード記録</strong>
+- 説明: シグナル発生から人間の判断、仮想約定、損益までを記録し、対S&amp;P500での成績を集計する。
+- 受け入れ基準:
+  - シグナル・判断・仮想約定・損益がDuckDBに記録され、記録後にレコードを再取得して整合性を確認できることをpytestで検証できる。
+  - <code>copilot-decision</code>は<code>run_id</code>と候補銘柄を検証し、戦略が一意なら推定して判断を記録する。候補外の銘柄は拒否する。
+  - 判断記録後、当該runの生成済みMarkdownの判断セクションをDuckDBから原子的に更新する。
+  - 成績集計コマンドを実行すると、累積損益とS&amp;P500騰落率との比較が出力されることを確認できる。</p>
+<p><strong>FR-12 日次バッチ</strong>
+- 説明: FR-01〜FR-06を基盤とし、FR-07〜FR-09を含めた日次処理を、利用者が1日1回コマンドで手動実行することにより順次実行するオーケストレーション。FR-10（バックテスト）とFR-11（人間の判断記録）は同じストアとドメインロジックを使う別CLIとして扱う。各実行に一意な<code>run_id</code>を付与し、同じ評価対象日を再実行しても自然キーupsertにより重複データを生成しない。テキスト収集や分析入力エクスポートが失敗してもスクリーニングまでは完走するフェイルソフト設計とする。定性分析そのものは日次バッチの外（Claude Codeスキル）で実行し、<code>copilot-ingest-analysis</code>が別コマンドとして結果を取り込む。
+- 受け入れ基準:
+  - バッチ実行コマンドを同日中に2回実行した場合、2回目の実行が重複データを生成しないことをpytestで検証できる（冪等性の確認）。
+  - 2回の実行が別々の<code>run_id</code>とステップ履歴を持ち、失敗した実行の後に再実行して正常完了できることをpytestで検証できる。
+  - テキスト収集または分析入力エクスポートを意図的に失敗させるテストで、スクリーニング・シグナル抽出・レポート生成（定性分析部分を除く）までが正常完了し、runが<code>degraded</code>で終了コード0になることを確認できる（フェイルソフトの確認）。
+  - ローカル実行時の所要時間が35分以内に収まることを、実行ログのタイムスタンプで確認できる。
+  - 設定は外部I/Oとrun DB作成の前にstrictに検証され、未知キー・型の暗黙変換・非正の期間/本数/timeout・範囲外の比率/閾値・<code>sma_short &gt;= sma_long</code>を明確な設定エラーとして拒否することを確認できる。
+  - <code>--limit</code>は非負整数だけを受け付け、負数は外部I/Oとrun DB作成の前にusage error（終了コード2）で終了する。<code>0</code>は新規のユニバース候補を選ばず、既存の保有銘柄だけは安全上の監視対象として維持することを確認できる。</p>
+<hr />
+<h2 id="_12">非機能要件<a class="headerlink" href="#_12" title="Permanent link">&para;</a></h2>
+<h3 id="_13">非機能要件一覧<a class="headerlink" href="#_13" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>要件名</th>
+<th>概要</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NFR-01</td>
+<td>コスト</td>
+<td>LLM API従量課金なし。データ費のみで本番運用は月$25以内</td>
+</tr>
+<tr>
+<td>NFR-02</td>
+<td>保守性</td>
+<td>個人1人で保守可能。常時稼働サーバーなし、依存ライブラリ最小</td>
+</tr>
+<tr>
+<td>NFR-03</td>
+<td>性能</td>
+<td>日次バッチ合計35分以内（ローカル手動実行）</td>
+</tr>
+<tr>
+<td>NFR-04</td>
+<td>信頼性</td>
+<td>データ欠損検知、外部API障害時のフェイルソフトとリトライ</td>
+</tr>
+<tr>
+<td>NFR-05</td>
+<td>監査性</td>
+<td>全シグナル・分析入出力・人間の判断を記録し後から検証可能</td>
+</tr>
+<tr>
+<td>NFR-06</td>
+<td>セキュリティ</td>
+<td>APIキーはコードに含めない。リポジトリはプライベート</td>
+</tr>
+<tr>
+<td>NFR-07</td>
+<td>拡張性</td>
+<td>Strategy/Filter/Signal/DataProvider/Notifierをインターフェース分離</td>
+</tr>
+<tr>
+<td>NFR-08</td>
+<td>テスト品質</td>
+<td>line+branchカバレッジ95%以上、E2Eスモークテスト必須</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_14">各要件の説明と受け入れ基準<a class="headerlink" href="#_14" title="Permanent link">&para;</a></h3>
+<p><strong>NFR-01 コスト</strong>
+- 説明: 定性分析はClaude Codeスキルとして利用者のClaude Codeセッション内で実行され、本システムからLLM APIを呼ばないため、LLMのAPI従量課金は発生しない（既存のClaude Codeサブスクリプションの範囲内）。残る外部費用はデータ取得のみで、$0構成（yfinance・EDGAR・Finnhub無料枠・FRED）を維持する試作期は月$0、本番運用（P3〜）で有料データ基盤へ移行する場合も月$25以内に収める。
+- 受け入れ基準: <code>src/</code>配下にLLM APIクライアント・APIキー・従量課金の会計処理が存在しないことをコード上で確認できる（<code>anthropic</code>パッケージへの依存を持たない）。有料データ基盤へ移行する場合の月額は契約プランの定額から事前に確認できる。</p>
+<blockquote>
+<p><strong>P7（スキル移行）での変更</strong>: 旧NFR-01は<code>llm_calls</code>テーブルへの実績コスト記録と呼び出し前の月次予算ゲートを受け入れ基準としていた。LLM API呼び出し自体が無くなったため、予算会計・月次上限ゲート・実行単位の呼び出し上限・Batch API検討はいずれも廃止した。</p>
+</blockquote>
+<p><strong>NFR-02 保守性</strong>
+- 説明: 常時稼働サーバーを持たず、依存ライブラリを最小限に保ち、個人1人が長期間保守できる構成とする。
+- 受け入れ基準: システム構成に常時稼働のサーバープロセス（デーモン）が存在しないことをアーキテクチャ図・実行構成から確認できる。構造化データの永続化はDuckDB、株価時系列はParquetに限定し、同一目的のDBを重複導入しない。TA-Lib・backtesting.py・SQLite専用データアクセス層はP1〜P2の依存に含めない。</p>
+<p><strong>NFR-03 性能</strong>
+- 説明: 日次バッチの合計実行時間を35分以内に収め、利用者が1日1回ローカルで手動実行した際に許容できる待ち時間に収める。
+- 受け入れ基準: ローカル実行時のバッチ実行ログから、開始〜終了までの所要時間が35分以内であることを確認できる。</p>
+<p><strong>NFR-04 信頼性</strong>
+- 説明: データ欠損を検知し、外部API障害時にはフェイルソフト（処理継続）とリトライを行う。
+- 受け入れ基準: 主要データソース（yfinance/EODHD, EDGAR, Finnhub, FRED）のいずれかが意図的に失敗するモックを用いたテストで、欠損が検知されログ等に記録されることを確認できる。一時的な障害に対してリトライ処理が行われることをテストで確認できる。
+- 通常のpytest suiteはautouseのsocket遮断により実ネットワーク接続を即時失敗させる。外部portにはfakeを注入し、live canaryは通常suiteと成功条件から分離する。</p>
+<p><strong>NFR-05 監査性</strong>
+- 説明: 全実行・ステップ・候補・リスク評価・定性分析の入出力・人間の判断を記録し、特定の<code>run_id</code>のレポート入力を後から再構成可能な状態を保つ。
+- 受け入れ基準: DuckDBのスキーマに、実行・ステップ・シグナル/候補・リスク評価・収集テキスト・人間の判断それぞれに対応するテーブルが存在する。<code>runs.config_hash</code>は検証済み<code>Settings</code>・選択した<code>StrategySpec</code>・<code>strategy_key</code>のcanonical JSON全体から算出する完全SHA-256指紋とし、同じ行の<code>metadata_json</code>にはprovider名、data tier、実効ユニバースのsnapshot日・identity、アプリ版・メタデータschema版を秘密情報なしで保存する。定性分析の監査証跡は<code>reports/&lt;run_date&gt;/&lt;run_id&gt;/</code>に残る<code>analysis_input.json</code>（分析へ渡した入力そのもの）・<code>analysis_result.json</code>（スキルの回答そのもの）・<code>report_context.json</code>（再描画に使ったブリーフのスナップショット）の3ファイルが担う。3文書は<code>run_id</code>、<code>as_of</code>、<code>strategy_key</code>、入力のcanonical JSONから計算した完全SHA-256 digestで束縛し、いずれかが不一致なら既存レポートを変更せずhard failする。任意の<code>run_id</code>のバッチ実行結果を、記録された入力参照と出力から再構成できることをテストで確認できる。</p>
+<blockquote>
+<p><strong>P7（スキル移行）での変更</strong>: 旧NFR-05が定性分析の証跡としていた<code>llm_calls</code>テーブル（プロンプト全文・トークン数・コスト・レスポンスJSON）は、LLM API呼び出しの廃止に伴い削除した。証跡は上記のJSONアーティファクトへ置き換わっている。</p>
+</blockquote>
+<p><strong>NFR-06 セキュリティ</strong>
+- 説明: APIキー等の秘匿情報をコードに含めず、ローカルの<code>.env</code>（<code>.gitignore</code>対象、python-dotenvで読み込み）で管理する。GitHubリポジトリを利用する場合（コード管理用、利用自体は任意）はプライベートリポジトリとする。
+- 受け入れ基準: コード・設定ファイルにAPIキーがハードコードされていないことを、シークレットスキャン（例: <code>git grep</code>によるパターン検索）で確認できる。<code>.env</code>が<code>.gitignore</code>に含まれ、バージョン管理対象外であることを確認できる。GitHubリポジトリを利用する場合、プライベート設定であることを確認できる。</p>
+<p><strong>NFR-07 拡張性</strong>
+- 説明: Strategy、Filter、Signal、DataProvider、Notifierをそれぞれ独立したインターフェースとして分離し、実装の追加・差し替えを容易にする。
+- 受け入れ基準: 上記5種のインターフェース（抽象基底クラスまたはProtocol）がそれぞれ定義されており、各インターフェースに対して少なくとも1つの具体実装が存在することをコード上で確認できる。新しい実装を追加する際に既存の呼び出し側コードの変更が不要であることを、モック実装を追加するテストで確認できる。</p>
+<p><strong>NFR-08 テスト品質</strong>
+- 説明: 「実際にアプリを動かしたときにバグがないレベル」の品質を、数値カバレッジとE2Eスモークテストの両輪で担保する。pytest-covによるline+branchカバレッジを全体で95%以上とし、<code>--cov-fail-under=95</code>を検証コマンドに組み込む。カバレッジ除外（<code># pragma: no cover</code>）の使用は<code>if __name__ == "__main__":</code>ブロックとProtocol/ABCの抽象メソッド本体に限定し、テストのskip/xfailによるカバレッジ回避は禁止する。
+- 受け入れ基準:
+  - <code>uv run pytest</code>実行時、line+branchカバレッジが全体95%以上であり、<code>--cov-fail-under=95</code>のしきい値チェックを通過することを確認できる。
+  - <code># pragma: no cover</code>が付与されている箇所が<code>if __name__ == "__main__":</code>ブロックおよびProtocol/ABCの抽象メソッド本体のみであることを、コードレビューまたは<code>git grep "pragma: no cover"</code>等の確認手段で検証できる。
+  - テストの<code>@pytest.mark.skip</code>/<code>@pytest.mark.xfail</code>がカバレッジ回避目的で使用されていないことを確認できる。
+  - 外部API呼び出しを記録済みフィクスチャ/モックに差し替えた状態で<code>copilot-daily</code>相当のコマンドを一気通貫実行し、CLIブリーフとMarkdown生成まで正常終了（終了コード0）することをE2Eスモークテストとして検証できる。
+  - <code>just verify</code>がruff、format check、mypy strict、line+branch coverage 95%以上のpytest、<code>mkdocs build --strict</code>、wheel smokeを非破壊で実行し、すべて終了コード0になることを確認できる。</p>
+<hr />
+<h2 id="_15">制約<a class="headerlink" href="#_15" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>制約内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CON-01</td>
+<td>発注自動化はスコープ外（証券会社APIは使わない）</td>
+</tr>
+<tr>
+<td>CON-02</td>
+<td>yfinanceは試作限定（非公式・個人利用のみ）。本番データ基盤にしない</td>
+</tr>
+<tr>
+<td>CON-03</td>
+<td>投資助言に該当する出力（断定的な売買指示）をCLI・Markdown・通知に含めない。最終判断は人間。検査はスキルへの指示だけに依存せず、<code>copilot-ingest-analysis</code>（<code>analysis/safety.py</code>の純関数）が全ユーザー表示テキストへ一元適用し、違反銘柄はfail-closedで縮退表示する</td>
+</tr>
+<tr>
+<td>CON-04</td>
+<td>バックテスト好成績でも、3ヶ月以上のペーパートレードで対S&amp;P500評価を経ずに実資金へ進まない</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_16">用語集<a class="headerlink" href="#_16" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>用語</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>スイング〜ポジショントレード</td>
+<td>数日〜数ヶ月程度の期間ポジションを保有する株式売買スタイル</td>
+</tr>
+<tr>
+<td>ユニバース</td>
+<td>スクリーニング・分析の対象となる銘柄群（本システムではS&amp;P500構成銘柄）</td>
+</tr>
+<tr>
+<td>DataProvider</td>
+<td>株価データ取得元を抽象化するインターフェース。yfinance/EODHD等の実装を差し替え可能にする</td>
+</tr>
+<tr>
+<td>XBRL</td>
+<td>SEC EDGARが提供する財務データの構造化フォーマット</td>
+</tr>
+<tr>
+<td>ファンダ品質フィルタ</td>
+<td>黒字・財務健全性などファンダメンタル指標に基づく銘柄の第1段絞り込み</td>
+</tr>
+<tr>
+<td>プラガブル</td>
+<td>インターフェースを介して実装を追加・差し替え・組み合わせできる設計方針</td>
+</tr>
+<tr>
+<td>分析入力（<code>analysis_input.json</code>）</td>
+<td>日次バッチが書き出す、定性分析スキルへ渡す唯一の入力。決定論的な文脈ブロックと未信頼テキストを含む</td>
+</tr>
+<tr>
+<td>分析結果（<code>analysis_result.json</code>）</td>
+<td>定性分析スキルが書き出す回答。<code>copilot-ingest-analysis</code>が検証するまでレポートへ反映されない</td>
+</tr>
+<tr>
+<td>provenance</td>
+<td>各factが引用する<code>source_ids</code>が、実際に供給した入力IDの部分集合であること。出典を辿れることの機械的保証</td>
+</tr>
+<tr>
+<td>fail-closed</td>
+<td>検証を通らなかった内容を、推測で補ったり再試行したりせず、非表示（縮退）にする方針</td>
+</tr>
+<tr>
+<td>verdict</td>
+<td>定性分析による銘柄ごとの推奨（<code>proceed</code>＝懸念なし／<code>skip</code>＝見送り推奨）。決定論的なスコア・順位は変更しない</td>
+</tr>
+<tr>
+<td>フェイルソフト</td>
+<td>一部処理が失敗しても、可能な範囲まで処理を完走させる設計方針</td>
+</tr>
+<tr>
+<td>ペーパートレード</td>
+<td>実資金を用いず、仮想的な売買として記録・検証する取引</td>
+</tr>
+<tr>
+<td>生存者バイアス</td>
+<td>上場廃止銘柄が除外されたデータでバックテストすることによる成績の過大評価</td>
+</tr>
+<tr>
+<td>冪等性</td>
+<td>同一処理を複数回実行しても結果が変わらない性質（本システムでは同日再実行への対応）</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

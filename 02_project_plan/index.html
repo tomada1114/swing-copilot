@@ -1,0 +1,1333 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/02_project_plan/">
+      
+      
+        <link rel="prev" href="../01_requirements/">
+      
+      
+        <link rel="next" href="../03_basic_design/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Project Plan - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#02-swing-copilot" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Project Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01_requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        体制
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        フェーズ計画
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="フェーズ計画">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#p0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P0: 人間の下準備
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1: 基盤構築
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2: 分析・レポート統合
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3: ペーパートレード検証
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P4: 本番移行判断
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        マイルストーン表
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        コスト計画
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        リスク管理表
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        変更管理
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../03_basic_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../06_reliability_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../07_invariant_test_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        体制
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        フェーズ計画
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="フェーズ計画">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#p0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P0: 人間の下準備
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1: 基盤構築
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2: 分析・レポート統合
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3: ペーパートレード検証
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P4: 本番移行判断
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        マイルストーン表
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        コスト計画
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        リスク管理表
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        変更管理
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="02-swing-copilot">02. プロジェクト計画書（swing-copilot）<a class="headerlink" href="#02-swing-copilot" title="Permanent link">&para;</a></h1>
+<h2 id="_1">文書情報<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>システム名（仮称）</td>
+<td>swing-copilot</td>
+</tr>
+<tr>
+<td>文書種別</td>
+<td>プロジェクト計画書</td>
+</tr>
+<tr>
+<td>版数</td>
+<td>1.2</td>
+</tr>
+<tr>
+<td>作成日</td>
+<td>2026-07-20</td>
+</tr>
+<tr>
+<td>最終更新日</td>
+<td>2026-07-22</td>
+</tr>
+<tr>
+<td>関連文書</td>
+<td>00_human_preparation.md（人間の下準備チェックリスト）、01_requirements.md（要件定義書）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_2">体制<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>人間（発注者）</strong>: 1名。日本在住の個人投資家、Python可。要件レビュー、<code>/goal</code>実行の指示、実装成果物のレビュー、日々の運用（朝のレポート確認・判断記録）、予算・契約判断を担当する。</li>
+<li><strong>Claude Code（自律実装）</strong>: <code>/goal</code>による自律実装エージェント。01_requirements.mdの各要件（FR/NFR/CON）と受け入れ基準に基づき、実装・テスト作成・検証を行う。実装過程で判断に迷う場合は要件定義書の受け入れ基準を根拠とする。</li>
+<li>開発環境: Python 3.14、uv（パッケージ管理）、pytest（テスト）、ruff（リント）。ソースはプライベートGitHubリポジトリで管理する。</li>
+</ul>
+<hr />
+<h2 id="_3">フェーズ計画<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<h3 id="p0">P0: 人間の下準備<a class="headerlink" href="#p0" title="Permanent link">&para;</a></h3>
+<ul>
+<li>期間目安: 0.5日</li>
+<li>成果物: 00_human_preparation.mdのチェックリスト完了（P0対象項目1〜7, 10）。APIキー・<code>.env</code>の整備完了（Discord Webhook URLは通知を使う場合のみ）。</li>
+<li>完了ゲート: 00_human_preparation.mdのP0チェックリスト項目がすべて完了していること。</li>
+</ul>
+<h3 id="p1">P1: 基盤構築<a class="headerlink" href="#p1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>期間目安: 1〜2週間</li>
+<li>対象要件: FR-01, FR-02, FR-03, FR-04, FR-05, FR-06, FR-10, FR-12（$0構成: yfinance＋EDGAR＋Parquet＋単一DuckDBで実装）</li>
+<li>進め方: <code>/goal</code>による自律実装＋人間レビュー。</li>
+<li>成果物: ユニバース管理・株価/財務データ取得・2段スクリーニング・リスク管理チェック・バックテスト機能・日次バッチオーケストレーションの実装一式とテストコード。</li>
+<li>完了ゲート: バックテストが再現可能に動くこと（同一入力・戦略設定での再実行結果が一致することがpytestで確認できる）。加えて、line+branchカバレッジが全体95%以上であること（<code>--cov-fail-under=95</code>が通ること）。</li>
+</ul>
+<h3 id="p2">P2: 分析・レポート統合<a class="headerlink" href="#p2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>期間目安: 1週間</li>
+<li>対象要件: FR-07, FR-08, FR-09, FR-11</li>
+<li>成果物: ニュース・EDGAR新着開示・経済指標カレンダーの収集、定性分析、CLI日次ブリーフ、監査用Markdown、Discord Webhook通知（オプション）、判断記録CLI。</li>
+<li>実装完了ゲート: line+branchカバレッジ95%以上、fixture/fakeによるCLI・MarkdownまでのE2Eスモーク成功、および設定済みの実キーが利用可能なら20銘柄のlive canary成功。</li>
+<li>P3開始前の運用ゲート: 日次バッチをローカルで7営業日連続して手動実行し、フェイルソフトを含め正常完了すること。時間経過を必要とするため、<code>/goal</code>によるP1+P2実装の完了条件には含めない。</li>
+</ul>
+<h3 id="p3">P3: ペーパートレード検証<a class="headerlink" href="#p3" title="Permanent link">&para;</a></h3>
+<ul>
+<li>期間目安: 3ヶ月以上</li>
+<li>進め方: 毎朝、CLI日次ブリーフを確認し、<code>copilot-decision</code>で仮想売買（見送り／仮想エントリー等）を記録する。</li>
+<li>成果物: 3ヶ月以上にわたるペーパートレード記録（シグナル・判断・仮想約定・損益）と対S&amp;P500の成績集計。</li>
+<li>完了ゲート: 対S&amp;P500での成績・運用プロセスを評価し、継続／改良／中止のいずれかを判断すること。</li>
+</ul>
+<h3 id="p4">P4: 本番移行判断<a class="headerlink" href="#p4" title="Permanent link">&para;</a></h3>
+<ul>
+<li>期間目安: 判断・移行作業（P3完了後、期間は成績評価結果に応じて変動）</li>
+<li>内容: EODHD契約（$19.99/月）の要否判断とAPIキー登録、生存者バイアスを排したバックテストの再実行、少額実運用への移行可否判断。</li>
+<li>成果物: EODHD契約判断結果（契約する場合はAPIキー登録・delisted API利用可否のサポート確認済み）、再バックテスト結果、少額実運用移行可否の意思決定記録。</li>
+<li>完了ゲート: CON-04に基づき、3ヶ月以上のペーパートレードで対S&amp;P500評価を経た上で、実資金移行の可否が明示的に判断されていること。</li>
+</ul>
+<hr />
+<h2 id="_4">マイルストーン表<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>フェーズ</th>
+<th>マイルストーン</th>
+<th>想定タイミング（P0開始起点）</th>
+<th>完了ゲート</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0</td>
+<td>人間の下準備完了</td>
+<td>開始〜0.5日後</td>
+<td>00_human_preparation.mdのP0項目すべて完了</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>基盤構築完了</td>
+<td>P0完了後1〜2週間後</td>
+<td>バックテストが再現可能に動作、カバレッジ95%以上（<code>--cov-fail-under=95</code>）</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>分析・レポート統合完了</td>
+<td>P1完了後1週間後</td>
+<td>カバレッジ95%以上、オフラインE2Eスモーク成功、利用可能なら20銘柄live canary成功</td>
+</tr>
+<tr>
+<td>P2→P3</td>
+<td>運用準備確認</td>
+<td>P2完了後7営業日以上</td>
+<td>日次バッチを7営業日連続で手動実行し、結果と所要時間を確認</td>
+</tr>
+<tr>
+<td>P3</td>
+<td>ペーパートレード検証完了</td>
+<td>P2完了後3ヶ月以上後</td>
+<td>対S&amp;P500成績評価に基づく継続/改良/中止判断</td>
+</tr>
+<tr>
+<td>P4</td>
+<td>本番移行判断</td>
+<td>P3完了後、判断結果に応じて実施</td>
+<td>実資金移行可否の意思決定記録</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_5">コスト計画<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>フェーズ</th>
+<th>データ費用</th>
+<th>分析費用</th>
+<th>月額上限（NFR-01）</th>
+<th>備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0</td>
+<td>$0</td>
+<td>$0</td>
+<td>-</td>
+<td>アカウント登録・キー取得は原則無料</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>$0（yfinance, EDGAR: 無料）</td>
+<td>$0（分析未統合）</td>
+<td>月$0</td>
+<td>$0構成での基盤実装期間</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>$0（yfinance, EDGAR, Finnhub無料枠, FRED: 無料）</td>
+<td>$0（Claude Codeサブスクリプション内で実行、API従量課金なし）</td>
+<td>月$0</td>
+<td>定性分析はスキルとして人間のClaude Codeセッションで走る</td>
+</tr>
+<tr>
+<td>P3</td>
+<td>$0（$0構成継続）</td>
+<td>$0</td>
+<td>月$0</td>
+<td>$0構成を継続する限りシステム自体の月額費用は発生しない</td>
+</tr>
+<tr>
+<td>P4</td>
+<td>EODHD契約時の最新価格を契約前に確認</td>
+<td>$0</td>
+<td>月$25以内</td>
+<td>データ費が上限内に収まる場合のみ移行する</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>P7（スキル移行）での更新</strong>: 当初計画はAnthropic API直呼びのLLM統合を前提に、
+試作期の月$5上限・<code>llm_calls</code>による実績集計・呼び出し前の予算ゲート・
+モデル価格表の版管理・Batch API検討を置いていた。定性分析をClaude Codeスキルへ
+移行してLLM API呼び出しを全廃したため、これらはいずれも不要になった
+（<code>docs/01_requirements.md</code> NFR-01を参照）。残る外部費用はデータ取得のみである。</p>
+</blockquote>
+<hr />
+<h2 id="_6">リスク管理表<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>リスク</th>
+<th>影響</th>
+<th>確率</th>
+<th>対策</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>yfinance停止リスク（非公式APIのため予告なく利用不可になる可能性）</td>
+<td>P1構築中のデータ取得が停止し、$0構成での基盤検証が滞る</td>
+<td>中</td>
+<td>DataProviderインターフェース（FR-02/NFR-07）による抽象化を徹底し、代替実装（EODHD等）への切り替えを容易にしておく</td>
+</tr>
+<tr>
+<td>無料API仕様変更（Finnhub, FRED, EDGAR等のレート制限・仕様変更）</td>
+<td>データ取得処理がエラーとなり日次バッチが失敗する</td>
+<td>中</td>
+<td>フェイルソフト設計（FR-12）とリトライ・欠損検知（NFR-04）で影響を局所化する</td>
+</tr>
+<tr>
+<td>実行忘れ（ローカル手動実行のため、その日のバッチを実行し忘れる可能性がある）</td>
+<td>P3のペーパートレード検証期間中に一部日付のデータ・判断記録が欠落する</td>
+<td>中</td>
+<td>実行しなかった日はその日のレポート・記録が単純に存在しないだけで、以降のデータ整合性やスケジュール前提は壊れない設計とする（冪等性・日付キー方式のため翌日以降の実行に影響しない）</td>
+</tr>
+<tr>
+<td>過学習（バックテストで戦略パラメータを過度に最適化してしまうリスク）</td>
+<td>バックテストの好成績が実運用・ペーパートレードで再現しない</td>
+<td>高</td>
+<td>CON-04に基づき、バックテスト好成績のみで実資金へ進まず、3ヶ月以上のペーパートレードでの検証を必須とする</td>
+</tr>
+<tr>
+<td>定性分析の幻覚（ニュース解釈・開示解釈での事実誤認）</td>
+<td>誤った情報に基づく判断支援が行われるリスク</td>
+<td>中</td>
+<td>FR-08の出力スキーマで事実と解釈を分離し、各factに<code>source_ids</code>を必須化する。<code>copilot-ingest-analysis</code>が引用元の実在をprovenance検証し、違反銘柄はfail-closedで非表示にする。レポートから原文を確認できるようにし、CON-03により断定的な売買指示は出力しない</td>
+</tr>
+<tr>
+<td>スキル出力がスクリーニング結果を書き換える</td>
+<td>決定論的なスコア・順位・株数が定性判断で歪められる</td>
+<td>中</td>
+<td>分析結果は表示専用フィールドとverdictにしか流れない構造とし、ingestは<code>report_context.json</code>の決定論的フィールドを無変更で持ち越す</td>
+</tr>
+<tr>
+<td>モチベーション枯渇（毎朝のレポート確認・判断記録という運用負担）</td>
+<td>P3のペーパートレード検証が中断し、3ヶ月以上の継続的な対S&amp;P500評価ができなくなる</td>
+<td>中</td>
+<td>00_human_preparation.mdの項目9で事前に運用習慣について合意し、確認作業を5〜10分程度に抑える設計（サマリ通知＋詳細レポートの二段構え）とする</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_7">変更管理<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
+<ul>
+<li>本プロジェクト計画書・要件定義書・人間の下準備チェックリストは、いずれもプロジェクトの進行に応じて更新され得る。ただし、01_requirements.mdの要件ID（FR-01〜FR-12, NFR-01〜NFR-08, CON-01〜CON-04）は設計書・実装から参照されるため、<strong>変更・追加・削除する場合は必ず発注者の承認を得た上で改版し、変更履歴を明記する</strong>。</li>
+<li>ドキュメント更新時は、版数（文書情報セクションの「版数」欄）をインクリメントし、更新日と変更概要を記録する。</li>
+<li>P1〜P4の各フェーズ完了ゲートを満たさずに次フェーズへ進むことは原則禁止とする。やむを得ず前倒しで進める場合は、発注者が明示的に承認し、その判断根拠を本文書に追記する。</li>
+<li>CON-04（3ヶ月以上のペーパートレードで対S&amp;P500評価を経ずに実資金へ進まない）は本プロジェクトの中核的な制約であり、いかなる変更管理プロセスにおいても緩和・削除の対象としない。</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -322,6 +322,27 @@ def test_a_gap_in_a_target_omits_that_horizon_instead_of_emitting_nan() -> None:
     assert affected
 
 
+def test_an_interior_gap_omits_the_horizon_even_when_its_last_bar_exists() -> None:
+    """A hole mid-window drops the horizon; a surviving endpoint is not enough.
+
+    `Series.min` skips `NaN`, so an interior gap would otherwise report a
+    drawdown searched over fewer bars than the horizon claims to cover.
+    """
+    bars = market_bars(130)
+    dates = sorted(bars["date"].unique())
+    holed = bars.loc[~((bars["symbol"] == QQQ_TARGET) & (bars["date"] == dates[121]))]
+    scan = scan_forward(_request(holed, horizons=(3,)))
+
+    entry = next(
+        observation
+        for observation in scan.observations
+        if observation.as_of == dates[119]
+    )
+    # The window is dates[120..122]: its endpoint survives, its middle bar does not.
+    assert entry.outcome(SPY_TARGET, 3) is not None
+    assert entry.outcome(QQQ_TARGET, 3) is None
+
+
 def test_forward_outcome_target_is_absent_when_its_close_is_zero_or_negative() -> None:
     """A collapsed-to-zero close can never become a division base for its own target.
 

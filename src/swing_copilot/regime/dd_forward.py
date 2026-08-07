@@ -23,7 +23,6 @@ date it was asked about. No forward value is ever fed back into a level.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isnan
 from statistics import fmean, median
 from typing import TYPE_CHECKING
 
@@ -218,9 +217,10 @@ def _forward_outcomes(
     """Build every horizon's outcome from `series` position `index`.
 
     A gap in a target's history (a symbol with no bar on a date SPY traded)
-    leaves `NaN` after the reindex onto the trading calendar. Such a horizon is
-    omitted rather than emitted, because `NaN` propagates silently through
-    `fmean` and would render a whole level's average unusable without saying so.
+    leaves `NaN` after the reindex onto the trading calendar. A horizon whose
+    forward window holds any such gap is omitted rather than emitted, because
+    `NaN` propagates silently through `fmean` and would render a whole level's
+    average unusable without saying so.
     """
     base = float(series.iloc[index])
     outcomes: list[ForwardOutcome] = []
@@ -229,11 +229,14 @@ def _forward_outcomes(
     for horizon in horizons:
         if index + horizon >= len(series):
             continue
-        end = float(series.iloc[index + horizon])
         window = series.iloc[index + 1 : index + horizon + 1]
-        trough = float(window.min()) if window.notna().any() else end
-        if isnan(end) or isnan(trough):
+        # `Series.min` skips `NaN`, so an interior gap would quietly shrink the
+        # trough search to the bars that happen to exist and report a partially
+        # covered drawdown as a full one. The whole window must be present.
+        if window.empty or bool(window.isna().any()):
             continue
+        end = float(window.iloc[-1])
+        trough = float(window.min())
         outcomes.append(
             ForwardOutcome(
                 target=target,

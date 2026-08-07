@@ -126,7 +126,12 @@ def main(arguments: list[str]) -> int:
                 "install",
                 "--python",
                 str(venv_python),
-                "--no-cache",
+                # Refresh only this project, never the dependencies: the wheel
+                # under test must always be re-read from disk, while letting the
+                # shared uv cache serve pandas/pyarrow/duckdb keeps the check
+                # from re-downloading tens of megabytes on every `just verify`.
+                "--refresh-package",
+                project_name,
                 str(wheel_path),
             ]
         )

@@ -551,10 +551,14 @@ Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で
 `pipeline/daily.py`だけが`MarketStore`からSPY/QQQ/^VIXの履歴を読み、run単位で
 `StateStore.record_regime_snapshot()`へ補正upsertする。`DailyBrief`は同じsnapshotを
 terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
-roadmap §5 P3-13に従いすべて要検証値として扱う。`distribution_level()`が
+`dd_severe_d25`/`dd_severe_d15`を除きroadmap §5 P3-13に従い要検証値として扱う。
+`distribution_level()`が
 NORMAL/CAUTION/HIGH/SEVEREを決めるd25/d15/d5の水準境界（`dd_severe_d25`,
 `dd_severe_d15`, `dd_high_d25`, `dd_high_d15`, `dd_high_d5`, `dd_caution_d25`）も
-同じ`regime.*`の設定項目であり、既定値は従来ハードコードされていた定数と同値。
+同じ`regime.*`の設定項目である。`dd_severe_d25`/`dd_severe_d15`は
+`copilot-dd-forward`の検証を経て2026-08-07にIssue #111で7/6を採用済み
+（根拠: `reports/regime/2026-08-06-dd-threshold-review.md` §10）。
+`DistributionThresholds`のdataclass既定値も採用値と同値に保つ。
 `RegimeConfig`は`dd_severe_d25 > dd_high_d25 > dd_caution_d25`と
 `dd_severe_d15 > dd_high_d15`の順序をvalidatorで強制する。
 
@@ -2037,8 +2041,8 @@ regime:
   dd_decline_pct: -0.002           # DD下落率（要検証）
   stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
   recovery_pct: 0.05               # DD無効化上昇率（要検証）
-  dd_severe_d25: 6                 # SEVERE判定のd25閾値（要検証）
-  dd_severe_d15: 4                 # SEVERE判定のd15閾値（要検証）
+  dd_severe_d25: 7                 # SEVERE判定のd25閾値（Issue #111で採用済み）
+  dd_severe_d15: 6                 # SEVERE判定のd15閾値（Issue #111で採用済み）
   dd_high_d25: 5                   # HIGH判定のd25閾値（要検証）
   dd_high_d15: 3                   # HIGH判定のd15閾値（要検証）
   dd_high_d5: 2                    # HIGH判定のd5閾値（要検証）

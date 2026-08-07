@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 _MIN_HIGH_D25 = 2
 
 #: Candidate values per swept boundary. Wide enough to contain both the shipped
-#: 6/4/5/3/2 and the far looser settings the measured count distribution
+#: 7/6/5/3/2 and the far looser settings the measured count distribution
 #: suggests, without exploding the constrained product.
 GRID_RANGES: dict[str, tuple[int, ...]] = {
     "severe_d25": tuple(range(4, 14)),

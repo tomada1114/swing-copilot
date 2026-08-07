@@ -429,7 +429,7 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 
 ## `copilot-dd-forward`とDistribution Day水準の予測力
 
-`regime.dd_*`は roadmap §5 P3-13 で**要検証**のまま本番に入っている。しかも
+`regime.dd_*`は roadmap §5 P3-13 で**要検証**のまま本番に入っていた。しかも
 検証する手段が無かった。`backtest/`は`regime.exposure`も`regime.distribution`も
 importしておらず（`backtest/engine.py`のサイジングは`risk/position_sizing.py`を
 直接呼ぶ）、`dd_*`をどう動かしても`copilot-backtest`の数字は1つも動かない。
@@ -441,6 +441,11 @@ importしておらず（`backtest/engine.py`のサイジングは`risk/position_
 `as_of`として再生し、`pipeline/daily.py::_calculate_regime_snapshot`と同一の
 分類（SPYとQQQそれぞれの水準の`max`）を出したうえで、その後に実際に起きた
 リターンとドローダウンを水準別に集計する。
+
+この検証の結果、`dd_severe_d25`/`dd_severe_d15`は2026-08-07にIssue #111で
+`7`/`6`（従来`6`/`4`）で**採用済み**（根拠:
+`reports/regime/2026-08-06-dd-threshold-review.md` §10）。`dd_high_*`（5/3/2）と
+`dd_caution_d25`は据え置きで、引き続き**要検証**。
 
 ```bash
 copilot-dd-forward --as-of 2026-08-06

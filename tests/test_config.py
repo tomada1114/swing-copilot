@@ -432,12 +432,15 @@ def test_circuit_breaker_thresholds_have_documented_defaults():
 
 
 def test_dd_level_thresholds_default_to_previous_hardcoded_constants():
-    # These defaults must reproduce the module constants that used to live in
-    # `regime/distribution.py` (`_SEVERE_D25=6`, `_SEVERE_D15=4`, `_HIGH_D25=5`,
-    # `_HIGH_D15=3`, `_HIGH_D5=2`, `_CAUTION_D25=3`) so behavior is unchanged.
+    # `dd_high_d25/d15/d5` and `dd_caution_d25` still reproduce the module
+    # constants that used to live in `regime/distribution.py` (`_HIGH_D25=5`,
+    # `_HIGH_D15=3`, `_HIGH_D5=2`, `_CAUTION_D25=3`). `dd_severe_d25`/
+    # `dd_severe_d15` were changed from the original `_SEVERE_D25=6`/
+    # `_SEVERE_D15=4` on 2026-08-07 (Issue #111; see
+    # `reports/regime/2026-08-06-dd-threshold-review.md` §10).
     settings = load_settings("config/settings.yaml")
-    assert settings.regime.dd_severe_d25 == 6
-    assert settings.regime.dd_severe_d15 == 4
+    assert settings.regime.dd_severe_d25 == 7
+    assert settings.regime.dd_severe_d15 == 6
     assert settings.regime.dd_high_d25 == 5
     assert settings.regime.dd_high_d15 == 3
     assert settings.regime.dd_high_d5 == 2

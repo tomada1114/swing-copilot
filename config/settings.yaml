@@ -115,11 +115,13 @@ regime:
   dd_decline_pct: -0.002
   stall_abs_change_pct: 0.001
   recovery_pct: 0.05
-  # roadmap §5 P3-13（要検証）: Distribution Day level-classification
-  # boundaries. Order constraints: dd_severe_d25 > dd_high_d25 >
-  # dd_caution_d25; dd_severe_d15 > dd_high_d15.
-  dd_severe_d25: 6
-  dd_severe_d15: 4
+  # roadmap §5 P3-13: Distribution Day level-classification boundaries.
+  # Order constraints: dd_severe_d25 > dd_high_d25 > dd_caution_d25;
+  # dd_severe_d15 > dd_high_d15. The severe pair was decided 2026-08-07 in
+  # Issue #111 (evidence: reports/regime/2026-08-06-dd-threshold-review.md
+  # §10); dd_high_* and dd_caution_d25 remain 要検証.
+  dd_severe_d25: 7
+  dd_severe_d15: 6
   dd_high_d25: 5
   dd_high_d15: 3
   dd_high_d5: 2

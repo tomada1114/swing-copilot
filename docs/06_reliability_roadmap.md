@@ -358,15 +358,16 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **Not in scope**: エクスポージャー judgement への接続（P3-14）、FTD（P3-16）、
   ブレッド指標（ユニバース全体の MA 上比率等は将来検討）
 - **依存**: なし（フェーズ基盤）
-- **(要検証) の現状**: 閾値そのものは未変更のまま。`copilot-dd-forward`
-  （`regime/dd_forward_cli.py`）で水準別の先行きリターン/ドローダウンを測れる
-  ようになった。2019-01-02〜2026-08-06 の実測では現行の 6/4/5/3/2 が全1810
-  観測日の **57.5% を SEVERE**（= `CASH_PRIORITY`）に分類し、強気だった 2021 年
-  でも 66%、下落した 2022 年の 71% とほぼ差が付かない。水準と先行きリターンの
-  対応も単調でない（`SEVERE` の10営業日平均が `HIGH` を上回る）。詳細と
-  `dd_severe_d25: 7` / `dd_severe_d15: 6` への変更案は
-  `docs/reference.md` の「`copilot-dd-forward`とDistribution Day水準の予測力」
-  および `reports/regime/2026-08-06-dd-threshold-review.md` を参照。採否は未決。
+- **(要検証) の現状**: 2026-08-07、#111 で `dd_severe_d25: 7` / `dd_severe_d15: 6`
+  を採用し `config/settings.yaml` に反映した。根拠は 2000-01-03〜2026-08-06
+  （6,589観測日）への履歴延長・holdout・エピソード単位ブロックブートストラップに
+  よる再検証で、①現行 6/4 では SEVERE（= `CASH_PRIORITY`）が全期間の 61% を
+  占める既定状態だったこと（7/6 で 35%、前半/後半分割でも安定）、②SEVERE の
+  先行き平均ドローダウンが最深で、SEVERE−(CAUTION+NORMAL) の差はブートストラップ
+  95%CI でも有意なこと。先行きリターンの単調性は期間分割で再現せず根拠から
+  撤回した。`dd_high_*`（5/3/2）は据え置きで引き続き要検証。実損益への効果は
+  `backtest/` が exposure を消費しないため未測定（P3-14 の範囲）。詳細は
+  `reports/regime/2026-08-06-dd-threshold-review.md` §10。
   なお `dd_caution_d25` は `_base_exposure` が `CAUTION` と `NORMAL` を同じ
   分岐に落とすため、露出上限を1日も動かせない表示専用のラベルである
 

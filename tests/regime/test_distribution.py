@@ -90,7 +90,8 @@ class TestDistributionDays:
             (2.0, 0.0, 0.0, DistributionLevel.NORMAL),
             (3.0, 0.0, 0.0, DistributionLevel.CAUTION),
             (1.0, 0.0, 2.0, DistributionLevel.HIGH),
-            (4.0, 4.0, 0.0, DistributionLevel.SEVERE),
+            # d25 alone is only CAUTION; the stricter d15 decides the level.
+            (4.0, 6.0, 0.0, DistributionLevel.SEVERE),
         ],
     )
     def test_selects_strictest_distribution_level(
@@ -101,8 +102,11 @@ class TestDistributionDays:
     @pytest.mark.parametrize(
         ("d25", "d15", "d5", "expected"),
         [
-            (6.0, 0.0, 0.0, DistributionLevel.SEVERE),
-            (0.0, 4.0, 0.0, DistributionLevel.SEVERE),
+            (7.0, 0.0, 0.0, DistributionLevel.SEVERE),
+            (0.0, 6.0, 0.0, DistributionLevel.SEVERE),
+            # The rejected 6/4 severe pair must now classify one level lower.
+            (6.0, 0.0, 0.0, DistributionLevel.HIGH),
+            (0.0, 4.0, 0.0, DistributionLevel.HIGH),
             (5.0, 0.0, 0.0, DistributionLevel.HIGH),
             (0.0, 3.0, 0.0, DistributionLevel.HIGH),
             (0.0, 0.0, 2.0, DistributionLevel.HIGH),
@@ -110,10 +114,15 @@ class TestDistributionDays:
             (2.0, 0.0, 0.0, DistributionLevel.NORMAL),
         ],
     )
-    def test_default_thresholds_match_previous_hardcoded_boundaries(
+    def test_default_thresholds_match_the_shipped_config_boundaries(
         self, d25: float, d15: float, d5: float, expected: DistributionLevel
     ) -> None:
-        """Default `DistributionThresholds` preserve the prior module constants."""
+        """Default `DistributionThresholds` mirror `config/settings.yaml`.
+
+        A caller that omits `thresholds=` must classify a day exactly as the
+        pipeline does, so the dataclass defaults may not drift from the
+        shipped `regime.dd_*` values.
+        """
         assert distribution_level(d25, d15, d5) is expected
         assert (
             distribution_level(d25, d15, d5, thresholds=DistributionThresholds())

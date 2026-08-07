@@ -44,7 +44,10 @@ build:
     uv build
 
 # Build and smoke-test the wheel in a temporary virtual environment
-smoke: build
+# (`--wheel` skips the sdist round-trip `just build` does; the smoke test only
+# installs the wheel, and the sdist is still built by `just build` and release)
+smoke:
+    uv build --wheel
     uv run python scripts/smoke_test.py
 
 # Non-mutating local release/PR gate

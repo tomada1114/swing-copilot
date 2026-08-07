@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reports/backtests/2026-07-30-strategy-comparison.md` の R2（期待値・PF・
   Sharpe 改善、DD 同等）に基づく採用判断。`score_weights.atr_pct` は R3 で
   上積みが観測されなかったため `0.0` のまま見送り
+- `regime/distribution.py` の `calculate_distribution_days` を、1日ごとの
+  `DataFrame.iloc` 行アクセスと末尾スライスから、close/volume を一度リスト化
+  したうえで「その日より後の最高値」を逆順に積み上げた配列と比較する走査へ
+  変更した。判定結果は変えていない（160本の履歴を全`as_of`・NaN あり・
+  短い履歴で照合済み）。`scan_forward` が観測日ごとに呼ぶため、
+  `copilot-dd-forward` と日次パイプラインの regime 判定が速くなる。
+  計測は 0.83s → 0.06s（14.7x）、`pytest tests/regime` は 107s → 5.0s。
+  NaN の close は明示的に読み飛ばす。置き換え前の `NaN >= threshold` が
+  常に偽だったのと同じ扱いで、欠損を回復と誤認させないため
+- `just smoke` のビルドを `uv build --wheel` に変更し、`scripts/smoke_test.py`
+  の `uv pip install` を `--no-cache` から `--refresh-package <project>` へ
+  変更した。検証対象の wheel は毎回ディスクから読み直すが、pandas/pyarrow/
+  duckdb などの依存は共有 uv キャッシュから引く。sdist を含む完全なビルドは
+  `just build` と CI / release ワークフローが引き続き行う。ローカルの
+  `just verify` で smoke が 16s → 4.1s、smoke 用ビルドが 21s（cold）→ 1.0s
 
 ### Added
 

@@ -26,7 +26,7 @@ above). This repo additionally ships Claude Code configuration:
 
 `/swing-daily` runs unattended on weekdays via a **local Claude Desktop Routine**
 (`swing-copilot-daily`), which replaced the former launchd agent: folder = this
-repository, cron `5 15 * * 1-5`, mode `Auto`, branch `main`, model Opus,
+repository, cron `30 18 * * 1-5`, mode `Auto`, branch `main`, model Opus,
 **Worktree off**. The routine's Instructions live in the Claude Desktop app and
 are deliberately not mirrored here, to avoid drift.
 

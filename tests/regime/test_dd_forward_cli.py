@@ -231,7 +231,7 @@ def test_json_is_written_atomically_into_tmp_path(tmp_path: Path) -> None:
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["as_of"] == as_of.isoformat()
     assert payload["horizons"] == [5]
-    assert payload["thresholds"]["severe_d25"] == 6
+    assert payload["thresholds"]["severe_d25"] == 7
     assert payload["observation_count"] == len(payload["observations"])
     assert not list(tmp_path.glob("**/*.tmp"))
 
@@ -265,7 +265,7 @@ def test_grid_reports_the_current_configuration_alongside_candidates(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shipped 6/4/5/3/2 is always shown, so candidates have a reference row.
+    """The shipped 7/6/5/3/2 is always shown, so candidates have a reference row.
 
     The production ranges score ~17k candidates twice and take about a minute;
     this asserts the rendering contract, which does not depend on their size.
@@ -293,7 +293,7 @@ def test_grid_reports_the_current_configuration_alongside_candidates(
         ]
     )
     output = capsys.readouterr().out
-    assert "6/4/5/3/2 (現行)" in output
+    assert "7/6/5/3/2 (現行)" in output
     assert "CASH_PRIORITY 軸" in output
     assert "REDUCE_ONLY 軸" in output
     assert "out-of-sample の検証ではない" in output
@@ -503,7 +503,10 @@ def test_sweep_skips_a_boundary_whose_whole_range_is_unloadable(
 
     It must be omitted from `--sweep`, not rendered as an empty table.
     """
-    monkeypatch.setitem(GRID_RANGES, "high_d25", (6, 7, 8))
+    # Current dd_severe_d25 is 7 (config/settings.yaml); every candidate here
+    # must be >= it so the whole range is unloadable (dd_severe_d25 >
+    # dd_high_d25 is required).
+    monkeypatch.setitem(GRID_RANGES, "high_d25", (7, 8, 9))
     db_path, as_of = _stored_db(tmp_path)
     main(
         [

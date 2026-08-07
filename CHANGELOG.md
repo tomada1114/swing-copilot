@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-dd-forward`（`regime/dd_forward_cli.py`、コアは`regime/dd_forward.py`
+  と`regime/dd_forward_sweep.py`）。保存済み履歴を1日ずつ`as_of`として再生し、
+  `_calculate_regime_snapshot`と同一の分類を出したうえで、その後に実際に起きた
+  リターンとドローダウンを Distribution Day 水準別に集計する読み取り専用の
+  診断CLI。`regime.dd_*`は roadmap §5 P3-13 で要検証のまま本番に入っていたが、
+  `backtest/`は`regime.exposure`も`regime.distribution`もimportしていないため
+  `copilot-backtest`では効果を1つも測れなかった。対象はSPY・QQQと`--as-of`時点
+  スナップショットの等加重バスケット、既定の保有期間は5/10/25営業日
+  （25は`backtest.max_hold_days`）。`--sweep`は閾値の一変数感度、`--grid`は
+  順序制約を満たすグリッドの全走査を`CASH_PRIORITY`軸と`REDUCE_ONLY`軸に
+  分けて出す。`dd_caution_d25`は`_base_exposure`が`CAUTION`と`NORMAL`を同じ
+  分岐に落とすため掃引対象から外している（露出上限を1日も動かせない）。
+  `config/settings.yaml`は変更していない
 - run成果物`reports/<run_date>/<run_id>/rejections.json`（schema
   `rejections-v1`、`report/rejections.py`）。落選明細はDuckDBの
   `screening_rejections`にしかなく、run成果物にはreason_code別の**件数**しか

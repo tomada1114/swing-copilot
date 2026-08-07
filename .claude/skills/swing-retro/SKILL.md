@@ -51,6 +51,9 @@ Python 側（`copilot-retro`）には config / コードを書き換える経路
     （銘柄ごとに最初に失敗した 1 条件のみ記録される点に注意）
   - `uv run copilot-filter-matrix --as-of <YYYY-MM-DD>` — 各フィルタ/シグナルを
     単独適用した独立通過率と重複行列（真のボトルネック特定用）
+  - `uv run copilot-dd-forward --as-of <YYYY-MM-DD>` — Distribution Day 水準別の
+    先行きリターン/ドローダウン。「候補は出たが Exposure Ceiling で全部
+    shares=0 になった」系の仮説を検証する（`--sweep` / `--grid` で閾値感度）
 
 ## Outputs
 

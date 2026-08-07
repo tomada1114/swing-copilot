@@ -427,6 +427,71 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 `bars`ビューを用意するため、DuckDBの単一ライターロックはかかる。
 `copilot-daily`の実行中には走らせないこと。
 
+## `copilot-dd-forward`とDistribution Day水準の予測力
+
+`regime.dd_*`は roadmap §5 P3-13 で**要検証**のまま本番に入っている。しかも
+検証する手段が無かった。`backtest/`は`regime.exposure`も`regime.distribution`も
+importしておらず（`backtest/engine.py`のサイジングは`risk/position_sizing.py`を
+直接呼ぶ）、`dd_*`をどう動かしても`copilot-backtest`の数字は1つも動かない。
+一方で`SEVERE`は`_base_exposure`で単独に`CASH_PRIORITY`まで落とし、その日の
+候補は全銘柄`shares=0`になる。**効果を測れないまま、最も強い制約を課している
+パラメーターだった。**
+
+`copilot-dd-forward`（`regime/dd_forward_cli.py`）は保存済み履歴を1日ずつ
+`as_of`として再生し、`pipeline/daily.py::_calculate_regime_snapshot`と同一の
+分類（SPYとQQQそれぞれの水準の`max`）を出したうえで、その後に実際に起きた
+リターンとドローダウンを水準別に集計する。
+
+```bash
+copilot-dd-forward --as-of 2026-08-06
+copilot-dd-forward --as-of 2026-08-06 --sweep --score-target UNIVERSE_EW
+copilot-dd-forward --as-of 2026-08-06 --grid --json reports/dd_forward.json
+# settings.yaml を書き換えずに閾値バリアントを測る
+copilot-dd-forward --as-of 2026-08-06 --settings /tmp/variant/settings.yaml
+```
+
+| オプション | 既定 | 意味 |
+| --- | --- | --- |
+| `--as-of` | 必須 | 可視性の基準日。これ以降のバーはどの用途でも読まない |
+| `--start` | 履歴の先頭 | 最初の観測日。手前は助走（窓とEMAシード）として読む |
+| `--horizons` | `5,10,25` | 先行きリターンの保有営業日数。25は`backtest.max_hold_days` |
+| `--sweep` | off | 閾値を1つずつ動かした感度表 |
+| `--grid` | off | 順序制約を満たすグリッドの全走査（既定レンジで約1分） |
+| `--score-target` / `--score-horizon` | `SPY` / `10` | `--sweep`・`--grid`・ゲート表の採点軸。測定していない対象・保有日数を指定するとエラーで落ちる（空欄の表を出さないため）。`--horizons`を絞ったら合わせて指定する |
+| `--json` | なし | 日次の観測列を含む機械可読な書き出し（一時ファイル＋`os.replace`） |
+
+**先行きの窓は評価専用の意図的な先読みである。** 各日の*分類*は`date <= as_of`の
+包含境界を厳密に守り、先読みするのは「その日に付ける成績」だけで、全体は
+外側の`--as-of`で閉じている。先行きの値が水準に戻ることは無い。
+
+測る対象は SPY・QQQ と、`--as-of`時点の永続スナップショットの銘柄による
+**等加重バスケット**（`UNIVERSE_EW`）の3つ。露出上限がゲートしているのは
+指数ではなく個別株なので、バスケットの方が「その日を`CASH_PRIORITY`にした
+コスト」に近い代理になる。ただしメンバーは現在のスナップショットなので
+**生存バイアスがある**。水準間の比較にだけ使い、水準の絶対値の根拠にはしない。
+
+**N(日)ではなくN(エピソード)を見ること。** 日次観測の先行き窓は重なっており、
+日数はサンプルサイズを大きく見せる。表は連続した同一水準のランを
+エピソードとして併記する。
+
+掃引するのは6つのうち5つで、`dd_caution_d25`は含めない。`_base_exposure`は
+`CAUTION`と`NORMAL`を同じ分岐に落とし、`DistributionLevel.CAUTION`は
+パッケージ内に他の消費者を持たない——つまり**`dd_caution_d25`は露出上限を
+1日も動かせない表示専用のラベルである**。グリッドはさらに
+`CASH_PRIORITY`軸（`severe_*`だけが決める）と`REDUCE_ONLY`軸（`high_*`だけが
+決める）に分けて出す。2つは独立なので、片方の差で5次元を並べると
+もう片方の同じ挙動の変種で埋まるためである。候補は
+`config.RegimeConfig._validate_dd_level_order`と同じ順序制約を通したものだけで、
+そのまま`settings.yaml`に書けば読める。
+
+順位は同じ履歴の in-sample スコアである。候補の絞り込みには使えるが、それ
+自体は out-of-sample の検証ではない。
+
+`copilot-filter-matrix`と同じくオフラインかつ読み取り専用で、スキーマ
+マイグレーションを実行せず、`--db`が無ければ作らずにエラーにする。
+`MarketStore`が共有DuckDBを読み書きで開く点も同じなので、`copilot-daily`の
+実行中には走らせないこと。
+
 ## バックテストの設定バリアント比較
 
 `copilot-backtest`は`--settings`と`--strategies`でそれぞれ`config/settings.yaml`と

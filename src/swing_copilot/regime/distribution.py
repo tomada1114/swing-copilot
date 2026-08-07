@@ -122,6 +122,21 @@ def calculate_distribution_days(
     )
 
 
+def distribution_severity(level: DistributionLevel) -> int:
+    """Rank a level so callers can take the strictest of several.
+
+    `UNKNOWN` deliberately outranks `SEVERE`: an unknown input must never be
+    able to loosen a decision by losing a `max()` comparison.
+    """
+    return {
+        DistributionLevel.NORMAL: 0,
+        DistributionLevel.CAUTION: 1,
+        DistributionLevel.HIGH: 2,
+        DistributionLevel.SEVERE: 3,
+        DistributionLevel.UNKNOWN: 4,
+    }[level]
+
+
 def distribution_level(
     d25: float,
     d15: float,

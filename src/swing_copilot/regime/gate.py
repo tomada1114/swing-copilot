@@ -12,6 +12,7 @@ from swing_copilot.regime.distribution import (
     DistributionResult,
     DistributionThresholds,
     calculate_distribution_days,
+    distribution_severity,
 )
 from swing_copilot.screening.indicators import ema
 
@@ -149,7 +150,7 @@ def calculate_regime_snapshot(
         dd_level = DistributionLevel.UNKNOWN
     else:
         levels = (spy_distribution.level, qqq_distribution.level)
-        dd_level = max(levels, key=_distribution_severity)
+        dd_level = max(levels, key=distribution_severity)
     is_insufficient = (
         gate.verdict is GateVerdict.UNKNOWN
         or spy_distribution.data_quality is DataQuality.INSUFFICIENT
@@ -163,13 +164,3 @@ def calculate_regime_snapshot(
         dd_level,
         DataQuality.INSUFFICIENT if is_insufficient else DataQuality.OK,
     )
-
-
-def _distribution_severity(level: DistributionLevel) -> int:
-    return {
-        DistributionLevel.NORMAL: 0,
-        DistributionLevel.CAUTION: 1,
-        DistributionLevel.HIGH: 2,
-        DistributionLevel.SEVERE: 3,
-        DistributionLevel.UNKNOWN: 4,
-    }[level]

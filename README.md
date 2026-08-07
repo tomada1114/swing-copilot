@@ -65,6 +65,17 @@ sensitivity grid:
 uv run copilot-backtest grid --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30
 ```
 
+Diagnose configured thresholds read-only, without touching `settings.yaml`.
+`copilot-filter-matrix` applies each screening filter/signal independently to
+the whole universe; `copilot-dd-forward` replays the stored history and reports
+the forward return and drawdown that followed each Distribution Day level, which
+`copilot-backtest` cannot measure at all (it never imports `regime/`):
+
+```bash
+uv run copilot-filter-matrix --as-of 2026-07-29
+uv run copilot-dd-forward --as-of 2026-08-06
+```
+
 See `docs/00_human_preparation.md` for the full setup checklist and
 `docs/03_basic_design.md` / `docs/04_detailed_design.md` for the architecture.
 

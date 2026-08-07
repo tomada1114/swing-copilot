@@ -22,6 +22,23 @@ above). This repo additionally ships Claude Code configuration:
   lint, and test commands; personal preferences (model, output style, extra
   permissions) belong in `.claude/settings.local.json`, never here
 
+## Scheduled Daily Run
+
+`/swing-daily` runs unattended on weekdays via a **local Claude Desktop Routine**
+(`swing-copilot-daily`), which replaced the former launchd agent: folder = this
+repository, cron `5 15 * * 1-5`, mode `Auto`, branch `main`, model Opus,
+**Worktree off**. The routine's Instructions live in the Claude Desktop app and
+are deliberately not mirrored here, to avoid drift.
+
+Worktree stays off because `data/`, `.env`, and `.venv` are untracked — a clean
+checkout would lose the API keys and the cached price/filing history and refetch
+everything. So **this working copy is the execution environment**: keep it on
+`main` and clean, and do feature work in a `git worktree` elsewhere. A scheduled
+run aborts on its own if the branch is not `main`, or if `src`, `config`,
+`pyproject.toml`, or `uv.lock` has uncommitted changes. A local routine only
+fires while the machine is awake and online; unlike launchd, a missed run is
+never retried later.
+
 `AGENTS.md` is the canonical cross-tool contract for domain invariants,
 source-of-truth precedence, test expectations, and the Japanese/English
 language policy. Do not duplicate or weaken those rules here.

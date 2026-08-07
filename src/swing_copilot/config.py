@@ -383,7 +383,7 @@ class PostmortemConfig(_StrictModel):
 
 
 class RegimeConfig(_StrictModel):
-    """`regime.*` thresholds (roadmap §5 P3-13; all are 要検証)."""
+    """`regime.*` thresholds (roadmap §5 P3-13; 未決分は要検証)."""
 
     ema_period: int = Field(default=50, ge=1)
     bull_vix_max: float = Field(default=20.0, ge=0.0)
@@ -393,10 +393,12 @@ class RegimeConfig(_StrictModel):
     dd_decline_pct: float = Field(default=-0.002, le=0.0)
     stall_abs_change_pct: float = Field(default=0.001, ge=0.0)
     recovery_pct: float = Field(default=0.05, ge=0.0)
-    # Distribution Day level-classification boundaries (roadmap §5 P3-13,
-    # 要検証). Defaults reproduce the previously hardcoded module constants.
-    dd_severe_d25: int = Field(default=6, ge=1)
-    dd_severe_d15: int = Field(default=4, ge=1)
+    # Distribution Day level-classification boundaries (roadmap §5 P3-13).
+    # severe defaults follow the 2026-08-07 decision (Issue #111; see
+    # reports/regime/2026-08-06-dd-threshold-review.md §10). high/caution
+    # defaults reproduce the previously hardcoded module constants (要検証).
+    dd_severe_d25: int = Field(default=7, ge=1)
+    dd_severe_d15: int = Field(default=6, ge=1)
     dd_high_d25: int = Field(default=5, ge=1)
     dd_high_d15: int = Field(default=3, ge=1)
     dd_high_d5: int = Field(default=2, ge=1)

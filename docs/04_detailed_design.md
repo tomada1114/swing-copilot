@@ -1573,13 +1573,14 @@ src/swing_copilot/tracking/
    - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
    - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
    - **孤児の削除**: 建玉に先立ち、対応する`proceed` verdictが存在しない`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、`proceed`から`skip`へ訂正された銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
-2. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
+2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って約定することはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。`verdict_position_notes`（人間の判断メモ）は使わない——PKが`(run_id, symbol, note_date)`で衝突するため。
+3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
    - ATR14は1ポジションにつき1パス（`backtest/exits.py::atr14_by_date`）で全セッション分を求め、日ごとに`atr14_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
-   - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは4のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
-3. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
-4. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
+   - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは5のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
+4. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
+5. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
 
 手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間14はエンジンと同じくハードコード（`settings.backtest.exit_atr_period`は未配線のまま。3.19の既知事項）。
 

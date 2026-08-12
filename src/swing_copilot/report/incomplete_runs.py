@@ -122,11 +122,11 @@ def find_incomplete_runs(
             no longer be filled.
 
     Returns:
-        Newest `run_date` first; within a date, latest `started_at` first,
-        falling back to the greater `run_id` string when it cannot be
-        resolved. A directory without `analysis_input.json` is never
-        included: that run never reached the analysis phase, and its failure
-        is recorded in `runs.status` instead.
+        Newest `run_date` first; within a date, latest `started_at` first
+        (an unresolvable one sorts as the oldest), with the greater `run_id`
+        string as the final tie-break. A directory without
+        `analysis_input.json` is never included: that run never reached the
+        analysis phase, and its failure is recorded in `runs.status` instead.
     """
     completed_by_date: dict[date, UUID] = {}
     candidates: list[RunDirectory] = []

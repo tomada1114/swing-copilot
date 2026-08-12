@@ -1015,7 +1015,7 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 境界（十分／希薄／ゼロ、`related_symbols`が空でも計数は変わらないこと、枠で切られた場合の`collected_items`と`exported_items`、旧アーカイブの後方互換）は`tests/analysis/test_news_supply.py`・`tests/analysis/test_export.py`・`tests/analysis/test_schemas.py`で検証する。
 
-### 3.17 `analysis/validate.py` / `analysis/safety.py` / `analysis/snapshot.py` / `analysis/cli.py`（FR-08、CON-03、NFR-05）
+### 3.17 `analysis/validate.py` / `analysis/safety.py` / `analysis/snapshot.py` / `analysis/cli.py` / `analysis/fragment.py` / `analysis/verify_cli.py`（FR-08、CON-03、NFR-05）
 
 **責務**: スキルが書いたものを一切信頼せず、レポートへ到達する前に機械検証する。
 
@@ -1043,6 +1043,25 @@ class ValidatedAnalysis:
 def load_analysis_input(path: Path) -> AnalysisInput: ...
 def load_analysis_result(path: Path) -> AnalysisResult: ...
 def validate_analysis(analysis_input: AnalysisInput, result: AnalysisResult) -> ValidatedAnalysis: ...
+def calendar_source_bodies(analysis_input: AnalysisInput) -> dict[str, str]: ...
+def verify_symbol_analysis(                        # 銘柄1件の検査（ingestと事前検査の共通実装）
+    analysis: SymbolAnalysis,
+    candidate: CandidateInput | None,
+    calendar_bodies: Mapping[str, str],
+) -> SymbolOutcome: ...
+
+# analysis/fragment.py（analysis_work/ 断片の契約、Issue #132）
+class AnalysisFragment(BaseModel):
+    """run_id / as_of / input_digest / symbol / ac_check ＋ペイロードキーちょうど1つ"""
+
+def as_symbol_analysis(fragment: AnalysisFragment) -> SymbolAnalysis: ...
+def fragment_filename_error(path: Path, fragment: AnalysisFragment) -> str | None: ...
+def verify_fragment(analysis_input: AnalysisInput, fragment: AnalysisFragment) -> str | None: ...
+
+# analysis/verify_cli.py（copilot-verify-analysis）
+def verify_document(analysis_input: AnalysisInput, path: Path) -> VerificationReport: ...
+def verify_paths(paths: list[Path], input_path: Path | None) -> list[VerificationReport]: ...
+def main(argv: list[str] | None = None) -> None: ...
 
 # analysis/snapshot.py
 REPORT_CONTEXT_FILENAME = "report_context.json"
@@ -1060,6 +1079,12 @@ def main(argv: list[str] | None = None) -> None: ...
 **数値整合の警告（Issue #131、fail-closedではない）**: `evidence_quote`の逐語一致は「その本文を読んだ」ことしか証明せず、**引用は正しいのに日本語化した`text`側の数値だけが誤っている**factを検出できない。2026-08-11のrunでは`Total operating revenues ... 3,495,296`（千ドル）を「35億9,530万ドル」と書いたfactが、provenance・evidence・CON-03の3層をすべて通過した。`analysis/numeric_consistency.py`の`unsupported_magnitudes(text, evidence_quote)`が、**両側に単位・通貨の付いた数値がある場合に限り**、text側の数値がquote側の数値から10のべき乗（千/百万/billion/million/億/万）で到達できるかを照合し、到達できない数値を`validate.py`が警告としてログへ出す。照合は有効数字が粗い側の桁数で行い、末尾ゼロは有効桁と数えない（`$3.50 billion`は34億9,530万ドルと一致し、35億9,530万ドルとは一致しない）。年号・四半期・比率・株数のような単位の付かない数値は対象外である。**この検査は銘柄を縮退させない**——単位系の情報は入力に明示されておらず、照合は10のべき乗を跨いだ推定を含むため、誤検知の代償を「分析が消える」ことにできない。運用側の一次防衛線は`swing-daily`スキルのStep 3.5とAC16であり、機械検査はその取りこぼしを拾う警告チャンネルである。
 
 **hard failの境界**: 文書が読めない・JSONでない・スキーマ違反、入力/文脈digest不正、候補/結果symbolや候補内source_idの重複、resultのsymbol集合がinput候補集合と不一致、`no_trade`と理由の組み合わせが不正、または3文書の`run_id`・`as_of`・`strategy_key`・`input_digest`が食い違う場合は、レポート・`latest.md`・既存3成果物を変更せず`AnalysisIngestError`でrun全体を失敗させる。部分結果は意図的に許可しない。別のrunを記述しているかもしれないファイルの「安全な部分読み込み」は存在しないためである。
+
+**断片の事前検査（Issue #132）**: `analysis_result.json`は専門家サブエージェントが書いた`analysis_work/<kind>-<SYMBOL>.json`断片のマージで作られる。断片は`AnalysisResult`の部分集合では**ない**——マージが捨てる作業用メタデータ（`run_id` / `as_of` / `input_digest` / `ac_check`）を持ち、銘柄1件分ではなくペイロードキー1つだけを持つ——ため、`load_analysis_result()`では読めない。2026-08-11のrunでは、これを埋めるために15体の専門家がそれぞれ自前の検証を実装し、grepで済ませたものと実コードを呼んだものが混在した。grepは`evidence.py`のNFKC正規化・記号統一・空白畳み込みと`safety.py`の正規化を再現しないため、**ingestでは落ちるものを「合格」と報告しうる**。
+
+そこで`analysis/fragment.py`が断片の`extra="forbid"`スキーマ（ペイロードキーはちょうど1つ、`screening_assessment: null`は拒否、`news_summary: null` / `filing_analyses: []`は「分析済みで空」として許可）を持ち、`as_symbol_analysis()`で空のスタンドイン（`ScreeningAssessment(summary="")`と理由なしの`Verdict`。いずれも`source_id`も表示テキストも足さない）を補って`SymbolAnalysis`へ持ち上げ、`verify_symbol_analysis()`へ渡す。**これはingestが銘柄ごとに呼ぶのと同一の関数**であり、事前検査が本番検査より弱くなりえない構造にしてある。identity（`run_id` / `as_of` / `input_digest`）の不一致は内容検査より先に報告する——別runの断片をprovenance違反として報告すると原因を取り違えるためである。書き出し前の自己検査自体は残す必要がある（ingestはfail-closedでリトライしないため、後から見つけてもその銘柄のその日の分析は消える）。
+
+`analysis/verify_cli.py`（`copilot-verify-analysis`）がこれをスキルへ公開する。断片と`analysis_result.json`は`schema_version`で判別し（result側は必須、fragment側は`extra="forbid"`で禁止のため、どちらか一方としてしか解釈されえない）、result側は`load_analysis_result()`・`validate_artifact_identity()`・`validate_analysis()`をそのまま呼ぶingestのdry-runになる。`report_context.json`との照合だけは省く——同じrunの`copilot-daily`がコード側で書くファイルであり、スキルが取り違えうるのはresult側だからである。`analysis/cli.py`とは別モジュールに置くのは、あちらがレポートを**書き換える**入口であるのに対し、こちらは読み取り専用で何度でも実行できる必要があるためである。
 
 **コード所有メタデータの解決**: 書類種別・提出日は`analysis_input.json`の`FilingInput`から、ソースURLは`ValidatedAnalysis.source_urls`（入力側news/filing/calendar URLのうち`http`/`https`だけ）から解決する。不正・空URLはリンクにもbare URLにもせずattributionを省略する。レポートはスキルが申告したリンクを一切信頼せず、ingestはこの解決のためにデータベースへ触れない。
 
@@ -2213,7 +2238,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | 何 | 正本 |
 |---|---|
 | 統括ワークフロー（実行順・並列委譲・統合レビュー・verdict決定・ingest） | `.claude/skills/swing-daily/SKILL.md` |
-| 共通規約（AC1〜AC15: CON-03・provenance・叙述） | `.claude/skills/swing-daily/references/analysis-conventions.md` |
+| 共通規約（AC1〜AC16: CON-03・provenance・叙述・数値整合） | `.claude/skills/swing-daily/references/analysis-conventions.md` |
 | 入出力JSONと`analysis_work/`断片の形式 | `.claude/skills/swing-daily/references/output-schema.md` |
 | ニュース解釈 / 開示解釈 / スクリーニング定性評価の個別指示 | `.claude/skills/analyze-news/SKILL.md`、`.claude/skills/analyze-filings/SKILL.md`、`.claude/skills/interpret-screening/SKILL.md` |
 | スキーマの最終正本（スキル側もJSON組み立て前にこれを読む） | `src/swing_copilot/analysis/schemas.py`（3.15節） |

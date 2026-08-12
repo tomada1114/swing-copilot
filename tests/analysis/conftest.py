@@ -12,6 +12,7 @@ from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
 )
+from swing_copilot.analysis.fragment import PAYLOAD_FIELD_BY_KIND
 from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
@@ -21,6 +22,9 @@ from swing_copilot.analysis.schemas import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from swing_copilot.analysis.fragment import FragmentKind
+
 
 AS_OF = date(2027, 3, 1)
 NEWS_ID = "finnhub:1"
@@ -163,6 +167,25 @@ def symbol_payload(**overrides: Any) -> dict[str, Any]:
             ],
         },
     }
+    payload.update(overrides)
+    return payload
+
+
+def fragment_payload(kind: FragmentKind = "news", **overrides: Any) -> dict[str, Any]:
+    """One `analysis_work/<kind>-AAPL.json` fragment answering `input_payload()`.
+
+    The payload key defaults to the one `kind` owns; pass it explicitly in
+    `overrides` to exercise a fragment that carries the wrong number of keys.
+    """
+    symbol = symbol_payload()
+    payload: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "as_of": AS_OF.isoformat(),
+        "input_digest": input_payload()["input_digest"],
+        "symbol": "AAPL",
+        "ac_check": "AC1-AC16 違反なし",
+    }
+    payload[PAYLOAD_FIELD_BY_KIND[kind]] = symbol[PAYLOAD_FIELD_BY_KIND[kind]]
     payload.update(overrides)
     return payload
 

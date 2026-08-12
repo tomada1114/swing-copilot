@@ -21,7 +21,7 @@ description: >
 作業前に必ず読む:
 
 - [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md)
-  — AC1〜AC15 の共通規約（**必読**）。このスキルの出力は ingest の機械検査を通らないため、
+  — AC1〜AC16 の共通規約（**必読**）。このスキルの出力は ingest の機械検査を通らないため、
   規約はスキル指示として**自力で**守る必要がある
 
 ## Inputs
@@ -183,7 +183,7 @@ Agent ツール（**`model: opus`**）を、銘柄分**同一メッセージ内�
 ## bear case                  <- 同上
 ## 監視トリガー               <- 観測条件の列挙。行動指示にしない
 ## 入力の限界                 <- 非網羅・欠落章・古い出典・判定不能だった論点
-## AC 自己点検                <- 「AC1-AC15 違反なし」または懸念の AC 番号と一言
+## AC 自己点検                <- 「AC1-AC16 違反なし」または懸念の AC 番号と一言
 ```
 
 ## 禁止事項

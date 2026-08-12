@@ -153,6 +153,43 @@ verdictがあるときだけ`⚠ 定性: 見送り推奨（要約）`または`�
 `reports/<run_date>/<run_id>/`に残る`analysis_input.json`・`analysis_result.json`・
 `report_context.json`の3ファイルが、そのままNFR-05の監査証跡になる。
 
+## `copilot-verify-analysis`とスキルの事前検査
+
+`analysis/verify_cli.py`（`copilot-verify-analysis`）は、スキルが書いた文書を
+**レポートを書かずに**契約と突き合わせる読み取り専用のコマンドである。
+`analysis_work/`の断片1件と、マージ後の`analysis_result.json`の両方を受け取る。
+
+```bash
+copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json  # 断片1件
+copilot-verify-analysis <WORKDIR>/analysis_work                 # 全断片
+copilot-verify-analysis <WORKDIR>/analysis_result.json          # ingestのdry-run
+```
+
+- 対象が断片か結果かは`schema_version`で判別する。結果スキーマはこの項を必須と
+  し、断片スキーマは`extra="forbid"`で禁じるため、どちらか一方としてしか解釈
+  されえない。判別後はそれぞれ自分のstrictスキーマで検証される
+- ディレクトリを渡すと直下の`*.json`を検査し、コード所有の
+  `analysis_input.json` / `report_context.json` / `rejections.json`は除外する。
+  よって`<WORKDIR>/analysis_work`は全断片、`<WORKDIR>`はマージ後の結果を意味する
+- `analysis_input.json`は対象の隣か1つ上の階層から解決する（`--input`で明示可）
+- 終了コードは`0`（全件合格）/`1`（契約違反あり）/`2`（パスや入力の解決失敗）
+- `copilot-ingest-analysis`と同じくネットワークにもDBにも触れず、
+  スクリーニングを再実行せず、レポートも`latest.md`も書き換えない
+
+**検査水準がingestと同一であること**が本コマンドの要件である（Issue #132）。
+断片は`analysis/fragment.py`の`AnalysisFragment`（`run_id` / `as_of` /
+`input_digest` / `ac_check` ＋ペイロードキーちょうど1つ）でparseし、
+`SymbolAnalysis`へ持ち上げてから`analysis/validate.py`の
+`verify_symbol_analysis()`——`copilot-ingest-analysis`が銘柄ごとに呼ぶのと
+**同一の関数**——へ渡す。結果側は`load_analysis_result()`・
+`validate_artifact_identity()`・`validate_analysis()`をそのまま呼ぶ。
+自前のgrepで代用すると、`evidence.py`のNFKC正規化・記号統一・空白畳み込みと
+`safety.py`の正規化を再現できず、ingestで落ちるものを合格と報告してしまう。
+
+結果側のdry-runで唯一省くのは`report_context.json`との照合である。あれは同じrunの
+`copilot-daily`がコード側で書くファイルで、スキルが取り違えうるのはresult側だから
+であり、identityの照合自体は`validate_artifact_identity()`をそのまま通している。
+
 ## `copilot-retro`とverdictの当否評価
 
 `retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、`collect`/`evaluate`/

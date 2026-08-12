@@ -48,9 +48,13 @@ description: >
 1 回でも実行しようとすると承認待ちで実行全体が停止する（実測で 44 分停止した例がある）。
 したがって次を全員が守る。
 
-- 作業用の一時ファイル（入力スライス、抽出テキスト、検証スクリプト等）は
+- 作業用の一時ファイル（入力スライス、抽出テキスト等）は
   **セッションの scratchpad ディレクトリ配下にだけ**作る。`<WORKDIR>` 直下や
   リポジトリ配下に作らない（`analysis_work/` に置かないのは従来どおり）
+- **契約検証のスクリプトは統括もサブエージェントも書かない。** 断片と
+  `analysis_result.json` の検証は `uv run copilot-verify-analysis` が担う
+  （Step 3 / Step 5）。同じ検査を各自が実装し直すと、実装のばらつきがそのまま
+  検査水準のばらつきになる（Issue #132）
 - **一時ファイルを削除しない。`rm` を実行しない。** scratchpad はセッション終了時に
   破棄されるため掃除は不要で、掃除の実行コストの方が高い
 - 掃除が必要になるのは、リポジトリ配下に一時ファイルを作ってしまった場合だけである。
@@ -79,6 +83,9 @@ description: >
      食い違う → 同じく再分析対象にし、同じパスを上書きさせる
    - **陳腐化した断片を `rm` で消さない。** 上書きで同じ結果になり、削除は
      「一時ファイルと後始末」の禁止事項に当たる
+   - この 3 値の照合と JSON・ペイロードキーの妥当性は
+     `uv run copilot-verify-analysis <WORKDIR>/analysis_work` が機械的に行う。
+     **自前の照合スクリプトを書かない**（Step 3 の「断片の機械検証」参照）
 3. `analysis_input.json` の `candidates[].symbol` に無い銘柄の断片は、削除せず
    **無視する**（Step 3 のマージ対象から外す）。
 4. 流用した断片は Step 3 でそのままマージ対象に含める（要約は断片内の
@@ -205,6 +212,8 @@ Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分�
 5. 作業用の一時ファイルは scratchpad ディレクトリ配下にだけ作り、**削除しないこと
    （`rm` を実行しないこと）**。無人実行では `rm` の承認待ちでワークフロー全体が
    停止する（「一時ファイルと後始末」参照）
+6. 書き出した断片を `uv run copilot-verify-analysis <断片の絶対パス>` で検証し、
+   **契約検証のスクリプトを自作しないこと**。合否と FAIL 理由を親への要約に含めること
 
 ## Step 3: 断片のマージ
 
@@ -224,6 +233,26 @@ Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分�
 - news が空の銘柄は `news_summary: null`、filings が空の銘柄は `filing_analyses: []`。
   `screening_assessment` は全銘柄必須
 
+### 断片の機械検証（自前実装しない）
+
+断片を読んだら、マージ内容を確定する前に、まとめて機械検証する。
+
+```bash
+uv run copilot-verify-analysis <WORKDIR>/analysis_work
+```
+
+- ingest（`copilot-ingest-analysis`）と**同一の関数**で、断片の strict schema、
+  `run_id` / `as_of` / `input_digest` の一致、ファイル名とペイロードの一致、
+  provenance、`evidence_quote` の逐語一致、CON-03 を検査する。契約と終了コードは
+  [references/output-schema.md](references/output-schema.md) の「断片の契約検証」参照
+- **同じ検査を自前のスクリプトで書き直さない。** 逐語一致と CON-03 は Unicode NFKC
+  正規化を経て判定されるため、grep ベースの自己検査は ingest より弱くなる（Issue #132）
+- FAIL した断片は、統括が本文を書き換えるのではなく Step 3.5 の手順で該当専門家に
+  再分析を依頼して**同じパスを上書き**させる（AC15）
+- 3 値が不一致の断片（別 run・前日以前の残骸）と、入力に無い銘柄の断片も FAIL として
+  出るが、扱いは Step 0 のとおりに分かれる。前者は流用せず**再分析対象**にし、
+  後者はマージ対象から外して**無視する**。どちらも `rm` で消さない
+
 ## Step 3.5: 統合レビュー（2〜3 段目、セッション本体で実施）
 
 マージした内容を突き合わせ、以下を点検する。括弧内は
@@ -235,9 +264,11 @@ Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分�
   実在する ID の部分集合か（AC6）、逐語コピーか（AC7）、複数ソースを取りこぼして
   いないか（AC9）、`facts[].evidence_quote` がその `source_ids` の本文（ニュースは
   見出し＋要約、開示は入力の `text`、カレンダーイベントはタイトル＋要約）からの
-  逐語引用になっているか（AC6）。この一致は `analysis/validate.py` が正規化した
-  うえで機械的に照合するため、統括のレビューは「別銘柄の本文からの取り違えが
-  無いか」の見立てであり、最終判定は ingest 側が行う
+  逐語引用になっているか（AC6）。ID の部分集合性と引用の逐語一致は Step 3 の
+  `copilot-verify-analysis` が `analysis/validate.py` の関数で照合済みなので、
+  **統括はこの照合を書き直さない**。ここで見るのは機械が見られない部分——
+  複数ソースの取りこぼし（AC9）と、正しい ID を申告しつつ内容が別銘柄の
+  取り違えになっていないかの見立て——に絞る
 - **数値の桁**: `facts[].text` の数値が `evidence_quote` の数値と桁まで整合しているか
   （AC16）。開示の表は多くが `(in thousands)` で、`3,495,296` は 34億9,530万ドルである。
   引用が正しくても変換だけを誤った fact は逐語一致の検査を素通りするため、**単位変換を
@@ -427,11 +458,22 @@ Step 3.6 の反証エージェントと**同一の入力契約**を使う: 当�
   実在する完全一致の ID でなければならない。テキスト由来の理由に空リストを使わず、
   決定論的入力だけの理由に限り空リストを許可する
 
-書き出したら JSON として妥当かを確認する。
+書き出したら、ingest を走らせる前に dry-run で検証する（**自前の検証スクリプトを
+書かない**）。
 
 ```bash
-uv run python -c "import json,sys;json.load(open(sys.argv[1]))" <analysis_result.json の絶対パス>
+uv run copilot-verify-analysis <analysis_result.json の絶対パス>
 ```
+
+- JSON の妥当性、strict schema、input との identity 一致（`run_id` / `as_of` /
+  `strategy_key` / `input_digest`）、symbol 集合の完全一致、provenance、
+  `evidence_quote` の逐語一致、CON-03 を、**ingest と同一の関数**で検査する。
+  レポートは書かない
+- 終了コード `0` なら Step 6 へ進む。`1` の場合、FAIL 行が縮退または hard fail の
+  理由を示す。**文言を書き換えて検査を通そうとしない（AC15）。** 断片に修正が要るなら
+  Step 3.5 の手順で該当専門家に再分析させ、Step 3 からやり直す
+- マージ時のフィールド名の取り違え（`ac_check` の混入、`evidence_quote` の落とし）は
+  ここで hard fail として出る。これは内容の書き換えではないので直して再実行してよい
 
 ## Step 6: ingest 実行
 
@@ -505,6 +547,8 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 - ユーザーが再実行を求めていないのに既存の `analysis_result.json` を上書きすること
 - 一時ファイルの掃除目的で `rm` を実行すること（統括・サブエージェントとも。
   「一時ファイルと後始末」参照）
-- `<WORKDIR>` やリポジトリ配下に作業用の一時ファイル（スライス、抽出テキスト、
-  検証スクリプト等）を作ること
+- `<WORKDIR>` やリポジトリ配下に作業用の一時ファイル（スライス、抽出テキスト等）を
+  作ること
+- 断片や `analysis_result.json` の契約検証を自前のスクリプトで実装すること
+  （`copilot-verify-analysis` を使う。Issue #132）
 - `src/`, `tests/`, `docs/` の編集（このスキルは分析実行であり実装変更ではない）

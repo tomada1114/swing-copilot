@@ -25,7 +25,7 @@ Python 側（`copilot-retro`）には config / コードを書き換える経路
 
 作業前に必ず読む:
 
-- `.claude/skills/swing-daily/references/analysis-conventions.md` — AC1〜AC15 の
+- `.claude/skills/swing-daily/references/analysis-conventions.md` — AC1〜AC16 の
   共通叙述規約（CON-03・provenance・hedge）。振り返りの叙述にもそのまま適用する。
   **このスキルへコピーせず、上記パスを直接読むこと**
 - [references/proposal-rules.md](references/proposal-rules.md) — 敗因分類・提案レベルと
@@ -114,7 +114,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 
 各エージェントへの指示に必ず含めるもの:
 
-1. `.claude/skills/swing-daily/references/analysis-conventions.md` を読み、AC1〜AC15 に
+1. `.claude/skills/swing-daily/references/analysis-conventions.md` を読み、AC1〜AC16 に
    従うこと（特に AC3〜AC5 の CON-03、AC6 の provenance、AC12 の hedge）
 2. `retro_input.json` の**絶対パス**と、担当する `surprise_id` / 指標 ID の列挙
 3. `evidence_refs` に書けるのは `retro_input.json` が供給した ID だけであること

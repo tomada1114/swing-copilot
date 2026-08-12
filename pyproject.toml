@@ -42,6 +42,7 @@ copilot-backtest = "swing_copilot.backtest.cli:main"
 copilot-filter-matrix = "swing_copilot.screening.filter_matrix_cli:main"
 copilot-dd-forward = "swing_copilot.regime.dd_forward_cli:main"
 copilot-ingest-analysis = "swing_copilot.analysis.cli:main"
+copilot-verify-analysis = "swing_copilot.analysis.verify_cli:main"
 copilot-retro = "swing_copilot.retro.cli:main"
 copilot-track = "swing_copilot.tracking.cli:main"
 

@@ -199,12 +199,11 @@ def validate_analysis(
 
     _verify_complete_symbol_coverage(analysis_input, result)
     candidates = {item.symbol: item for item in analysis_input.candidates}
-    calendar_bodies = normalized_source_bodies(
-        (item.source_id, _text_body(item.title, item.summary))
-        for item in analysis_input.context.calendar_events
-    )
+    calendar_bodies = calendar_source_bodies(analysis_input)
     outcomes = tuple(
-        _verify_symbol(analysis, candidates.get(analysis.symbol), calendar_bodies)
+        verify_symbol_analysis(
+            analysis, candidates.get(analysis.symbol), calendar_bodies
+        )
         for analysis in result.symbols
     )
     return ValidatedAnalysis(
@@ -259,6 +258,27 @@ def validate_artifact_identity(
             raise AnalysisIngestError(msg)
 
 
+def calendar_source_bodies(analysis_input: AnalysisInput) -> dict[str, str]:
+    """Return the run-wide calendar `source_id` -> normalized quotable body.
+
+    Calendar events are not tied to a candidate, so every symbol may cite them.
+    Exposed because callers that verify one symbol at a time -- notably the
+    fragment checker behind `copilot-verify-analysis` -- need exactly the map
+    `validate_analysis` builds, rather than an approximation of it.
+
+    Args:
+        analysis_input: The exported input whose events are citable run-wide.
+
+    Returns:
+        Normalized bodies ready for a containment check against a quote passed
+        through `normalize_evidence_text`.
+    """
+    return normalized_source_bodies(
+        (item.source_id, _text_body(item.title, item.summary))
+        for item in analysis_input.context.calendar_events
+    )
+
+
 def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -277,19 +297,29 @@ def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
         raise AnalysisIngestError(msg) from exc
 
 
-def _verify_symbol(
+def verify_symbol_analysis(
     analysis: SymbolAnalysis,
     candidate: CandidateInput | None,
     calendar_bodies: Mapping[str, str],
 ) -> SymbolOutcome:
     """Apply the per-symbol provenance, evidence, and CON-03 rules, fail-closed.
 
+    This is the single implementation of "does one symbol's qualitative section
+    satisfy the contract". `validate_analysis` calls it once per symbol at
+    ingest, and `analysis/fragment.py` calls it on one `analysis_work/`
+    fragment before that fragment is ever merged, so an expert's pre-flight
+    check cannot be weaker than the check that will actually gate the report.
+
     Args:
         analysis: This symbol's section of the skill's answer.
         candidate: The exported candidate it claims to answer, or `None` when
             the input never offered this symbol.
         calendar_bodies: Run-wide calendar `source_id` -> normalized body, the
-            IDs of which every symbol may cite.
+            IDs of which every symbol may cite (`calendar_source_bodies`).
+
+    Returns:
+        The symbol's outcome, whose `error` is non-`None` exactly when the
+        section must be withheld.
     """
     if candidate is None:
         return _withheld(analysis.symbol, "symbol is absent from analysis_input.json")

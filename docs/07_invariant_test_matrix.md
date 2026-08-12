@@ -107,3 +107,20 @@
 | `analysis/schemas.py` | `news_supply` を持たない過去アーカイブが v2/v3 とも読める | フィールド追加で P8 collect が過去 run を読めなくなる | `tests/analysis/test_schemas.py::TestSchemaVersions::test_an_archive_without_news_supply_still_parses` |
 | `analysis/schemas.py` | `level: "none"` と件数ゼロが常に一致する | 申告と件数が食い違い、どちらを信じるか読み手が判断できない | `tests/analysis/test_schemas.py::TestNewsSupplyCounts::test_the_none_level_must_mean_exactly_zero_mentions` |
 | `.claude/skills/analyze-news/SKILL.md` | 供給不足の申告経路が指示文に残っている | コードは数えているのに誰も読まず、下流に届かない | `tests/analysis/test_skill_contract.py::test_news_skill_must_declare_a_thin_symbol_specific_supply` |
+
+## 断片の契約検証の共通化
+
+要件 ID を持たない、Issue #132 で追加した経路の不変条件。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `analysis/fragment.py` | 断片の事前検査は ingest と同じ関数で同じ理由を返す | grep ベースの自己検査が、NFKC 正規化後に初めて見える違反を「合格」と報告する | `tests/analysis/test_fragment.py::TestSharedCheckMatchesIngest::test_a_violating_payload_fails_identically_in_both_paths` |
+| `analysis/fragment.py` | 正規化で吸収されるだけの表記差は落とさない | 全角・NBSP・大小の違いだけで正しい引用が withhold される | `tests/analysis/test_fragment.py::TestSharedCheckMatchesIngest::test_a_conforming_payload_passes_identically_in_both_paths` |
+| `analysis/fragment.py` | 断片はペイロードキーをちょうど 1 つだけ持つ | 1 ファイルに 2 専門家分が混ざり、マージが取りこぼす | `tests/analysis/test_fragment.py::TestFragmentEnvelope::test_a_fragment_carrying_two_experts_answers_is_rejected` |
+| `analysis/fragment.py` | 別 run の断片は内容検査より先に identity 違反として報告する | 前日の残骸が provenance 違反として報告され、原因を取り違える | `tests/analysis/test_fragment.py::TestFragmentIdentity::test_identity_is_reported_before_the_content_checks` |
+| `analysis/fragment.py` | ファイル名の `<kind>-<SYMBOL>` とペイロードの不一致を検出する | 別銘柄の断片が正しい名前で置かれ、マージが取り違える | `tests/analysis/test_fragment.py::TestFragmentFilename::test_a_filename_naming_another_symbol_is_reported` |
+| `analysis/verify_cli.py` | result の dry-run は ingest が縮退させる銘柄と理由を一致させる | 事前検査を通ったのに ingest で縮退する | `tests/analysis/test_verify_cli.py::TestVerificationStrengthMatchesIngest::test_the_dry_run_reports_exactly_what_ingest_would_withhold` |
+| `analysis/verify_cli.py` | 検査はレポートも run ディレクトリも書き換えない | 事前検査が当日の成果物を書き換える | `tests/analysis/test_verify_cli.py::TestResultDryRun::test_a_valid_result_passes_without_writing_anything` |
+| `analysis/verify_cli.py` | 壊れた 1 件が同じディレクトリの他の断片の判定を隠さない | 1 ファイルの JSON 破損で全断片の合否が分からなくなる | `tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_one_unreadable_entry_does_not_hide_its_siblings` |
+| 専門家スキル | 共有コマンドを使う指示が指示文に残っている | コマンドはあるのに誰も呼ばず、各自が自前検査へ戻る | `tests/analysis/test_skill_contract.py::test_every_fragment_author_is_pointed_at_the_shared_checker` |
+| `output-schema.md` | 「ingest と同一の関数」の主張が関数名で束縛されている | リネームで主張だけが残り、実体との対応が切れる | `tests/analysis/test_skill_contract.py::test_the_schema_reference_binds_the_checker_to_the_ingest_function` |

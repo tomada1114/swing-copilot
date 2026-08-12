@@ -16,6 +16,13 @@ qualitative section is withheld and the failure is logged, with no retry. A
 malformed document or an `as_of` that disagrees with the input is a hard
 failure for the whole run -- there is no safe partial reading of a file that
 may describe a different trading day.
+
+A fifth check is deliberately *not* fail-closed. A correct quote can still be
+restated with the wrong digits (Issue #131), which rule 3 cannot see, so
+`numeric_consistency.py` compares the figures on both sides and this module
+logs a warning naming them. It stays a warning because the comparison spans
+unit systems the input never states: a false positive must cost a second look
+by the reviewer, never a withheld analysis.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from swing_copilot.analysis.evidence import (
     normalize_evidence_text,
     normalized_source_bodies,
 )
+from swing_copilot.analysis.numeric_consistency import unsupported_magnitudes
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
 from swing_copilot.analysis.schemas import (
     RESULT_SCHEMA_VERSION,
@@ -295,6 +303,7 @@ def _verify_symbol(
             error = f"CON-03 violation: {exc}"
     if error is not None:
         return _withheld(analysis.symbol, error)
+    _log_numeric_disagreements(analysis)
     filings_by_id = {item.source_id: item for item in candidate.filings}
     return SymbolOutcome(
         symbol=analysis.symbol,
@@ -401,6 +410,31 @@ def _evidence_error(
                 f"{sorted(fact.source_ids)}: {fact.evidence_quote!r}"
             )
     return None
+
+
+def _log_numeric_disagreements(analysis: SymbolAnalysis) -> None:
+    """Warn about a fact whose figures its own quote cannot account for.
+
+    Unlike the checks above this one never withholds. `numeric_consistency.py`
+    reconciles across unit systems the input does not state, so the reviewer --
+    not the pipeline -- decides what an unexplained figure means. Call it only
+    once a symbol has passed the fail-closed rules: a withheld symbol renders
+    nothing, so warning about its digits would only add noise.
+    """
+    for fact in _sourced_facts(analysis):
+        # `_evidence_error` has already proven every quote is present and
+        # occurs in a cited body; the fallback only satisfies the optional type.
+        unsupported = unsupported_magnitudes(fact.text, fact.evidence_quote or "")
+        if unsupported:
+            logger.warning(
+                "analysis for %s states figures its evidence_quote does not "
+                "account for (still rendered; verify the unit conversion by "
+                "hand): %s in %r, quoting %r",
+                analysis.symbol,
+                ", ".join(unsupported),
+                fact.text,
+                fact.evidence_quote,
+            )
 
 
 def _candidate_source_bodies(candidate: CandidateInput) -> Iterator[tuple[str, str]]:

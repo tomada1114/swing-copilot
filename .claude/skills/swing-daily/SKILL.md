@@ -17,7 +17,7 @@ description: >
 
 作業前に必ず読む:
 
-- [references/analysis-conventions.md](references/analysis-conventions.md) — AC1〜AC15 の共通規約（CON-03・provenance・叙述）
+- [references/analysis-conventions.md](references/analysis-conventions.md) — AC1〜AC16 の共通規約（CON-03・provenance・叙述・数値整合）
 - [references/output-schema.md](references/output-schema.md) — 入出力 JSON スキーマと `analysis_work/` 断片の形式
 - `src/swing_copilot/analysis/schemas.py` — **スキーマの最終正本**。JSON を組み立てる前に必ず読む
 
@@ -238,6 +238,13 @@ Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分�
   逐語引用になっているか（AC6）。この一致は `analysis/validate.py` が正規化した
   うえで機械的に照合するため、統括のレビューは「別銘柄の本文からの取り違えが
   無いか」の見立てであり、最終判定は ingest 側が行う
+- **数値の桁**: `facts[].text` の数値が `evidence_quote` の数値と桁まで整合しているか
+  （AC16）。開示の表は多くが `(in thousands)` で、`3,495,296` は 34億9,530万ドルである。
+  引用が正しくても変換だけを誤った fact は逐語一致の検査を素通りするため、**単位変換を
+  跨ぐ数値は 1 件ずつ引用と突き合わせる**。前年同期・前四半期を並べた fact は各行を
+  個別に確認する（1 行だけ誤る事故が実際に起きている）。ingest 側の機械検査は単位・
+  通貨の付いた数値だけを対象にした**警告**であり、fail-closed ではない。警告が出て
+  いないことは正しさの証明にならない
 - **入力外情報**: 入力に無い企業情報・株価・決算数値が混ざっていないか（AC8）、
   決定論的スコアを書き換えていないか（AC1・AC2）
 - **CON-03**: 断定的売買指示（AC3）・命令形（AC4）・根拠なき心理診断（AC5）

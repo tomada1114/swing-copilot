@@ -26,9 +26,11 @@ from tests.analysis.conftest import (
 )
 
 
-def _validated(write_documents, **result_overrides):
+def _validated(write_documents, *, analysis_input=None, **result_overrides):
     """Load and verify a result built from `result_payload(**overrides)`."""
-    input_path, result_path = write_documents(None, result_payload(**result_overrides))
+    input_path, result_path = write_documents(
+        analysis_input, result_payload(**result_overrides)
+    )
     return validate_analysis(
         load_analysis_input(input_path), load_analysis_result(result_path)
     )
@@ -398,6 +400,119 @@ class TestResultSchemaVersion:
         )
 
         assert load_analysis_result(result_path).schema_version == "analysis-result-v2"
+
+
+class TestNumericConsistencyWarnings:
+    """A verbatim quote restated with the wrong digits (Issue #131).
+
+    The quote is real, its source ID is real, and CON-03 has nothing to say --
+    only the converted figure is wrong, so this check warns rather than
+    withholds and the symbol still reaches the report.
+    """
+
+    def test_a_misconverted_figure_is_warned_about(self, write_documents, caplog):
+        with caplog.at_level(logging.WARNING):
+            validated = _validated(
+                write_documents,
+                **_statement_documents("連結営業収益は35億9,530万ドルだった。"),
+            )
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is None
+        assert "35億9,530万" in caplog.text
+        assert "AAPL" in caplog.text
+
+    def test_a_warned_symbol_is_still_rendered(self, write_documents):
+        validated = _validated(
+            write_documents,
+            **_statement_documents("連結営業収益は35億9,530万ドルだった。"),
+        )
+
+        outcome = validated.outcomes[0]
+        assert outcome.filings[0].analysis.facts[0].text.endswith("ドルだった。")
+        assert outcome.verdict is not None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(
+                "連結営業収益は34億9,530万ドルだった。", id="the-corrected-figure"
+            ),
+            pytest.param(
+                "前年同期の連結営業収益は29億2,818万ドルだった。",
+                id="the-prior-year-figure",
+            ),
+            pytest.param(
+                "連結営業収益は前年同期比19.4%増だった。", id="a-derived-percentage"
+            ),
+        ],
+    )
+    def test_a_faithful_restatement_is_not_warned_about(
+        self, write_documents, caplog, text
+    ):
+        with caplog.at_level(logging.WARNING):
+            validated = _validated(write_documents, **_statement_documents(text))
+
+        assert validated.outcomes[0].error is None
+        assert caplog.records == []
+
+    def test_a_withheld_symbol_is_not_also_warned_about_its_figures(
+        self, write_documents, caplog
+    ):
+        documents = _statement_documents(
+            "連結営業収益は35億9,530万ドル。今すぐ買うべき。"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            validated = _validated(write_documents, **documents)
+
+        assert validated.outcomes[0].error is not None
+        assert "35億9,530万" not in caplog.text
+
+
+#: The 2026-08-11 JBHT statement line Issue #131 was found against: the figure
+#: is in thousands, so every faithful restatement of it converts a power of ten.
+_STATEMENT_LINE = (
+    "Condensed Consolidated Statements of Earnings (in thousands) "
+    "Total operating revenues 3,495,296 2,928,181"
+)
+_STATEMENT_QUOTE = "Total operating revenues 3,495,296 2,928,181"
+
+
+def _statement_documents(fact_text: str) -> dict[str, Any]:
+    """Build `_validated` overrides whose only filing body is `_STATEMENT_LINE`."""
+    candidate = input_payload()["candidates"][0]
+    filing = {
+        **candidate["filings"][0],
+        "text": _STATEMENT_LINE,
+        "coverage": {
+            "original_chars": len(_STATEMENT_LINE),
+            "exported_chars": len(_STATEMENT_LINE),
+            "is_truncated": False,
+            "selection_mode": "full",
+            "sections": [],
+        },
+    }
+    custom_input = input_payload(candidates=[{**candidate, "filings": [filing]}])
+    symbol = symbol_payload(
+        news_summary=None,
+        filing_analyses=[
+            _filing(
+                facts=[
+                    {
+                        "text": fact_text,
+                        "source_ids": [FILING_ID],
+                        "evidence_quote": _STATEMENT_QUOTE,
+                    }
+                ]
+            )
+        ],
+    )
+    return {
+        "analysis_input": custom_input,
+        "input_digest": custom_input["input_digest"],
+        "symbols": [symbol],
+    }
 
 
 _VIOLATION = "今すぐ買うべき。"

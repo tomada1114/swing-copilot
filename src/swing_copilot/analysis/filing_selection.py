@@ -16,6 +16,7 @@ from swing_copilot.analysis.schemas import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from swing_copilot.analysis.schemas import FilingSectionStatus
     from swing_copilot.text.base import TextItem
 
 _TEN_Q_FORMS = frozenset({"10-Q", "10-Q/A"})
@@ -26,6 +27,9 @@ _SECTION_TARGETS = (
     ("part_ii_item_1", 10_000),
 )
 _TOTAL_SECTION_QUOTA = sum(quota for _, quota in _SECTION_TARGETS)
+#: "part_ii" is checked first since "part_ii_item_1a" also starts with the
+#: shorter "part_i" prefix.
+_PART_II_PREFIX = "part_ii"
 # A truncated section keeps its head and its tail rather than the head alone.
 # The decision-relevant passages of a 10-Q sit at the end of a section: Part I
 # Item 1's commitments/contingencies and legal notes follow the statements, and
@@ -143,8 +147,14 @@ def select_filing_text(
         if allocated[name] > 0
     ]
     selected = "\n\n".join(parts)[:budget]
+    parsed_parts = {_part_group(name) for name, _, _ in available}
     coverage = tuple(
-        _section_coverage(name, sections.get(name), shaped.get(name))
+        _section_coverage(
+            name,
+            sections.get(name),
+            shaped.get(name),
+            part_has_a_parsed_sibling=_part_group(name) in parsed_parts,
+        )
         for name, _ in _SECTION_TARGETS
     )
     mode: FilingSelectionMode = (
@@ -155,8 +165,17 @@ def select_filing_text(
     return _selection(selected, len(original), mode, coverage)
 
 
+def _part_group(name: str) -> str:
+    """Return the Part-level group ("part_i" or "part_ii") a section belongs to."""
+    return "part_ii" if name.startswith(_PART_II_PREFIX) else "part_i"
+
+
 def _section_coverage(
-    name: str, content: str | None, piece: _ShapedSection | None
+    name: str,
+    content: str | None,
+    piece: _ShapedSection | None,
+    *,
+    part_has_a_parsed_sibling: bool,
 ) -> FilingSectionCoverage:
     """Report one priority section's status together with its deficit.
 
@@ -165,14 +184,24 @@ def _section_coverage(
         content: The parsed section text, or `None` when the parser found no
             such section in this filing.
         piece: What `_shape_section` kept of `content`, paired with `content`.
+        part_has_a_parsed_sibling: Whether another priority section in the
+            same Part (`part_i_*` / `part_ii_*`) was parsed. Only consulted
+            when this section itself was not (P8-122).
 
     Returns:
         Coverage carrying character counts and an omission shape whenever the
-        section existed; a bare `missing` status when it did not, since an
-        absent section has no original length to report.
+        section existed. When it did not: `absent_from_filing` if the Part's
+        structure is otherwise readable (a sibling parsed, so the section
+        itself is likely genuinely not in the filing), else `not_parsed`
+        (the Part's structure was not recovered at all, so presence is
+        undetermined). Neither carries character counts -- there is no
+        original length to report.
     """
     if content is None or piece is None:
-        return FilingSectionCoverage(name=name, status="missing")
+        status: FilingSectionStatus = (
+            "absent_from_filing" if part_has_a_parsed_sibling else "not_parsed"
+        )
+        return FilingSectionCoverage(name=name, status=status)
     return FilingSectionCoverage(
         name=name,
         status="full" if piece.exported_chars >= len(content) else "partial",
@@ -221,17 +250,32 @@ def _shape_section(content: str, allocated: int) -> _ShapedSection:
 def _allocate_section_chars(
     available: list[tuple[str, int, str]], budget: int
 ) -> dict[str, int]:
-    """Allocate scaled minimum quotas, then reuse slack deterministically."""
+    """Allocate scaled minimum quotas, then reuse slack by shortage ratio.
+
+    The redistribution pass (P8-122) visits sections in descending
+    `len(content) / max(1, allocated[name])` -- how many times over its
+    current allocation a section's content actually runs -- so a heavily
+    under-served section (e.g. a Part II item at 7x its scaled quota) gets
+    the leftover before one only slightly short. Ties break on ascending
+    section name for determinism. `max(1, ...)` avoids a zero division when
+    a scaled quota floors to 0 on a very small budget.
+    """
     allocated: dict[str, int] = {}
+    contents: dict[str, str] = {}
     for name, quota, content in available:
         scaled_quota = budget * quota // _TOTAL_SECTION_QUOTA
         allocated[name] = min(len(content), scaled_quota)
+        contents[name] = content
 
     remaining = budget - sum(allocated.values())
-    for name, _, content in available:
+    order = sorted(
+        contents,
+        key=lambda name: (-(len(contents[name]) / max(1, allocated[name])), name),
+    )
+    for name in order:
         if remaining <= 0:
             break
-        extra = min(len(content) - allocated[name], remaining)
+        extra = min(len(contents[name]) - allocated[name], remaining)
         allocated[name] += extra
         remaining -= extra
     return allocated

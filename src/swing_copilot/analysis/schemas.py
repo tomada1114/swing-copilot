@@ -115,7 +115,13 @@ FilingSelectionMode = Literal[
     "head_fallback",
     "omitted_symbol_budget",
 ]
-FilingSectionStatus = Literal["full", "partial", "missing"]
+# P8-122: "missing" is retained solely so archived analysis_input.json
+# documents (written before this change) keep parsing -- new code never
+# emits it, reporting "absent_from_filing" or "not_parsed" instead
+# (filing_selection.py's Part-grouping rule distinguishes them).
+FilingSectionStatus = Literal[
+    "full", "partial", "absent_from_filing", "not_parsed", "missing"
+]
 FilingSectionOmissionShape = Literal["head_only", "head_and_tail"]
 
 

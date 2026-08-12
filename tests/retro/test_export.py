@@ -230,6 +230,45 @@ class TestBuildRetroInput:
         assert separation["metric:separation:5d"].value == pytest.approx(-7.0)
         assert separation["metric:separation:5d"].is_preliminary is True
 
+    def test_verdict_mix_reflects_the_windows_verdicts(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # populated_store: one run, AAPL proceed / MSFT skip.
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        mix = document.aggregates.verdict_mix
+        assert mix.metric_id == "verdict_mix"
+        assert (mix.run_count, mix.verdict_count) == (1, 2)
+        assert (mix.proceed_count, mix.skip_count) == (1, 1)
+        assert mix.proceed_ratio == pytest.approx(0.5)
+        assert mix.is_flagged is False
+
+    def test_verdict_mix_is_computed_even_when_nothing_has_matured(
+        self, state_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # REQ-009: 25 skip verdicts, zero verdict_outcomes (no horizon has
+        # matured yet) -- separation/proceed_severe_miss_rate/skip_hit_rate
+        # all go silent (value=None), but verdict_mix still sees the window.
+        state_store.replace_run_verdicts(
+            RUN_ID,
+            [_verdict(f"S{i}", "skip") for i in range(25)],
+            [],
+        )
+
+        document = build_retro_input(
+            _deps(state_store, market_store), _request(tmp_path)
+        )
+
+        mix = document.aggregates.verdict_mix
+        assert (mix.verdict_count, mix.proceed_count) == (25, 0)
+        assert mix.is_flagged is True
+        composed_separation = next(
+            row for row in document.aggregates.separation if row.horizon_days is None
+        )
+        assert composed_separation.value is None
+
     def test_records_the_evaluation_settings_the_numbers_came_from(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
     ) -> None:

@@ -108,6 +108,15 @@ def retro_input_unsigned_payload() -> dict[str, Any]:
                     "is_preliminary": True,
                 }
             ],
+            "verdict_mix": {
+                "metric_id": "verdict_mix",
+                "run_count": 1,
+                "verdict_count": 4,
+                "proceed_count": 2,
+                "skip_count": 2,
+                "proceed_ratio": 0.5,
+                "is_flagged": False,
+            },
         },
         "signal_performance": [
             {

@@ -85,9 +85,12 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    求めていなければ**上書きしない**。既存の提案を要約して報告し、再実行するか確認する
 2. `retro_input.json` を読み、`as_of` / `input_digest` / `window_start` を控える
    （2 値は後段で result に逐語転記する。不一致は run ごと hard fail）
-3. 読む順序: `aggregates`（separation → proceed 重大外し率 → skip 的中率）→
+3. 読む順序: `aggregates`（verdict_mix → separation → proceed 重大外し率 → skip 的中率）→
    `signal_performance` → `human_alignment` → `source_contribution` → `surprises` →
-   `config_snapshot` → `notes`
+   `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
+   proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、
+   `verdict_mix` は成熟を待たず窓内の verdicts から算出されるため沈黙しない
+   （`verdict_count >= 20` かつ `proceed_count == 0` で `is_flagged: true`）
 4. `proposals_ledger.path` の台帳と、`rejected_proposal_ids` が指す提案全文を読む。
    過去に却下・検証不合格になった提案は Step 4 の突合対象になる
 5. `is_preliminary: true` の指標は「暫定」。`value: null` は「この窓では測れない」で
@@ -163,9 +166,9 @@ CON-03 機械検査・再提案ガードを行い、通過した提案だけを�
 - スキーマ不一致による hard fail のみ、`schemas.py` を読み直して
   **フィールド名の誤りを修正**して再実行してよい（内容の書き換えではないため）
 
-ユーザーへ提示する内容: 成績サマリ（separation・重大外し率・skip 的中率と暫定表示）、
-敗因分類の分布、記録された提案一覧（RP-ID / level / タイトル）、非表示になった項目、
-`structural_review_note`、`retro_report.md` のパス。
+ユーザーへ提示する内容: 成績サマリ（verdict_mix・separation・重大外し率・skip 的中率と
+暫定表示）、敗因分類の分布、記録された提案一覧（RP-ID / level / タイトル）、
+非表示になった項目、`structural_review_note`、`retro_report.md` のパス。
 
 ingest が台帳へ追記した status=proposed の行と提案全文は、この振り返り回の記録として
 1 本のブランチ（例 `docs/retro-<as_of>`）にコミットし PR を作る。`reports/retro/**` は
@@ -212,7 +215,7 @@ L2（構成変更）・L3（設計見直し）は、適用前に `AskUserQuestio
 ## Step 8: 報告
 
 - 評価対象の窓（`window_start` 〜 `as_of`）と評価件数
-- 成績サマリ（separation・重大外し率・skip 的中率、暫定表示の有無）
+- 成績サマリ（verdict_mix・separation・重大外し率・skip 的中率、暫定表示の有無）
 - 敗因分類の分布と、そこから昇格させた構造的観察
 - 提案ごとの顛末（RP-ID / level / applied+PR 番号 / rejected / deferred /
   verification_failed）

@@ -1,8 +1,11 @@
 """Retrospective aggregate metrics (P8-31, design §3.4).
 
-Pure functions over already-classified `verdict_outcomes` rows: no database,
-no clock, no network. `retro/export.py` reads the rows and packs the results
-into `retro_input.json`; the skill narrates them but never recomputes them.
+Pure functions over already-classified `verdict_outcomes` rows -- except
+`compute_verdict_mix` (P8-120), which reads the window's raw `verdicts`
+instead, since a `proceed`-less window never matures an outcome to read. No
+database, no clock, no network either way. `retro/export.py` reads the rows
+and packs the results into `retro_input.json`; the skill narrates them but
+never recomputes them.
 
 Three properties shape the shapes below:
 
@@ -44,6 +47,7 @@ if TYPE_CHECKING:
         VerdictCitationRow,
         VerdictDecisionRow,
         VerdictOutcomeRecord,
+        VerdictRow,
     )
 
 #: Watch level for the proceed severe-miss rate (design §3.4, 要検証): more
@@ -57,8 +61,14 @@ PROCEED_SEVERE_MISS_WATCH_RATE = 0.15
 _SEPARATION = "separation"
 _PROCEED_SEVERE_MISS_RATE = "proceed_severe_miss_rate"
 _SKIP_HIT_RATE = "skip_hit_rate"
+_VERDICT_MIX = "verdict_mix"
 _METRIC_PREFIX = "metric"
 _COMPOSED = "composed"
+
+#: P8-120: below this many windowed verdicts, a zero-proceed stretch is not
+#: distinguishable from an ordinary quiet period -- 8/3-8/6's 4 scheduled
+#: days (32 verdicts) is the level that motivated the ticket.
+_VERDICT_MIX_FLAG_MIN_VERDICT_COUNT = 20
 
 #: Decides whether a rate deserves attention, given the rate and its
 #: baseline. The two rates flag for opposite reasons, so the rule travels
@@ -92,6 +102,28 @@ class RateMetricSummary:
     is_flagged: bool
     sample_size: int
     is_preliminary: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictMixSummary:
+    """Whether the window's verdicts could produce `proceed` at all (P8-120).
+
+    Unlike the other metrics here, this has no baseline (there is nothing to
+    compare a mix against) and no horizon breakdown (a verdict is not tied to
+    one -- `horizon_days` is deliberately absent). Computed from the window's
+    `verdicts` rather than `verdict_outcomes`, so it is not silenced by the
+    same condition it exists to detect: a `proceed`-less window never
+    matures any outcomes for `separation` / `proceed_severe_miss_rate` to
+    measure, but `verdict_mix` still sees every skip.
+    """
+
+    metric_id: str
+    run_count: int
+    verdict_count: int
+    proceed_count: int
+    skip_count: int
+    proceed_ratio: float | None
+    is_flagged: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +349,33 @@ def compute_skip_hit_rate(
         for horizon_days, rows in _rows_by_horizon(outcomes)
     ]
     return _rate_summaries(parts, _SKIP_HIT_RATE, thresholds, _flag_below_baseline)
+
+
+def compute_verdict_mix(verdicts: Sequence[VerdictRow]) -> VerdictMixSummary:
+    """Return how the window's verdicts split between `proceed` and `skip`.
+
+    Args:
+        verdicts: Every verdict in the window, unfiltered by maturity.
+
+    Returns:
+        Counts, the resulting `proceed` ratio (`None` on an empty window,
+        never `0.0`), and `is_flagged` when the window has enough verdicts to
+        be meaningful (`>= 20`) yet produced zero `proceed`.
+    """
+    verdict_count = len(verdicts)
+    proceed_count = sum(1 for row in verdicts if row.recommendation == PROCEED)
+    skip_count = verdict_count - proceed_count
+    return VerdictMixSummary(
+        metric_id=_VERDICT_MIX,
+        run_count=len({row.run_id for row in verdicts}),
+        verdict_count=verdict_count,
+        proceed_count=proceed_count,
+        skip_count=skip_count,
+        proceed_ratio=proceed_count / verdict_count if verdict_count > 0 else None,
+        is_flagged=(
+            verdict_count >= _VERDICT_MIX_FLAG_MIN_VERDICT_COUNT and proceed_count == 0
+        ),
+    )
 
 
 def _rows_by_horizon(

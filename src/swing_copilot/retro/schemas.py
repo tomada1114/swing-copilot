@@ -118,12 +118,30 @@ class RateMetricEntry(_StrictModel):
     is_preliminary: bool
 
 
+class VerdictMixEntry(_StrictModel):
+    """Whether the window's verdicts could produce `proceed` at all (P8-120).
+
+    No baseline and no `horizon_days`: unlike the rate metrics above, a
+    verdict is not tied to a horizon, and there is nothing to compare a mix
+    against. A single entry, not a list -- one value per window.
+    """
+
+    metric_id: NonBlankText
+    run_count: int = Field(ge=0)
+    verdict_count: int = Field(ge=0)
+    proceed_count: int = Field(ge=0)
+    skip_count: int = Field(ge=0)
+    proceed_ratio: float | None
+    is_flagged: bool
+
+
 class AggregateMetrics(_StrictModel):
     """Design §3.4's headline measures of the qualitative layer."""
 
     separation: list[MetricEntry]
     proceed_severe_miss_rate: list[RateMetricEntry]
     skip_hit_rate: list[RateMetricEntry]
+    verdict_mix: VerdictMixEntry
 
 
 class SignalPerformanceEntry(_StrictModel):

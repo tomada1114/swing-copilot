@@ -42,6 +42,7 @@ from swing_copilot.retro.aggregate import (
     compute_separation,
     compute_skip_hit_rate,
     compute_source_contribution,
+    compute_verdict_mix,
 )
 from swing_copilot.retro.evaluate import MISS_SEVERE
 from swing_copilot.retro.ledger import read_ledger
@@ -63,6 +64,7 @@ from swing_copilot.retro.schemas import (
     SurpriseBundle,
     SurpriseDossier,
     SurpriseOutcomeEntry,
+    VerdictMixEntry,
     VerdictReasonEntry,
     retro_input_digest,
 )
@@ -90,6 +92,7 @@ if TYPE_CHECKING:
         VerdictCitationRow,
         VerdictOutcomeRecord,
         VerdictRecord,
+        VerdictRow,
     )
 
 logger = logging.getLogger(__name__)
@@ -245,6 +248,7 @@ def build_retro_input(
     as_of = request.as_of
     window_start = as_of - timedelta(days=thresholds.lookback_window_days)
 
+    verdicts = store.get_verdicts_in_window(window_start, as_of)
     outcomes = store.get_verdict_outcomes_in_window(window_start, as_of)
     coverages = store.get_analysis_source_coverages_in_window(window_start, as_of)
     citations = store.get_verdict_citations_in_window(window_start, as_of)
@@ -269,7 +273,9 @@ def build_retro_input(
         "generated_at": deps.clock.now().isoformat(),
         "window_start": window_start.isoformat(),
         "evaluation": _evaluation_settings(deps.settings).model_dump(mode="json"),
-        "aggregates": _aggregates(outcomes, deps.settings).model_dump(mode="json"),
+        "aggregates": _aggregates(verdicts, outcomes, deps.settings).model_dump(
+            mode="json"
+        ),
         "signal_performance": _signal_entries(signals),
         "human_alignment": [
             AlignmentEntry(**asdict(cell)).model_dump(mode="json")
@@ -342,7 +348,9 @@ def _evaluation_settings(settings: Settings) -> EvaluationSettings:
 
 
 def _aggregates(
-    outcomes: Sequence[VerdictOutcomeRecord], settings: Settings
+    verdicts: Sequence[VerdictRow],
+    outcomes: Sequence[VerdictOutcomeRecord],
+    settings: Settings,
 ) -> AggregateMetrics:
     thresholds = settings.postmortem
     return AggregateMetrics(
@@ -358,6 +366,7 @@ def _aggregates(
             RateMetricEntry(**asdict(row))
             for row in compute_skip_hit_rate(outcomes, thresholds)
         ],
+        verdict_mix=VerdictMixEntry(**asdict(compute_verdict_mix(verdicts))),
     )
 
 

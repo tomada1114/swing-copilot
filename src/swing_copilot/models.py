@@ -89,6 +89,9 @@ class DailyRunOptions:
     limit: int | None = None
     strategy_key: str = "default"
     log_level: str | None = None
+    # P8-118: bypasses the same-day rerun guard (a prior `status='success'`
+    # run already exists for the resolved `run_date`).
+    allow_same_day_rerun: bool = False
 
 
 @dataclass(frozen=True, slots=True)

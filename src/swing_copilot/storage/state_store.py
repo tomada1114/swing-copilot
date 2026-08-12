@@ -511,6 +511,12 @@ class StateStore:
         """Return one run's `started_at`, or `None` if it has no `runs` row."""
         return history_queries.get_run_started_at(self._database, run_id)
 
+    def get_successful_run(
+        self, run_date: date
+    ) -> history_queries.SuccessfulRun | None:
+        """Return the most recently started `status='success'` run on `run_date`."""
+        return history_queries.get_successful_run(self._database, run_date)
+
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]
     ) -> None:

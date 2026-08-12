@@ -42,3 +42,14 @@ never retried later.
 `AGENTS.md` is the canonical cross-tool contract for domain invariants,
 source-of-truth precedence, test expectations, and the Japanese/English
 language policy. Do not duplicate or weaken those rules here.
+
+`copilot-daily` guards against a same-day double run (Issue #118): if a
+`status='success'` run already exists for the resolved `run_date` (the
+`swing-copilot-daily` routine only fires once, but a cron edit or a manual
+re-run of an already-completed day would otherwise write a second `verdicts`
+set for that date), it exits `2` before creating a `runs` row or `reports/`
+directory instead of proceeding. The `swing-daily` skill treats exit code `2`
+as a re-entry signal: it summarizes the existing run from the abort message
+and terminates without writing `analysis_result.json`, rather than treating it
+as a failure. `--allow-same-day-rerun` bypasses the guard for an intentional
+re-run.

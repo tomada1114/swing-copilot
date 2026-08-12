@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from swing_copilot.storage.history_queries import (
     get_run_detail,
     get_run_started_at,
     get_signal_outcomes,
+    get_successful_run,
     get_symbol_timeline,
     list_runs,
     run_exists,
@@ -298,6 +300,107 @@ class TestGetRunStartedAt:
         found = get_run_started_at(state_store._database, run_id)  # noqa: SLF001
 
         assert found == started_at
+
+
+class TestGetSuccessfulRun:
+    """P8-118: the same-day rerun guard's existing-run lookup."""
+
+    def test_no_run_on_the_date_returns_none(self, state_store: StateStore) -> None:
+        assert (
+            get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+            is None
+        )
+
+    def test_a_success_run_is_returned_with_its_report_path(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at, report_path) VALUES (?, ?, 'live', 'cfg', 'success', "
+                "?, ?)",
+                [
+                    str(run_id),
+                    date(2026, 8, 7),
+                    datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
+                    "reports/2026-08-07/x.md",
+                ],
+            )
+
+        found = get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == run_id
+        assert found.report_path == Path("reports/2026-08-07/x.md")
+
+    def test_a_null_report_path_is_returned_as_none(
+        self, state_store: StateStore
+    ) -> None:
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [
+                    str(uuid4()),
+                    date(2026, 8, 7),
+                    datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
+                ],
+            )
+
+        found = get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+
+        assert found is not None
+        assert found.report_path is None
+
+    def test_only_success_status_counts(self, state_store: StateStore) -> None:
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            for status in ("failed", "running", "degraded"):
+                conn.execute(
+                    "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                    "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
+                    [
+                        str(uuid4()),
+                        date(2026, 8, 7),
+                        status,
+                        datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
+                    ],
+                )
+
+        assert (
+            get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+            is None
+        )
+
+    def test_multiple_success_runs_returns_the_most_recently_started(
+        self, state_store: StateStore
+    ) -> None:
+        older_id = uuid4()
+        newer_id = uuid4()
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [
+                    str(older_id),
+                    date(2026, 8, 6),
+                    datetime(2026, 8, 6, 15, 6, tzinfo=UTC),
+                ],
+            )
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [
+                    str(newer_id),
+                    date(2026, 8, 6),
+                    datetime(2026, 8, 6, 16, 52, tzinfo=UTC),
+                ],
+            )
+
+        found = get_successful_run(state_store._database, date(2026, 8, 6))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == newer_id
 
 
 class TestGetSignalOutcomes:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from swing_copilot.storage import paper_records
@@ -212,6 +213,46 @@ def get_run_started_at(database: Database, run_id: UUID) -> datetime | None:
             "SELECT started_at FROM runs WHERE run_id = ?", [str(run_id)]
         ).fetchone()
     return None if row is None else row[0]
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessfulRun:
+    """One `run_date`'s already-completed successful run (P8-118)."""
+
+    run_id: UUID
+    report_path: Path | None
+
+
+def get_successful_run(database: Database, run_date: date) -> SuccessfulRun | None:
+    """Return the most recently started `status='success'` run on `run_date`.
+
+    Backs `daily_runner.py`'s same-day rerun guard: `run_date` is resolved
+    from the latest prefetched bar rather than wall-clock, so this can only
+    be checked after that resolution, immediately before `start_run`. Only
+    `status='success'` counts -- a prior `failed` or still-`running` row must
+    not block a legitimate retry (P8-118 design; `degraded` also does not
+    count, since a degraded run still produced a usable report and verdict).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_date: The resolved run date to check for a prior success.
+
+    Returns:
+        The existing run's identity and report path (`None` if it was never
+        recorded), or `None` if no successful run exists on that date.
+    """
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT run_id, report_path FROM runs "
+            "WHERE run_date = ? AND status = 'success' "
+            "ORDER BY started_at DESC LIMIT 1",
+            [run_date],
+        ).fetchone()
+    if row is None:
+        return None
+    return SuccessfulRun(
+        run_id=row[0], report_path=Path(row[1]) if row[1] is not None else None
+    )
 
 
 def get_run_by_date(database: Database, run_date: date) -> UUID | None:

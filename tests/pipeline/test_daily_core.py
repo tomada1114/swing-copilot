@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from swing_copilot.data.base import BarFetchResult, FetchFailure
+from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
@@ -346,7 +347,10 @@ class TestIdempotency:
         self, deps, market_store
     ):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-        second = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
 
         assert first.run_id != second.run_id
         assert first.status == RunStatus.SUCCESS
@@ -360,7 +364,10 @@ class TestIdempotency:
 
     def test_two_runs_have_independent_step_histories(self, deps, state_store):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-        second = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
             first_steps = conn.execute(
@@ -592,6 +599,118 @@ class TestAccountEquityUnsetWarning:
         )
 
 
+#: `deps`'s bars run through `_bars_for(["AAPL", "MSFT"], AS_OF)`, whose last
+#: generated session is `AS_OF - 1 day` (see `TestAsOfDefaulting`), so a live
+#: (no explicit `--as-of`) run resolves `run_date` to this date, not `AS_OF`.
+_LIVE_RUN_DATE = AS_OF - timedelta(days=1)
+
+
+class TestSameDayRerunGuard:
+    """P8-118: abort before start_run when run_date already has a success run."""
+
+    def test_existing_success_run_aborts_before_start_run(self, deps, state_store):
+        existing_id = uuid4()
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at, report_path) VALUES (?, ?, 'live', 'cfg', 'success', "
+                "?, ?)",
+                [
+                    str(existing_id),
+                    _LIVE_RUN_DATE,
+                    datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+                    "reports/2027-02-28/x.md",
+                ],
+            )
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        message = str(exc_info.value)
+        assert str(existing_id) in message
+        assert _LIVE_RUN_DATE.isoformat() in message
+        assert "reports/2027-02-28/x.md" in message
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM runs").fetchone()
+        assert count == (1,)
+
+    def test_allow_same_day_rerun_bypasses_the_guard(self, deps, state_store):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [
+                    str(uuid4()),
+                    _LIVE_RUN_DATE,
+                    datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+                ],
+            )
+
+        result = run_daily(
+            DailyRunOptions(is_dry_run=True, allow_same_day_rerun=True), deps
+        )
+
+        assert result.status == RunStatus.SUCCESS
+
+    def test_only_failed_or_running_existing_runs_do_not_abort(self, deps, state_store):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            for status in ("failed", "running"):
+                conn.execute(
+                    "INSERT INTO runs (run_id, run_date, mode, config_hash, "
+                    "status, started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
+                    [
+                        str(uuid4()),
+                        _LIVE_RUN_DATE,
+                        status,
+                        datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+                    ],
+                )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+
+    def test_historical_as_of_applies_the_same_guard(self, deps, state_store):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [str(uuid4()), AS_OF, datetime(2027, 3, 1, 15, 5, tzinfo=UTC)],
+            )
+
+        with pytest.raises(PreflightAbort):
+            run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+    def test_a_market_holiday_evening_run_checks_the_resolved_run_date(
+        self, deps, state_store
+    ):
+        # fetch_cutoff (deps.clock.today() == AS_OF) has no bar that day; the
+        # latest prefetched bar resolves run_date to an earlier trading day
+        # instead. _bars_for(symbols, X)'s last session is X - 1 day, so
+        # asking for bars "as of" holiday_run_date + 1 day lands the latest
+        # bar exactly on holiday_run_date.
+        holiday_run_date = AS_OF - timedelta(days=5)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [
+                    str(uuid4()),
+                    holiday_run_date,
+                    datetime(2027, 2, 24, 15, 5, tzinfo=UTC),
+                ],
+            )
+        holiday_provider = FakeDataProvider(
+            _bars_for(["AAPL", "MSFT"], holiday_run_date + timedelta(days=1))
+        )
+        holiday_deps = replace(deps, data_provider=holiday_provider)
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), holiday_deps)
+
+        assert holiday_run_date.isoformat() in str(exc_info.value)
+
+
 class TestFundamentalsStepSkipped:
     def test_no_edgar_client_records_step_as_skipped(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -779,7 +898,10 @@ class TestFundamentalsSameDaySkip:
             DailyRunOptions(as_of=past_as_of, is_dry_run=True), deps_with_edgar
         )
         second = run_daily(
-            DailyRunOptions(as_of=past_as_of, is_dry_run=True), deps_with_edgar
+            DailyRunOptions(
+                as_of=past_as_of, is_dry_run=True, allow_same_day_rerun=True
+            ),
+            deps_with_edgar,
         )
 
         assert first.status == RunStatus.SUCCESS

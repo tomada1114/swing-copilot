@@ -141,6 +141,12 @@ _TEXT_SYMBOL_LIMIT = (
 _DECISION_HISTORY_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
 _RETRO_NOTE_DETAIL_LIMIT = 3
+#: P8-117: shared between `daily_composition.py`'s preflight warning log and
+#: `daily_runner.py`'s report `## Warnings` line, so both say the same thing.
+ACCOUNT_EQUITY_UNSET_NOTICE = (
+    "account_equity_usd が未設定です。株数と portfolio heat は not_calculable に"
+    "なります。決済済みポジションを記録するとサーキットブレーカーが全候補を停止します。"
+)
 _VISIBLE_PIPELINE_STEPS = (
     "1_prices",
     "2_fundamentals",

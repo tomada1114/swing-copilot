@@ -22,10 +22,11 @@ from swing_copilot.config import (
 from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
-from swing_copilot.exceptions import ConfigError
+from swing_copilot.exceptions import ConfigError, PreflightAbort
 from swing_copilot.models import DailyRunOptions
 from swing_copilot.pipeline.daily import (
     _LOG_LEVELS,
+    ACCOUNT_EQUITY_UNSET_NOTICE,
     DailyDependencies,
     _paths_for_mode,
     _run_mode,
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _non_negative_int(raw_value: str) -> int:
@@ -174,6 +177,46 @@ def _compose_dependencies(
     )
 
 
+def _preflight(deps: DailyDependencies, options: DailyRunOptions) -> None:
+    """Abort before any run state is written when continuing would be pointless.
+
+    `account_equity_usd is None` already makes `RiskChecker` return
+    `not_calculable` for every candidate (by design, unchanged here). The
+    additional trap this closes: once a single closed position exists,
+    `evaluate_circuit_breaker` also cannot evaluate loss discipline without
+    an equity figure and returns `HALTED`, rejecting every candidate too --
+    at that point a run only produces a report and verdict full of
+    algorithmically-forced rejections. Historical replay (`options.as_of is
+    not None`) never sees current position state (`daily_runner.py`'s
+    `_HISTORICAL_POSITION_NOTICE`), so its portfolio is always empty and the
+    abort would never fire anyway; it is skipped explicitly rather than
+    relying on that to stay true.
+
+    Args:
+        deps: Composed dependencies; only `state_store` and `settings` are
+            read, and `state_store` is never queried when `account_equity_usd`
+            is set.
+        options: Parsed CLI options for this run.
+
+    Raises:
+        PreflightAbort: `account_equity_usd` is unset and at least one closed
+            (paper) position already exists for a live run.
+    """
+    if deps.settings.risk.account_equity_usd is not None:
+        return
+    if options.as_of is None:
+        closed = deps.state_store.get_closed_positions(is_paper=True)
+        if closed:
+            msg = (
+                "preflight abort: config/settings.yaml の risk.account_equity_usd が"
+                f"未設定のまま決済済みポジションが{len(closed)}件あります。この状態では"
+                "サーキットブレーカーが全候補を CIRCUIT_BREAKER_HALTED で reject するため、"
+                "run を中止しました。"
+            )
+            raise PreflightAbort(msg)
+    logger.warning(ACCOUNT_EQUITY_UNSET_NOTICE)
+
+
 class _SecretRedactionFilter(logging.Filter):
     """Replace configured secret values before a log record reaches stderr."""
 
@@ -234,6 +277,11 @@ def main(argv: list[str] | None = None) -> None:
         deps = _compose_dependencies(options, settings, strategies)
     except UniverseError as exc:
         raise SystemExit(str(exc)) from exc
+    try:
+        _preflight(deps, options)
+    except PreflightAbort as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(2) from exc
     result = run_daily(options, deps)
     paths = TerminalPaths(
         report=result.report_path,

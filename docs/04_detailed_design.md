@@ -1255,6 +1255,8 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 `prototype` data tier（現行`yfinance`）のCLIブリーフとMarkdownには非公式データに
 基づく試作結果であることを明示する。ブラウザ自動起動は行わない。
 
+**P8-117実装時追記（Issue #117）**: `daily_composition.py::main()`は`_compose_dependencies()`と`run_daily()`の間に**preflightフェーズ**（`_preflight(deps, options)`）を挟む。`account_equity_usd`（`config/settings.yaml`の`risk.account_equity_usd`）が未設定のとき、`RiskChecker`が全候補を`not_calculable`にする挙動自体は3.13節どおり不変だが、決済済みポジション（`state_store.get_closed_positions(is_paper=True)`）が1件以上あると`evaluate_circuit_breaker`もequity不明のまま損失規律を評価できず`HALTED`を返し、全候補が`CIRCUIT_BREAKER_HALTED`でreject される（サーキットブレーカーのfail-closed自体は正しく、`risk/circuit_breaker.py`は無変更）。この組み合わせではrunを続けても「全候補rejectのレポートとverdict」を生成するだけなので、`exceptions.PreflightAbort`を送出してrun作成前に中止する。`main()`はこれを捕捉し、メッセージをstderrへ書いたうえで**終了コード2**（0=成功、1=失敗とは別の「意図的な中止」）でプロセスを終える——`runs`への行も`reports/`ディレクトリも作られない。決済済みが0件なら`logger.warning`を1回出すだけで続行し、同じ文言を`report/markdown_report.py`の既存`## Warnings`節にも1行載せる（`pipeline/daily.py::ACCOUNT_EQUITY_UNSET_NOTICE`を`daily_composition.py`のログと`daily_runner.py`の`notices`タプルで共有）。明示`--as-of`（ヒストリカル再生）は中止判定をスキップする——3.12節のとおり現在のポジション状態を一切読まないため空ポートフォリオが保証されており、警告のみ出す。`PreflightAbort`と終了コード2の枠組みは#118が同じ箇所へ同日重複起動ガードを追加する土台になる。
+
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
 明示`--as-of`では、現在状態しか持たない`get_open_positions()`をrun開始時にも

@@ -560,6 +560,38 @@ class TestSymbolLimit:
         )
 
 
+class TestAccountEquityUnsetWarning:
+    """P8-117 REQ-005/REQ-006: the `## Warnings` line, independent of preflight."""
+
+    def test_unset_equity_adds_a_report_warning(self, deps):
+        # `settings` (config/settings.yaml) defaults account_equity_usd to null.
+        assert deps.settings.risk.account_equity_usd is None
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.brief is not None
+        assert any("account_equity_usd" in notice for notice in result.brief.notices)
+
+    def test_set_equity_adds_no_warning(self, deps):
+        equity_deps = replace(
+            deps,
+            settings=deps.settings.model_copy(
+                update={
+                    "risk": deps.settings.risk.model_copy(
+                        update={"account_equity_usd": 100_000.0}
+                    )
+                }
+            ),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), equity_deps)
+
+        assert result.brief is not None
+        assert not any(
+            "account_equity_usd" in notice for notice in result.brief.notices
+        )
+
+
 class TestFundamentalsStepSkipped:
     def test_no_edgar_client_records_step_as_skipped(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)

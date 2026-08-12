@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
 from swing_copilot.pipeline.daily import (
     _TIME_BUDGET_STEP_OUTCOME,
+    ACCOUNT_EQUITY_UNSET_NOTICE,
     DailyDependencies,
     _config_hash,
     _OutputCompletion,
@@ -375,6 +376,11 @@ def _run_soft_steps(
     notices = (
         ((deps.universe_warning,) if deps.universe_warning is not None else ())
         + ((_HISTORICAL_POSITION_NOTICE,) if options.as_of is not None else ())
+        + (
+            (ACCOUNT_EQUITY_UNSET_NOTICE,)
+            if deps.settings.risk.account_equity_usd is None
+            else ()
+        )
         + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
         + tuple(
             f"{label}: {outcome.detail}"

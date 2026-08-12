@@ -301,6 +301,15 @@ class TestEarlyOperation:
                         "separation": [],
                         "proceed_severe_miss_rate": [],
                         "skip_hit_rate": [],
+                        "verdict_mix": {
+                            "metric_id": "verdict_mix",
+                            "run_count": 0,
+                            "verdict_count": 0,
+                            "proceed_count": 0,
+                            "skip_count": 0,
+                            "proceed_ratio": None,
+                            "is_flagged": False,
+                        },
                     },
                     notes=[],
                 )

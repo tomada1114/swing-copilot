@@ -1420,7 +1420,7 @@ src/swing_copilot/retro/
 ├── cli.py        # copilot-retro: collect / evaluate / export / prepare / ingest
 ├── collect.py    # reports/ 走査 → verdicts / verdict_sources 取り込み
 ├── evaluate.py   # 満期判定・forward return → verdict_outcomes
-├── aggregate.py  # 集約指標（separation / 重大外し率 / skip的中率 / 人間整合 / ソース貢献）
+├── aggregate.py  # 集約指標（verdict_mix / separation / 重大外し率 / skip的中率 / 人間整合 / ソース貢献）
 ├── surprises.py  # MISS_SEVERE の選定と鮮度データ取得
 ├── export.py     # 集約 + 証拠一式 → retro_input.json
 ├── ingest.py     # retro_result.json → retro_report.md + 提案台帳
@@ -1479,6 +1479,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 | 指標 | 定義 | 判定 |
 |---|---|---|
+| verdict_mix | 窓内`verdicts`（`verdict_outcomes`ではない）のproceed/skip内訳・`proceed_ratio`・distinct run数 | `verdict_count>=20`かつ`proceed_count==0`でフラグ。ホライズンを持たない単一値（`horizon_days`なし）、ベースラインも持たない |
 | **separation**（最重要） | proceed群とskip群の平均forward returnの差（ホライズン別＋重み合成） | n≥40で≤0が持続すればL3検討トリガー。定性レイヤの存在意義そのものを測る |
 | proceed重大外し率 | proceedのうち`MISS_SEVERE`の割合 | `settings.retro`ではなくコード定数`PROCEED_SEVERE_MISS_WATCH_RATE=0.15`超でフラグ。同runの全候補（skip含む）のベースラインを併記し、ベースラインより悪ければ水準未満でもフラグ |
 | skip的中率 | skipのうち非`NEUTRAL`に占める`HIT` | 絶対閾値ではなく同期間ベースライン比で判定 |
@@ -1486,6 +1487,8 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 | ソース貢献 | `(source_type, provider)`別の引用回数とHIT/MISS/NEUTRAL引用数・HIT引用比率 | 観測のみ。引用されないソース・MISSに偏るソースが削減候補になる |
 
 重み合成の値は、値を持つホライズンだけで重みを再正規化する。5日しか満期を迎えていない窓（運用初期の通常状態）で、欠けた20日を0として重み付けすると実在する効果をゼロ方向へ引き戻してしまうため。`sample_size < preliminary_sample_threshold`（既定20）の行は`is_preliminary`が立ち「暫定」表示になる。`value: null`は「この窓では測れない」であって「ゼロ」ではない。
+
+**P8-120実装時追記（Issue #120）**: separation・proceed重大外し率はいずれも成熟済み`verdict_outcomes`を入力とするため、proceedがゼロの窓では分母を失い`value: null`で沈黙する。proceedが出ないこと自体を測る指標が無いと、skip偏りが強まるほどそれを検知するはずの指標が先に沈黙する自己隠蔽が起きる（定時実行が実際にproceedを1件も出せていなかった事例で発覚）。`verdict_mix`は`verdict_outcomes`ではなく窓内の`verdicts`（`get_verdicts_in_window`）を直接読むため、成熟を待たずに算出でき沈黙しない。専用の`VerdictMixSummary`/`VerdictMixEntry`を使い、`RateMetricSummary`（ベースライン必須）は流用しない——proceedゼロ自体を測る指標にベースラインの概念が無いため。
 
 #### 3.23.4 `retro-input-v1`（`export`が書く証拠dossier）
 

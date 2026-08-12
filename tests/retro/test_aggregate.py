@@ -21,11 +21,13 @@ from swing_copilot.retro.aggregate import (
     compute_separation,
     compute_skip_hit_rate,
     compute_source_contribution,
+    compute_verdict_mix,
 )
 from swing_copilot.storage.verdict_records import (
     VerdictCitationRow,
     VerdictDecisionRow,
     VerdictOutcomeRecord,
+    VerdictRow,
 )
 
 MATURITY = date(2027, 3, 15)
@@ -432,3 +434,83 @@ class TestSourceContribution:
 
     def test_reports_an_empty_window_as_no_rows(self) -> None:
         assert compute_source_contribution((), ()) == ()
+
+
+def _verdict(symbol: str, recommendation: str, *, run_id: UUID = RUN_A) -> VerdictRow:
+    return VerdictRow(
+        run_id=run_id, symbol=symbol, as_of=MATURITY, recommendation=recommendation
+    )
+
+
+class TestVerdictMix:
+    """P8-120: whether proceed itself has gone structurally silent."""
+
+    def test_metric_id_is_the_literal_verdict_mix(self) -> None:
+        assert compute_verdict_mix(()).metric_id == "verdict_mix"
+
+    def test_empty_window_reports_no_ratio_and_no_flag(self) -> None:
+        summary = compute_verdict_mix(())
+
+        assert summary.verdict_count == 0
+        assert summary.proceed_ratio is None
+        assert summary.is_flagged is False
+
+    def test_nineteen_verdicts_all_skip_does_not_flag(self) -> None:
+        verdicts = tuple(_verdict(f"S{i}", "skip") for i in range(19))
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.verdict_count == 19
+        assert summary.proceed_count == 0
+        assert summary.is_flagged is False
+
+    def test_twenty_verdicts_all_skip_flags_at_the_inclusive_threshold(self) -> None:
+        verdicts = tuple(_verdict(f"S{i}", "skip") for i in range(20))
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.verdict_count == 20
+        assert summary.proceed_count == 0
+        assert summary.proceed_ratio == pytest.approx(0.0)
+        assert summary.is_flagged is True
+
+    def test_twenty_verdicts_with_one_proceed_does_not_flag(self) -> None:
+        verdicts = (
+            *(_verdict(f"S{i}", "skip") for i in range(19)),
+            _verdict("P1", "proceed"),
+        )
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.verdict_count == 20
+        assert summary.proceed_count == 1
+        assert summary.is_flagged is False
+
+    def test_all_proceed_reports_full_ratio_and_no_flag(self) -> None:
+        verdicts = tuple(_verdict(f"P{i}", "proceed") for i in range(25))
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.proceed_ratio == pytest.approx(1.0)
+        assert summary.skip_count == 0
+        assert summary.is_flagged is False
+
+    def test_run_count_is_distinct_run_ids_not_verdict_count(self) -> None:
+        verdicts = tuple(_verdict(f"S{i}", "skip", run_id=RUN_A) for i in range(10))
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.run_count == 1
+        assert summary.verdict_count == 10
+
+    def test_run_count_counts_every_distinct_run(self) -> None:
+        other_run = uuid4()
+        verdicts = (
+            *(_verdict(f"A{i}", "skip", run_id=RUN_A) for i in range(3)),
+            *(_verdict(f"B{i}", "skip", run_id=other_run) for i in range(2)),
+        )
+
+        summary = compute_verdict_mix(verdicts)
+
+        assert summary.run_count == 2
+        assert summary.verdict_count == 5

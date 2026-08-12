@@ -32,8 +32,9 @@ def record_text_items(database: Database, items: Sequence[TextItem]) -> None:
                     """
                     INSERT INTO text_items (
                         source_id, symbol, source_type, published_at, title,
-                        source_url, content_text, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        source_url, content_text, fetched_at, related_symbols,
+                        category
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (source_id) DO UPDATE SET
                         symbol = EXCLUDED.symbol,
                         source_type = EXCLUDED.source_type,
@@ -41,7 +42,9 @@ def record_text_items(database: Database, items: Sequence[TextItem]) -> None:
                         title = EXCLUDED.title,
                         source_url = EXCLUDED.source_url,
                         content_text = EXCLUDED.content_text,
-                        fetched_at = EXCLUDED.fetched_at
+                        fetched_at = EXCLUDED.fetched_at,
+                        related_symbols = EXCLUDED.related_symbols,
+                        category = EXCLUDED.category
                     """,
                     [
                         item.source_id,
@@ -52,6 +55,8 @@ def record_text_items(database: Database, items: Sequence[TextItem]) -> None:
                         item.source_url,
                         item.content_text,
                         item.fetched_at,
+                        ",".join(item.related_symbols) or None,
+                        item.category,
                     ],
                 )
         except Exception:

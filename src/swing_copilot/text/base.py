@@ -28,8 +28,10 @@ class TextItem:
 
     The stored columns match the `text_items` table schema
     (`docs/04_detailed_design.md` 4.2) directly, so every source's output
-    stores identically regardless of origin. The trailing fields are
-    collection-time analysis aids that are not persisted.
+    stores identically regardless of origin. `filing_sections` is a
+    collection-time analysis aid that is not persisted; `related_symbols` and
+    `category` are persisted (P8-123) so ticker-collision observation does
+    not depend on re-fetching.
     """
 
     source_id: str

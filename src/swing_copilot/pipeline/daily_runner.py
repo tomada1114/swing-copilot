@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
+from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
 from swing_copilot.pipeline.daily import (
     _TIME_BUDGET_STEP_OUTCOME,
@@ -162,6 +163,18 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
                 run_date = latest.date() if isinstance(latest, datetime) else latest
         except Exception as exc:
             prefetch_error = f"unexpected error: {exc}"
+
+    if not options.allow_same_day_rerun:
+        existing = deps.state_store.get_successful_run(run_date)
+        if existing is not None:
+            report = existing.report_path
+            msg = (
+                f"preflight abort: {run_date.isoformat()} に対して成功済みの run が"
+                f"既にあります (run_id={existing.run_id}, "
+                f"report={report if report is not None else '不明'})。"
+                "再実行するには --allow-same-day-rerun を指定してください。"
+            )
+            raise PreflightAbort(msg)
 
     config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
     run_id = deps.state_store.start_run(

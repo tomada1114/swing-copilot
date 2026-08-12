@@ -61,10 +61,15 @@ description: >
 `<WORKDIR>` が既に分かっている場合（同一セッションでの再実行、ユーザーがパスを
 指定した場合）はここで確認する。分からない場合は **Step 1 の直後に同じ確認**を行う。
 
-1. `<WORKDIR>/analysis_result.json` が存在する場合:
+1. 次のいずれかが存在する場合、既存アーティファクトとみなす:
+   - `<WORKDIR>/analysis_result.json`
+   - `reports/<as_of>/*/analysis_result.json`（glob。`<WORKDIR>` が未確定でも
+     対象日 `as_of` さえ分かれば確認できる。#118 の同日重複起動ガードが
+     `run_id` 発行前に判定する`run_date`単位の重複と同じ粒度で見るための追加確認）
    - ユーザーが明示的に再実行・やり直しを求めていなければ **上書きしない**。
      既存の verdict を要約して報告し、再実行するか確認する
-   - 再実行を求められている場合のみ、以降のステップで上書きしてよい
+   - 再実行を求められている場合のみ、以降のステップで上書きしてよい（Step 1 の
+     `uv run copilot-daily` に `--allow-same-day-rerun` を付けて実行する）
 2. `<WORKDIR>/analysis_work/` が存在する場合、各断片の `run_id`、`as_of`、`input_digest` を読む:
    - 3値すべてが `analysis_input.json` と**一致**し、JSON として妥当で、
      ペイロードキーがある → その銘柄 × 専門家は **再分析せず流用**する
@@ -89,6 +94,21 @@ uv run copilot-daily <ユーザー指定の引数>
 ```
 
 引数（対象日、dry-run/live 等）はユーザーの指示に従う。指定が無ければ引数なしで実行。
+
+**終了コード 2（preflight abort）を再入シグナルとして扱う（#118）。** これは
+同一 `run_date` に対して成功済みの run が既にあることを意味する（同日重複起動
+ガード。`run_date` は最新 bar 由来でプリフェッチ後にしか確定しないため、Step 0
+の事前確認をすり抜けることがある）。この場合:
+
+1. stderr のメッセージから既存の `run_id` とレポートパスを読み取る
+2. 既存レポート（`reports/<as_of>/<run_id>.md`）または
+   `uv run copilot-history run --run-id <run_id>` を読み、既存 verdict を要約する
+3. 「本日は既に分析済み」として上記要約とともに正常終了する。
+   `analysis_result.json` は書かない。Step 2 以降に進まない
+4. ユーザーが明示的に再実行を求めている場合のみ、`--allow-same-day-rerun` を
+   付けて Step 1 を再実行し、通常どおり続行する
+
+終了コード 0/1 は従来どおり続行する。
 
 ターミナル出力から **`analysis_input.json` の絶対パス**を拾う。
 

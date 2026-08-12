@@ -81,6 +81,14 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     )
     parser.add_argument("--strategy", default="default")
     parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
+    parser.add_argument(
+        "--allow-same-day-rerun",
+        action="store_true",
+        help=(
+            "bypass the same-day rerun guard: proceed even when a successful "
+            "run already exists for the resolved run_date"
+        ),
+    )
     args = parser.parse_args(argv)
     return DailyRunOptions(
         as_of=args.as_of,
@@ -89,6 +97,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         limit=args.limit,
         strategy_key=args.strategy,
         log_level=args.log_level,
+        allow_same_day_rerun=args.allow_same_day_rerun,
     )
 
 
@@ -279,10 +288,13 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(str(exc)) from exc
     try:
         _preflight(deps, options)
+        result = run_daily(options, deps)
     except PreflightAbort as exc:
+        # `_preflight` catches the account-equity trap; `run_daily` itself
+        # raises the same exception for the same-day rerun guard (P8-118),
+        # since `run_date` only resolves after prefetch, deep inside the run.
         sys.stderr.write(f"{exc}\n")
         raise SystemExit(2) from exc
-    result = run_daily(options, deps)
     paths = TerminalPaths(
         report=result.report_path,
         analysis_input=result.analysis_input_path,

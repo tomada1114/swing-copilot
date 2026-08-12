@@ -325,7 +325,10 @@ class TestFiveSymbolEndToEnd:
 
     def test_same_day_runs_keep_independent_analysis_artifact_directories(self, deps):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-        second = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
 
         assert first.analysis_input_path is not None
         assert second.analysis_input_path is not None
@@ -411,7 +414,10 @@ class TestFiveSymbolEndToEnd:
 
     def test_rerun_is_idempotent_and_gets_a_new_run_id(self, deps):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-        second = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
 
         assert first.run_id != second.run_id
         assert second.status == RunStatus.SUCCESS

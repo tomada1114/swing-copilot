@@ -34,6 +34,7 @@ from swing_copilot.pipeline.forward_returns import (
     compute_forward_return,
     find_maturity_trading_day,
 )
+from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.storage.verdict_records import VerdictOutcomeRecord
 
 if TYPE_CHECKING:
@@ -170,7 +171,13 @@ def evaluate_verdicts(
     window_start = as_of - timedelta(
         days=thresholds.lookback_window_days + _EVALUATION_WINDOW_PADDING_DAYS
     )
-    runs = _group_by_run(state_store.get_verdicts_in_window(window_start, as_of))
+    # P8-124: classifying a same-day loser would write `verdict_outcomes` rows
+    # that every window aggregate then double-counts.
+    runs = _group_by_run(
+        keep_adopted_rows(
+            state_store.get_verdicts_in_window(window_start, as_of), state_store
+        )
+    )
 
     request = _EvaluationRequest(
         as_of=as_of, thresholds=thresholds, benchmark_symbol=benchmark_symbol

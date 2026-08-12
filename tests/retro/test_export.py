@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from swing_copilot.storage.state_store import StateStore
 
 RUN_ID = UUID("11111111-1111-1111-1111-111111111111")
+#: A second run sharing `RUN_DATE`, the shape `collect` skips (P8-119/#124).
+SUPERSEDED_RUN_ID = UUID("99999999-9999-9999-9999-999999999999")
 RUN_DATE = date(2027, 3, 1)
 MATURITY_5D = date(2027, 3, 8)
 MATURITY_20D = date(2027, 3, 29)
@@ -102,6 +104,18 @@ def _verdict(
         ),
         no_trade=False,
     )
+
+
+def _insert_run(
+    state_store: StateStore, run_id: UUID, run_date: date, started_at: datetime
+) -> None:
+    """Insert a minimal `runs` row so `get_run_started_at` can resolve it."""
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+            [str(run_id), run_date, started_at],
+        )
 
 
 def _outcome(
@@ -244,6 +258,38 @@ class TestBuildRetroInput:
         assert (mix.proceed_count, mix.skip_count) == (1, 1)
         assert mix.proceed_ratio == pytest.approx(0.5)
         assert mix.is_flagged is False
+
+    def test_verdict_mix_counts_a_same_day_rerun_once(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # P8-124: `collect` skips a same-day loser but leaves its previously
+        # written rows in place, so the window read has to drop them too.
+        # Without that, this day is counted twice: 2 runs / 4 verdicts.
+        _insert_run(
+            populated_store, RUN_ID, RUN_DATE, datetime(2027, 3, 1, 18, tzinfo=UTC)
+        )
+        _insert_run(
+            populated_store,
+            SUPERSEDED_RUN_ID,
+            RUN_DATE,
+            datetime(2027, 3, 1, 9, tzinfo=UTC),
+        )
+        populated_store.replace_run_verdicts(
+            SUPERSEDED_RUN_ID,
+            [
+                _verdict("AAPL", "proceed", run_id=SUPERSEDED_RUN_ID),
+                _verdict("MSFT", "proceed", run_id=SUPERSEDED_RUN_ID),
+            ],
+            [],
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        mix = document.aggregates.verdict_mix
+        assert (mix.run_count, mix.verdict_count) == (1, 2)
+        assert (mix.proceed_count, mix.skip_count) == (1, 1)
 
     def test_verdict_mix_is_computed_even_when_nothing_has_matured(
         self, state_store: StateStore, market_store: MarketStore, tmp_path: Path

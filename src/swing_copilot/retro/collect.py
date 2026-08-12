@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -36,6 +36,7 @@ from swing_copilot.analysis.validate import (
     load_analysis_input,
     load_analysis_result,
 )
+from swing_copilot.retro.adoption import adopt_one_run_per_date
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
     VerdictReasonRecord,
@@ -52,13 +53,6 @@ if TYPE_CHECKING:
         SymbolAnalysis,
     )
     from swing_copilot.storage.state_store import StateStore
-
-#: Substituted for an unresolvable `runs.started_at` (P8-119) so a same-day
-#: tie-break comparison never crashes on `None`; such a candidate sorts as
-#: the oldest, so it only wins when every candidate is equally unresolved
-#: (falling through to the run_id string tie-break) or when it is the sole
-#: candidate for that date.
-_UNRESOLVED_STARTED_AT = datetime.min.replace(tzinfo=UTC)
 
 logger = logging.getLogger(__name__)
 
@@ -178,12 +172,14 @@ def _adopted_runs(
                     f"{run_date.isoformat()}: run {run_directory.run_id} の "
                     "started_at を解決できないため同日重複の判定を適用しない"
                 )
-        winner = max(
-            candidates,
-            key=lambda candidate: (
-                started_at_by_run_id[candidate[0].run_id] or _UNRESOLVED_STARTED_AT,
-                str(candidate[0].run_id),
-            ),
+        adopted_run_ids = adopt_one_run_per_date(
+            ((run_date, run_directory.run_id) for run_directory, _ in candidates),
+            started_at_by_run_id,
+        )
+        winner = next(
+            candidate
+            for candidate in candidates
+            if candidate[0].run_id in adopted_run_ids
         )
         adopted.append(winner)
         for run_directory, _loaded in candidates:

@@ -13,6 +13,7 @@ risk:
   max_correlation: 0.7 # warn (do not block) above this Pearson correlation
   correlation_lookback_days: 60
   max_portfolio_heat_pct: 6.0 # %; roadmap §5 P4-17（要検証）
+  earnings_lookahead_days: 45 # calendar days; covers max_hold_days=25 business days + margin (P8-115)
   earnings_block_business_days: 2 # weekdays; roadmap §5 P4-18（要検証）
   earnings_warn_business_days: 5 # weekdays; roadmap §5 P4-18（要検証）
   circuit_daily_loss_pct: 2.0 # realized loss %; roadmap §5 P4-19（要検証）

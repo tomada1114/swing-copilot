@@ -695,7 +695,9 @@ class RiskChecker:
 1秒間隔の全試行レート制限、1秒・2秒の決定論的指数バックオフで呼ぶ。
 429/5xxとtransport/timeoutだけを再試行し、4xx・応答型不正は再試行しない。
 応答イベントは要求した包含区間`start <= earnings_date <= end`でも再検証する。
-各銘柄の失敗は`pipeline/earnings.py`で`None`へ変換し、他銘柄を継続する。
+`pipeline/earnings.py::collect_earnings_calendar`は銘柄ごとの結果を
+`found`/`none_in_window`/`fetch_failed`の3状態を持つ`data/earnings.py::EarningsLookup`
+（`status`・`event`・`recent_event`）へ正規化する（P8-115、下記追記）。
 APIキー未設定時はガード全体を無効化し、
 `NO_EARNINGS_DATA: FINNHUB_API_KEY is not configured`をレポート警告へ渡す。
 
@@ -722,6 +724,21 @@ rejectした段が保持する**。`check()`は sizing/regime → 決算ガー�
 （`analysis/context.py`は`binding_constraint`と`sizing_warnings`のみ描画する）ため、
 決算ブロックは`sizing_warnings`にも`EARNINGS_PROXIMITY_BLOCK`を追記して定性分析側から
 可視に保つ。
+
+**P8-115実装時追記（Issue #115）**: 照会窓を`_LOOKAHEAD_CALENDAR_DAYS = 30`固定から
+`risk.earnings_lookahead_days`（既定45暦日）へ変更した。25営業日の最大保有期間は
+暦日換算で約35日のため、30日窓では保有期間の終盤に入る決算が窓外へ落ち、
+`fetch_next_earnings`が`None`を返して`EARNINGS_DATE_UNKNOWN`が誤って立っていた
+（2026-08-07 runで候補10銘柄全件が該当）。45日は35日に週末・祝日マージン10日を
+足した値である。あわせて`EARNINGS_DATE_UNKNOWN`を「fetch失敗」だけに限定し、
+「窓内に決算なし（`none_in_window`、窓が保有期間を覆っている以上は実質clear）」を
+無警告にした。`RiskChecker._apply_earnings_guard`は`EarningsLookup.recent_event`
+（`storage/earnings_records.py::get_earnings_event`が返す、symbol主キーの
+「最後に既知だったイベント」1行。将来日・過去日を問わない）が`as_of`より前で
+3営業日以内なら`EARNINGS_RECENTLY_REPORTED: <N> business days since <YYYY-MM-DD>`を
+`sizing_warnings`へ追記する。`recent_event`は`fetch_next_earnings`の成否と独立に
+毎回`get_earnings_event`から読むため、直前runがfetch失敗でも直近実績の警告は失われない。
+ガード無効時（APIキー未設定・ヒストリカル再生）はいずれの警告も追加しない。
 
 **P4-19（roadmap §5、Issue #28）**:
 `risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、
@@ -1975,6 +1992,7 @@ risk:
   max_correlation: 0.7               # 保有銘柄との相関がこれを超えたら警告（ブロックしない、FR-06）
   correlation_lookback_days: 60      # 相関計算に用いる直近営業日数（FR-06）
   max_portfolio_heat_pct: 6.0        # 保有+承認候補のstopリスク上限%（roadmap §5 P4-17、要検証）
+  earnings_lookahead_days: 45         # 決算予定の照会窓（暦日）。25営業日の最大保有期間を覆う（P8-115）
   earnings_block_business_days: 2    # 決算までこの営業日数以内はblock（roadmap §5 P4-18、要検証）
   earnings_warn_business_days: 5     # block超〜この営業日数以内はwarn（roadmap §5 P4-18、要検証）
   circuit_daily_loss_pct: 2.0        # 日次実現損失上限%（roadmap §5 P4-19、要検証）

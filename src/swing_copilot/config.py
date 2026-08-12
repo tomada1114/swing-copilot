@@ -94,6 +94,11 @@ class RiskConfig(_StrictModel):
     # (roadmap §5 P4-17; breakout-trade-planner / Minervini 6-8%帯の
     # 保守側、要検証).
     max_portfolio_heat_pct: float = Field(default=6.0, gt=0.0)
+    # Earnings-calendar lookahead window in calendar days (P8-115). 45 covers
+    # max_hold_days=25 business days (~35 calendar days) plus a
+    # weekend/holiday margin, so an event due late in the hold period is not
+    # missed and misreported as EARNINGS_DATE_UNKNOWN.
+    earnings_lookahead_days: int = Field(default=45, ge=1)
     # Weekday-only earnings proximity thresholds (roadmap §5 P4-18;
     # parabolic-short-trade-planner, 要検証).
     earnings_block_business_days: int = Field(default=2, ge=0)

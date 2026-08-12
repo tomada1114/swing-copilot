@@ -422,6 +422,16 @@ def test_earnings_guard_thresholds_default_to_two_and_five_business_days():
     assert settings.risk.earnings_warn_business_days == 5
 
 
+def test_earnings_lookahead_days_defaults_to_forty_five_calendar_days():
+    settings = load_settings("config/settings.yaml")
+    assert settings.risk.earnings_lookahead_days == 45
+
+
+def test_earnings_lookahead_days_rejects_zero_or_negative():
+    with pytest.raises(ValidationError, match="earnings_lookahead_days"):
+        Settings.model_validate({"risk": {"earnings_lookahead_days": 0}})
+
+
 def test_circuit_breaker_thresholds_have_documented_defaults():
     settings = load_settings("config/settings.yaml")
     assert settings.risk.circuit_daily_loss_pct == 2.0

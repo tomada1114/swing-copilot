@@ -22,6 +22,7 @@ from swing_copilot.analysis.context import (
     format_score_breakdown,
 )
 from swing_copilot.analysis.filing_selection import select_filing_inputs
+from swing_copilot.analysis.news_supply import measure_news_supply
 from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     AnalysisContextBlocks,
@@ -208,12 +209,14 @@ def write_text_atomically(destination: Path, content: str) -> None:
 
 def _candidate_input(item: ExportCandidate, limits: TextExportLimits) -> CandidateInput:
     history = format_decision_history(item.decision_history)
+    news = _news_inputs(item.text_items, limits, item.candidate.symbol)
     return CandidateInput(
         symbol=item.candidate.symbol,
         score_breakdown=format_score_breakdown(item.candidate),
         risk_constraints=format_risk_constraints(item.risk_assessment),
         decision_history=history or None,
-        news=_news_inputs(item.text_items, limits, item.candidate.symbol),
+        news=news,
+        news_supply=measure_news_supply(item.candidate.symbol, item.text_items, news),
         filings=_filing_inputs(item.text_items, limits),
     )
 

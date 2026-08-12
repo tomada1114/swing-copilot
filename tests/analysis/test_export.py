@@ -19,6 +19,7 @@ from swing_copilot.analysis.export import (
     write_analysis_input,
     write_json_atomically,
 )
+from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
@@ -47,6 +48,9 @@ LIMITS = TextExportLimits(
     max_calendar_events=2,
     max_calendar_chars=20,
 )
+#: A production-shaped news budget, so supply levels are exercised against a
+#: cap that does not itself cut the feed below the symbol-mention floor.
+_SUPPLY_LIMITS = replace(LIMITS, max_news_items=20, max_news_chars=200)
 
 
 class _FixedClock:
@@ -167,7 +171,9 @@ def _calendar_event(source_id: str, day: int, body: str = "C" * 100) -> TextItem
 
 
 def _request(
-    *text_items: TextItem, calendar_events: tuple[TextItem, ...] = ()
+    *text_items: TextItem,
+    calendar_events: tuple[TextItem, ...] = (),
+    limits: TextExportLimits = LIMITS,
 ) -> ExportRequest:
     candidate = ExportCandidate(
         candidate=Candidate(
@@ -203,7 +209,7 @@ def _request(
         exposure_decision=_exposure(),
         performance_summary=None,
         candidates=(candidate,),
-        limits=LIMITS,
+        limits=limits,
         calendar_events=calendar_events,
     )
 
@@ -327,6 +333,103 @@ class TestBuildAnalysisInput:
         assert [item.model_dump() for item in first] == [
             item.model_dump() for item in second
         ]
+
+    def test_a_candidate_without_news_reports_no_supply_rather_than_nothing(self):
+        payload = build_analysis_input(_request(_filing()))
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert (supply.collected_items, supply.exported_items) == (0, 0)
+        assert supply.level == "none"
+
+    def test_a_feed_of_peer_stories_reports_no_symbol_specific_supply(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, body="Schneider Q2 earnings beat estimates."),
+                _news("finnhub:2", 27, body="ArcBest Q2 revenues rise year over year."),
+                limits=_SUPPLY_LIMITS,
+            )
+        )
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert (supply.exported_items, supply.symbol_mention_items) == (2, 0)
+        assert supply.level == "none"
+
+    def test_a_feed_naming_the_symbol_a_few_times_reports_sparse_supply(self):
+        payload = build_analysis_input(
+            _request(
+                *(
+                    _news(f"finnhub:{index}", 28, body="AAPL lifted guidance.")
+                    for index in range(SUFFICIENT_SYMBOL_MENTION_ITEMS - 1)
+                ),
+                _news("finnhub:peer", 27, body="Dell Q2 earnings beat estimates."),
+                limits=_SUPPLY_LIMITS,
+            )
+        )
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        assert supply.level == "sparse"
+
+    def test_a_feed_naming_the_symbol_at_the_floor_reports_sufficient_supply(self):
+        payload = build_analysis_input(
+            _request(
+                *(
+                    _news(f"finnhub:{index}", 28, body="AAPL lifted guidance.")
+                    for index in range(SUFFICIENT_SYMBOL_MENTION_ITEMS)
+                ),
+                limits=_SUPPLY_LIMITS,
+            )
+        )
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert supply.level == "sufficient"
+
+    def test_news_without_related_tickers_is_ranked_on_target_but_not_counted(self):
+        """Ordering keeps an undeclared item on target; supply does not credit it."""
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, body="Sector volumes rose.", related=("MSFT",)),
+                _news("finnhub:2", 10, body="Sector volumes rose.", related=()),
+                limits=_SUPPLY_LIMITS,
+            )
+        )
+
+        candidate = payload.candidates[0]
+        assert [item.source_id for item in candidate.news] == [
+            "finnhub:2",
+            "finnhub:1",
+        ]
+        assert candidate.news_supply is not None
+        assert candidate.news_supply.symbol_mention_items == 0
+        assert candidate.news_supply.level == "none"
+
+    def test_supply_counts_the_whole_feed_even_when_the_budget_truncates_it(self):
+        payload = build_analysis_input(
+            _request(
+                _news("finnhub:1", 28, body="AAPL lifted guidance."),
+                _news("finnhub:2", 27, body="AAPL lifted guidance."),
+                _news("finnhub:3", 26, body="AAPL lifted guidance."),
+            )
+        )
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert (supply.collected_items, supply.exported_items) == (3, 2)
+
+    def test_a_mention_lost_to_the_body_budget_is_not_counted(self):
+        """Supply measures the text the skill receives, not the collected body."""
+        payload = build_analysis_input(
+            _request(_news("finnhub:1", 28, body="Sector volumes rose sharply. AAPL"))
+        )
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert supply.symbol_mention_items == 0
 
     def test_news_bodies_are_truncated_to_the_export_budget(self):
         payload = build_analysis_input(_request(_news("finnhub:1", 20)))

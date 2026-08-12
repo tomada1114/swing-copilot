@@ -205,6 +205,51 @@ class FilingInput(_StrictModel):
     coverage: FilingCoverage | None = None
 
 
+NewsSupplyLevel = Literal["sufficient", "sparse", "none"]
+
+
+class NewsSupply(_StrictModel):
+    """How much of the exported news names this symbol at all (Issue #130).
+
+    Order alone cannot say where a candidate's own material ends: `news[]` is
+    sorted by relevance, but the reader sees no boundary between "articles
+    about this company" and "sector round-ups that merely arrived in its
+    feed". Without that, an analysis cannot tell "nothing bad was reported"
+    apart from "almost nothing about this company was supplied", and the
+    second was read as the first (Issue #130's J.B. Hunt run).
+
+    The counts are candidate-level aggregates, deliberately not a per-item
+    relevance flag: they let a reader qualify a conclusion drawn from the set,
+    without offering a per-article score the skill could re-rank on.
+
+    `symbol_mention_items` is a *lower bound* on company-specific supply -- an
+    article that discusses the company without ever printing its ticker is not
+    counted -- so the level errs toward declaring uncertainty. It stays
+    optional so archived `analysis-input-v2`/`-v3` documents written before it
+    existed keep parsing; absent means "not measured", never "measured as
+    sufficient".
+    """
+
+    collected_items: int = Field(ge=0)
+    exported_items: int = Field(ge=0)
+    symbol_mention_items: int = Field(ge=0)
+    level: NewsSupplyLevel
+
+    @model_validator(mode="after")
+    def _verify_supply_counts(self) -> Self:
+        """Keep the level and its counts from disagreeing with each other."""
+        if self.exported_items > self.collected_items:
+            msg = "exported_items cannot exceed collected_items"
+            raise ValueError(msg)
+        if self.symbol_mention_items > self.exported_items:
+            msg = "symbol_mention_items cannot exceed exported_items"
+            raise ValueError(msg)
+        if (self.level == "none") != (self.symbol_mention_items == 0):
+            msg = "level 'none' means exactly zero symbol_mention_items"
+            raise ValueError(msg)
+        return self
+
+
 class CandidateInput(_StrictModel):
     """One screened candidate's deterministic context plus its untrusted text.
 
@@ -220,6 +265,10 @@ class CandidateInput(_StrictModel):
     risk_constraints: str
     decision_history: str | None
     news: list[NewsInput]
+    # Optional by design, unlike `FilingInput.coverage`: requiring it under
+    # `analysis-input-v3` would make every v3 document archived before Issue
+    # #130 unreadable to P8 collect.
+    news_supply: NewsSupply | None = None
     filings: list[FilingInput]
 
 

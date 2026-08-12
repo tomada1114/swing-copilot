@@ -12,6 +12,7 @@ from swing_copilot.analysis.schemas import (
     AnalysisInput,
     AnalysisResult,
     CalendarEventInput,
+    NewsSupply,
     SourcedFact,
     SymbolAnalysis,
     Verdict,
@@ -49,6 +50,27 @@ class TestSchemaVersions:
             ValidationError, match="analysis-input-v3 requires coverage"
         ):
             AnalysisInput.model_validate(legacy)
+
+    @pytest.mark.parametrize(
+        "schema_version",
+        [
+            pytest.param("analysis-input-v2", id="v2-archive"),
+            pytest.param("analysis-input-v3", id="v3-archive"),
+        ],
+    )
+    def test_an_archive_without_news_supply_still_parses(self, schema_version):
+        archived = input_payload()
+        archived["schema_version"] = schema_version
+        archived["candidates"][0].pop("news_supply")
+        if schema_version == "analysis-input-v2":
+            archived["candidates"][0]["filings"][0].pop("coverage")
+        archived["input_digest"] = canonical_json_digest(
+            archived, excluded_field="input_digest"
+        )
+
+        parsed = AnalysisInput.model_validate(archived)
+
+        assert parsed.candidates[0].news_supply is None
 
     def test_a_wrong_result_schema_version_is_rejected(self):
         with pytest.raises(ValidationError, match="schema_version"):
@@ -101,6 +123,72 @@ class TestUniqueAnalysisEntities:
 
         with pytest.raises(ValidationError, match="result symbols must be unique"):
             AnalysisResult.model_validate(payload)
+
+
+class TestNewsSupplyCounts:
+    def test_a_consistent_supply_block_is_accepted(self):
+        supply = NewsSupply.model_validate(
+            {
+                "collected_items": 40,
+                "exported_items": 20,
+                "symbol_mention_items": 4,
+                "level": "sparse",
+            }
+        )
+
+        assert supply.level == "sparse"
+
+    def test_exporting_more_than_was_collected_is_rejected(self):
+        with pytest.raises(ValidationError, match="exported_items cannot exceed"):
+            NewsSupply.model_validate(
+                {
+                    "collected_items": 2,
+                    "exported_items": 3,
+                    "symbol_mention_items": 1,
+                    "level": "sparse",
+                }
+            )
+
+    def test_more_mentions_than_exported_items_is_rejected(self):
+        with pytest.raises(ValidationError, match="symbol_mention_items cannot exceed"):
+            NewsSupply.model_validate(
+                {
+                    "collected_items": 3,
+                    "exported_items": 3,
+                    "symbol_mention_items": 4,
+                    "level": "sparse",
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("mentions", "level"),
+        [
+            pytest.param(0, "sparse", id="empty-supply-graded-sparse"),
+            pytest.param(0, "sufficient", id="empty-supply-graded-sufficient"),
+            pytest.param(2, "none", id="present-supply-graded-none"),
+        ],
+    )
+    def test_the_none_level_must_mean_exactly_zero_mentions(self, mentions, level):
+        with pytest.raises(ValidationError, match="level 'none' means exactly zero"):
+            NewsSupply.model_validate(
+                {
+                    "collected_items": 5,
+                    "exported_items": 5,
+                    "symbol_mention_items": mentions,
+                    "level": level,
+                }
+            )
+
+    def test_a_negative_count_is_rejected(self):
+        with pytest.raises(ValidationError, match="symbol_mention_items"):
+            NewsSupply.model_validate(
+                {
+                    "collected_items": 5,
+                    "exported_items": 5,
+                    "symbol_mention_items": -1,
+                    "level": "none",
+                }
+            )
 
 
 class TestNoTradeContract:

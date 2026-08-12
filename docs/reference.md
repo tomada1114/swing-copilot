@@ -93,6 +93,10 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 元/出力文字数、選択方式、章の`full`/`partial`/`missing`が入り、
 過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
 後方互換で受理する。
+候補ごとの`news_supply`は、載せたニュースのうち`headline`／`summary`にティッカーが
+現れる件数を数えて`sufficient`／`sparse`／`none`を申告する（Issue #130）。同業の決算記事や
+セクター横断記事で枠が埋まった入力を、下流が「悪材料が無い」と読み違えないための
+コード所有の観測値であり、記事の除外にも並び順にも使わない。
 ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
 どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの
 `TextItem`（`source_type="calendar"`）はどの候補にも属さないため、run単位の

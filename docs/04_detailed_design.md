@@ -798,7 +798,7 @@ def fetch_calendar_events(start: "date", end: "date", *, as_of: "date") -> list[
 - **フェイルソフト**: 値取得の失敗（トランスポート・HTTP・応答形状）はイベントを落とさず、`Latest and prior values are unavailable: ...`と欠落理由を明示した要約に縮退する。`releases/dates`本体の失敗だけは従来どおり伝播し、ステップ(5)のフェイルソフト判定に委ねる
 - **シークレット**: FREDはHTTPエラーメッセージにAPIキー入りのリクエストURLをそのまま埋め込むため、縮退時のログは`logging.exception()`ではなく`api_key=***`へ置換した1行の警告として出す
 
-**P8-83実装時追記（Issue #83）**: `FinnhubNewsClient`はFinnhub応答の`related`（関連ティッカー）と`category`（分類ラベル）を`TextItem.related_symbols` / `TextItem.category`へ保持する。`related`はカンマ区切り文字列のため、大文字化・空要素除去・重複除去を行いソース側の並び順のままtupleにする。文字列でない値・欠落・空文字は空tuple（`category`は`None`）へ落とす。用途は3.16節のニュース選別であり、`analysis_input.json`のスキーマ（`analysis-input-v3`）は変更しない——関連度は`news[]`の**順序**として伝わる。
+**P8-83実装時追記（Issue #83）**: `FinnhubNewsClient`はFinnhub応答の`related`（関連ティッカー）と`category`（分類ラベル）を`TextItem.related_symbols` / `TextItem.category`へ保持する。`related`はカンマ区切り文字列のため、大文字化・空要素除去・重複除去を行いソース側の並び順のままtupleにする。文字列でない値・欠落・空文字は空tuple（`category`は`None`）へ落とす。用途は3.16節のニュース選別であり、記事ごとの関連度は`news[]`の**順序**として伝わる（`NewsInput`にフィールドを足さない）。なおIssue #130の`CandidateInput.news_supply`は候補単位の集計であってこの記事ごとの関連度ではなく、`related_symbols`も使わない（3.16.2節）。実測では永続化済みニュース行の`related`は全件`NULL`である。
 
 **P8-123実装時追記（Issue #123）**: 上記2フィールドは当初「収集時の分析補助であり永続化しない」設計だったが、ティッカー衝突（同一ティッカーの別取引所上場企業）を実データから判別できるようにするため、4.2節のDDLに`related_symbols VARCHAR` / `category VARCHAR`を追加し永続化するよう変更した。`record_text_items`は`related_symbols`をカンマ区切り文字列（空タプルは`NULL`）として`ON CONFLICT DO UPDATE`にも含めて保存する。既存DBへは`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追加し、過去行はバックフィルせず`NULL`のままとする。
 
@@ -982,13 +982,38 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 - **降格であって除外ではない**: 関連ティッカーに対象銘柄を含まない記事（セクター横断記事・他社記事・定型マーケットサマリ）は後順位へ回すだけで捨てない。関連記事が`max_news_items`に満たない銘柄でも、降格された記事が残りの枠を埋めるため`news[]`が空になったり枠が余ったりしない。除外にすると「関連記事が2件しか無い銘柄は2件で打ち切り」となり、判断材料の総量が銘柄ごとに不安定になる
 - **宣言なしは無関連ではない**: `related_symbols`が空の記事は降格しない。空はソースがティッカーを宣言しなかったことを意味し、無関連であることを意味しない。ここで降格すると、ティッカーメタデータを持たないソースがソースごと不利になる
-- **関連度は順序でのみ伝える**: `analysis_input.json`のスキーマは変更しない（`analysis-input-v3`のまま、`NewsInput`にフィールドを足さない）。スキル側が関連度フラグを自分の判断で読み替える余地を作らず、コードが決めた順序だけを渡す
+- **記事ごとの関連度は順序でのみ伝える**: `NewsInput`にはフィールドを足さない。スキル側が記事単位の関連度フラグを自分の判断で読み替えて並べ替える余地を作らず、コードが決めた順序だけを渡す。**P8-130実装時追記（Issue #130）**: 候補単位の集計だけは例外として`CandidateInput.news_supply`で渡す（3.16.2節）。順序は「どれが上位か」しか伝えられず、「自社材料がそもそも何件供給されたか」を伝えられないためである。記事単位のスコアではないので、この値で`news[]`を並べ替えることはできない。スキーマは`analysis-input-v3`のまま（任意フィールドとして追加）
 
 `category`は収集時に保持するが選別には使わない。Finnhubのカテゴリ語彙は安定した契約ではなく、これを閾値に使うと外部の分類変更で無言に選別が変わるためである。
 
 同一入力・同一`as_of`で選別が一致することは、収集順を入れ替えた同一集合が同一の`news[]`を返すことで検証する（`tests/analysis/test_export.py`）。
 
 なお、振り返り（3.23節）の鮮度ニュース`retro/surprises.py::_news_inputs()`は公開日時と`source_id`だけで並べており、この選別順を共有していない。鮮度データは「runのas_of以降に何が出たか」を漏れなく見せるための証拠であり、関連度で順位を付ける対象ではないためである（意図的な相違として記録する）。
+
+#### 3.16.2 自社材料の供給量（FR-07・FR-08、Issue #130）
+
+`analysis/news_supply.py::measure_news_supply(symbol, collected, exported)`が候補ごとに`CandidateInput.news_supply`（`NewsSupply`）を組み立てる。
+
+| フィールド | 意味 |
+|---|---|
+| `collected_items` | その銘柄について収集できたニュース件数（`max_news_items`で切る前） |
+| `exported_items` | 実際に`news[]`へ載った件数 |
+| `symbol_mention_items` | うち**エクスポート後の**`headline`＋`summary`にティッカーが独立トークンとして現れる件数 |
+| `level` | `sufficient`（`symbol_mention_items >= 5`）／`sparse`（1〜4）／`none`（0） |
+
+**解決する問題**: 2026-08-11のrunでJBHTへ供給された20件は、記念行事・長期リターンの自動生成記事・**同業**（SNDR / ARCB）の決算記事がほとんどで、JBHT自身の直近業績を報じた項目が無かった。にもかかわらず`proceed`寄りの根拠の一部が「ニュースに重大な悪材料が無い」だった。下流から見ると**「悪材料が無い」と「材料が供給されていない」が区別できない**——これが本節の対象である（`related`が誤って別企業の記事を混ぜる衝突はIssue #123の対象で、別問題）。
+
+**ティッカー言及で数える理由**: `TextItem.related_symbols`は使わない。永続化済みのニュース行は2026-08-11 runで収集した分を含め全2,265行とも`related`が`NULL`であり、メタデータ基準の計数は毎日「測定不能」しか返さない。また本問題は帰属メタデータが正しくても**内容が他社の話**である希薄化であって、メタデータでは検出できない。判定は大文字・独立トークン一致（`(JBHT)`・`JBHT.`は該当、`JBHTX`・小文字`jbht`は非該当）とする。
+
+**下限値であることの明示**: 社名しか書かない自社記事は数え落とし、1〜2文字のティッカーは無関係な大文字トークンを拾いうる。よってこの値は記事の除外にも順序にも使わず、**申告義務の引き金**としてのみ使う。誤差は「不確実性を申告する」側へ倒れる。
+
+**しきい値5の根拠**: 既定の`max_news_items_per_symbol: 20`に対する絶対値である。2026-08-11 runの実測では健全な8銘柄が6〜15件、本issueが報告するJBHTが4件で、5を境にJBHTだけが`sparse`になる。枠に対する比率にしないのは、枠が小さくても「自社材料4件」は結論を出すには薄いという判断が変わらないためである。
+
+**申告経路**: `news_supply` → `analyze-news`スキルが`level`が`sparse`/`none`のとき（または本文を読んで自社材料が見当たらないとき）`risk_flags`の先頭に`材料供給不足:`で始まる項目を置く → `news_summary.risk_flags`として`analysis_result.json`へ載り、レポートとverdict判断に届く。同スキルは併せて、悪材料の不在を好材料として書くことと、同業他社の実績を担当銘柄の実績として書くことを禁じられる。スキル指示が守られたかはingestでは検査できないため（`risk_flags`の欠落は構造的に不在と区別できない）、コード側の担保は「供給量を数えて必ず渡すこと」と、指示文にこの経路が残っていることの機械検査（`tests/analysis/test_skill_contract.py`）に留まる。
+
+**任意フィールドである理由**: `FilingInput.coverage`と異なり`analysis-input-v3`でも必須にしない。必須化するとIssue #130以前にアーカイブされたv3の`analysis_input.json`がP8 collectで読めなくなるためである。欠落は「未測定」であって「十分」ではない。
+
+境界（十分／希薄／ゼロ、`related_symbols`が空でも計数は変わらないこと、枠で切られた場合の`collected_items`と`exported_items`、旧アーカイブの後方互換）は`tests/analysis/test_news_supply.py`・`tests/analysis/test_export.py`・`tests/analysis/test_schemas.py`で検証する。
 
 ### 3.17 `analysis/validate.py` / `analysis/safety.py` / `analysis/snapshot.py` / `analysis/cli.py`（FR-08、CON-03、NFR-05）
 

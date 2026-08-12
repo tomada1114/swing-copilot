@@ -49,7 +49,9 @@ def _make_yfinance_provider():
     def fake_download(symbols, start, end, **kwargs):
         return _yfinance_two_symbol_fixture()
 
-    return YFinanceProvider(download_fn=fake_download)
+    # sleep_fn is faked so the retry backoff never burns real wall-clock time;
+    # the actual backoff schedule is asserted in test_yfinance_provider.py.
+    return YFinanceProvider(download_fn=fake_download, sleep_fn=lambda _delay: None)
 
 
 PROVIDER_FACTORIES = (_make_yfinance_provider,)

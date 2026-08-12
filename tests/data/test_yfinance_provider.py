@@ -35,7 +35,9 @@ class TestGetDailyBars:
         assert result.failures == ()
 
     def test_empty_response_marks_all_symbols_failed(self):
-        provider = YFinanceProvider(download_fn=lambda *_a, **_k: pd.DataFrame())
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: pd.DataFrame(), sleep_fn=lambda _delay: None
+        )
         result = provider.get_daily_bars(
             ["AAPL", "MSFT"], date(2026, 7, 15), date(2026, 7, 18)
         )
@@ -185,7 +187,9 @@ class TestGetLatestBars:
         assert result.bars.iloc[0]["close"] == pytest.approx(12.2)
 
     def test_symbol_with_no_bars_in_window_is_a_failure(self):
-        provider = YFinanceProvider(download_fn=lambda *_a, **_k: pd.DataFrame())
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: pd.DataFrame(), sleep_fn=lambda _delay: None
+        )
 
         result = provider.get_latest_bars(["AAPL"], date(2026, 7, 17))
 

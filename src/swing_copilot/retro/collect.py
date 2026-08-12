@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -46,8 +46,19 @@ from swing_copilot.storage.verdict_records import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from swing_copilot.analysis.schemas import AnalysisInput, SymbolAnalysis
+    from swing_copilot.analysis.schemas import (
+        AnalysisInput,
+        AnalysisResult,
+        SymbolAnalysis,
+    )
     from swing_copilot.storage.state_store import StateStore
+
+#: Substituted for an unresolvable `runs.started_at` (P8-119) so a same-day
+#: tie-break comparison never crashes on `None`; such a candidate sorts as
+#: the oldest, so it only wins when every candidate is equally unresolved
+#: (falling through to the run_id string tie-break) or when it is the sole
+#: candidate for that date.
+_UNRESOLVED_STARTED_AT = datetime.min.replace(tzinfo=UTC)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +91,13 @@ class CollectSummary:
 def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSummary:
     """Scan `reports_root` and replace each archived run's verdict rows.
 
+    Same-day duplicates (P8-119: more than one collectable run directory
+    sharing a `run_date`, the "input" side of what #118 now guards at the
+    door) are resolved before any write: only the run whose `runs.started_at`
+    is latest is collected, and the rest are noted as skipped rather than
+    written. A run this scan does not adopt is never touched -- its
+    previously collected rows, if any, are left exactly as they were.
+
     Args:
         state_store: Write target for `verdicts` / `verdict_sources`.
         reports_root: The daily pipeline's output directory (`reports/`).
@@ -93,10 +111,8 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
     notes: list[str] = []
     collected = verdict_count = source_count = coverage_count = 0
     run_directories = _find_run_directories(reports_root)
-    for run_directory in run_directories:
-        written = _collect_one_run(state_store, run_directory, notes)
-        if written is None:
-            continue
+    for run_directory, loaded in _adopted_runs(state_store, run_directories, notes):
+        written = _write_run(state_store, run_directory, loaded, notes)
         collected += 1
         verdict_count += written[0]
         source_count += written[1]
@@ -109,6 +125,75 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
         coverage_count=coverage_count,
         notes=tuple(notes),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedRun:
+    """One run directory's parsed documents, proven collectable."""
+
+    analysis_input: AnalysisInput
+    result: AnalysisResult
+
+
+def _adopted_runs(
+    state_store: StateStore,
+    run_directories: tuple[RunDirectory, ...],
+    notes: list[str],
+) -> list[tuple[RunDirectory, _LoadedRun]]:
+    """Return the one run directory to collect per `run_date` (P8-119).
+
+    Collectability -- both documents exist, parse, and `result.run_id`
+    matches the directory name -- is decided first and independently of
+    deduplication, so a broken later rerun can never hide an earlier good
+    run (design Example 2). Only among directories that clear that bar does
+    a `run_date` with more than one candidate get narrowed to the single
+    latest `runs.started_at` (ties broken on the greater `run_id` string,
+    for determinism). A `run_date` with exactly one collectable candidate is
+    always adopted, matching prior behavior even when its `started_at`
+    cannot be resolved.
+    """
+    by_date: dict[date, list[tuple[RunDirectory, _LoadedRun]]] = {}
+    for run_directory in run_directories:
+        loaded = _load_collectable_run(run_directory, notes)
+        if loaded is not None:
+            by_date.setdefault(run_directory.run_date, []).append(
+                (run_directory, loaded)
+            )
+
+    adopted: list[tuple[RunDirectory, _LoadedRun]] = []
+    for run_date, candidates in by_date.items():
+        if len(candidates) == 1:
+            # REQ-007: a single collectable candidate is always adopted,
+            # unconditionally on `started_at` -- there is nothing to dedupe
+            # against, so resolving it would only add a note no prior
+            # behavior ever produced.
+            adopted.append(candidates[0])
+            continue
+        started_at_by_run_id: dict[UUID, datetime | None] = {}
+        for run_directory, _loaded in candidates:
+            started_at = state_store.get_run_started_at(run_directory.run_id)
+            started_at_by_run_id[run_directory.run_id] = started_at
+            if started_at is None:
+                notes.append(
+                    f"{run_date.isoformat()}: run {run_directory.run_id} の "
+                    "started_at を解決できないため同日重複の判定を適用しない"
+                )
+        winner = max(
+            candidates,
+            key=lambda candidate: (
+                started_at_by_run_id[candidate[0].run_id] or _UNRESOLVED_STARTED_AT,
+                str(candidate[0].run_id),
+            ),
+        )
+        adopted.append(winner)
+        for run_directory, _loaded in candidates:
+            if run_directory is winner[0]:
+                continue
+            notes.append(
+                f"{run_date.isoformat()}: run {run_directory.run_id} は同日の"
+                f"重複のため収集をスキップ (採用: {winner[0].run_id})"
+            )
+    return adopted
 
 
 def _find_run_directories(reports_root: Path) -> tuple[RunDirectory, ...]:
@@ -153,13 +238,16 @@ def _parse_uuid(candidate: Path) -> UUID | None:
         return None
 
 
-def _collect_one_run(
-    state_store: StateStore, run_directory: RunDirectory, notes: list[str]
-) -> tuple[int, int, int] | None:
-    """Replace one run; return `(verdicts, sources, coverages)`, or `None`.
+def _load_collectable_run(
+    run_directory: RunDirectory, notes: list[str]
+) -> _LoadedRun | None:
+    """Parse and validate one run directory; return `None` if unusable.
 
     `None` means the run was skipped fail-soft, with the reason appended to
-    `notes`.
+    `notes`. This is "collectability" (P8-119 REQ-003): both documents exist,
+    parse under their strict schemas, and `result.run_id` matches the
+    directory name -- decided independently of, and before, same-day
+    deduplication.
     """
     label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
     input_path = run_directory.path / ANALYSIS_INPUT_FILENAME
@@ -184,6 +272,18 @@ def _collect_one_run(
         )
         return None
 
+    return _LoadedRun(analysis_input=analysis_input, result=result)
+
+
+def _write_run(
+    state_store: StateStore,
+    run_directory: RunDirectory,
+    loaded: _LoadedRun,
+    notes: list[str],
+) -> tuple[int, int, int]:
+    """Replace one adopted run's rows; return `(verdicts, sources, coverages)`."""
+    label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
+    analysis_input, result = loaded.analysis_input, loaded.result
     source_types = _SourceTypeIndex(analysis_input)
     verdicts: list[VerdictRecord] = []
     sources: list[VerdictSourceRecord] = []

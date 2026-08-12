@@ -19,6 +19,7 @@ from swing_copilot.storage.history_queries import (
     get_rejections,
     get_run_by_date,
     get_run_detail,
+    get_run_started_at,
     get_signal_outcomes,
     get_symbol_timeline,
     list_runs,
@@ -276,6 +277,27 @@ class TestGetRunByDate:
         found = get_run_by_date(state_store._database, run_date)  # noqa: SLF001
 
         assert found == newer_run_id
+
+
+class TestGetRunStartedAt:
+    """P8-119: `retro/collect.py`'s same-day duplicate tie-break input."""
+
+    def test_unknown_run_id_returns_none(self, state_store: StateStore) -> None:
+        assert get_run_started_at(state_store._database, uuid4()) is None  # noqa: SLF001
+
+    def test_known_run_id_returns_its_started_at(self, state_store: StateStore) -> None:
+        run_id = uuid4()
+        started_at = datetime(2026, 8, 6, 15, 6, 7, tzinfo=UTC)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [str(run_id), date(2026, 8, 6), started_at],
+            )
+
+        found = get_run_started_at(state_store._database, run_id)  # noqa: SLF001
+
+        assert found == started_at
 
 
 class TestGetSignalOutcomes:

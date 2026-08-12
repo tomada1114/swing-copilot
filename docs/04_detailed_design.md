@@ -1443,6 +1443,8 @@ src/swing_copilot/retro/
 
 `collect`（`copilot-retro collect`）は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の完全置換（DELETE→INSERT、1トランザクション）で取り込む。`analysis_result.json`が訂正されていれば再取り込みで更新される。run_idはディレクトリ名のUUID、runのas_ofは親ディレクトリ名の日付から得る。`analysis_result.json`と`analysis_input.json`のどちらかを欠くrunディレクトリ、および`analysis_input.json`側に見つからないsource_idを引用する行は、取り込まずnoteへ記録する（fail-soft）。走査0件は正常終了。
 
+**P8-119実装時追記（Issue #119）**: 同一`run_date`に複数の収集可能なrunディレクトリがあると、それぞれ独立サンプルとして`verdicts`へ二重計上されていた（#118がマージ前は入口の重複起動ガードが無く、実際に2026-08-06が20件＝1日ぶんの重みが2倍で集計されていた）。`_adopted_runs()`が同日重複排除を「収集可能性の判定」より後・「実際の書き込み」より前に挟む: まず`_load_collectable_run()`（両ドキュメントの存在・パース・`result.run_id`とディレクトリ名の一致）を全runディレクトリに適用し、この時点で不採用になったものは従来どおりnoteに記録される。次に`run_date`単位でグルーピングし、**候補が1件だけの日付はstarted_atの解決有無に関わらずそのまま採用する**（従来挙動を変えないため。既存テスト無改変で通る、REQ-007）。**候補が2件以上ある日付だけ**`StateStore.get_run_started_at(run_id)`（`storage/history_queries.py`、`runs`テーブルの読み出し専用クエリ）で`started_at`を解決し、最新の1件だけを採用してnoteに残す。タイブレークは`run_id`文字列の降順。`started_at`が解決できない候補（DBと`reports/`が乖離）はその旨をnoteに残したうえで最古扱いにフォールバックし、比較不能でクラッシュしない。採用されなかったrunには`replace_run_verdicts`を呼ばない——**既に書き込まれた行を消しに行かない**契約（Not In Scope）を守るため、前回runで採用されていたrunが今回の重複判定で不採用側に回っても、そのrunの既存行はそのまま残る。
+
 `evaluate`は`(run_id, horizon_days)`単位の完全置換で、`replace_signal_outcomes`と同じパターン。株価訂正後の再実行で分類が更新される。複数行書き込みは全コミットか全ロールバック。
 
 #### 3.23.2 満期セマンティクスと`as_of`の意味（決定D7・重要）

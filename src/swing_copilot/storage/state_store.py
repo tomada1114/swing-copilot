@@ -21,6 +21,7 @@ from swing_copilot.storage import (
     earnings_records,
     exposure_records,
     ftd_records,
+    history_queries,
     paper_records,
     regime_records,
     text_records,
@@ -505,6 +506,10 @@ class StateStore:
     def get_latest_run_report_path(self) -> Path | None:
         """Return the newest completed generated artifact path."""
         return paper_records.get_latest_run_report_path(self._database)
+
+    def get_run_started_at(self, run_id: UUID) -> datetime | None:
+        """Return one run's `started_at`, or `None` if it has no `runs` row."""
+        return history_queries.get_run_started_at(self._database, run_id)
 
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]

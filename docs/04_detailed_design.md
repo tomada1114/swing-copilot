@@ -326,6 +326,14 @@ class EdgarClient:
 
 **P6-26実装時追記（roadmap §5 P6-26）**: `fetch_filing_texts(symbol, form_types, *, as_of, since=None, limit=None)`に`since`/`limit`を追加した。従来は`as_of`（point-in-time上限）のみで下限も件数上限もなく、返却順も外部`get_filings()`の順そのまま——`fetch_fundamentals()`が`filed_at`で明示ソートしているのと非対称だった。`since`（`filed_at >= since`、inclusive下限）と`limit`（最大件数）で絞り込んだ後、常に`filed_at`降順でソートしてから`limit`を適用するため、「直近N件」の意味が外部ライブラリの返却順に左右されない。呼び出し元`text/edgar_filings.py::fetch_recent_filings_text()`は`FilingLookbackBounds(lookback_days, limit)`（`settings.analysis.filing_lookback_days`/`max_filings_per_symbol`、既定90日・3件。P7で`settings.llm.*`から移設）から`since = as_of - lookback_days`を計算して渡す。`fetch_recent_filings()`（`FilingRef`を返す方、`pipeline/daily.py`からは未使用）は本Issueのスコープ外のため変更していない。
 
+**Issue #128実装時追記（決算8-KのExhibit 99.1）**: 決算8-Kの主文書はItem 2.02の「プレスリリースをExhibit 99.1としてfurnishした」という告知だけで、売上・EPS・通期ガイダンス・経営陣コメントはExhibit側にある。従来は`filing.text()`（主文書のみ）を`content_text`にしていたため、入力にガイダンスが一切存在しなかった。`_filing_text_item()`は8-K・8-K/Aに限り`filing.attachments.documents`から`document_type`が`EX-99`で始まる添付（`EX-99` / `EX-99.1` / `EX-99.01` / `EX-99.2` …）を提出順に最大3件取得し、`\n\n[EXHIBIT <document_type> <document>]\n`ヘッダ付きで**同じ`content_text`へ連結する**。10-K/10-Qは主文書に実体があり、その添付は証明書・定型文が中心のため対象外とする。EX-10（重要契約）やEX-23（同意書）は決算ナラティブではないので99系だけに限定する。
+
+- **1つの開示は1つの`TextItem`のまま**とする。Exhibitを別`source_id`で切り出すと`analysis_source_coverage.selection_mode`に新しい値が必要になるが、当該列はCHECK制約でenumを固定しており、`CREATE TABLE IF NOT EXISTS`は既存テーブルを更新せず、DuckDBは`ALTER ... ADD COLUMN`にCHECKを付けられない。運用者の既存DBだけがINSERTで落ちる形になるため、既存の`selection_mode`集合（`full` / `head_fallback` / `section_priority` / `section_priority_partial` / `omitted_symbol_budget`）を一切増やさない設計を採る。
+- **予算**: 1開示あたりのExhibit合計を60,000字までとし、超過分は`\n[... exhibit truncated ...]`を末尾に付けて切り詰める。8-Kの主文書は数千〜23,000字程度なので、`analysis.max_filing_chars`（既定120,000）の内側に収まり、`max_filing_chars_per_symbol`（既定240,000）でも決算8-K 2件＋10-Q 1件が同居できる。予算は開示単位で共有し、先頭のExhibit（通常99.1のプレスリリース本文）から先に割り当てる。予算を使い切った後続Exhibitはダウンロードもしない。
+- **`coverage.original_chars`の定義**: 「その開示についてパイプラインが保持している監査コピー全体の文字数」であり、本変更後は**主文書＋連結済みExhibit**の長さを指す。主文書だけの長さではない。`select_filing_text()`は従来どおり`len(item.content_text)`を`original_chars`とするので、契約は変わらず意味だけが広がる。8-Kは章抽出の対象外なので、合計が`max_filing_chars`を超える場合の縮退は従来どおり`head_fallback`（先頭スライス）である。
+- **HTML/テキスト変換**: edgartoolsの`Attachment.text()`に委ねる。HTMLはテキストへ変換され、バイナリ（99.1としてfurnishされるPDFのスライド資料など）は`None`が返る。これは失敗ではなく不在として扱い、そのExhibitを飛ばす。
+- **fail-soft／レート制限**: Exhibit取得は10-Q章抽出と同じくfail-softで、例外は握って`logger.exception()`で記録し、既に組み立て済みのExhibitと主文書テキストは保持する。添付一覧の取得と各Exhibitのダウンロードはいずれも`_with_retries()`経由なので、10リクエスト/秒のthrottleとretry方針（合計3試行、検証エラーは再試行しない）が全試行に適用される。
+
 ### 3.7 `storage/database.py` / `storage/market_store.py`
 
 ```python

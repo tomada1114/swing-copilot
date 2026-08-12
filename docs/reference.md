@@ -87,8 +87,11 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
 開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする。
 10-Q/10-Q-Aは財務諸表、MD&A、リスク要因、法的手続を章優先で構成し、抽出不能時のみ
-先頭スライスへ縮退する。各開示の`coverage`には元/出力文字数、選択方式、章の
-`full`/`partial`/`missing`が入り、過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
+先頭スライスへ縮退する。8-Kは主文書に加えてExhibit 99系（プレスリリース本文、
+合計60,000字まで）を同じ本文へ連結して取り込むため、`coverage`の`original_chars`は
+主文書とExhibitを合わせた文字数を指す（Issue #128）。各開示の`coverage`には
+元/出力文字数、選択方式、章の`full`/`partial`/`missing`が入り、
+過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
 後方互換で受理する。
 ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
 どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの

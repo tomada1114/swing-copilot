@@ -14,7 +14,39 @@ from swing_copilot.storage.market_store import FundamentalsRecord
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from swing_copilot.text.base import TextItem
+
 IDENTITY = "swing-copilot tester tmasuyama1114@gmail.com"
+
+
+class FakeAttachment:
+    """One filed document, shaped like edgartools' `Attachment`."""
+
+    def __init__(
+        self,
+        document_type: str,
+        document: str,
+        text: str | None = "",
+        error: Exception | None = None,
+    ) -> None:
+        self.document_type = document_type
+        self.document = document
+        self._text = text
+        self._error = error
+        self.text_calls = 0
+
+    def text(self):
+        self.text_calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._text
+
+
+class FakeAttachments:
+    """A filing's attachment set, shaped like edgartools' `Attachments`."""
+
+    def __init__(self, documents: list[FakeAttachment]) -> None:
+        self.documents = documents
 
 
 class FakeFiling:
@@ -34,6 +66,16 @@ class FakeFiling:
         self.filing_url = self.DEFAULT_URL
         self.filing_text = "Full filing text content."
         self.report: FakeTenQReport | None = None
+        self.documents: list[FakeAttachment] = []
+        self.attachments_error: Exception | None = None
+        self.attachments_calls = 0
+
+    @property
+    def attachments(self):
+        self.attachments_calls += 1
+        if self.attachments_error is not None:
+            raise self.attachments_error
+        return FakeAttachments(self.documents)
 
     def text(self):
         return self.filing_text
@@ -801,3 +843,276 @@ class TestFetchFilingTextsBounds:
         )
 
         assert [item.source_id for item in items] == ["edgar:newest"]
+
+
+def _eight_k_with_exhibits(*exhibits: FakeAttachment) -> FakeFiling:
+    """An 8-K whose primary document is the usual Item 2.02 notice."""
+    filing = FakeFiling("0001-26-000009", "8-K", date(2026, 7, 18), date(2026, 7, 18))
+    filing.filing_text = "Item 2.02 Results of Operations. See Exhibit 99.1."
+    filing.documents = list(exhibits)
+    return filing
+
+
+def _fetch_one(
+    filing: FakeFiling,
+    sleep_fn: Callable[[float], None] = lambda _s: None,
+    clock: FakeClock | None = None,
+) -> TextItem:
+    """Fetch `filing`'s single `TextItem` through the public entry point."""
+    client = EdgarClient(
+        IDENTITY,
+        company_factory=_company_factory(FakeCompany([filing])),
+        clock=clock,
+        sleep_fn=sleep_fn,
+    )
+    return client.fetch_filing_texts(
+        "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+    )[0]
+
+
+class TestEightKExhibits:
+    """Issue #128: an earnings 8-K's substance lives in Exhibit 99.1."""
+
+    def test_exhibit_text_is_appended_to_the_primary_document_text(self):
+        release = FakeAttachment(
+            "EX-99.1", "release.htm", "Q2 revenue rose 8%. FY guidance raised."
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(release))
+
+        assert item.content_text == (
+            "Item 2.02 Results of Operations. See Exhibit 99.1."
+            "\n\n[EXHIBIT EX-99.1 release.htm]\n"
+            "Q2 revenue rose 8%. FY guidance raised."
+        )
+
+    def test_every_exhibit_ninety_nine_variant_is_collected_in_filed_order(self):
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "press release"),
+            FakeAttachment("EX-99.2", "supplement.htm", "supplemental detail"),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert item.content_text.endswith(
+            "\n\n[EXHIBIT EX-99.1 release.htm]\npress release"
+            "\n\n[EXHIBIT EX-99.2 supplement.htm]\nsupplemental detail"
+        )
+
+    def test_exhibits_outside_the_ninety_nine_series_are_excluded(self):
+        exhibits = (
+            FakeAttachment("EX-10.1", "contract.htm", "material contract"),
+            FakeAttachment("EX-99.1", "release.htm", "press release"),
+            FakeAttachment("GRAPHIC", "logo.jpg", "binary"),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert "material contract" not in item.content_text
+        assert "logo.jpg" not in item.content_text
+        assert item.content_text.endswith(
+            "\n\n[EXHIBIT EX-99.1 release.htm]\npress release"
+        )
+
+    def test_eight_k_without_exhibits_keeps_the_primary_document_text_alone(self):
+        item = _fetch_one(_eight_k_with_exhibits())
+
+        assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
+
+    def test_binary_exhibit_without_extractable_text_is_skipped(self):
+        exhibits = (
+            FakeAttachment("EX-99.1", "deck.pdf", None),
+            FakeAttachment("EX-99.2", "release.htm", "press release"),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert "deck.pdf" not in item.content_text
+        assert item.content_text.endswith(
+            "\n\n[EXHIBIT EX-99.2 release.htm]\npress release"
+        )
+
+    def test_blank_exhibit_text_is_skipped(self):
+        item = _fetch_one(
+            _eight_k_with_exhibits(FakeAttachment("EX-99.1", "empty.htm", "   \n  "))
+        )
+
+        assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
+
+    def test_at_most_three_exhibits_are_retrieved(self):
+        exhibits = [
+            FakeAttachment(f"EX-99.{n}", f"doc{n}.htm", f"body {n}")
+            for n in range(1, 6)
+        ]
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert [exhibit.text_calls for exhibit in exhibits] == [1, 1, 1, 0, 0]
+        assert "doc4.htm" not in item.content_text
+
+    def test_forms_other_than_eight_k_never_request_attachments(self):
+        filing = FakeFiling(
+            "0001-26-000010", "10-Q", date(2026, 7, 18), date(2026, 6, 30)
+        )
+        filing.documents = [FakeAttachment("EX-99.1", "release.htm", "press release")]
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany([filing])),
+            sleep_fn=lambda _s: None,
+        )
+
+        item = client.fetch_filing_texts(
+            "AAPL", ["10-Q"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )[0]
+
+        assert filing.attachments_calls == 0
+        assert item.content_text == "Full filing text content."
+
+
+def _exhibit_block(content_text: str, header: str) -> str:
+    """Return just the body appended under `header`, up to the next block."""
+    return content_text.split(f"[EXHIBIT {header}]\n", 1)[1].split("\n\n[EXHIBIT ", 1)[
+        0
+    ]
+
+
+class TestEightKExhibitBudget:
+    """60,000 exhibit characters per filing, shared across its exhibits."""
+
+    def test_exhibit_longer_than_the_budget_is_cut_with_an_inline_marker(self):
+        oversized = FakeAttachment("EX-99.1", "release.htm", "x" * 70_000)
+
+        item = _fetch_one(_eight_k_with_exhibits(oversized))
+
+        assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == (
+            "x" * 60_000 + "\n[... exhibit truncated ...]"
+        )
+
+    def test_exhibit_exactly_at_the_budget_is_kept_whole_and_unmarked(self):
+        exact = FakeAttachment("EX-99.1", "release.htm", "x" * 60_000)
+
+        item = _fetch_one(_eight_k_with_exhibits(exact))
+
+        assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == "x" * 60_000
+
+    def test_exhausted_budget_skips_the_next_exhibit_without_downloading_it(self):
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "a" * 60_000),
+            FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert exhibits[1].text_calls == 0
+        assert "supplement.htm" not in item.content_text
+
+    def test_partially_spent_budget_truncates_the_next_exhibit(self):
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "a" * 59_990),
+            FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert _exhibit_block(item.content_text, "EX-99.2 supplement.htm") == (
+            "b" * 10 + "\n[... exhibit truncated ...]"
+        )
+
+
+class TestEightKExhibitFailSoft:
+    def test_unavailable_attachment_list_falls_back_to_the_primary_document(
+        self, caplog
+    ):
+        filing = _eight_k_with_exhibits()
+        filing.attachments_error = ConnectionError("EDGAR attachment index unavailable")
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one(filing)
+
+        assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
+        assert "Exhibit retrieval failed for accession 0001-26-000009" in caplog.text
+
+    def test_failing_exhibit_keeps_the_exhibits_already_retrieved(self, caplog):
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "press release"),
+            FakeAttachment("EX-99.2", "gone.htm", error=ConnectionError("404")),
+        )
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert item.content_text.endswith(
+            "\n\n[EXHIBIT EX-99.1 release.htm]\npress release"
+        )
+        assert "keeping 1 exhibit(s)" in caplog.text
+
+    def test_exhibit_fetch_failure_does_not_abort_the_remaining_filings(self, caplog):
+        broken = _eight_k_with_exhibits()
+        broken.attachments_error = ConnectionError("EDGAR attachment index unavailable")
+        healthy = FakeFiling(
+            "0001-26-000011", "8-K", date(2026, 7, 17), date(2026, 7, 17)
+        )
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany([broken, healthy])),
+            sleep_fn=lambda _s: None,
+        )
+
+        with caplog.at_level("ERROR"):
+            items = client.fetch_filing_texts(
+                "AAPL", ["8-K"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+            )
+
+        assert [item.source_id for item in items] == [
+            "edgar:0001-26-000009",
+            "edgar:0001-26-000011",
+        ]
+
+    def test_validation_error_on_an_exhibit_is_not_retried(self):
+        exhibit = FakeAttachment("EX-99.1", "release.htm", error=ValueError("bad path"))
+        sleeps: list[float] = []
+        # Spaced far enough apart that no sleep can come from the throttle,
+        # so an empty `sleeps` proves no retry backoff happened.
+        clock = FakeClock([0.0, 5.0, 10.0, 15.0])
+
+        item = _fetch_one(
+            _eight_k_with_exhibits(exhibit), sleep_fn=sleeps.append, clock=clock
+        )
+
+        assert exhibit.text_calls == 1
+        assert sleeps == []
+        assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
+
+    def test_transient_exhibit_failure_is_retried_before_giving_up(self):
+        exhibit = FakeAttachment(
+            "EX-99.1", "release.htm", error=ConnectionError("EDGAR timeout")
+        )
+        sleeps: list[float] = []
+        clock = FakeClock([0.0, 5.0, 10.0, 15.0, 20.0, 25.0])
+
+        item = _fetch_one(
+            _eight_k_with_exhibits(exhibit), sleep_fn=sleeps.append, clock=clock
+        )
+
+        assert exhibit.text_calls == 3
+        assert sleeps == [1.0, 2.0]
+        assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
+
+
+class TestEightKExhibitRateLimiting:
+    def test_throttles_the_attachment_index_and_every_exhibit_download(self):
+        """Rate limiting applies to every attempt, exhibit downloads included."""
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "press release"),
+            FakeAttachment("EX-99.2", "supplement.htm", "supplemental detail"),
+        )
+        sleeps: list[float] = []
+        # One tick per throttled request: get_filings, filing.text,
+        # filing.attachments, and one per exhibit download.
+        clock = FakeClock([0.0, 0.0, 0.0, 0.0, 0.0])
+
+        _fetch_one(
+            _eight_k_with_exhibits(*exhibits), sleep_fn=sleeps.append, clock=clock
+        )
+
+        assert sleeps == [pytest.approx(0.1)] * 4

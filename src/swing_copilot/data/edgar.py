@@ -21,6 +21,13 @@ duration is preferred, which favors the discrete-quarter figure over the
 cumulative one; ties fall back to fact order (deterministic, not otherwise
 meaningful).
 
+An earnings 8-K's primary document is usually only the Item 2.02 notice that a
+press release was furnished; the revenue/EPS figures, the full-year guidance,
+and management's demand commentary all live in Exhibit 99.1 (Issue #128). So
+for 8-K forms the `EX-99*` exhibits are downloaded and appended to the primary
+document's text, under their own character ceiling, producing one combined
+`content_text` per accession.
+
 Requests are throttled to at most 10/second (SEC fair-access, `docs/00_human_
 preparation.md`) via an injectable clock/sleep pair so the throttle itself is
 unit-testable without real waiting.
@@ -43,7 +50,7 @@ from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.text.base import FilingSection, TextItem
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from datetime import date
 
     from swing_copilot.clock import Clock
@@ -54,6 +61,29 @@ _MIN_REQUEST_INTERVAL_SECONDS = 0.1  # 10 requests/second cap
 _DEFAULT_FUNDAMENTALS_LOOKBACK_DAYS = 400  # SEC filing lookback window; owned independently of pipeline/daily.py's price-history lookback
 _SEC_ARCHIVE_URL = "https://www.sec.gov/Archives/edgar"
 logger = logging.getLogger(__name__)
+
+# Exhibit collection (Issue #128). Restricted to 8-K because that is the form
+# whose primary document is a bare notice; a 10-K/10-Q already carries its
+# substance in the primary document and its exhibits are mostly certifications
+# and legal boilerplate.
+_EXHIBIT_FORMS = frozenset({"8-K", "8-K/A"})
+#: EDGAR's `document_type` for the Item 2.02 press release and its siblings
+#: ("EX-99", "EX-99.1", "EX-99.01", "EX-99.2", ...). Item 2.02 material is
+#: always furnished under 99; other exhibit numbers (EX-10 contracts, EX-23
+#: consents) are not the earnings narrative and are deliberately excluded.
+_EXHIBIT_DOCUMENT_TYPE_PREFIX = "EX-99"
+#: A furnished earnings release occasionally splits across 99.1 (release) and
+#: 99.2 (supplement/presentation); beyond three, an 8-K is attaching a document
+#: set rather than one release.
+_MAX_EXHIBITS_PER_FILING = 3
+#: Total exhibit characters appended to one filing. Sized against the export
+#: ceilings in `config/settings.yaml` (`max_filing_chars: 120000`,
+#: `max_filing_chars_per_symbol: 240000`): an 8-K primary document runs a few
+#: thousand to ~23,000 characters, so 60,000 leaves a typical earnings 8-K
+#: comfortably inside the per-filing ceiling and lets two of them plus a 10-Q
+#: share the per-symbol ceiling.
+_MAX_EXHIBIT_CHARS_PER_FILING = 60_000
+_EXHIBIT_TRUNCATION_MARKER = "\n[... exhibit truncated ...]"
 
 # US-GAAP concept tag variants, tried in priority order per metric. Facts are
 # matched by the concept's local name (namespace prefix such as `us-gaap:` is
@@ -86,12 +116,32 @@ _CAPITAL_EXPENDITURES_CONCEPTS = (
 )
 
 
+class _AttachmentLike(Protocol):
+    """One filing attachment, shaped like edgartools' `Attachment`."""
+
+    document_type: str
+    document: str
+
+    def text(self) -> str | None: ...  # pragma: no cover
+
+
+class _AttachmentsLike(Protocol):
+    """A filing's attachment set, shaped like edgartools' `Attachments`.
+
+    Only `documents` (the filed document list) is used; `data_files` holds
+    XBRL/graphic side-cars, which carry no narrative.
+    """
+
+    documents: Sequence[_AttachmentLike]
+
+
 class _FilingLike(Protocol):
     accession_number: str
     form: str
     filing_date: date
     period_of_report: date
     filing_url: str
+    attachments: _AttachmentsLike
 
     def text(self) -> str: ...  # pragma: no cover
 
@@ -486,7 +536,7 @@ class EdgarClient:
 
     def _filing_text_item(self, filing: _FilingLike, symbol: str) -> TextItem:
         """Build one audit-complete item plus optional structured 10-Q sections."""
-        content_text = self._with_retries(filing.text)
+        content_text = self._with_retries(filing.text) + self._exhibit_text(filing)
         return TextItem(
             source_id=f"edgar:{filing.accession_number}",
             symbol=symbol,
@@ -498,6 +548,76 @@ class EdgarClient:
             fetched_at=self._date_clock.now(),
             filing_sections=_extract_ten_q_sections(filing),
         )
+
+    def _exhibit_text(self, filing: _FilingLike) -> str:
+        """Return an 8-K's `EX-99*` exhibit text, as appendable blocks.
+
+        An earnings 8-K's primary document usually only states that a press
+        release was furnished as Exhibit 99.1; the figures, the guidance, and
+        management's commentary are in the exhibit itself (Issue #128). The
+        exhibits are therefore concatenated onto the same `content_text` -- one
+        accession stays one `TextItem`, so `text_items`, the exported
+        `coverage`, and `analysis_source_coverage.selection_mode` all keep
+        their existing shape.
+
+        Retrieval is fail-soft, like 10-Q section extraction: an exhibit that
+        cannot be downloaded or parsed is a data-quality outcome, not a reason
+        to lose either the notice text or the exhibits that did arrive.
+        Whatever was already assembled is kept and the failure is logged with
+        its traceback.
+
+        Returns:
+            The exhibit blocks to append, each introduced by an
+            `[EXHIBIT ...]` header so a reader never mistakes the join for
+            continuous text. `""` for a non-8-K, for an 8-K with no readable
+            `EX-99*` exhibit, and when the attachment list itself could not be
+            retrieved. Total exhibit characters are capped at
+            `_MAX_EXHIBIT_CHARS_PER_FILING`; a cut-off exhibit is marked
+            inline.
+        """
+        if filing.form not in _EXHIBIT_FORMS:
+            return ""
+        blocks: list[str] = []
+        remaining = _MAX_EXHIBIT_CHARS_PER_FILING
+        try:
+            attachments = self._with_retries(lambda: filing.attachments)
+            for exhibit in _earnings_exhibits(attachments):
+                if remaining <= 0:
+                    break
+                # `Attachment.text()` returns `None` for a binary exhibit (a
+                # PDF slide deck furnished as 99.1, for example), which is an
+                # absence, not a failure.
+                text = self._with_retries(exhibit.text)
+                if not text or not text.strip():
+                    continue
+                kept = text[:remaining]
+                remaining -= len(kept)
+                marker = "" if len(kept) == len(text) else _EXHIBIT_TRUNCATION_MARKER
+                header = f"[EXHIBIT {exhibit.document_type} {exhibit.document}]"
+                blocks.append(f"\n\n{header}\n{kept}{marker}")
+        except Exception:  # exhibit retrieval is a documented fail-soft boundary
+            logger.exception(
+                "Exhibit retrieval failed for accession %s; keeping %d exhibit(s)",
+                filing.accession_number,
+                len(blocks),
+            )
+        return "".join(blocks)
+
+
+def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:
+    """Return the filing's `EX-99*` exhibits, capped and in filed order.
+
+    Filed order is EDGAR's own sequence numbering, so 99.1 (the press release)
+    precedes 99.2 (supplements) and gets the character budget first.
+    """
+    return [
+        attachment
+        for attachment in attachments.documents
+        if (attachment.document_type or "")
+        .strip()
+        .upper()
+        .startswith(_EXHIBIT_DOCUMENT_TYPE_PREFIX)
+    ][:_MAX_EXHIBITS_PER_FILING]
 
 
 def _extract_ten_q_sections(filing: _FilingLike) -> tuple[FilingSection, ...]:

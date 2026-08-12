@@ -106,6 +106,8 @@
 - ニュース／開示スライスには担当銘柄の該当 source object だけを、スクリーニング
   スライスにはその銘柄の決定論的入力と必要な run-wide context だけを入れる。担当外の
   候補や長文テキストを入れない
+- ニューススライスには `news_supply`（あれば）も逐語コピーする。自社材料の供給量は
+  ニュース担当が申告する対象であり、落とすと申告経路が切れる
 - スライスは `analysis_input.json` を置き換えない。digest は元入力全体に対する値なので、
   スライス単体で digest を再計算・検証しない
 
@@ -138,6 +140,12 @@
         { "source_id": "news-...", "published_at": "...", "headline": "...",
           "summary": "...", "url": "...", "provider": "..." }
       ],
+      "news_supply": {                 // コードが数えた自社材料の供給量（Issue #130）
+        "collected_items": 24,         // 収集件数（max_news_items で切る前）
+        "exported_items": 20,          // news[] に載った件数
+        "symbol_mention_items": 4,     // うち headline/summary にティッカーが現れる件数
+        "level": "sparse"              // "sufficient" | "sparse" | "none"
+      },
       "filings": [
         { "source_id": "filing-...", "form_type": "10-Q", "filed_at": "...",
           "text": "...", "url": "...",
@@ -183,6 +191,13 @@
   `status: "partial"`以外には付かない。3値が`null`のときは「未記録」であって
   「欠落なし」ではない（フィールド追加前のアーカイブと、P8がDB行から復元した
   coverageが該当する）。欠落量は`original_chars - exported_chars`で読む。
+- `news_supply` は**任意**（スキーマは`analysis-input-v3`のまま）。新規runは常に出すが、
+  フィールド追加前のアーカイブには無い。`symbol_mention_items`はティッカー表記だけで
+  数えた**下限値**で、社名しか書かれていない自社記事は数え落とす。`level`が
+  `sparse` / `none`のとき、およびフィールドが無い旧アーカイブを読むときは、
+  **「悪材料が見当たらない」を根拠に使わない**（判断材料の不在であって好材料ではない）。
+  ニュース担当は該当時に`risk_flags`の先頭へ`材料供給不足:`で始まる申告を置く
+  （`.claude/skills/analyze-news/SKILL.md`）。
 - news/filings が空の候補も `candidates` に含まれる（screening 評価は行うため）。
 - `candidates[].symbol` は文書内で一意、各候補の news と filings を合わせた
   `source_id` も一意にする。重複は strict schema の parse failure になる。

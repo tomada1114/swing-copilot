@@ -94,3 +94,16 @@
 | `data/edgar.py` | 予算を使い切った後続 Exhibit はダウンロードもしない | 捨てる本文のために SEC へリクエストを投げる | `tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhausted_budget_skips_the_next_exhibit_without_downloading_it` |
 | `data/edgar.py` | Exhibit 取得の失敗は fail-soft で、主文書と取得済み Exhibit を保持する | 添付 1 件の 404 で開示そのものが入力から消える | `tests/data/test_edgar.py::TestEightKExhibitFailSoft::test_failing_exhibit_keeps_the_exhibits_already_retrieved` |
 | `data/edgar.py` | 添付ダウンロードにも 10 リクエスト/秒の throttle を適用する | Exhibit 取得だけがレート制限を迂回する | `tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download` |
+
+## 自社材料の供給量の申告
+
+要件 ID を持たない、Issue #130 で追加した経路の不変条件。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `analysis/news_supply.py` | 自社材料ゼロの入力を `level: "none"` として申告する | 20 件供給されているという事実だけが下流に届き、「悪材料なし」と読まれる | `tests/analysis/test_news_supply.py::TestSupplyLevel::test_a_full_feed_that_never_names_the_symbol_reports_none` |
+| `analysis/news_supply.py` | しきい値の直下は `sparse`、直上は `sufficient` になる | 境界が片側にずれ、薄い供給が十分と申告される | `tests/analysis/test_news_supply.py::TestSupplyLevel::test_one_below_the_threshold_the_supply_is_sparse` |
+| `analysis/export.py` | `related_symbols` が空の記事は選別で降格されないが、自社材料としては数えない | ティッカー未宣言の記事が自社材料に化け、供給量が水増しされる | `tests/analysis/test_export.py::TestBuildAnalysisInput::test_news_without_related_tickers_is_ranked_on_target_but_not_counted` |
+| `analysis/schemas.py` | `news_supply` を持たない過去アーカイブが v2/v3 とも読める | フィールド追加で P8 collect が過去 run を読めなくなる | `tests/analysis/test_schemas.py::TestSchemaVersions::test_an_archive_without_news_supply_still_parses` |
+| `analysis/schemas.py` | `level: "none"` と件数ゼロが常に一致する | 申告と件数が食い違い、どちらを信じるか読み手が判断できない | `tests/analysis/test_schemas.py::TestNewsSupplyCounts::test_the_none_level_must_mean_exactly_zero_mentions` |
+| `.claude/skills/analyze-news/SKILL.md` | 供給不足の申告経路が指示文に残っている | コードは数えているのに誰も読まず、下流に届かない | `tests/analysis/test_skill_contract.py::test_news_skill_must_declare_a_thin_symbol_specific_supply` |

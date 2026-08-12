@@ -72,6 +72,12 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
                         "provider": "finnhub",
                     }
                 ],
+                "news_supply": {
+                    "collected_items": 1,
+                    "exported_items": 1,
+                    "symbol_mention_items": 1,
+                    "level": "sparse",
+                },
                 "filings": [
                     {
                         "source_id": FILING_ID,

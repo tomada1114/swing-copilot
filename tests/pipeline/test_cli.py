@@ -8,7 +8,7 @@ developer's local `.env` (never read directly in this suite).
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,14 +17,15 @@ import httpx
 import pytest
 
 from swing_copilot.config import Secrets, load_settings, load_strategies
-from swing_copilot.exceptions import ConfigError
-from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
+from swing_copilot.exceptions import ConfigError, PreflightAbort
+from swing_copilot.models import DailyRunOptions, DataTier, Position, RunMode, RunStatus
 from swing_copilot.pipeline import daily_composition as daily_module
 from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
     _compose_dependencies,
     _configure_logging,
     _parse_args,
+    _preflight,
     _required_features,
     main,
 )
@@ -352,6 +353,140 @@ class TestPathsForMode:
         assert db_path != DEFAULT_DB_PATH
 
 
+def _closed_position(**overrides: object) -> Position:
+    fields: dict[str, object] = {
+        "position_id": uuid4(),
+        "symbol": "AAPL",
+        "is_paper": True,
+        "entry_date": date(2027, 1, 1),
+        "entry_price": 100.0,
+        "shares": 10,
+        "status": "closed",
+        "stop_price": 95.0,
+        "close_date": date(2027, 1, 10),
+        "close_at": datetime(2027, 1, 10, 20, 0, tzinfo=UTC),
+        "close_price": 105.0,
+        "exit_reason": "target",
+    }
+    fields.update(overrides)
+    return Position(**fields)  # type: ignore[arg-type]
+
+
+def _equity_settings(settings, account_equity_usd):
+    return settings.model_copy(
+        update={
+            "risk": settings.risk.model_copy(
+                update={"account_equity_usd": account_equity_usd}
+            )
+        }
+    )
+
+
+def _preflight_deps(state_store, settings):
+    """A minimal stand-in for `DailyDependencies`: `_preflight` reads only these two."""
+    return SimpleNamespace(state_store=state_store, settings=settings)
+
+
+class TestPreflight:
+    """P8-117: abort before any state is written when continuing is pointless."""
+
+    def test_equity_set_neither_warns_nor_aborts(self, settings, state_store, caplog):
+        state_store.upsert_position(_closed_position())
+        deps = _preflight_deps(state_store, _equity_settings(settings, 100_000.0))
+
+        with caplog.at_level(logging.WARNING):
+            _preflight(deps, DailyRunOptions())
+
+        assert caplog.records == []
+
+    def test_equity_unset_zero_closed_warns_and_continues(
+        self, settings, state_store, caplog
+    ):
+        deps = _preflight_deps(state_store, settings)
+
+        with caplog.at_level(logging.WARNING):
+            _preflight(deps, DailyRunOptions())
+
+        assert any("account_equity_usd" in record.message for record in caplog.records)
+
+    def test_equity_unset_one_closed_aborts(self, settings, state_store):
+        state_store.upsert_position(_closed_position())
+        deps = _preflight_deps(state_store, settings)
+
+        with pytest.raises(
+            PreflightAbort, match=r"risk\.account_equity_usd"
+        ) as exc_info:
+            _preflight(deps, DailyRunOptions())
+
+        assert "CIRCUIT_BREAKER_HALTED" in str(exc_info.value)
+
+    def test_a_close_price_of_none_still_counts_as_one_closed_position(
+        self, settings, state_store
+    ):
+        state_store.upsert_position(_closed_position(close_price=None))
+        deps = _preflight_deps(state_store, settings)
+
+        with pytest.raises(PreflightAbort):
+            _preflight(deps, DailyRunOptions())
+
+    def test_dry_run_applies_the_same_rules(self, settings, state_store):
+        state_store.upsert_position(_closed_position())
+        deps = _preflight_deps(state_store, settings)
+
+        with pytest.raises(PreflightAbort):
+            _preflight(deps, DailyRunOptions(is_dry_run=True))
+
+    def test_historical_as_of_skips_the_abort_but_still_warns(
+        self, settings, state_store, caplog
+    ):
+        state_store.upsert_position(_closed_position())
+        deps = _preflight_deps(state_store, settings)
+
+        with caplog.at_level(logging.WARNING):
+            _preflight(deps, DailyRunOptions(as_of=date(2027, 1, 15)))
+
+        assert any("account_equity_usd" in record.message for record in caplog.records)
+
+    def test_abort_does_not_touch_storage(self, settings, state_store):
+        position = _closed_position()
+        state_store.upsert_position(position)
+        deps = _preflight_deps(state_store, settings)
+
+        with pytest.raises(PreflightAbort):
+            _preflight(deps, DailyRunOptions())
+
+        assert state_store.get_closed_positions(is_paper=True) == [position]
+
+    def test_main_exits_with_code_two_and_creates_no_run(
+        self, monkeypatch, capsys, settings, state_store
+    ):
+        state_store.upsert_position(_closed_position())
+        run_daily_calls = []
+        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_settings", lambda: settings)
+        monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
+        monkeypatch.setattr(
+            daily_module,
+            "_compose_dependencies",
+            lambda *_args: _preflight_deps(state_store, settings),
+        )
+        monkeypatch.setattr(
+            daily_module,
+            "run_daily",
+            lambda *_args: run_daily_calls.append(_args),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+        assert exc_info.value.code == 2
+        assert run_daily_calls == []
+        assert "risk.account_equity_usd" in capsys.readouterr().err
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM runs").fetchone()
+        assert count == (0,)
+
+
 class TestMain:
     def test_historical_missing_snapshot_exits_before_price_provider(
         self, monkeypatch, tmp_path
@@ -410,6 +545,7 @@ class TestMain:
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(daily_module, "_compose_dependencies", fake_compose)
+        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(daily_module, "run_daily", fake_run_daily)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -431,6 +567,7 @@ class TestMain:
         monkeypatch.setattr(
             daily_module, "_compose_dependencies", lambda *_args: "fake-deps"
         )
+        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
             daily_module,
             "run_daily",

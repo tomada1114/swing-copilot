@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from swing_copilot.storage import paper_records
 
 if TYPE_CHECKING:
-    from datetime import date
+    from datetime import date, datetime
     from uuid import UUID
 
     from swing_copilot.storage.database import Database
@@ -189,6 +189,29 @@ def run_exists(database: Database, run_id: UUID) -> bool:
             "SELECT 1 FROM runs WHERE run_id = ?", [str(run_id)]
         ).fetchone()
     return row is not None
+
+
+def get_run_started_at(database: Database, run_id: UUID) -> datetime | None:
+    """Return one run's `started_at`, or `None` if it has no `runs` row (P8-119).
+
+    Backs `retro/collect.py`'s same-day duplicate tie-break: when two
+    `reports/<date>/` run directories exist for one day, the one whose
+    `runs.started_at` is later is adopted. `None` means the DB and the
+    `reports/` directory tree have diverged, so the caller collects that run
+    unconditionally rather than guessing an order.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The run to look up.
+
+    Returns:
+        The run's start timestamp, or `None` when no such `runs` row exists.
+    """
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT started_at FROM runs WHERE run_id = ?", [str(run_id)]
+        ).fetchone()
+    return None if row is None else row[0]
 
 
 def get_run_by_date(database: Database, run_date: date) -> UUID | None:

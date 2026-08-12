@@ -693,6 +693,7 @@ def _run_step_risk(
         ),
         request.as_of,
         deps.state_store,
+        lookahead_days=deps.settings.risk.earnings_lookahead_days,
         is_historical=request.is_historical,
     )
     checker = RiskChecker(
@@ -701,7 +702,7 @@ def _run_step_risk(
         deps.market_store,
         RiskRunContext(
             earnings_guard=EarningsGuardInput(
-                earnings.is_enabled, earnings.events_by_symbol
+                earnings.is_enabled, earnings.lookups_by_symbol
             ),
             circuit_breaker=circuit_breaker,
         ),

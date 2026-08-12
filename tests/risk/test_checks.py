@@ -8,7 +8,11 @@ from uuid import uuid4
 import pandas as pd
 import pytest
 
-from swing_copilot.data.earnings import EarningsEvent
+from swing_copilot.data.earnings import (
+    EarningsEvent,
+    EarningsLookup,
+    EarningsLookupStatus,
+)
 from swing_copilot.models import Position
 from swing_copilot.regime.distribution import (
     DataQuality,
@@ -22,6 +26,7 @@ from swing_copilot.risk.checks import (
     EARNINGS_DATE_UNKNOWN_WARNING,
     EARNINGS_PROXIMITY_BLOCK_REASON,
     EARNINGS_PROXIMITY_WARN_WARNING,
+    EARNINGS_RECENTLY_REPORTED_WARNING,
     PORTFOLIO_HEAT_EXCEEDED_REASON,
     PORTFOLIO_HEAT_NOT_CALCULABLE_REASON,
     REGIME_CASH_PRIORITY_REASON,
@@ -388,14 +393,25 @@ class TestCircuitBreaker:
         assert result.binding_constraint == "regime"
 
 
+def _lookup(
+    *,
+    status: EarningsLookupStatus = "found",
+    event: EarningsEvent | None = None,
+    recent_event: EarningsEvent | None = None,
+) -> EarningsLookup:
+    return EarningsLookup(status=status, event=event, recent_event=recent_event)
+
+
 class TestEarningsGuard:
     def test_two_business_days_blocks_candidate(self, settings, market_store):
-        events = {
-            "AAPL": EarningsEvent(
-                "AAPL",
-                date(2027, 1, 5),
-                "amc",
-                datetime(2027, 1, 1, tzinfo=UTC),
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL",
+                    date(2027, 1, 5),
+                    "amc",
+                    datetime(2027, 1, 1, tzinfo=UTC),
+                )
             )
         }
 
@@ -403,7 +419,7 @@ class TestEarningsGuard:
             settings,
             (),
             market_store,
-            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, lookups)),
         )
         result = checker.check(
             [_candidate("AAPL")],
@@ -416,12 +432,14 @@ class TestEarningsGuard:
         assert result.binding_constraint == "earnings"
 
     def test_five_business_days_warns_without_rejecting(self, settings, market_store):
-        events = {
-            "AAPL": EarningsEvent(
-                "AAPL",
-                date(2027, 1, 8),
-                "bmo",
-                datetime(2027, 1, 1, tzinfo=UTC),
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL",
+                    date(2027, 1, 8),
+                    "bmo",
+                    datetime(2027, 1, 1, tzinfo=UTC),
+                )
             )
         }
 
@@ -429,7 +447,7 @@ class TestEarningsGuard:
             settings,
             (),
             market_store,
-            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, lookups)),
         )
         result = checker.check(
             [_candidate("AAPL")],
@@ -443,12 +461,16 @@ class TestEarningsGuard:
             for warning in result.sizing_warnings
         )
 
-    def test_missing_event_is_explicit_warning(self, settings, market_store):
+    def test_fetch_failed_is_an_explicit_unknown_warning(self, settings, market_store):
         checker = RiskChecker(
             settings,
             (),
             market_store,
-            RiskRunContext(earnings_guard=EarningsGuardInput(True, {"AAPL": None})),
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True, {"AAPL": _lookup(status="fetch_failed")}
+                )
+            ),
         )
         result = checker.check(
             [_candidate("AAPL")],
@@ -458,6 +480,181 @@ class TestEarningsGuard:
 
         assert result.status == "approved"
         assert EARNINGS_DATE_UNKNOWN_WARNING in result.sizing_warnings
+
+    def test_no_match_in_window_adds_no_unknown_warning(self, settings, market_store):
+        # REQ-003: an empty window is not the same as "we don't know" -- the
+        # window already covers the whole hold period, so this is silent.
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True, {"AAPL": _lookup(status="none_in_window")}
+                )
+            ),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert EARNINGS_DATE_UNKNOWN_WARNING not in result.sizing_warnings
+
+    def test_a_symbol_with_no_lookup_at_all_gets_no_earnings_warnings(
+        self, settings, market_store
+    ):
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, {})),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert EARNINGS_DATE_UNKNOWN_WARNING not in result.sizing_warnings
+        assert not any(
+            warning.startswith(EARNINGS_RECENTLY_REPORTED_WARNING)
+            for warning in result.sizing_warnings
+        )
+
+    def test_a_report_three_business_days_ago_adds_a_recently_reported_warning(
+        self, settings, market_store
+    ):
+        # AS_OF is Friday 2027-01-01; Tuesday 2026-12-29 is exactly 3
+        # business days before it (inclusive boundary, REQ-006).
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True,
+                    {
+                        "AAPL": _lookup(
+                            status="none_in_window",
+                            recent_event=EarningsEvent(
+                                "AAPL",
+                                date(2026, 12, 29),
+                                "amc",
+                                datetime(2026, 12, 29, 20, tzinfo=UTC),
+                            ),
+                        )
+                    },
+                )
+            ),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert (
+            f"{EARNINGS_RECENTLY_REPORTED_WARNING}: 3 business days since 2026-12-29"
+            in result.sizing_warnings
+        )
+
+    def test_a_report_four_business_days_ago_adds_no_warning(
+        self, settings, market_store
+    ):
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True,
+                    {
+                        "AAPL": _lookup(
+                            status="none_in_window",
+                            recent_event=EarningsEvent(
+                                "AAPL",
+                                date(2026, 12, 28),
+                                "amc",
+                                datetime(2026, 12, 28, 20, tzinfo=UTC),
+                            ),
+                        )
+                    },
+                )
+            ),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert not any(
+            warning.startswith(EARNINGS_RECENTLY_REPORTED_WARNING)
+            for warning in result.sizing_warnings
+        )
+
+    def test_a_stored_event_with_no_earnings_calendar_row_raises_nothing(
+        self, settings, market_store
+    ):
+        # REQ-007: no stored row at all (recent_event is None).
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True, {"AAPL": _lookup(status="none_in_window")}
+                )
+            ),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert not any(
+            warning.startswith(EARNINGS_RECENTLY_REPORTED_WARNING)
+            for warning in result.sizing_warnings
+        )
+
+    def test_a_future_recent_event_is_not_treated_as_recently_reported(
+        self, settings, market_store
+    ):
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(
+                earnings_guard=EarningsGuardInput(
+                    True,
+                    {
+                        "AAPL": _lookup(
+                            status="none_in_window",
+                            recent_event=EarningsEvent(
+                                "AAPL",
+                                date(2027, 1, 2),
+                                "amc",
+                                datetime(2026, 12, 1, tzinfo=UTC),
+                            ),
+                        )
+                    },
+                )
+            ),
+        )
+        result = checker.check(
+            [_candidate("AAPL")],
+            [],
+            100_000.0,
+        )[0]
+
+        assert not any(
+            warning.startswith(EARNINGS_RECENTLY_REPORTED_WARNING)
+            for warning in result.sizing_warnings
+        )
 
     def test_regime_rejection_keeps_binding_constraint_when_earnings_also_blocks(
         self, settings, market_store
@@ -469,19 +666,21 @@ class TestEarningsGuard:
         already passed reported `binding_constraint: earnings`, hiding the
         regime as the actual determinant.
         """
-        events = {
-            "AAPL": EarningsEvent(
-                "AAPL",
-                date(2027, 1, 5),
-                "amc",
-                datetime(2027, 1, 1, tzinfo=UTC),
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL",
+                    date(2027, 1, 5),
+                    "amc",
+                    datetime(2027, 1, 1, tzinfo=UTC),
+                )
             )
         }
         checker = RiskChecker(
             settings,
             (),
             market_store,
-            RiskRunContext(earnings_guard=EarningsGuardInput(True, events)),
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, lookups)),
         )
 
         result = checker.check(
@@ -502,12 +701,14 @@ class TestEarningsGuard:
     def test_circuit_breaker_keeps_earlier_earnings_binding_constraint(
         self, settings, market_store
     ):
-        events = {
-            "AAPL": EarningsEvent(
-                "AAPL",
-                date(2027, 1, 5),
-                "amc",
-                datetime(2027, 1, 1, tzinfo=UTC),
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL",
+                    date(2027, 1, 5),
+                    "amc",
+                    datetime(2027, 1, 1, tzinfo=UTC),
+                )
             )
         }
         circuit = CircuitBreakerResult(
@@ -525,7 +726,7 @@ class TestEarningsGuard:
             market_store,
             RiskRunContext(
                 circuit_breaker=circuit,
-                earnings_guard=EarningsGuardInput(True, events),
+                earnings_guard=EarningsGuardInput(True, lookups),
             ),
         )
 
@@ -549,7 +750,13 @@ class TestEarningsGuard:
             100_000.0,
         )[0]
 
+        # REQ-008: disabled means neither warning, even if a lookup carrying
+        # a recently-reported event were somehow present.
         assert EARNINGS_DATE_UNKNOWN_WARNING not in result.sizing_warnings
+        assert not any(
+            warning.startswith(EARNINGS_RECENTLY_REPORTED_WARNING)
+            for warning in result.sizing_warnings
+        )
 
 
 class TestCorrelationWarnings:

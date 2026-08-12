@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from swing_copilot.risk.earnings import evaluate_earnings_proximity
+from swing_copilot.risk.earnings import business_days_since, evaluate_earnings_proximity
 from swing_copilot.risk.position_sizing import PositionSizeResult, calc_position_size
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from datetime import date
 
     from swing_copilot.config import Settings
-    from swing_copilot.data.earnings import EarningsEvent
+    from swing_copilot.data.earnings import EarningsLookup
     from swing_copilot.models import Position
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
@@ -55,7 +55,14 @@ PORTFOLIO_HEAT_NOT_CALCULABLE_REASON = "PORTFOLIO_HEAT_NOT_CALCULABLE"
 EARNINGS_PROXIMITY_BLOCK_REASON = "EARNINGS_PROXIMITY_BLOCK"
 EARNINGS_PROXIMITY_WARN_WARNING = "EARNINGS_PROXIMITY_WARN"
 EARNINGS_DATE_UNKNOWN_WARNING = "EARNINGS_DATE_UNKNOWN"
+EARNINGS_RECENTLY_REPORTED_WARNING = "EARNINGS_RECENTLY_REPORTED"
 CIRCUIT_BREAKER_REASON_PREFIX = "CIRCUIT_BREAKER_"
+
+# P8-115: a stored `earnings_calendar` row within this many business days
+# before `as_of` is recent enough to flag. Fixed rather than configurable --
+# decided in the ticket rather than derived from the block/warn thresholds,
+# which classify the *upcoming* event, not the last one.
+_RECENTLY_REPORTED_BUSINESS_DAYS = 3
 
 # REQ-004: the constraint that determined the final share count.
 BindingConstraint = str  # "trade_risk" | "position_cap" | "sector" | "correlation" | "regime" | "portfolio_heat" | "earnings" | "not_calculable"
@@ -73,10 +80,10 @@ class PortfolioHeatResult:
 
 @dataclass(frozen=True, slots=True)
 class EarningsGuardInput:
-    """Pre-fetched event data supplied to the deterministic risk core."""
+    """Pre-fetched lookup data supplied to the deterministic risk core."""
 
     is_enabled: bool
-    events_by_symbol: Mapping[str, EarningsEvent | None]
+    lookups_by_symbol: Mapping[str, EarningsLookup]
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +251,7 @@ class RiskChecker:
             assessment = self._apply_earnings_guard(
                 assessment,
                 candidate.as_of,
-                self._earnings_guard.events_by_symbol.get(candidate.symbol),
+                self._earnings_guard.lookups_by_symbol.get(candidate.symbol),
                 self._earnings_guard.is_enabled,
             )
             assessment = self._apply_circuit_breaker(assessment)
@@ -315,11 +322,12 @@ class RiskChecker:
         self,
         assessment: RiskAssessment,
         as_of: date,
-        event: EarningsEvent | None,
+        lookup: EarningsLookup | None,
         is_enabled: bool,
     ) -> RiskAssessment:
         if not is_enabled:
             return assessment
+        event = lookup.event if lookup is not None else None
         proximity = evaluate_earnings_proximity(
             as_of,
             event.earnings_date if event is not None else None,
@@ -327,7 +335,7 @@ class RiskChecker:
             warn_business_days=self._risk_config.earnings_warn_business_days,
         )
         if proximity.status == "block":
-            return replace(
+            assessment = replace(
                 assessment,
                 status="rejected",
                 reasons=(*assessment.reasons, EARNINGS_PROXIMITY_BLOCK_REASON),
@@ -342,24 +350,50 @@ class RiskChecker:
                 ),
                 binding_constraint=_binding_constraint_after(assessment, "earnings"),
             )
-        if proximity.status == "warn" and event is not None:
+        elif proximity.status == "warn" and event is not None:
             warning = (
                 f"{EARNINGS_PROXIMITY_WARN_WARNING}: {proximity.business_days} "
                 f"business days until {event.earnings_date.isoformat()}"
             )
-            return replace(
-                assessment,
-                sizing_warnings=(*assessment.sizing_warnings, warning),
+            assessment = replace(
+                assessment, sizing_warnings=(*assessment.sizing_warnings, warning)
             )
-        if proximity.status == "unknown":
-            return replace(
+        elif (
+            proximity.status == "unknown"
+            and lookup is not None
+            and lookup.status == "fetch_failed"
+        ):
+            # `none_in_window` also reaches "unknown" here (no event date to
+            # classify), but only a genuine fetch failure is unknown enough
+            # to warn on -- an empty window already covers the hold period.
+            assessment = replace(
                 assessment,
                 sizing_warnings=(
                     *assessment.sizing_warnings,
                     EARNINGS_DATE_UNKNOWN_WARNING,
                 ),
             )
-        return assessment
+        return self._apply_recently_reported_warning(assessment, as_of, lookup)
+
+    @staticmethod
+    def _apply_recently_reported_warning(
+        assessment: RiskAssessment,
+        as_of: date,
+        lookup: EarningsLookup | None,
+    ) -> RiskAssessment:
+        recent_event = lookup.recent_event if lookup is not None else None
+        if recent_event is None or recent_event.earnings_date >= as_of:
+            return assessment
+        days_since = business_days_since(as_of, recent_event.earnings_date)
+        if days_since > _RECENTLY_REPORTED_BUSINESS_DAYS:
+            return assessment
+        warning = (
+            f"{EARNINGS_RECENTLY_REPORTED_WARNING}: {days_since} "
+            f"business days since {recent_event.earnings_date.isoformat()}"
+        )
+        return replace(
+            assessment, sizing_warnings=(*assessment.sizing_warnings, warning)
+        )
 
     @staticmethod
     def _assessment_heat_pct(

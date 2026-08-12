@@ -32,6 +32,23 @@ def _business_days_until(as_of: date, event_date: date) -> int:
     return count
 
 
+def business_days_since(as_of: date, event_date: date) -> int:
+    """Business days from `event_date` (exclusive) through `as_of` (inclusive).
+
+    The mirror of `_business_days_until`'s counting style, used to classify
+    how recently a symbol reported rather than how soon it will (P8-115).
+    """
+    if event_date >= as_of:
+        return 0
+    cursor = event_date + timedelta(days=1)
+    count = 0
+    while cursor <= as_of:
+        if cursor.weekday() < _WEEKEND_START:
+            count += 1
+        cursor += timedelta(days=1)
+    return count
+
+
 def evaluate_earnings_proximity(
     as_of: date,
     earnings_date: date | None,

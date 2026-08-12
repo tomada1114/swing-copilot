@@ -35,6 +35,7 @@ from swing_copilot.analysis.schemas import (
     canonical_json_digest,
 )
 from swing_copilot.pipeline.postmortem import compute_signal_performance
+from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
     compute_human_alignment,
@@ -248,8 +249,14 @@ def build_retro_input(
     as_of = request.as_of
     window_start = as_of - timedelta(days=thresholds.lookback_window_days)
 
-    verdicts = store.get_verdicts_in_window(window_start, as_of)
-    outcomes = store.get_verdict_outcomes_in_window(window_start, as_of)
+    # P8-124: `collect` leaves a non-adopted same-day run's rows in place, so
+    # the window read has to re-apply its rule or the day is counted twice.
+    verdicts = keep_adopted_rows(
+        store.get_verdicts_in_window(window_start, as_of), store
+    )
+    outcomes = keep_adopted_rows(
+        store.get_verdict_outcomes_in_window(window_start, as_of), store
+    )
     coverages = store.get_analysis_source_coverages_in_window(window_start, as_of)
     citations = store.get_verdict_citations_in_window(window_start, as_of)
     alignment = store.get_verdict_decision_alignment(window_start, as_of)

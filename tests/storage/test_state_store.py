@@ -85,6 +85,19 @@ _PRE_NO_TRADE_VERDICT_POSITIONS_TABLE = """
     )
 """
 
+_PRE_P8_123_TEXT_ITEMS_TABLE = """
+    CREATE TABLE IF NOT EXISTS text_items (
+        source_id      VARCHAR PRIMARY KEY,
+        symbol         VARCHAR,
+        source_type    VARCHAR NOT NULL,
+        published_at   TIMESTAMPTZ NOT NULL,
+        title          VARCHAR,
+        source_url     VARCHAR NOT NULL,
+        content_text   VARCHAR NOT NULL,
+        fetched_at     TIMESTAMPTZ NOT NULL
+    )
+"""
+
 _PRE_I57_RUNS_TABLE = """
     CREATE TABLE IF NOT EXISTS runs (
         run_id          UUID PRIMARY KEY,
@@ -276,6 +289,63 @@ class TestInitSchema:
                     "not_a_real_reason",
                 ],
             )
+
+    def test_text_items_has_related_symbols_and_category_columns(self, state_store):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            columns = conn.execute("DESCRIBE text_items").fetchall()
+        names = [row[0] for row in columns]
+        assert len(names) == 10
+        assert "related_symbols" in names
+        assert "category" in names
+
+    def test_init_schema_adds_related_symbols_and_category_to_a_pre_p8_123_table(
+        self, tmp_path
+    ):
+        # A database created before this change: text_items has the old
+        # 8-column shape with no related_symbols/category columns at all.
+        database = Database(tmp_path / "pre_p8_123.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P8_123_TEXT_ITEMS_TABLE)
+            conn.execute(
+                """
+                INSERT INTO text_items (
+                    source_id, symbol, source_type, published_at, title,
+                    source_url, content_text, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    "finnhub-1",
+                    "AAPL",
+                    "news",
+                    datetime(2026, 7, 19, tzinfo=UTC),
+                    "Example headline",
+                    "https://example.com/1",
+                    "Example body text.",
+                    datetime(2026, 7, 20, tzinfo=UTC),
+                ],
+            )
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        with database.connect() as conn:
+            row = conn.execute(
+                "SELECT symbol, related_symbols, category FROM text_items "
+                "WHERE source_id = 'finnhub-1'"
+            ).fetchone()
+            count = conn.execute("SELECT count(*) FROM text_items").fetchone()
+        assert row == ("AAPL", None, None)
+        assert count == (1,)
+
+        # Idempotent: re-running the migration a second time must not raise
+        # or disturb the already-migrated row.
+        store.init_schema()
+        with database.connect() as conn:
+            row_again = conn.execute(
+                "SELECT symbol, related_symbols, category FROM text_items "
+                "WHERE source_id = 'finnhub-1'"
+            ).fetchone()
+        assert row_again == ("AAPL", None, None)
 
     def test_init_schema_adds_run_metadata_to_a_pre_i57_database(self, tmp_path):
         database = Database(tmp_path / "pre_i57.duckdb")
@@ -1494,17 +1564,38 @@ class TestRecordSignalOutcomes:
         assert count == (0,)
 
 
-def _text_item(source_id: str, source_url: str) -> TextItem:
+def _text_item(
+    source_id: str,
+    source_url: str,
+    *,
+    source_type: str = "news",
+    related_symbols: tuple[str, ...] = (),
+    category: str | None = None,
+) -> TextItem:
     return TextItem(
         source_id=source_id,
         symbol="AAPL",
-        source_type="news",
+        source_type=source_type,
         published_at=datetime(2026, 7, 19, tzinfo=UTC),
         title="Example headline",
         source_url=source_url,
         content_text="Example body text.",
         fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+        related_symbols=related_symbols,
+        category=category,
     )
+
+
+def _text_item_related_symbols_and_category(
+    state_store: StateStore, source_id: str
+) -> tuple[str | None, str | None]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT related_symbols, category FROM text_items WHERE source_id = ?",
+            [source_id],
+        ).fetchone()
+    assert row is not None
+    return (row[0], row[1])
 
 
 class TestTextItems:
@@ -1567,3 +1658,101 @@ class TestTextItems:
             state_store.record_text_items([valid, invalid])
 
         assert state_store.get_source_urls(["finnhub-1", "finnhub-2"]) == {}
+
+    def test_related_symbols_are_joined_by_comma_in_provider_order(self, state_store):
+        state_store.record_text_items(
+            [
+                _text_item(
+                    "finnhub-1",
+                    "https://example.com/1",
+                    related_symbols=("ADM", "AAPL"),
+                )
+            ]
+        )
+
+        related, _category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert related == "ADM,AAPL"
+
+    def test_single_related_symbol_is_stored_without_a_delimiter(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1", related_symbols=("ADM",))]
+        )
+
+        related, _category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert related == "ADM"
+
+    def test_empty_related_symbols_are_stored_as_null(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1", related_symbols=())]
+        )
+
+        related, _category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert related is None
+
+    def test_category_is_persisted(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1", category="company")]
+        )
+
+        _related, category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert category == "company"
+
+    def test_none_category_is_stored_as_null(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1", category=None)]
+        )
+
+        _related, category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert category is None
+
+    @pytest.mark.parametrize("source_type", ["filing", "calendar"])
+    def test_filing_and_calendar_items_default_both_columns_to_null(
+        self, state_store, source_type
+    ):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1", source_type=source_type)]
+        )
+
+        related, category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert related is None
+        assert category is None
+
+    def test_rerecording_corrects_related_symbols_and_category(self, state_store):
+        state_store.record_text_items(
+            [
+                _text_item(
+                    "finnhub-1",
+                    "https://example.com/1",
+                    related_symbols=("ADM",),
+                    category="company",
+                )
+            ]
+        )
+        state_store.record_text_items(
+            [
+                _text_item(
+                    "finnhub-1",
+                    "https://example.com/1",
+                    related_symbols=("ADM", "AAPL"),
+                    category="press-release",
+                )
+            ]
+        )
+
+        related, category = _text_item_related_symbols_and_category(
+            state_store, "finnhub-1"
+        )
+        assert related == "ADM,AAPL"
+        assert category == "press-release"

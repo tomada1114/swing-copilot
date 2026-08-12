@@ -171,14 +171,16 @@ INIT_SCHEMA_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS text_items (
-        source_id      VARCHAR PRIMARY KEY,
-        symbol         VARCHAR,
-        source_type    VARCHAR NOT NULL,
-        published_at   TIMESTAMPTZ NOT NULL,
-        title          VARCHAR,
-        source_url     VARCHAR NOT NULL,
-        content_text   VARCHAR NOT NULL,
-        fetched_at     TIMESTAMPTZ NOT NULL
+        source_id       VARCHAR PRIMARY KEY,
+        symbol          VARCHAR,
+        source_type     VARCHAR NOT NULL,
+        published_at    TIMESTAMPTZ NOT NULL,
+        title           VARCHAR,
+        source_url      VARCHAR NOT NULL,
+        content_text    VARCHAR NOT NULL,
+        fetched_at      TIMESTAMPTZ NOT NULL,
+        related_symbols VARCHAR,
+        category        VARCHAR
     )
     """,
     """
@@ -375,4 +377,10 @@ ALTER_SCHEMA_STATEMENTS = (
     # `positions.exit_reason`. Both statements are idempotent.
     "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN",
     "UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL",
+    # P8-123: Finnhub's `related`/`category` are now persisted for ticker-
+    # collision observation instead of staying collection-time-only. No
+    # backfill for rows written before this change -- both columns stay NULL
+    # on them (re-fetching ~610k historical rows is not worth it).
+    "ALTER TABLE text_items ADD COLUMN IF NOT EXISTS related_symbols VARCHAR",
+    "ALTER TABLE text_items ADD COLUMN IF NOT EXISTS category VARCHAR",
 )

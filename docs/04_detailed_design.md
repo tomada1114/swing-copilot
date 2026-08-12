@@ -773,7 +773,9 @@ def fetch_calendar_events(start: "date", end: "date", *, as_of: "date") -> list[
 - **フェイルソフト**: 値取得の失敗（トランスポート・HTTP・応答形状）はイベントを落とさず、`Latest and prior values are unavailable: ...`と欠落理由を明示した要約に縮退する。`releases/dates`本体の失敗だけは従来どおり伝播し、ステップ(5)のフェイルソフト判定に委ねる
 - **シークレット**: FREDはHTTPエラーメッセージにAPIキー入りのリクエストURLをそのまま埋め込むため、縮退時のログは`logging.exception()`ではなく`api_key=***`へ置換した1行の警告として出す
 
-**P8-83実装時追記（Issue #83）**: `FinnhubNewsClient`はFinnhub応答の`related`（関連ティッカー）と`category`（分類ラベル）を`TextItem.related_symbols` / `TextItem.category`へ保持する。`related`はカンマ区切り文字列のため、大文字化・空要素除去・重複除去を行いソース側の並び順のままtupleにする。文字列でない値・欠落・空文字は空tuple（`category`は`None`）へ落とす。これらは`filing_sections`と同じ「収集時に得られる分析補助メタデータ」であり、`text_items`テーブルには永続化しない（4.2節のDDLは不変）。用途は3.16節のニュース選別であり、`analysis_input.json`のスキーマ（`analysis-input-v3`）は変更しない——関連度は`news[]`の**順序**として伝わる。
+**P8-83実装時追記（Issue #83）**: `FinnhubNewsClient`はFinnhub応答の`related`（関連ティッカー）と`category`（分類ラベル）を`TextItem.related_symbols` / `TextItem.category`へ保持する。`related`はカンマ区切り文字列のため、大文字化・空要素除去・重複除去を行いソース側の並び順のままtupleにする。文字列でない値・欠落・空文字は空tuple（`category`は`None`）へ落とす。用途は3.16節のニュース選別であり、`analysis_input.json`のスキーマ（`analysis-input-v3`）は変更しない——関連度は`news[]`の**順序**として伝わる。
+
+**P8-123実装時追記（Issue #123）**: 上記2フィールドは当初「収集時の分析補助であり永続化しない」設計だったが、ティッカー衝突（同一ティッカーの別取引所上場企業）を実データから判別できるようにするため、4.2節のDDLに`related_symbols VARCHAR` / `category VARCHAR`を追加し永続化するよう変更した。`record_text_items`は`related_symbols`をカンマ区切り文字列（空タプルは`NULL`）として`ON CONFLICT DO UPDATE`にも含めて保存する。既存DBへは`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追加し、過去行はバックフィルせず`NULL`のままとする。
 
 **エラー処理**: Finnhubニュース、FRED、EDGAR境界は接続・タイムアウト・HTTP 408/429/5xxだけを固定バックオフ1秒・2秒で最大3回まで再試行する。Finnhubの60コール/分制限、EDGARの10リクエスト/秒制限、FREDの120リクエスト/分制限は各試行前に適用する。その他の4xxとパース・検証エラーは即時に伝播する。銘柄・イベント単位で取得失敗した場合はスキップし処理を継続する。全体が失敗した場合、`pipeline/daily.py`のステップ(5)は`failed`として記録され、ステップ(6)は`skipped`、(7)(8)は縮退版で継続する（FR-12）。
 
@@ -1894,14 +1896,16 @@ CREATE TABLE IF NOT EXISTS trades_journal (
 );
 
 CREATE TABLE IF NOT EXISTS text_items (
-    source_id      VARCHAR PRIMARY KEY,
-    symbol         VARCHAR,
-    source_type    VARCHAR NOT NULL,
-    published_at   TIMESTAMPTZ NOT NULL,
-    title          VARCHAR,
-    source_url     VARCHAR NOT NULL,
-    content_text   VARCHAR NOT NULL,
-    fetched_at     TIMESTAMPTZ NOT NULL
+    source_id       VARCHAR PRIMARY KEY,
+    symbol          VARCHAR,
+    source_type     VARCHAR NOT NULL,
+    published_at    TIMESTAMPTZ NOT NULL,
+    title           VARCHAR,
+    source_url      VARCHAR NOT NULL,
+    content_text    VARCHAR NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    related_symbols VARCHAR,
+    category        VARCHAR
 );
 ```
 

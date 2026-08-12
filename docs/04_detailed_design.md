@@ -903,7 +903,7 @@ class AnalysisResult(_StrictModel):
 
 `SourcedFact.evidence_quote`はGitHub Issue #86で追加した。`source_ids`は「そのIDが当該銘柄に供給されている」ことしか証明せず、正しい`source_id`を申告しながら別銘柄の本文を読んで書いたfactを検出できなかった。`evidence_quote`は、factが引用する`source_ids`のいずれかの本文（ニュースは見出し＋要約、開示は入力に渡された`text`、カレンダーイベントはタイトル＋要約）から実際に抜粋した逐語文字列（正規化後12〜300字）であることを`analysis/validate.py`が照合する。照合はUnicode NFKC正規化・全角/半角記号統一・空白畳み込み・大小無視のうえで行うため表記ゆれは通るが、言い換えは一致しない。`VerdictReason`には`evidence_quote`が無く、引き続き空の`source_ids`を許す（決定論的入力のみに基づく理由には引用元本文自体が存在しないため）。
 
-`analysis-input-v3`では各`FilingInput`に`coverage`を必須とし、元本文文字数、書き出し文字数、切り詰め有無、選択方式、重要章ごとの`full` / `partial` / `missing`をコード所有値として載せる。`analysis-input-v2`の受理は既存P8アーカイブの再読に限る後方互換であり、新規runは常にv3を生成する。
+`analysis-input-v3`では各`FilingInput`に`coverage`を必須とし、元本文文字数、書き出し文字数、切り詰め有無、選択方式、重要章ごとの`full` / `partial` / `absent_from_filing` / `not_parsed`（新規runが出す4値）をコード所有値として載せる。`missing`は`FilingSectionStatus`のLiteralに残るが過去アーカイブの再読専用で、新規生成物には出ない（P8-122、下記）。`analysis-input-v2`の受理は既存P8アーカイブの再読に限る後方互換であり、新規runは常にv3を生成する。
 
 章の`status`だけでは「どれだけ落ちたか」「どこが落ちたか」を表せないため、`FilingSectionCoverage`は`original_chars` / `exported_chars`（`FilingCoverage`と同じ対で、章単位の欠落量）と`omission_shape`（`head_only` / `head_and_tail`）を併せて持つ。`head_and_tail`は先頭と末尾を残して中間を落としたこと、`head_only`は先頭スライスだけを残したことを意味する。切り詰めが先頭のみから先頭＋末尾へ変わった以上、`partial`＝末尾欠落とは読めない。model validatorが`original_chars`と`exported_chars`の同時指定、`exported_chars <= original_chars`、`partial`なら`exported_chars < original_chars`、`omission_shape`は`partial`にのみ付くことを強制する。この3フィールドは**任意**であり、スキーマバージョンは`analysis-input-v3`に据え置く（追加のみで既存アーカイブは読めるため）。3フィールドが欠けている場合は「記録されていない」であって「欠落が無い」ではない。フィールド追加前の過去アーカイブと、`analysis_source_coverage`行（name/statusのみを保存）から復元するP8の再構成が該当する。
 
@@ -955,7 +955,9 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
-配分を超える章は**先頭だけでなく末尾も残す**。10-Qで判断材料になる記述は章の末尾に寄っており、Part I Item 1では財務諸表本体の後ろに約定・偶発債務・訴訟の注記（Note 13相当）が、Part I Item 2では冒頭のBusiness Overviewの後ろにResults of Operationsが置かれる。先頭のみの切り詰めはこれらを無言で落とすため、割当文字数を先頭3/5・末尾2/5に配分し、境界に`[... omitted middle of section ...]`を挿入して結合部を連続本文と誤読させない。マーカーは固定長で、割当文字数に含める。割当がマーカー長以下の場合だけ従来どおり先頭スライスとする。章の`status`（full/partial/missing）の判定は変更しない。
+**P8-122実装時追記（Issue #122）**: 余りの再配分順序を`_SECTION_TARGETS`の宣言順から、不足率`len(content) / max(1, allocated[name])`の**降順**（同率はセクション名の昇順でタイブレーク）へ変更した。宣言順のままだと極端に長い章（例: DDOGの`part_ii_item_1a`原文153,699字に対し配分わずか19,983字、不足率約7.7）より先に宣言順が早いだけの章（`part_i_item_1`、不足率約1.33）へ余りが回っていた。`max(1, allocated[name])`は`allocated[name] == 0`（極小budgetでscaled quotaが0に丸まる場合）でもゼロ除算を起こさないためのガードである。
+
+また、章の`status`判定を`full` / `partial` / `absent_from_filing` / `not_parsed`の4値へ分離した（`missing`は過去アーカイブ読み込み専用でLiteralに残すのみ。`FilingSectionStatus`と`retro/collect.py`は無変更）。判定は`filing_selection.py`内で完結し、`data/edgar.py`の章抽出は変更しない: 優先セクションがparsedされていない章について、**同じPart（`part_i_*`/`part_ii_*`）の他の優先セクションが1つ以上parsedされていれば`absent_from_filing`**（Part構造は認識できているのでこの章自体が提出書類に無い可能性が高い。10-QはItem 1A等を前回提出から重要な変更が無ければ省略できる）、**1つもparsedされていなければ`not_parsed`**（Part自体の構造をパーサが取れず有無が判定できない）とする。この規則は`part_i_*`/`part_ii_*`に対称に適用する。CF実測（2026-08-07 run）ではPart IIの2章がともに`not_parsed`になる。
 
 **calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 

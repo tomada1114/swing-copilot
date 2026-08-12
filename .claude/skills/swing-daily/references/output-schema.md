@@ -154,7 +154,9 @@
               { "name": "part_ii_item_1a", "status": "partial",
                 "original_chars": 20500, "exported_chars": 18390,
                 "omission_shape": "head_and_tail" },
-              { "name": "part_ii_item_1", "status": "missing",
+              // 同じPart(II)の他章(part_ii_item_1a)がparsedされているので
+              // absent_from_filing（この章自体は提出書類に無い可能性が高い）
+              { "name": "part_ii_item_1", "status": "absent_from_filing",
                 "original_chars": null, "exported_chars": null,
                 "omission_shape": null }
             ]
@@ -168,10 +170,17 @@
 - `source_id` というキー名は【固定】。
 - 新規runは`analysis-input-v3`で、全filingにコード所有の`coverage`が必須。
   `analysis-input-v2`は過去のP8アーカイブ読み込みに限り互換対応し、新規生成しない。
+- `sections[].status`は`"full"` / `"partial"` / `"absent_from_filing"` /
+  `"not_parsed"` / `"missing"`の5値。新規runが出すのは前4つのみで、`"missing"`は
+  過去アーカイブ読み込み専用（新規生成物には出ない）。`absent_from_filing`は
+  同じPartの他章がparsedされているのにこの章だけ見つからない場合
+  （章自体が提出書類に無い可能性が高い。10-Qは前回提出から重要な変更が無ければ
+  Item 1A等を省略できる）、`not_parsed`は同じPart自体の構造をパーサが取れず
+  この章の有無が判定できない場合。
 - `sections[]`の`original_chars` / `exported_chars` / `omission_shape`は**任意**
   （スキーマは`analysis-input-v3`のまま）。`omission_shape`は残した形を表し、
   `head_and_tail`＝章の中間が欠落、`head_only`＝先頭スライスのみで以降が欠落。
-  `status: "full"`と`"missing"`には付かない。3値が`null`のときは「未記録」であって
+  `status: "partial"`以外には付かない。3値が`null`のときは「未記録」であって
   「欠落なし」ではない（フィールド追加前のアーカイブと、P8がDB行から復元した
   coverageが該当する）。欠落量は`original_chars - exported_chars`で読む。
 - news/filings が空の候補も `candidates` に含まれる（screening 評価は行うため）。

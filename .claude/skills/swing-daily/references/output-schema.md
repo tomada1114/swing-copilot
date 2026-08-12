@@ -64,7 +64,7 @@
   "as_of": "2026-07-27",        // 入力の as_of を逐語コピー
   "input_digest": "...",        // 入力の完全 SHA-256 を逐語コピー
   "symbol": "AAPL",
-  "ac_check": "AC1-AC15 違反なし",   // または懸念のある AC 番号と一言
+  "ac_check": "AC1-AC16 違反なし",   // または懸念のある AC 番号と一言
   "news_summary": { }           // 担当に応じて news_summary / filing_analyses /
                                 //   screening_assessment のいずれか 1 キー
 }
@@ -76,6 +76,43 @@
   なので、混入すると hard fail する。
 - 該当テキストが無い銘柄の断片は、ペイロードを `null`（news）/ `[]`（filings）
   にしたファイルを書く（＝「分析済みで空」と「未分析」を区別できるようにする）。
+- 断片の契約の正本は `src/swing_copilot/analysis/fragment.py` の `AnalysisFragment`
+  （strict schema）。`analysis_result.json` の `AnalysisResult` とは別物で、
+  ペイロードキーは 3 つのうち**ちょうど 1 つ**でなければならない。
+
+## 断片の契約検証【共有手段・自前実装しない】
+
+断片を書き出したら、**自前の検証スクリプトを書かずに**次のコマンドを実行する。
+
+```bash
+uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
+```
+
+- **検査の実体は ingest と同一の関数**である。このコマンドは
+  `analysis/validate.py` の `verify_symbol_analysis()` を呼ぶ。これは
+  `copilot-ingest-analysis` が銘柄ごとに呼ぶのと同じ関数で、strict schema・
+  provenance・`evidence_quote` の逐語一致・CON-03 を通す。したがって
+  「ここで合格 ⇒ ingest でも合格」が成り立つ
+- **grep や自作スクリプトで代用しない。** 逐語一致と CON-03 は Unicode NFKC 正規化・
+  記号統一・空白畳み込み・大小無視を経て判定される。素の文字列検索ではこの正規化を
+  再現できず、**ingest では落ちるものを「合格」と報告してしまう**
+- 引数は複数指定でき、ディレクトリを渡すとその直下の `*.json` をすべて検査する。
+  `<WORKDIR>/analysis_work` なら全断片、`<WORKDIR>` ならマージ後の
+  `analysis_result.json`（`analysis_input.json` / `report_context.json` /
+  `rejections.json` はコード所有なので自動的に対象外）
+- `analysis_input.json` は対象ファイルの隣か 1 つ上の階層から自動解決する。
+  別の場所にある場合だけ `--input <path>` を付ける
+- 検査項目: 断片の strict schema（未知フィールド・ペイロードキーの数・
+  `screening_assessment: null` を拒否）、`run_id` / `as_of` / `input_digest` が
+  `analysis_input.json` と一致すること、ファイル名の `<kind>-<SYMBOL>` が
+  ペイロードと一致すること、provenance、`evidence_quote`、CON-03
+- 終了コード: `0` 全件合格 / `1` 契約違反あり / `2` パスや入力の解決に失敗
+- このコマンドは読み取り専用である。ネットワークにも DB にも触れず、レポートも
+  書かない。何度実行してもよい
+- FAIL したら、**検査を通すために文言を書き換えるのではなく**内容を直す（AC15）
+
+書き出し前の自己点検を省略してよいという意味ではない。ingest は fail-closed で
+リトライされないため、違反を後から見つけてもその銘柄のその日の分析は消える。
 
 ## サブエージェント入力スライス【読み取り専用・作業用】
 
@@ -302,6 +339,12 @@
 9. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
    事実本文を表示しても source attribution を付けない。
 10. ingest はネットワークアクセスもスクリーニング再実行もしない。
+
+`copilot-verify-analysis <analysis_result.json>` は上記のうち 1〜4・6〜8 を
+レポートを書かずに実行する **ingest の dry-run** である（`report_context.json`
+との照合だけは対象外。あれは `copilot-daily` が同じ run で書くコード所有の
+ファイルであり、スキルが取り違えうるのは result 側だから）。ingest の代わりには
+ならないが、ingest を走らせる前に同じ判定を得られる。
 
 ## レポート表示（ingest 側の責務、参考）
 

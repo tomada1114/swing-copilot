@@ -39,7 +39,7 @@ backtest と**同一の手仕舞いルール**（2.5×ATR14 トレーリング�
 
 作業前に必ず読む:
 
-- `.claude/skills/swing-daily/references/analysis-conventions.md` — AC1〜AC15 の共通叙述規約。
+- `.claude/skills/swing-daily/references/analysis-conventions.md` — AC1〜AC16 の共通叙述規約。
   台帳に残すメモにもそのまま適用する（特に AC3〜AC5 の CON-03、AC12 の hedge）。
   **このスキルへコピーせず、上記パスを直接読むこと**
 

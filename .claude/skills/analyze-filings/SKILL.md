@@ -24,7 +24,7 @@ description: >
   [output-schema.md の入力スライス契約](../swing-daily/references/output-schema.md#サブエージェント入力スライス読み取り専用作業用)
   に従い、これを分析に使う。`run_id` / `as_of` / `input_digest` が元 input と一致することを
   確認し、担当外の元入力本文は読み込まない
-- [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md) — AC1〜AC15 の共通規約（**必読**）
+- [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md) — AC1〜AC16 の共通規約（**必読**）
 - [../swing-daily/references/output-schema.md](../swing-daily/references/output-schema.md) — JSON の形と `analysis_work/` 断片の形式
 - `src/swing_copilot/analysis/schemas.py` — **スキーマの最終正本**。JSON を組み立てる前に読む
 
@@ -40,8 +40,9 @@ description: >
 
 ### 一時ファイル
 
-作業用の一時ファイル（開示本文の抽出、検証スクリプト等）は**セッションの scratchpad
+作業用の一時ファイル（開示本文の抽出等）は**セッションの scratchpad
 ディレクトリ配下にだけ**作る。`<WORKDIR>` 配下やリポジトリ配下には作らない。
+**契約検証のスクリプトは書かない**（下記「書き出し後の契約検証」の共有コマンドを使う）。
 
 **作った一時ファイルを削除しない。`rm` を実行しない。** scratchpad はセッション終了時に
 破棄されるため掃除は不要であり、このスキルは平日定時の無人実行から呼ばれるため、
@@ -68,6 +69,7 @@ description: >
      各 fact には、その `source_id` の入力 `text` から実際に読んだ箇所を
      `evidence_quote`（12〜300 字の逐語引用）として付ける
 5. 出力 JSON を組み立て、AC 自己点検（下記）を済ませてからファイルに書き出す。
+6. 書き出したら `copilot-verify-analysis` で契約検証する（下記「書き出し後の契約検証」）。
 
 ## リスク要因の扱い（Item 1A）
 
@@ -147,12 +149,31 @@ description: >
 
 ファイルを書き出す前に
 [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md)
-の AC チェックリスト（AC1〜AC15）を上から自己点検する。
+の AC チェックリスト（AC1〜AC16）を上から自己点検する。
 
 - 違反が見つかったら**その場で直してから**書き出す。検査を通すための言い換えで
   実質的な違反を残さない（AC15）
 - 断片の `ac_check` フィールドと親に返す要約の両方に、
-  **「AC1-AC15 違反なし」または懸念のある AC 番号と一言**を必ず含める
+  **「AC1-AC16 違反なし」または懸念のある AC 番号と一言**を必ず含める
+
+## 書き出し後の契約検証（共有コマンド）
+
+**検証スクリプトを自作しない。** 断片を書き出したら次を実行する。
+
+```bash
+uv run copilot-verify-analysis <WORKDIR>/analysis_work/filings-<SYMBOL>.json
+```
+
+- 複数の断片を書いたなら、まとめて渡すか `<WORKDIR>/analysis_work` を渡す
+- このコマンドは ingest（`copilot-ingest-analysis`）と**同一の関数**で
+  strict schema・provenance・`evidence_quote` の逐語一致・CON-03 を検査する。
+  逐語一致と CON-03 は Unicode NFKC 正規化を経て判定されるため、grep や
+  自作スクリプトでは再現できず、**ingest では落ちるものを「合格」と誤報告する**
+- 終了コード `0` なら合格。`1` なら FAIL 行に違反理由が出るので、**文言を検査に
+  合わせて書き換えるのではなく**内容を直して書き出し直し、再実行する（AC15）
+- 詳細は
+  [../swing-daily/references/output-schema.md](../swing-daily/references/output-schema.md)
+  の「断片の契約検証」を参照
 
 ## 出力ファイル
 
@@ -165,7 +186,7 @@ description: >
   "as_of": "2026-07-27",           // analysis_input.json の as_of をそのままコピー
   "input_digest": "<64 lowercase hexadecimal SHA-256 characters>", // 同じく逐語コピー
   "symbol": "AAPL",
-  "ac_check": "AC1-AC15 違反なし",
+  "ac_check": "AC1-AC16 違反なし",
   "filing_analyses": [             // 該当開示が無ければ []
     {
       "source_id": "filing-...",

@@ -14,7 +14,9 @@ Qualitative analysis of that news and filing text is done by Claude Code
 skills, not by this process: `copilot-daily` exports `analysis_input.json`
 beside the day's report, the `swing-daily` skill analyzes it, and
 `copilot-ingest-analysis` machine-verifies the answer (schema, source
-provenance, CON-03) before re-rendering the report.
+provenance, CON-03) before re-rendering the report. `copilot-verify-analysis`
+runs those same checks read-only, so the skill can check one working fragment —
+or dry-run the merged answer — without writing anything.
 
 ## Quickstart
 

@@ -64,6 +64,9 @@
 | ランキング | `atr_pct` は既定 0.0 で、出荷中のスコアを変えない | 新成分が既定で合成スコアに混入する | `tests/screening/test_pipeline.py::TestAtrPctScoreComponent::test_default_weight_is_zero_so_existing_scores_are_unchanged` |
 | ランキング | `atr_pct` も score_weights 合計 1.0 検証の対象である | 新成分を足しても合計 1.0 とみなされる | `tests/test_config.py::TestLoadStrategies::test_atr_pct_counts_toward_the_sum_to_one_requirement` |
 | バックテスト | 発火 0 件の決済理由も 0 として必ず報告する | 一度も出ていない理由がレポートから消える | `tests/backtest/test_metrics.py::TestExitReasonBreakdown::test_counts_every_reason_including_the_absent_ones` |
+| 分析数値整合 | 逐語引用と桁が食い違う fact を警告として名指しする | 千ドル単位の 3,495,296 を「35億9,530万ドル」と書いた fact が全検査を素通りする | `tests/analysis/test_validate.py::TestNumericConsistencyWarnings::test_a_misconverted_figure_is_warned_about` |
+| 分析数値整合 | 単位変換を跨いだ正しい言い換えは警告しない | 34億9,530万ドルや前年同期 29億2,818万ドルを誤検知する | `tests/analysis/test_numeric_consistency.py::TestTheIssueCase::test_the_corrected_figure_is_not_reported` |
+| 分析数値整合 | 数値の警告は銘柄を縮退させない | 誤検知した銘柄の定性セクションが丸ごと消える | `tests/analysis/test_validate.py::TestNumericConsistencyWarnings::test_a_warned_symbol_is_still_rendered` |
 
 ## 日次統合 E2E の境界
 

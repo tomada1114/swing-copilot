@@ -269,18 +269,24 @@
    `summary`）に、Unicode NFKC 正規化・全角/半角記号統一・空白畳み込み・大小無視の
    うえで実在すること。正しい `source_id` を申告しつつ別銘柄の本文から書いた
    fact は、ここで検出される。
-5. CON-03 機械検査を、Unicode NFKC 正規化後のユーザー表示テキスト全フィールドに適用
+5. 数値整合の**警告**（fail-closed ではない）: `facts[].text` と `evidence_quote` の
+   双方に単位・通貨の付いた数値がある fact に限り、10 のべき乗（千 / 百万 /
+   billion / million / 億 / 万）を跨いで text 側の数値が quote 側の数値へ到達できるかを
+   照合する。到達できない数値はログに警告として出るが、当該銘柄は縮退させずそのまま
+   描画する（誤検知で分析を落とさないため）。年号・四半期・比率・株数のような単位の
+   付かない数値は対象外で、検算責任は分析側（AC16）にある。
+6. CON-03 機械検査を、Unicode NFKC 正規化後のユーザー表示テキスト全フィールドに適用
    （`facts[].text`, `interpretation`, `risk_flags`, `red_flags`, `yoy_changes`,
    `screening_assessment.*`, `verdict.reasons[].text`, `no_trade_reason`）。
    売買動詞と命令形・義務表現の組み合わせを禁止し、引用・否定を含む場合も安全側で
    検査対象にする。
-6. 違反は **銘柄単位の fail-closed**。当該銘柄の定性セクションを縮退表示し、
-   リトライはしない。
-7. result の symbol 集合が input と完全一致しなければ run 全体を hard fail とする。
+7. 違反（3・4・6）は **銘柄単位の fail-closed**。当該銘柄の定性セクションを縮退表示し、
+   リトライはしない。5 の警告は縮退させない。
+8. result の symbol 集合が input と完全一致しなければ run 全体を hard fail とする。
    部分結果・重複・不足・入力外銘柄を縮退表示で受け入れない。
-8. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
+9. レポートがリンクにする URL は input 側の `http` / `https` だけ。不正・空 URL は
    事実本文を表示しても source attribution を付けない。
-9. ingest はネットワークアクセスもスクリーニング再実行もしない。
+10. ingest はネットワークアクセスもスクリーニング再実行もしない。
 
 ## レポート表示（ingest 側の責務、参考）
 

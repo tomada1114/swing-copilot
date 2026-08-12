@@ -3,7 +3,7 @@ name: analyze-filings
 description: >
   Interpret EDGAR filing text (10-K/10-Q/8-K and similar) for one or more equity
   symbols from analysis_input.json, extracting sourced facts, year-over-year
-  changes, newly added risk-factor language, and guidance shifts with mandatory
+  changes, risk-factor language, and guidance shifts with mandatory
   source_id provenance and conservative hedged interpretation. Use PROACTIVELY
   when: 開示分析、決算分析、EDGAR、10-K、10-Q、8-K、有価証券報告書の解釈、
   filing analysis, analyze filings, or when swing-daily delegates filing review.
@@ -62,15 +62,41 @@ description: >
 4. 抽出の重点（この順で優先度が高い）。
    - **yoy_changes**: 前年同期比・前四半期比の変化。数値と単位をそのまま引用
    - **red_flags**: going concern 的な記述、訴訟・規制・会計処理の変更。
-     10-Qのリスク要因については、`part_ii_item_1a` が `full` または `partial` で
-     実質本文を含み、比較対象も入力内にある場合に限って**新規記載**や文言の強まりを
-     判定する。10-K参照援用だけ、章が`absent_from_filing`/`not_parsed`/`missing`、
-     比較対象なしの場合は「新規なし」とせず「入力からは判定不能」とする
+     リスク要因（`part_ii_item_1a`）の扱いは下記「リスク要因の扱い（Item 1A）」に従う
    - **ガイダンス変化**: 上方／下方修正、レンジ変更、開示取りやめ
    - これらを facts（開示に明示された記述）と interpretation（示唆）に振り分ける（AC11）。
      各 fact には、その `source_id` の入力 `text` から実際に読んだ箇所を
      `evidence_quote`（12〜300 字の逐語引用）として付ける
 5. 出力 JSON を組み立て、AC 自己点検（下記）を済ませてからファイルに書き出す。
+
+## リスク要因の扱い（Item 1A）
+
+10-Q の Item 1A は、前回提出（多くは直近 10-K）から重要な変更が無ければ**参照援用だけで
+済ませてよい**。つまり参照援用は例外ではなく通常状態であり、比較対象となる 10-K の Item 1A
+本文はこの入力に含まれない。**「新規のリスク記載があるか」「文言が強まったか」は、この入力
+からは構造的に判定できない。判定しようとしない**（Issue #127）。
+
+章の中身で扱いを分ける。
+
+- **実質本文がある**（リスクの記述本文、あるいはリスク見出し／キャプションの列挙を含む）→
+  従来どおり読む。**そこに書かれているリスクの内容そのもの**（訴訟・規制・顧客集中・
+  資金調達・サプライチェーン等）を評価し、重要なものを `red_flags` に、含意を
+  `interpretation` に置く。fact には他と同様 `evidence_quote` を付ける
+- **参照援用のみ**（「前回 10-K から重要な変更なし」の申告と 10-K への参照だけで、リスクの
+  記述本文を持たない）→ **リスク要因を論点として立てない**。「新規記載の有無は判定不能」
+  「比較対象が無い」といった文言を `red_flags` / `interpretation` に**書かない**。毎回同じ
+  判定不能を書いても情報価値がなく、他の論点を薄めるだけである。この場合 Item 1A について
+  は何も出力しなくてよい
+
+どちらかの判定は**字数ではなく内容**で行う。参照援用の前置きが長くても、リスクの記述や
+リスク見出しの列挙が続いていれば「実質本文がある」側として扱う。
+
+いずれの場合も、比較対象が入力に無いまま「新規リスクなし」「リスクは変化していない」と
+**判定してはならない**（AC8）。判定不能を書かないことは「変化なし」を意味しない。
+
+章の `status` が `absent_from_filing` / `not_parsed` / `partial` / `missing` のときは、
+新規性ではなく**入力の欠落**の問題であり、下記「守ること」の欠落章ルールをそのまま適用する
+（欠落の明示は続ける）。
 
 ## 守ること
 

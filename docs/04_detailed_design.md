@@ -1386,6 +1386,7 @@ uv run copilot-history runs [--limit N] [--db PATH]
 uv run copilot-history run --run-id <UUID> [--db PATH]
 uv run copilot-history symbol <SYMBOL> [--db PATH]
 uv run copilot-history rejections --run-id <UUID> [--db PATH]
+uv run copilot-history incomplete [--reports-dir PATH] [--since YYYY-MM-DD] [--db PATH]
 uv run copilot-history performance [--db PATH]
 ```
 
@@ -1395,9 +1396,31 @@ uv run copilot-history performance [--db PATH]
 | `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
 | `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
 | `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
+| `incomplete` | 分析フェーズが完了していないrun（run_date, run_id, 分類, `runs.status`, 同日の完了run, パス） | `report/incomplete_runs.py::find_incomplete_runs()`（`reports/`走査＋`history_queries.get_run_statuses()`） |
 | `performance` | `PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/平均MAE・MFE/可能性注記/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
+
+#### 3.22.1 `incomplete`——分析フェーズ未完runの検知（Issue #129）
+
+`copilot-daily`は`analysis_input.json`を書いた時点で正常終了し、runが完走したと言えるのは後続の`/swing-daily`スキルが同じディレクトリへ`analysis_result.json`を書き戻したときだけである。スキルセッションが断片生成後・統合前に落ちると、`runs.status`は`success`のまま、runディレクトリも存在したまま、`analysis_result.json`だけが無いrunが残る。定時タスクのpreflightが「前営業日のディレクトリがあるか」で取りこぼしを見ていた間、この状態は**必ず**取りこぼされていた——ディレクトリを作るのは`copilot-daily`自身だからである。
+
+判定の一次シグナルはファイルシステム（`analysis_result.json`の有無）であり、DuckDBの`verdicts`行数は**使わない**。`verdicts`を書くのは`copilot-retro collect`で、run Nのverdictはrun N+1の日次実行ではじめて回収される（3.23節）。したがって完走した最新runは必ず`verdicts`0件であり、行数を判定式にすると最新runが常に偽陽性になる。この反例は`tests/report/test_incomplete_runs.py::TestFinishedRunsAreNeverFlagged::test_finished_run_with_zero_verdict_rows_is_not_flagged`が固定する。
+
+`analysis_input.json`が無いディレクトリは対象外とする。そのrunは分析フェーズに到達していないので、失敗は`runs.status`側に現れる。逆に`analysis_result.json`の**中身**は読まない。壊れた成果物は`copilot-retro collect`のnotesが扱う領分であり、preflight用の検知が厳格スキーマの解析を二重に持つ必要はない。
+
+| 分類（`IncompleteRunKind`） | 条件 | 要対処 |
+|---|---|---|
+| `ANALYSIS_MISSING` | `runs.status`が`success`/`degraded` | ○ |
+| `RUN_ROW_MISSING` | `reports/`にディレクトリがあるのに`runs`行が無い（DBとの乖離） | ○ |
+| `SAME_DAY_SUPERSEDED` | 同じ`run_date`に`analysis_result.json`を持つ別runがある（#118が入口で塞いだ二重起動の残骸） | × |
+| `PIPELINE_UNFINISHED` | `runs.status`が`failed`/`running` | × |
+
+分類の優先順位は`SAME_DAY_SUPERSEDED` → `RUN_ROW_MISSING` → `runs.status`による判定である。同日に完了runがあることは、そのrunの`runs.status`が何であれ「その日の分析は欠測していない」を意味するので、他のどの理由よりも先に効く。
+
+要対処が1件でもあれば終了コード`3`（`ANALYSIS_INCOMPLETE_EXIT_CODE`。0とも、argparseの2とも衝突しない）で終わり、preflightは表示を解析せずに分岐できる。要対処が0件なら一覧は出しても終了コード0とする——同日重複やパイプライン未完は再実行で埋めるものではなく、恒久的に赤いままの信号は運用上の雑音にしかならないためである。同じ理由で`--since`（包含境界）を持たせ、既に手当てのしようがない古い欠測を毎回蒸し返さずに直近の営業日だけを問えるようにしている。
+
+走査そのものは`retro/collect.py::find_run_directories()`を共有する。`reports/`配下の何がrunアーカイブなのかについて、2つの読み手が別々の定義を持つのを防ぐためである。読み出し専用の契約はこのサブコマンドにも及び、`tests/report/test_history_cli.py::TestReadOnly::test_incomplete_does_not_mutate_any_table`が終了コード3の経路で全テーブルのスナップショット一致を確認する。
 
 ### 3.22a `report/rejections.py`（run成果物 `rejections.json`）
 

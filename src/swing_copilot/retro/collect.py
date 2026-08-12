@@ -110,7 +110,7 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
     """
     notes: list[str] = []
     collected = verdict_count = source_count = coverage_count = 0
-    run_directories = _find_run_directories(reports_root)
+    run_directories = find_run_directories(reports_root)
     for run_directory, loaded in _adopted_runs(state_store, run_directories, notes):
         written = _write_run(state_store, run_directory, loaded, notes)
         collected += 1
@@ -196,12 +196,23 @@ def _adopted_runs(
     return adopted
 
 
-def _find_run_directories(reports_root: Path) -> tuple[RunDirectory, ...]:
+def find_run_directories(reports_root: Path) -> tuple[RunDirectory, ...]:
     """Return every `<date>/<uuid>/` directory under `reports_root`, in order.
 
     Entries that do not parse as a date or a UUID are not run archives (the
     daily pipeline also writes per-run Markdown alongside them), so they are
     ignored silently rather than noted as skips.
+
+    Public because `report/incomplete_runs.py` (Issue #129) walks the same
+    archive tree to detect runs whose analysis phase never finished; both
+    readers must agree on what counts as a run directory.
+
+    Args:
+        reports_root: The daily pipeline's output directory (`reports/`).
+            A missing path yields an empty tuple rather than raising.
+
+    Returns:
+        Run archives ordered by `run_date`, then by `run_id` string.
     """
     if not reports_root.is_dir():
         return ()

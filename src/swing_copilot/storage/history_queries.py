@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from swing_copilot.storage import paper_records
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import date, datetime
     from uuid import UUID
 
@@ -213,6 +214,48 @@ def get_run_started_at(database: Database, run_id: UUID) -> datetime | None:
             "SELECT started_at FROM runs WHERE run_id = ?", [str(run_id)]
         ).fetchone()
     return None if row is None else row[0]
+
+
+@dataclass(frozen=True, slots=True)
+class RunStatusRow:
+    """One `runs` row's lifecycle columns, for the incomplete-run scan (#129)."""
+
+    status: str
+    started_at: datetime
+
+
+def get_run_statuses(
+    database: Database, run_ids: Sequence[UUID]
+) -> dict[UUID, RunStatusRow]:
+    """Return `status`/`started_at` for each requested run, keyed by `run_id`.
+
+    Backs `report/incomplete_runs.py`, whose primary signal is the
+    filesystem: the DB is consulted only to tell a run whose analysis phase
+    never finished apart from one whose deterministic pipeline itself failed
+    or is still running.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_ids: Runs to look up, as discovered under `reports/`. An empty
+            sequence short-circuits without opening a connection.
+
+    Returns:
+        A mapping containing only the runs that have a `runs` row. A
+        `run_id` absent from the result means the `reports/` tree and the
+        database have diverged; the caller reports that divergence rather
+        than substituting a default status.
+    """
+    if not run_ids:
+        return {}
+    # S608: the interpolated fragment is a placeholder list derived solely
+    # from `len(run_ids)`; every value is still bound as a parameter.
+    placeholders = ", ".join("?" for _ in run_ids)
+    with database.connect() as conn:
+        rows = conn.execute(
+            f"SELECT run_id, status, started_at FROM runs WHERE run_id IN ({placeholders})",  # noqa: S608
+            [str(run_id) for run_id in run_ids],
+        ).fetchall()
+    return {row[0]: RunStatusRow(status=row[1], started_at=row[2]) for row in rows}
 
 
 @dataclass(frozen=True, slots=True)

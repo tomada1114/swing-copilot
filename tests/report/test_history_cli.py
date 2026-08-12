@@ -14,9 +14,14 @@ from uuid import UUID, uuid4
 import pandas as pd
 import pytest
 
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.models import Position, RunMode
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.report.history_cli import main
+from swing_copilot.report.incomplete_runs import ANALYSIS_INCOMPLETE_EXIT_CODE
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
     Candidate,
@@ -53,6 +58,31 @@ _TABLES = (
 
 def _db_path(state_store: StateStore) -> str:
     return str(state_store._database.db_path)  # noqa: SLF001
+
+
+def _write_run_archive(tmp_path: Path, run_date: date, *, has_result: bool) -> UUID:
+    """Build one `reports/<date>/<run_id>/` archive under an isolated root.
+
+    Detection is an existence check, so the documents' contents are
+    irrelevant here; what matters is which of the two files is present.
+    """
+    run_id = uuid4()
+    directory = tmp_path / "reports" / run_date.isoformat() / str(run_id)
+    directory.mkdir(parents=True)
+    (directory / ANALYSIS_INPUT_FILENAME).write_text("{}", encoding="utf-8")
+    if has_result:
+        (directory / ANALYSIS_RESULT_FILENAME).write_text("{}", encoding="utf-8")
+    return run_id
+
+
+def _insert_run_row(state_store: StateStore, run_id: UUID, run_date: date) -> None:
+    """Record the archive's run as a finished deterministic pipeline."""
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+            [str(run_id), run_date, datetime(2026, 8, 10, 18, 30, tzinfo=UTC)],
+        )
 
 
 def _candidate(symbol: str = "AAPL", rank: int = 1) -> Candidate:
@@ -431,6 +461,105 @@ class TestPerformance:
         assert "mean_revert" in output
 
 
+class TestIncomplete:
+    """Issue #129: surface runs whose analysis phase never finished."""
+
+    def test_actionable_gap_is_listed_and_exits_with_the_agreed_code(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        run_id = _write_run_archive(tmp_path, date(2026, 8, 10), has_result=False)
+        _insert_run_row(state_store, run_id, date(2026, 8, 10))
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "incomplete",
+                    "--reports-dir",
+                    str(tmp_path / "reports"),
+                    "--db",
+                    _db_path(state_store),
+                ]
+            )
+
+        assert exc_info.value.code == ANALYSIS_INCOMPLETE_EXIT_CODE
+        output = capsys.readouterr().out
+        assert str(run_id) in output
+        assert "分析未完" in output
+
+    def test_all_runs_finished_prints_the_clear_message_and_exits_zero(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        run_id = _write_run_archive(tmp_path, date(2026, 8, 11), has_result=True)
+        _insert_run_row(state_store, run_id, date(2026, 8, 11))
+
+        main(
+            [
+                "incomplete",
+                "--reports-dir",
+                str(tmp_path / "reports"),
+                "--db",
+                _db_path(state_store),
+            ]
+        )
+
+        assert "分析フェーズ未完のrunはありません" in capsys.readouterr().out
+
+    def test_same_day_duplicate_is_listed_without_raising_the_exit_code(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        finished = _write_run_archive(tmp_path, date(2026, 8, 3), has_result=True)
+        leftover = _write_run_archive(tmp_path, date(2026, 8, 3), has_result=False)
+        _insert_run_row(state_store, finished, date(2026, 8, 3))
+        _insert_run_row(state_store, leftover, date(2026, 8, 3))
+
+        main(
+            [
+                "incomplete",
+                "--reports-dir",
+                str(tmp_path / "reports"),
+                "--db",
+                _db_path(state_store),
+            ]
+        )
+
+        output = capsys.readouterr().out
+        assert str(leftover) in output
+        assert "同日重複" in output
+        assert "対処が必要な未完runはありません" in output
+
+    def test_since_narrows_the_window_to_the_dates_that_still_matter(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        stale = _write_run_archive(tmp_path, date(2026, 8, 3), has_result=False)
+        _insert_run_row(state_store, stale, date(2026, 8, 3))
+
+        main(
+            [
+                "incomplete",
+                "--since",
+                "2026-08-10",
+                "--reports-dir",
+                str(tmp_path / "reports"),
+                "--db",
+                _db_path(state_store),
+            ]
+        )
+
+        assert "分析フェーズ未完のrunはありません" in capsys.readouterr().out
+
+
 class TestReadOnly:
     """REQ-007: no `copilot-history` subcommand may mutate any table."""
 
@@ -473,4 +602,30 @@ class TestReadOnly:
     ) -> None:
         _populate(state_store)
         self._assert_no_mutation(state_store, ["performance"])
+        capsys.readouterr()
+
+    def test_incomplete_does_not_mutate_any_table(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Exercised through the exit-3 path, where the scan does the most
+        # work, to prove even that branch stays `SELECT`-only (REQ-007).
+        run_id = _write_run_archive(tmp_path, date(2026, 8, 10), has_result=False)
+        _insert_run_row(state_store, run_id, date(2026, 8, 10))
+        before = _snapshot(state_store._database)  # noqa: SLF001
+
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "incomplete",
+                    "--reports-dir",
+                    str(tmp_path / "reports"),
+                    "--db",
+                    _db_path(state_store),
+                ]
+            )
+
+        assert _snapshot(state_store._database) == before  # noqa: SLF001
         capsys.readouterr()

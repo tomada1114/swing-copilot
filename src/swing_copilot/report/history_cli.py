@@ -5,7 +5,8 @@ read-only counterpart. It lives under `report/` rather than `paper/` because
 it never writes -- mirroring this repo's convention of keeping write CLIs in
 the domain that owns the write (`paper/cli.py` for `copilot-decision`) and
 read-only presentation elsewhere. Every subcommand here is backed exclusively
-by `storage/history_queries.py`'s `SELECT`-only functions (REQ-007).
+by `storage/history_queries.py`'s `SELECT`-only functions (REQ-007), plus the
+read-only `reports/` scan behind `incomplete` (Issue #129).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -23,6 +25,11 @@ from rich.table import Table
 from swing_copilot.clock import SystemClock
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.paper.journal import PaperJournal
+from swing_copilot.report.incomplete_runs import (
+    ANALYSIS_INCOMPLETE_EXIT_CODE,
+    IncompleteRunKind,
+    find_incomplete_runs,
+)
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.history_queries import (
     get_rejections,
@@ -36,6 +43,7 @@ from swing_copilot.storage.state_store import StateStore
 
 if TYPE_CHECKING:
     from swing_copilot.paper.journal import PerformanceBreakdownRow, PerformanceSummary
+    from swing_copilot.report.incomplete_runs import IncompleteRun
     from swing_copilot.storage.history_queries import RunDetail, SymbolTimeline
 
 # REQ-002: `runs` requests more rows than exist (issue's own worked example
@@ -43,6 +51,21 @@ if TYPE_CHECKING:
 # sensible display default for an interactive terminal, not a hard cap.
 _DEFAULT_RUNS_LIMIT = 20
 _NO_RECORDS_MESSAGE = "記録なし"
+# `pipeline/daily.py`'s default `output_dir`: where run archives are written.
+_DEFAULT_REPORTS_DIR = Path("reports")
+_NO_INCOMPLETE_RUNS_MESSAGE = "分析フェーズ未完のrunはありません"
+_ONLY_NON_ACTIONABLE_MESSAGE = (
+    "対処が必要な未完runはありません（同日重複・パイプライン未完のみ）"
+)
+_RESUME_HINT_MESSAGE = (
+    "該当runのanalysis_input.jsonを対象に/swing-dailyの分析フェーズをやり直すこと"
+)
+_INCOMPLETE_KIND_LABELS = {
+    IncompleteRunKind.ANALYSIS_MISSING: "分析未完",
+    IncompleteRunKind.SAME_DAY_SUPERSEDED: "同日重複",
+    IncompleteRunKind.PIPELINE_UNFINISHED: "パイプライン未完",
+    IncompleteRunKind.RUN_ROW_MISSING: "runs行なし",
+}
 # Wide fixed width so Rich never truncates a long cell (e.g. a reason_code or
 # UUID) with an ellipsis regardless of the invoking terminal's actual size --
 # same rationale as `terminal_report.py`'s tests use `width=200` for.
@@ -255,6 +278,51 @@ def _run_rejections(database: Database, console: Console, run_id_value: str) -> 
     console.print(table)
 
 
+def _render_incomplete_runs(console: Console, runs: tuple[IncompleteRun, ...]) -> None:
+    table = Table(title="分析フェーズ未完のrun")
+    table.add_column("run_date")
+    table.add_column("run_id")
+    table.add_column("分類")
+    table.add_column("runs.status")
+    table.add_column("同日の完了run")
+    table.add_column("パス")
+    for run in runs:
+        sibling = run.completed_sibling_run_id
+        table.add_row(
+            run.run_date.isoformat(),
+            str(run.run_id),
+            _INCOMPLETE_KIND_LABELS[run.kind],
+            run.run_status or "-",
+            "-" if sibling is None else str(sibling),
+            str(run.path),
+        )
+    console.print(table)
+
+
+def _run_incomplete(
+    database: Database, console: Console, reports_dir: Path, since: date | None
+) -> None:
+    """Report runs whose analysis phase never finished (Issue #129).
+
+    Raises:
+        SystemExit: At least one *actionable* unfinished run was found, so
+            the previous day's analysis is genuinely missing. Listing-only
+            kinds (same-day duplicate, unfinished pipeline) print but exit 0.
+    """
+    runs = find_incomplete_runs(database, reports_dir, since=since)
+    if not runs:
+        console.print(_NO_INCOMPLETE_RUNS_MESSAGE)
+        return
+    _render_incomplete_runs(console, runs)
+    actionable = tuple(run for run in runs if run.is_actionable)
+    if not actionable:
+        console.print(_ONLY_NON_ACTIONABLE_MESSAGE)
+        return
+    console.print(f"[yellow]対処が必要な未完run: {len(actionable)}件[/yellow]")
+    console.print(_RESUME_HINT_MESSAGE)
+    raise SystemExit(ANALYSIS_INCOMPLETE_EXIT_CODE)
+
+
 def _render_breakdown(
     console: Console, title: str, rows: tuple[PerformanceBreakdownRow, ...]
 ) -> None:
@@ -327,6 +395,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     rejections_parser.add_argument("--run-id", required=True)
     rejections_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
+    incomplete_parser = subparsers.add_parser(
+        "incomplete",
+        help=(
+            "分析フェーズが完了していないrun"
+            f"（要対処が1件でもあれば終了コード{ANALYSIS_INCOMPLETE_EXIT_CODE}）"
+        ),
+    )
+    incomplete_parser.add_argument(
+        "--reports-dir", type=Path, default=_DEFAULT_REPORTS_DIR
+    )
+    incomplete_parser.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        default=None,
+        help="この日付以降のrun_dateだけを対象にする（YYYY-MM-DD）",
+    )
+    incomplete_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+
     performance_parser = subparsers.add_parser(
         "performance", help="クローズ済みペーパートレードのパフォーマンス集計"
     )
@@ -351,6 +437,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_symbol(database, console, args.symbol)
         elif args.command == "rejections":
             _run_rejections(database, console, args.run_id)
+        elif args.command == "incomplete":
+            _run_incomplete(database, console, args.reports_dir, args.since)
         else:
             _run_performance(database, state_store, console)
     except HistoryCommandError as exc:

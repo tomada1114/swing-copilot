@@ -21,6 +21,7 @@ from swing_copilot.storage.history_queries import (
     get_run_by_date,
     get_run_detail,
     get_run_started_at,
+    get_run_statuses,
     get_signal_outcomes,
     get_successful_run,
     get_symbol_timeline,
@@ -30,6 +31,11 @@ from swing_copilot.storage.history_queries import (
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 if TYPE_CHECKING:
+    from typing import NoReturn
+    from uuid import UUID
+
+    import pytest
+
     from swing_copilot.storage.state_store import StateStore
 
 
@@ -41,6 +47,22 @@ def _candidate(symbol: str = "AAPL", rank: int = 1) -> Candidate:
         {"close": 100.0, "score": 0.5},
         rank,
     )
+
+
+def _insert_run(
+    state_store: StateStore,
+    run_id: UUID,
+    run_date: date,
+    status: str,
+    started_at: datetime,
+) -> None:
+    """Insert a minimal `runs` row with an explicitly chosen lifecycle state."""
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
+            [str(run_id), run_date, status, started_at],
+        )
 
 
 class TestListRuns:
@@ -300,6 +322,58 @@ class TestGetRunStartedAt:
         found = get_run_started_at(state_store._database, run_id)  # noqa: SLF001
 
         assert found == started_at
+
+
+class TestGetRunStatuses:
+    """Issue #129: the incomplete-run scan's DB-side enrichment."""
+
+    def test_returns_status_and_started_at_keyed_by_run_id(
+        self, state_store: StateStore
+    ) -> None:
+        finished = uuid4()
+        unfinished = uuid4()
+        started_at = datetime(2026, 8, 10, 18, 30, tzinfo=UTC)
+        _insert_run(state_store, finished, date(2026, 8, 10), "success", started_at)
+        _insert_run(state_store, unfinished, date(2026, 8, 11), "failed", started_at)
+
+        found = get_run_statuses(state_store._database, [finished, unfinished])  # noqa: SLF001
+
+        assert found[finished].status == "success"
+        assert found[finished].started_at == started_at
+        assert found[unfinished].status == "failed"
+
+    def test_unknown_run_id_is_absent_rather_than_defaulted(
+        self, state_store: StateStore
+    ) -> None:
+        # The caller must be able to tell "no `runs` row" (a `reports/` vs DB
+        # divergence) apart from any real status value.
+        known = uuid4()
+        unknown = uuid4()
+        _insert_run(
+            state_store,
+            known,
+            date(2026, 8, 10),
+            "success",
+            datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
+        )
+
+        found = get_run_statuses(state_store._database, [known, unknown])  # noqa: SLF001
+
+        assert set(found) == {known}
+
+    def test_empty_request_returns_empty_without_opening_a_connection(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The scan calls this with an empty list whenever `reports/` holds no
+        # unfinished run at all, which is the common case.
+        def fail(*_args: object, **_kwargs: object) -> NoReturn:
+            msg = "connect() must not be called for an empty request"
+            raise AssertionError(msg)
+
+        database = state_store._database  # noqa: SLF001
+        monkeypatch.setattr(database, "connect", fail)
+
+        assert get_run_statuses(database, []) == {}
 
 
 class TestGetSuccessfulRun:

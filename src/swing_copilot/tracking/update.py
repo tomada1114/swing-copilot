@@ -70,6 +70,13 @@ _LOOKBACK_DAYS = 90
 
 _OHLC_KEYS = ("open", "low", "close")
 
+#: Ratio deviation on the entry-date close above which a price move is
+#: treated as a stock split rather than dividend-adjustment drift (exclusive:
+#: exactly 10% does not rebase). `auto_adjust=True` also re-scales history for
+#: every ex-dividend date, and US large-cap quarterly dividends run under 2%,
+#: while even the smallest ordinary splits (3-for-2, 5-for-4) clear 10%.
+_REBASE_THRESHOLD = 0.10
+
 
 class TrackingError(SwingCopilotError):
     """Raised when a manual tracking write names a position it cannot act on."""
@@ -150,12 +157,7 @@ def update_tracking(
     opened_count = len(pending)
 
     pending.extend(
-        _Work(
-            position=position,
-            bars=_position_bars(bars, position.symbol, position.entry_date),
-            seed_marks=(),
-        )
-        for position in open_positions
+        _rebased_work(state_store, bars, position, notes) for position in open_positions
     )
 
     advanced_count = closed_count = 0
@@ -210,6 +212,97 @@ def _position_bars(bars: pd.DataFrame, symbol: str, entry_date: date) -> pd.Data
         (bars["symbol"] == symbol)
         & (bars["date"] >= entry_date - timedelta(days=_LOOKBACK_DAYS))
     ]
+
+
+def _rebased_work(
+    state_store: StateStore,
+    bars: pd.DataFrame,
+    position: VerdictPosition,
+    notes: list[str],
+) -> _Work:
+    """Build one already-open position's `_Work`, rebasing it first if needed.
+
+    Detection is self-contained here rather than depending on `write_bars`'s
+    execution order (design P8-116): it only reads bars and the position's
+    own stored state, both already in hand by the time `update_tracking`
+    calls this.
+    """
+    position_bars = _position_bars(bars, position.symbol, position.entry_date)
+    existing_marks = state_store.get_verdict_position_marks(
+        position.run_id, position.symbol
+    )
+    rebased_position, rebased_marks = _rebase_position(
+        position, position_bars, existing_marks, notes
+    )
+    return _Work(
+        position=rebased_position, bars=position_bars, seed_marks=rebased_marks
+    )
+
+
+def _rebase_position(
+    position: VerdictPosition,
+    bars: pd.DataFrame,
+    marks: Sequence[VerdictPositionMark],
+    notes: list[str],
+) -> tuple[VerdictPosition, tuple[VerdictPositionMark, ...]]:
+    """Detect a stock split and rescale the position's frozen dollar figures.
+
+    Bars are re-fetched with `auto_adjust=True` every run, so a split rewrites
+    the whole stored history to post-split terms while `entry_price` /
+    `stop_price`, frozen as absolute dollars at open, do not move on their
+    own. This compares the stored `entry_price` against the (possibly
+    rewritten) bar close on the same session; a deviation past
+    `_REBASE_THRESHOLD` rescales `entry_price`, `stop_price`, and every mark
+    already published for this position by the same ratio, so a rebased
+    position is never stopped out against its pre-rebase basis. Called before
+    `_advance` replays any session (REQ-008).
+
+    Returns:
+        The (possibly rebased) position, and the (possibly rebased) marks --
+        empty when no rebase was needed, since nothing then needs rewriting.
+    """
+    if position.entry_price <= 0:
+        notes.append(
+            f"{position.symbol} {position.entry_date.isoformat()}: "
+            "entry_priceが0以下のため価格再調整の判定をスキップした"
+        )
+        return position, ()
+
+    bar_close = _close_on(bars, position.symbol, position.entry_date)
+    if bar_close is None:
+        notes.append(
+            f"{position.symbol} {position.entry_date.isoformat()}: "
+            "entry_dateのバーが参照窓に無いため価格再調整の判定をスキップした"
+        )
+        return position, ()
+
+    ratio = bar_close / position.entry_price
+    if abs(ratio - 1.0) <= _REBASE_THRESHOLD:
+        return position, ()
+
+    before_entry_price = position.entry_price
+    rebased_position = replace(
+        position,
+        entry_price=position.entry_price * ratio,
+        stop_price=(
+            None if position.stop_price is None else position.stop_price * ratio
+        ),
+    )
+    rebased_marks = tuple(
+        replace(
+            mark,
+            close=mark.close * ratio,
+            stop_price=None if mark.stop_price is None else mark.stop_price * ratio,
+        )
+        for mark in marks
+    )
+    notes.append(
+        f"{position.symbol} {position.entry_date.isoformat()}: "
+        f"価格再調整を検出（比率 {ratio:.6f}）、"
+        f"entry_price {before_entry_price:.6f} → "
+        f"{rebased_position.entry_price:.6f} に再基準化"
+    )
+    return rebased_position, rebased_marks
 
 
 def _seed_position(

@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import pytest
 
+from swing_copilot.storage.tracking_records import VerdictPosition, VerdictPositionMark
+from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 from swing_copilot.tracking.update import (
     TrackingError,
     close_manually,
@@ -38,9 +40,54 @@ from tests.tracking.conftest import (
 )
 
 if TYPE_CHECKING:
+    import duckdb
+
     from swing_copilot.config import BacktestConfig, Settings
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
+
+
+def _scaled(rows: list[dict[str, Any]], ratio: float) -> list[dict[str, Any]]:
+    """Rescale a batch of OHLC rows the way `auto_adjust=True` rewrites history."""
+    return [
+        {
+            **row,
+            "open": row["open"] * ratio,
+            "high": row["high"] * ratio,
+            "low": row["low"] * ratio,
+            "close": row["close"] * ratio,
+        }
+        for row in rows
+    ]
+
+
+class _FlakyConnection:
+    """Delegates to a real connection, raising on the `fail_on`-th `execute`."""
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection, fail_on: int) -> None:
+        self._conn = conn
+        self._fail_on = fail_on
+        self._calls = 0
+
+    def execute(
+        self, query: str, parameters: list[object] | None = None
+    ) -> duckdb.DuckDBPyConnection:
+        self._calls += 1
+        if self._calls == self._fail_on:
+            msg = "injected failure after the position row already updated"
+            raise RuntimeError(msg)
+        if parameters is None:
+            return self._conn.execute(query)
+        return self._conn.execute(query, parameters)
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> _FlakyConnection:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 @pytest.fixture
@@ -867,3 +914,366 @@ class TestDataQuality:
         assert result.opened_count == 0
         assert state_store.get_verdict_positions() == ()
         assert any("エントリー価格を解決できない" in note for note in result.notes)
+
+
+class TestSplitRebase:
+    def test_a_two_for_one_split_rebases_the_position_and_prevents_a_false_stop(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        # The next run re-fetches the whole 400-day window with
+        # auto_adjust=True: a 2-for-1 split rewrites every stored session,
+        # including the entry date, to half its pre-split dollars. Without
+        # rebasing, the stale stop (95.0) would gap-fill against day 1's
+        # post-split low (49.5) -- a false stop the split did not earn.
+        write_bars(market_store, _scaled(flat_prelude(), 0.5))
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_1
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+        assert position.entry_price == pytest.approx(50.0)
+        assert position.stop_price == pytest.approx(47.5)
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.as_of_date for mark in marks] == [ENTRY_DATE, DAY_1]
+        assert [mark.close for mark in marks] == pytest.approx([50.0, 50.0])
+        assert [mark.stop_price for mark in marks] == pytest.approx([47.5, 47.5])
+        assert any(
+            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
+            and "価格再調整を検出" in note
+            and "0.500000" in note
+            and "100.000000" in note
+            and "50.000000" in note
+            for note in result.notes
+        )
+
+    def test_a_dividend_sized_drift_does_not_rebase(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        # ~5% drift from an ex-dividend adjustment: well under the 10%
+        # threshold that separates dividend noise from an actual split.
+        write_bars(
+            market_store,
+            [bar(ENTRY_DATE, open_price=95.0, high=96.0, low=94.0, close=95.0)],
+        )
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == FLAT_CLOSE
+        assert position.stop_price == RISK_STOP
+        assert not any("価格再調整を検出" in note for note in result.notes)
+
+    def test_exactly_ten_percent_deviation_does_not_rebase(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        write_bars(
+            market_store,
+            [bar(ENTRY_DATE, open_price=90.0, high=91.0, low=89.0, close=90.0)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == FLAT_CLOSE
+        assert position.stop_price == RISK_STOP
+
+    def test_just_over_ten_percent_deviation_rebases(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        write_bars(
+            market_store,
+            [bar(ENTRY_DATE, open_price=89.99, high=90.99, low=88.99, close=89.99)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == pytest.approx(89.99)
+
+    def test_a_reverse_split_scales_up_by_the_full_ratio(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        # A 1-for-10 reverse split: the entry-day close now reads 10x higher.
+        write_bars(
+            market_store,
+            [bar(ENTRY_DATE, open_price=1000.0, high=1010.0, low=990.0, close=1000.0)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == pytest.approx(1000.0)
+        assert position.stop_price == pytest.approx(RISK_STOP * 10.0)
+
+    def test_stop_price_none_is_rebased_but_stays_none(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Too few sessions for ATR(14): the seeded position opens with no
+        # stop at all, the same path REQ-006 exercises.
+        seed_verdict(state_store)
+        seed_risk(state_store, stop_price=None)
+        write_bars(market_store, flat_prelude(sessions=5))
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        opened = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert opened is not None
+        assert opened.stop_price is None
+
+        write_bars(market_store, _scaled(flat_prelude(sessions=5), 0.5))
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == pytest.approx(50.0)
+        assert position.stop_price is None
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert marks[0].close == pytest.approx(50.0)
+        assert marks[0].stop_price is None
+
+    def test_missing_entry_date_bar_skips_the_rebase_check(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # The risk assessment prices the entry directly, so the position
+        # opens without any bar ever having been written for ENTRY_DATE.
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_2
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == FLAT_CLOSE
+        assert position.stop_price == RISK_STOP
+        assert any(
+            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
+            and "entry_dateのバーが参照窓に無い" in note
+            for note in result.notes
+        )
+
+    def test_entry_price_at_or_below_zero_skips_without_a_zero_division(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Not reachable through normal seeding (which refuses entry_price<=0
+        # outright); constructed directly to prove the guard against a
+        # zero-division on data that predates it.
+        seed_verdict(state_store)
+        state_store.upsert_verdict_position(
+            VerdictPosition(
+                run_id=RUN_ID,
+                symbol=SYMBOL,
+                strategy_key="default",
+                no_trade=False,
+                entry_date=ENTRY_DATE,
+                entry_price=0.0,
+                stop_price=None,
+                days_held=0,
+                status="open",
+                last_marked_date=ENTRY_DATE,
+            ),
+            [
+                VerdictPositionMark(
+                    run_id=RUN_ID,
+                    symbol=SYMBOL,
+                    as_of_date=ENTRY_DATE,
+                    close=0.0,
+                    stop_price=None,
+                    unrealized_return_pct=0.0,
+                )
+            ],
+        )
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == 0.0
+        assert any(
+            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
+            and "entry_priceが0以下" in note
+            for note in result.notes
+        )
+
+    def test_a_closed_position_is_never_rebased(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        close_manually(
+            state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=ENTRY_DATE
+        )
+        closed_before = state_store.get_verdict_position(RUN_ID, SYMBOL)
+
+        write_bars(market_store, _scaled(flat_prelude(), 0.5))
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+
+        closed_after = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert closed_after == closed_before
+
+    def test_only_the_split_symbol_is_rebased_when_a_run_holds_two_positions(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        other_symbol = "BBB"
+        # A single run can carry more than one verdict, so both symbols'
+        # verdicts must be archived in one `replace_run_verdicts` call --
+        # calling the single-verdict `seed_verdict` helper twice for the same
+        # run_id would wholesale-replace the first with the second.
+        state_store.replace_run_verdicts(
+            RUN_ID,
+            [
+                VerdictRecord(
+                    run_id=RUN_ID,
+                    symbol=symbol,
+                    as_of=ENTRY_DATE,
+                    strategy_key="default",
+                    recommendation="proceed",
+                    reasons=(VerdictReasonRecord(text="押し目が浅い", source_ids=()),),
+                    no_trade=False,
+                )
+                for symbol in (SYMBOL, other_symbol)
+            ],
+            [],
+        )
+        seed_risk(state_store, symbol=SYMBOL)
+        seed_risk(state_store, symbol=other_symbol)
+        write_bars(market_store, flat_prelude(symbol=SYMBOL))
+        write_bars(market_store, flat_prelude(symbol=other_symbol))
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        # Only SYMBOL's entry-day bar gets rewritten -- BBB never split.
+        write_bars(
+            market_store,
+            [bar(ENTRY_DATE, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        split_position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        other_position = state_store.get_verdict_position(RUN_ID, other_symbol)
+        assert split_position is not None
+        assert other_position is not None
+        assert split_position.entry_price == pytest.approx(50.0)
+        assert other_position.entry_price == FLAT_CLOSE
+
+    def test_a_write_failure_during_rebase_leaves_the_pre_rebase_values_intact(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        write_bars(market_store, _scaled(flat_prelude(), 0.5))
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+
+        # fail_on=3: BEGIN(1), the position row's UPDATE(2) succeeds, then the
+        # first mark write(3) fails -- proving the already-applied position
+        # rebase is rolled back too, not just the marks.
+        real_connect = state_store.database.connect
+        monkeypatch.setattr(
+            state_store.database,
+            "connect",
+            lambda: _FlakyConnection(real_connect(), fail_on=3),
+        )
+        with pytest.raises(RuntimeError, match="injected failure"):
+            update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+        monkeypatch.undo()
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == pytest.approx(FLAT_CLOSE)
+        assert position.stop_price == pytest.approx(RISK_STOP)
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.as_of_date for mark in marks] == [ENTRY_DATE]
+        assert marks[0].close == pytest.approx(FLAT_CLOSE)
+        assert marks[0].stop_price == pytest.approx(RISK_STOP)

@@ -124,3 +124,12 @@
 | `analysis/verify_cli.py` | 壊れた 1 件が同じディレクトリの他の断片の判定を隠さない | 1 ファイルの JSON 破損で全断片の合否が分からなくなる | `tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_one_unreadable_entry_does_not_hide_its_siblings` |
 | 専門家スキル | 共有コマンドを使う指示が指示文に残っている | コマンドはあるのに誰も呼ばず、各自が自前検査へ戻る | `tests/analysis/test_skill_contract.py::test_every_fragment_author_is_pointed_at_the_shared_checker` |
 | `output-schema.md` | 「ingest と同一の関数」の主張が関数名で束縛されている | リネームで主張だけが残り、実体との対応が切れる | `tests/analysis/test_skill_contract.py::test_the_schema_reference_binds_the_checker_to_the_ingest_function` |
+
+## 成果物読み取りの失敗型
+
+要件 ID を持たない、Issue #153 で追加した経路の不変条件。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `analysis/validate.py` | UTF-8 として読めない成果物も `AnalysisIngestError` として届く | 文字化けした `analysis_result.json` が生の `UnicodeDecodeError` になり、「壊れた成果物」ではなく想定外の異常として無人実行が落ちる | `tests/analysis/test_validate.py::TestHardFailures::test_a_wrongly_encoded_document_is_a_hard_failure` |
+| `analysis/verify_cli.py` | 事前検査と ingest が同じ読み取り関数で同じ失敗型を返す | 新 CLI だけが不正エンコーディングを FAIL 行に落とし、本番 ingest では例外型が揃わない | `tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_a_wrongly_encoded_fragment_is_reported_rather_than_raised` |

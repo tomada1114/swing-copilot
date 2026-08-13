@@ -24,7 +24,6 @@ database, and re-runs no screening.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from dataclasses import dataclass
@@ -45,6 +44,7 @@ from swing_copilot.analysis.validate import (
     ArtifactIdentity,
     load_analysis_input,
     load_analysis_result,
+    read_analysis_document,
     validate_analysis,
     validate_artifact_identity,
 )
@@ -103,21 +103,16 @@ def verify_document(analysis_input: AnalysisInput, path: Path) -> VerificationRe
 
 
 def _read_json(path: Path) -> dict[str, object]:
-    """Return the document's top-level object, for dispatch only."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        # A wrongly encoded file is as unusable as an unreadable one, and both
-        # are reachable from a skill that wrote its fragment by hand. Neither
-        # may end this command's whole run: the sibling documents still have
-        # verdicts worth reporting.
-        msg = f"Analysis document could not be read: {path}"
-        raise AnalysisIngestError(msg) from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        msg = f"Analysis document is not valid JSON: {path}"
-        raise AnalysisIngestError(msg) from exc
+    """Return the document's top-level object, for dispatch only.
+
+    Reading and JSON-parsing go through the ingest reader, so an unreadable or
+    wrongly encoded file is judged here exactly as `copilot-ingest-analysis`
+    would judge it. Both failures stay `AnalysisIngestError` because neither
+    may end this command's whole run: `verify_document` turns them into one
+    failing report, and the sibling documents still have verdicts worth
+    reporting.
+    """
+    payload = read_analysis_document(path)
     if not isinstance(payload, dict):
         msg = f"Analysis document is not a JSON object: {path}"
         raise AnalysisIngestError(msg)

@@ -8,6 +8,10 @@ from typing import Any
 
 import pytest
 
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.analysis.validate import (
     AnalysisIngestError,
     load_analysis_input,
@@ -40,6 +44,28 @@ class TestHardFailures:
     def test_a_missing_result_file_is_a_hard_failure(self, tmp_path):
         with pytest.raises(AnalysisIngestError, match="could not be read"):
             load_analysis_result(tmp_path / "nope.json")
+
+    @pytest.mark.parametrize(
+        ("load", "filename"),
+        [
+            pytest.param(load_analysis_input, ANALYSIS_INPUT_FILENAME, id="input"),
+            pytest.param(load_analysis_result, ANALYSIS_RESULT_FILENAME, id="result"),
+        ],
+    )
+    def test_a_wrongly_encoded_document_is_a_hard_failure(
+        self, tmp_path, load, filename
+    ):
+        """A non-UTF-8 artifact must arrive as `AnalysisIngestError` (Issue #153).
+
+        `UnicodeDecodeError` is a `ValueError`, so the read step used to let it
+        escape uncaught and the callers that tell "broken artifact" from
+        "unexpected fault" by exception type saw the wrong kind of failure.
+        """
+        path = tmp_path / filename
+        path.write_bytes(b'{"as_of": "\xff\xfe"}')
+
+        with pytest.raises(AnalysisIngestError, match="could not be read"):
+            load(path)
 
     def test_malformed_json_is_a_hard_failure(self, write_documents):
         _input_path, result_path = write_documents(None, "{not json")

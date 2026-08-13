@@ -84,6 +84,7 @@ def _coverage(
     source_id: str = "edgar:1",
     *,
     exported_chars: int = 120_000,
+    exhibit_truncated: bool | None = None,
 ) -> AnalysisSourceCoverageRecord:
     return AnalysisSourceCoverageRecord(
         run_id=run_id,
@@ -94,6 +95,7 @@ def _coverage(
         is_truncated=True,
         selection_mode="section_priority",
         sections=(("part_i_item_2", "full"), ("part_ii_item_1a", "partial")),
+        exhibit_truncated=exhibit_truncated,
     )
 
 
@@ -192,6 +194,32 @@ class TestReplaceRunVerdicts:
         replaced = state_store.get_analysis_source_coverages(run_id, "AAPL")
         assert len(replaced) == 1
         assert replaced[0].exported_chars == 100_000
+
+    @pytest.mark.parametrize(
+        "exhibit_truncated",
+        [
+            pytest.param(True, id="exhibit-cut-at-collection"),
+            pytest.param(False, id="no-marker-in-the-text"),
+            pytest.param(None, id="row-written-before-the-column-existed"),
+        ],
+    )
+    def test_round_trips_the_collection_stage_exhibit_signal(
+        self, state_store: StateStore, exhibit_truncated: bool | None
+    ) -> None:
+        # Issue #157: `None` must survive as `None`. Collapsing it to `False`
+        # on the way in or out would restate "not recorded" as "no exhibit was
+        # cut", which is the misreading the field exists to prevent.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict(run_id, "AAPL")],
+            [],
+            [_coverage(run_id, exhibit_truncated=exhibit_truncated)],
+        )
+
+        rows = state_store.get_analysis_source_coverages(run_id, "AAPL")
+
+        assert rows[0].exhibit_truncated is exhibit_truncated
 
     def test_rerun_replaces_corrected_rows_without_duplicating(
         self, state_store: StateStore

@@ -236,6 +236,14 @@ INIT_SCHEMA_STATEMENTS = (
             'full','section_priority','section_priority_partial',
             'head_fallback','omitted_symbol_budget'
         )),
+        -- Issue #157: collection-stage exhibit truncation, which the three
+        -- columns above cannot express. Deliberately nullable even here, where
+        -- `ALTER_SCHEMA_STATEMENTS`' inability to add a NOT NULL column does
+        -- not force it: NULL means "not recorded", which readers must not
+        -- conflate with FALSE ("no marker in the collected text"). Rows in a
+        -- pre-existing table are one source of NULL; a `retro collect` of an
+        -- archive written before the field existed is the other.
+        exhibit_truncated BOOLEAN,
         sections_json   JSON NOT NULL,
         PRIMARY KEY (run_id, symbol, source_id)
     )
@@ -383,4 +391,13 @@ ALTER_SCHEMA_STATEMENTS = (
     # on them (re-fetching ~610k historical rows is not worth it).
     "ALTER TABLE text_items ADD COLUMN IF NOT EXISTS related_symbols VARCHAR",
     "ALTER TABLE text_items ADD COLUMN IF NOT EXISTS category VARCHAR",
+    # Issue #157: an 8-K exhibit cut off while being collected is invisible to
+    # `is_truncated`, so it is recorded separately. Explicitly *not* backfilled
+    # to FALSE, unlike `positions.exit_reason` / `verdict_positions.no_trade`:
+    # those restated a fact the existing rows already had, whereas nothing in
+    # this table says whether a pre-existing row's filing carried the marker.
+    # NULL therefore keeps meaning "not recorded" rather than "no exhibit was
+    # cut", and readers must treat the two differently.
+    "ALTER TABLE analysis_source_coverage "
+    "ADD COLUMN IF NOT EXISTS exhibit_truncated BOOLEAN",
 )

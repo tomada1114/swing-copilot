@@ -93,6 +93,10 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 元/出力文字数、選択方式、章の`full`/`partial`/`missing`が入り、
 過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
 後方互換で受理する。
+`original_chars`/`exported_chars`/`is_truncated`が語るのはexport段の欠落だけで、
+Exhibitが取得段の60,000字上限で切られた分は含まれない。これは
+`coverage.exhibit_truncated`が本文中の`[... exhibit truncated ...]`マーカーの有無として
+別に申告する（Issue #157）。`false`は「マーカーが無い」であって「欠落が無い」ではない。
 候補ごとの`news_supply`は、載せたニュースのうち`headline`／`summary`にティッカーが
 現れる件数を数えて`sufficient`／`sparse`／`none`を申告する（Issue #130）。同業の決算記事や
 セクター横断記事で枠が埋まった入力を、下流が「悪材料が無い」と読み違えないための

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.retro.collect import collect_verdicts
 from tests.analysis.conftest import (
     AS_OF,
@@ -37,6 +38,26 @@ def _rows(
 ) -> list[tuple[object, ...]]:
     with state_store._database.connect() as conn:  # noqa: SLF001
         return conn.execute(sql, parameters or []).fetchall()
+
+
+def _input_declaring_exhibit_truncation(
+    exhibit_truncated: bool | None,
+) -> dict[str, Any]:
+    """An `analysis_input.json` payload stating -- or omitting -- the field.
+
+    `None` drops the key entirely, which is the shape of every archive written
+    before Issue #157 added it.
+    """
+    payload = input_payload()
+    coverage = payload["candidates"][0]["filings"][0]["coverage"]
+    if exhibit_truncated is None:
+        del coverage["exhibit_truncated"]
+    else:
+        coverage["exhibit_truncated"] = exhibit_truncated
+    payload["input_digest"] = canonical_json_digest(
+        payload, excluded_field="input_digest"
+    )
+    return payload
 
 
 def _insert_run(
@@ -75,6 +96,37 @@ class TestCollectHappyPath:
         assert len(coverage) == 1
         assert coverage[0].source_id == FILING_ID
         assert coverage[0].selection_mode == "full"
+        assert coverage[0].exhibit_truncated is False
+
+    def test_persists_a_collection_stage_exhibit_cut_the_archive_declared(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        write_run(_input_declaring_exhibit_truncation(True))
+
+        collect_verdicts(state_store, reports_root)
+
+        coverage = state_store.get_analysis_source_coverages(UUID(RUN_ID), "AAPL")
+        assert coverage[0].exhibit_truncated is True
+
+    def test_an_archive_predating_the_field_is_stored_as_not_recorded(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # Issue #157: `FilingCoverage.exhibit_truncated` defaults to `False`,
+        # so storing the parsed value would turn "the document never said"
+        # into "the document said no exhibit was cut", and the retrospective
+        # would then count that run's input as known to be complete.
+        write_run(_input_declaring_exhibit_truncation(None))
+
+        collect_verdicts(state_store, reports_root)
+
+        coverage = state_store.get_analysis_source_coverages(UUID(RUN_ID), "AAPL")
+        assert coverage[0].exhibit_truncated is None
 
     def test_persists_every_cited_source_with_its_input_resolved_type(
         self,

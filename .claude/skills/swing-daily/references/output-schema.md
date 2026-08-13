@@ -191,6 +191,10 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
             "exported_chars": 120000,
             "is_truncated": true,
             "selection_mode": "section_priority_partial",
+            // 取得段（8-K Exhibit の 60,000 字上限）で切られたか（Issue #157）。
+            // is_truncated とは独立で、false は「マーカーが無い」であって
+            // 「欠落が無い」ではない
+            "exhibit_truncated": false,
             "sections": [
               { "name": "part_i_item_2", "status": "full",
                 "original_chars": 38000, "exported_chars": 38000,

@@ -20,7 +20,7 @@ from swing_copilot.retro.surprises import (
     select_surprises,
 )
 from swing_copilot.storage.verdict_records import VerdictOutcomeRecord
-from swing_copilot.text.base import TextItem
+from swing_copilot.text.base import EXHIBIT_TRUNCATION_MARKER, TextItem
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -254,6 +254,45 @@ class TestFetchFreshness:
             ("finnhub:2", "本文")
         ]
         assert [item.text for item in bundle.filings] == ["かき"]
+
+    def test_reports_an_exhibit_cut_off_at_collection_on_this_path_too(self) -> None:
+        # Issue #157: the retrospective builds its coverage with the daily
+        # export's `select_filing_inputs`, but from `TextItem`s that crossed
+        # a boundary (re-fetched here, read back from storage elsewhere). The
+        # signal is the marker inside `content_text`, which survives that
+        # crossing, so this path must report the cut exactly as the daily
+        # export does rather than re-asserting "nothing was lost".
+        edgar_client = _FakeEdgarClient(
+            [_filing_item("edgar:1", "決算発表" + EXHIBIT_TRUNCATION_MARKER)]
+        )
+
+        bundle, _ = fetch_freshness(
+            FreshnessSources(edgar_client=edgar_client),
+            "AAA",
+            since=RUN_DATE,
+            as_of=AS_OF,
+            limits=AnalysisConfig(),
+        )
+
+        coverage = bundle.filings[0].coverage
+        assert coverage is not None
+        assert coverage.is_truncated is False
+        assert coverage.exhibit_truncated is True
+
+    def test_a_refetched_filing_without_the_marker_reports_no_exhibit_cut(self) -> None:
+        edgar_client = _FakeEdgarClient([_filing_item("edgar:1", "決算発表")])
+
+        bundle, _ = fetch_freshness(
+            FreshnessSources(edgar_client=edgar_client),
+            "AAA",
+            since=RUN_DATE,
+            as_of=AS_OF,
+            limits=AnalysisConfig(),
+        )
+
+        coverage = bundle.filings[0].coverage
+        assert coverage is not None
+        assert coverage.exhibit_truncated is False
 
     def test_degrades_to_an_empty_side_when_one_adapter_raises(self) -> None:
         bundle, notes = fetch_freshness(

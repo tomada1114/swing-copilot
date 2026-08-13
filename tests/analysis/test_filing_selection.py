@@ -15,7 +15,11 @@ from swing_copilot.analysis.filing_selection import (
 )
 from swing_copilot.analysis.schemas import FilingSectionCoverage, canonical_json_digest
 from swing_copilot.analysis.validate import load_analysis_input
-from swing_copilot.text.base import FilingSection, TextItem
+from swing_copilot.text.base import (
+    EXHIBIT_TRUNCATION_MARKER,
+    FilingSection,
+    TextItem,
+)
 from tests.analysis.conftest import input_payload
 
 if TYPE_CHECKING:
@@ -374,6 +378,100 @@ def test_filing_section_status_accepts_all_five_literal_values(status: str) -> N
     if status == "partial":
         kwargs.update(original_chars=100, exported_chars=50)
     FilingSectionCoverage(name="part_i_item_1", **kwargs)  # type: ignore[arg-type]
+
+
+class TestCollectionStageExhibitTruncation:
+    """Issue #157: a loss that happened before export must still be visible.
+
+    An earnings 8-K's `EX-99*` exhibits are cut off at `data/edgar.py`'s
+    per-filing ceiling, so the truncated text *is* `content_text`. Export then
+    copies it whole and the character triple honestly reports "nothing lost
+    here" -- which a reader took for "nothing missing" (the HST/UNH/GOOG/TROW/
+    WELL filings of run 43358613).
+    """
+
+    def test_an_export_that_kept_everything_still_reports_the_exhibit_cut(
+        self,
+    ) -> None:
+        # The reported shape: exhibits ran past the collection ceiling, the
+        # whole collected text fits the export budget.
+        collected = (
+            "Item 2.02 Results of Operations. See Exhibit 99.1."
+            "\n\n[EXHIBIT EX-99.1 release.htm]\n"
+            + "x" * 60_000
+            + EXHIBIT_TRUNCATION_MARKER
+        )
+
+        selected = select_filing_text(_item(collected), "8-K", 120_000)
+
+        coverage = selected.coverage
+        assert selected.text == collected
+        assert coverage.original_chars == coverage.exported_chars
+        assert coverage.is_truncated is False
+        assert coverage.selection_mode == "full"
+        assert coverage.exhibit_truncated is True
+
+    def test_a_filing_without_the_marker_reports_no_exhibit_truncation(self) -> None:
+        collected = (
+            "Item 2.02 Results of Operations. See Exhibit 99.1."
+            "\n\n[EXHIBIT EX-99.1 release.htm]\n" + "x" * 1_000
+        )
+
+        selected = select_filing_text(_item(collected), "8-K", 120_000)
+
+        assert selected.coverage.exhibit_truncated is False
+        assert selected.coverage.is_truncated is False
+
+    def test_an_export_slice_that_drops_the_marker_still_reports_the_cut(self) -> None:
+        # `head_fallback` keeps a leading slice, so the trailing marker does
+        # not survive into `text`. The exhibit loss is a property of the
+        # collected filing, so it must be reported from the collected text.
+        collected = "x" * 60_000 + EXHIBIT_TRUNCATION_MARKER
+
+        selected = select_filing_text(_item(collected), "8-K", 500)
+
+        assert EXHIBIT_TRUNCATION_MARKER not in selected.text
+        assert selected.coverage.selection_mode == "head_fallback"
+        assert selected.coverage.is_truncated is True
+        assert selected.coverage.exhibit_truncated is True
+
+    def test_a_symbol_budget_omission_still_reports_the_cut(self) -> None:
+        selected = select_filing_text(
+            _item("x" * 100 + EXHIBIT_TRUNCATION_MARKER), "8-K", 0
+        )
+
+        assert selected.coverage.selection_mode == "omitted_symbol_budget"
+        assert selected.coverage.exhibit_truncated is True
+
+    def test_a_section_priority_ten_q_reports_the_cut_it_inherited(self) -> None:
+        # 10-Q exhibits are not collected, but the field is filing-level and
+        # must not silently stop being computed on the section-priority path.
+        sections = (FilingSection("part_i_item_1", "financials " * 200),)
+        collected = "X" * 50_000 + EXHIBIT_TRUNCATION_MARKER
+
+        selected = select_filing_text(_item(collected, sections), "10-Q", 2_000)
+
+        assert selected.coverage.selection_mode == "section_priority_partial"
+        assert selected.coverage.exhibit_truncated is True
+
+    def test_an_archived_coverage_without_the_field_parses_as_false(
+        self, tmp_path: Path
+    ) -> None:
+        # The default keeps historical analysis-input-v2/v3 archives readable
+        # by the P8 collect path; `false` there means "not recorded".
+        payload = input_payload()
+        del payload["candidates"][0]["filings"][0]["coverage"]["exhibit_truncated"]
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+        input_path = tmp_path / "analysis_input.json"
+        input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = load_analysis_input(input_path)
+
+        coverage = loaded.candidates[0].filings[0].coverage
+        assert coverage is not None
+        assert coverage.exhibit_truncated is False
 
 
 def test_an_archived_missing_section_status_still_parses(tmp_path: Path) -> None:

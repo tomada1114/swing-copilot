@@ -340,6 +340,65 @@ class TestBuildRetroInput:
         assert dossier.input_filing_coverage[0].source_id == "edgar:quarterly"
         assert dossier.input_filing_coverage[0].coverage.sections[1].status == "partial"
 
+    @pytest.mark.parametrize(
+        ("exhibit_truncated", "severe_miss_counts"),
+        [
+            pytest.param(True, (1, 0, 0), id="collection-stage-cut-is-a-gap"),
+            pytest.param(False, (0, 1, 0), id="recorded-as-uncut-is-no-gap"),
+            pytest.param(None, (0, 0, 1), id="not-recorded-is-unknown-not-complete"),
+        ],
+    )
+    def test_an_exhibit_cut_before_export_is_not_counted_as_a_complete_input(
+        self,
+        populated_store: StateStore,
+        market_store: MarketStore,
+        tmp_path: Path,
+        exhibit_truncated: bool | None,
+        severe_miss_counts: tuple[int, int, int],
+    ) -> None:
+        # Issue #157: the export kept every character it was given, so
+        # `is_truncated` is honestly false. Counting only that column put the
+        # symbol in `without_gap`, telling the retrospective the input had
+        # been complete when the press release's tail was never collected.
+        populated_store.replace_run_verdicts(
+            RUN_ID,
+            [_verdict("AAPL", "proceed"), _verdict("MSFT", "skip")],
+            [],
+            [
+                AnalysisSourceCoverageRecord(
+                    run_id=RUN_ID,
+                    symbol="AAPL",
+                    source_id="edgar:earnings-8k",
+                    original_chars=64_841,
+                    exported_chars=64_841,
+                    is_truncated=False,
+                    selection_mode="full",
+                    sections=(),
+                    exhibit_truncated=exhibit_truncated,
+                )
+            ],
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        coverage = document.input_coverage
+        assert coverage is not None
+        assert coverage.truncated_filing_count == 0
+        assert coverage.exhibit_truncated_filing_count == (
+            1 if exhibit_truncated else 0
+        )
+        assert (
+            coverage.severe_miss_symbol_count_with_gap,
+            coverage.severe_miss_symbol_count_without_gap,
+            coverage.severe_miss_symbol_count_unknown,
+        ) == severe_miss_counts
+        dossier = document.surprises.items[0]
+        assert dossier.input_filing_coverage[0].coverage.exhibit_truncated is (
+            exhibit_truncated is True
+        )
+
     def test_cross_tabs_the_human_journal_and_the_cited_sources(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
     ) -> None:

@@ -52,7 +52,8 @@ description: >
 
 1. 入力 JSON を読み、担当銘柄の `filings` 配列を取り出す。`source_id`,
    `form_type`, `filed_at`, `text`, `coverage` を控える。`coverage` はコード所有の
-   完全性情報であり、`selection_mode`、`is_truncated`、章ごとの `status` を先に確認する。
+   完全性情報であり、`selection_mode`、`is_truncated`、`exhibit_truncated`、
+   章ごとの `status` を先に確認する。
    章が `partial` なら `original_chars` / `exported_chars` / `omission_shape` も控える
    （欠落量 = `original_chars - exported_chars`、欠落位置 = `omission_shape`）。
 2. `filings` が空なら、その銘柄は `filing_analyses: []` とする（内容を作らない・AC14）。
@@ -107,10 +108,22 @@ description: >
   （`interpretation` に「本分析は提供された開示テキストの重要箇所に基づくもので、
   リスク要因の網羅ではない」相当の一文を入れる）。テキストを分割して読んだ場合や
   一部しか与えられていない場合も同様に明記する。
-- `coverage.is_truncated`、`head_fallback`、`omitted_symbol_budget`、または章の
+- `coverage.is_truncated`、`coverage.exhibit_truncated`、`head_fallback`、
+  `omitted_symbol_budget`、または章の
   `partial` / `absent_from_filing` / `not_parsed` / `missing` を無視しない。
   欠落した章について事実が無かったとは結論せず、
   どの範囲が未分析かを `interpretation` または `red_flags` に具体的に記す。
+- **`exhibit_truncated: true` は「取得段で Exhibit が切られている」**（8-K の
+  Exhibit 99 系は 1 開示 60,000 字の上限で切られ、本文に
+  `[... exhibit truncated ...]` が入る）。この欠落は `is_truncated` にも
+  `original_chars` / `exported_chars` にも現れないので、`is_truncated: false` /
+  `selection_mode: "full"` と同時に立ちうる。立っていたら
+  「プレスリリース本文の末尾が入力に含まれていない。欠落の範囲・位置は入力からは
+  特定できない」旨を `interpretation` に書き、末尾に置かれがちな非GAAP調整表・
+  補足表・ガイダンス表について「記載が無かった」と結論しない。
+- **`exhibit_truncated: false` は「マーカーが無い」であって「欠落が無い」ではない。**
+  Exhibit の取得自体に失敗した開示や、マーカー導入前のアーカイブも `false` になる。
+  非網羅である旨（AC13）は `false` でも省略しない。
 - **未分析範囲は「章名 + 欠落量 + 欠落位置」で書く。** 「一部のみ」で止めない。
   `original_chars` / `exported_chars` / `omission_shape` がある章はそれを使う。
   - `omission_shape: "head_and_tail"` → 「part_ii_item_1a は 20,500 字中 18,390 字を

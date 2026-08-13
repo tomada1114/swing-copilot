@@ -12,6 +12,7 @@ from swing_copilot.analysis.schemas import (
     FilingSectionOmissionShape,
     FilingSelectionMode,
 )
+from swing_copilot.text.base import EXHIBIT_TRUNCATION_MARKER
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -104,18 +105,24 @@ def select_filing_text(
 ) -> FilingTextSelection:
     """Select one filing under `budget`, preferring important 10-Q sections.
 
-    The complete filing remains in `TextItem.content_text` for audit/storage.
+    The collected filing remains in `TextItem.content_text` for audit/storage.
     This function only shapes the copy offered to a qualitative-analysis
     context. A parser miss is fail-soft and visibly falls back to the historic
     leading slice.
+
+    `content_text` is the collected text, which is not necessarily the whole
+    filing: an 8-K's exhibits were already capped while being fetched. The
+    resulting coverage therefore reports export-stage loss (`is_truncated`)
+    and collection-stage loss (`exhibit_truncated`) separately -- see
+    `FilingCoverage`.
     """
     original = item.content_text
     if budget <= 0:
-        return _selection("", len(original), "omitted_symbol_budget", ())
+        return _selection("", original, "omitted_symbol_budget")
     if len(original) <= budget:
-        return _selection(original, len(original), "full", ())
+        return _selection(original, original, "full")
     if form_type not in _TEN_Q_FORMS or not item.filing_sections:
-        return _selection(original[:budget], len(original), "head_fallback", ())
+        return _selection(original[:budget], original, "head_fallback")
 
     sections = {
         section.name: section.content_text.strip()
@@ -128,7 +135,7 @@ def select_filing_text(
         if name in sections
     ]
     if not available:
-        return _selection(original[:budget], len(original), "head_fallback", ())
+        return _selection(original[:budget], original, "head_fallback")
 
     headers = {name: f"[SECTION {name}]\n" for name, _, _ in available}
     header_chars = sum(len(header) for header in headers.values()) + 2 * (
@@ -136,7 +143,7 @@ def select_filing_text(
     )
     content_budget = max(0, budget - header_chars)
     if content_budget == 0:
-        return _selection(original[:budget], len(original), "head_fallback", ())
+        return _selection(original[:budget], original, "head_fallback")
     allocated = _allocate_section_chars(available, content_budget)
     shaped = {
         name: _shape_section(content, allocated[name]) for name, _, content in available
@@ -162,7 +169,7 @@ def select_filing_text(
         if all(section.status == "full" for section in coverage)
         else "section_priority_partial"
     )
-    return _selection(selected, len(original), mode, coverage)
+    return _selection(selected, original, mode, coverage)
 
 
 def _part_group(name: str) -> str:
@@ -283,17 +290,33 @@ def _allocate_section_chars(
 
 def _selection(
     text: str,
-    original_chars: int,
+    original: str,
     mode: FilingSelectionMode,
-    sections: tuple[FilingSectionCoverage, ...],
+    sections: tuple[FilingSectionCoverage, ...] = (),
 ) -> FilingTextSelection:
+    """Pair `text` with the coverage that describes what it left behind.
+
+    Args:
+        text: The excerpt offered to the analysis context.
+        original: The collected filing text `text` was cut from. Passed whole
+            rather than as a length because the collection-stage truncation
+            signal is a marker *inside* it (Issue #157); reading it here keeps
+            every branch of `select_filing_text` from having to remember to
+            report it.
+        mode: How `text` was chosen.
+        sections: Per-section coverage, empty outside section-priority mode.
+    """
     return FilingTextSelection(
         text=text,
         coverage=FilingCoverage(
-            original_chars=original_chars,
+            original_chars=len(original),
             exported_chars=len(text),
-            is_truncated=len(text) < original_chars,
+            is_truncated=len(text) < len(original),
             selection_mode=mode,
+            # Detected on the collected text, not on `text`: a head slice can
+            # drop the trailing marker, and the exhibit loss it reports is a
+            # property of the filing as collected either way.
+            exhibit_truncated=EXHIBIT_TRUNCATION_MARKER in original,
             sections=list(sections),
         ),
     )

@@ -98,6 +98,20 @@ _PRE_P8_123_TEXT_ITEMS_TABLE = """
     )
 """
 
+_PRE_EXHIBIT_TRUNCATED_COVERAGE_TABLE = """
+    CREATE TABLE IF NOT EXISTS analysis_source_coverage (
+        run_id          UUID NOT NULL,
+        symbol          VARCHAR NOT NULL,
+        source_id       VARCHAR NOT NULL,
+        original_chars  INTEGER NOT NULL,
+        exported_chars  INTEGER NOT NULL,
+        is_truncated    BOOLEAN NOT NULL,
+        selection_mode  VARCHAR NOT NULL,
+        sections_json   JSON NOT NULL,
+        PRIMARY KEY (run_id, symbol, source_id)
+    )
+"""
+
 _PRE_I57_RUNS_TABLE = """
     CREATE TABLE IF NOT EXISTS runs (
         run_id          UUID PRIMARY KEY,
@@ -346,6 +360,38 @@ class TestInitSchema:
                 "WHERE source_id = 'finnhub-1'"
             ).fetchone()
         assert row_again == ("AAPL", None, None)
+
+    def test_init_schema_leaves_pre_issue_157_coverage_rows_not_recorded(
+        self, tmp_path
+    ):
+        # Issue #157: nothing in an existing row says whether its filing's
+        # exhibits were cut off at collection, so the migration adds the
+        # column without backfilling it. NULL keeps meaning "not recorded",
+        # which readers must not take for "no exhibit was cut".
+        database = Database(tmp_path / "pre_issue_157.duckdb")
+        run_id = uuid4()
+        with database.connect() as conn:
+            conn.execute(_PRE_EXHIBIT_TRUNCATED_COVERAGE_TABLE)
+            conn.execute(
+                """
+                INSERT INTO analysis_source_coverage (
+                    run_id, symbol, source_id, original_chars, exported_chars,
+                    is_truncated, selection_mode, sections_json
+                ) VALUES (?, 'AAPL', 'edgar:1', 64841, 64841, FALSE, 'full', '[]')
+                """,
+                [str(run_id)],
+            )
+
+        store = StateStore(database)
+        store.init_schema()  # Must not raise against the old table shape.
+
+        rows = store.get_analysis_source_coverages(run_id, "AAPL")
+        assert len(rows) == 1
+        assert rows[0].exhibit_truncated is None
+
+        # Idempotent: re-running must not disturb the un-backfilled row.
+        store.init_schema()
+        assert store.get_analysis_source_coverages(run_id, "AAPL")[0] == rows[0]
 
     def test_init_schema_adds_run_metadata_to_a_pre_i57_database(self, tmp_path):
         database = Database(tmp_path / "pre_i57.duckdb")

@@ -20,26 +20,33 @@ IDENTITY = "swing-copilot tester tmasuyama1114@gmail.com"
 
 
 class FakeAttachment:
-    """One filed document, shaped like edgartools' `Attachment`."""
+    """One filed document, shaped like edgartools' `Attachment`.
+
+    `content` is the raw filed payload, downloaded on access: a `str` for a
+    text/HTML document, `bytes` for anything else. Conversion to text is the
+    adapter's own job (Issue #156), so these fakes never render anything
+    themselves.
+    """
 
     def __init__(
         self,
         document_type: str,
         document: str,
-        text: str | None = "",
+        content: str | bytes | None = "",
         error: Exception | None = None,
     ) -> None:
         self.document_type = document_type
         self.document = document
-        self._text = text
+        self._content = content
         self._error = error
-        self.text_calls = 0
+        self.content_calls = 0
 
-    def text(self):
-        self.text_calls += 1
+    @property
+    def content(self):
+        self.content_calls += 1
         if self._error is not None:
             raise self._error
-        return self._text
+        return self._content
 
 
 class FakeAttachments:
@@ -928,8 +935,27 @@ class TestEightKExhibits:
         item = _fetch_one(_eight_k_with_exhibits(*exhibits))
 
         assert "deck.pdf" not in item.content_text
+        # A slide deck holds an encoded blob, not prose: it is recognized from
+        # its extension and never downloaded.
+        assert exhibits[0].content_calls == 0
         assert item.content_text.endswith(
             "\n\n[EXHIBIT EX-99.2 release.htm]\npress release"
+        )
+
+    def test_text_exhibit_delivered_as_bytes_is_skipped(self):
+        # Defensive: EDGAR returns text for a text extension, so this is not
+        # expected. If it ever happens, guessing an encoding would risk
+        # mangling the very figures the exhibit exists for.
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", b"<html>1,543,210</html>"),
+            FakeAttachment("EX-99.2", "supplement.htm", "supplemental detail"),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert "release.htm" not in item.content_text
+        assert item.content_text.endswith(
+            "\n\n[EXHIBIT EX-99.2 supplement.htm]\nsupplemental detail"
         )
 
     def test_blank_exhibit_text_is_skipped(self):
@@ -947,7 +973,7 @@ class TestEightKExhibits:
 
         item = _fetch_one(_eight_k_with_exhibits(*exhibits))
 
-        assert [exhibit.text_calls for exhibit in exhibits] == [1, 1, 1, 0, 0]
+        assert [exhibit.content_calls for exhibit in exhibits] == [1, 1, 1, 0, 0]
         assert "doc4.htm" not in item.content_text
 
     def test_forms_other_than_eight_k_never_request_attachments(self):
@@ -974,6 +1000,117 @@ def _exhibit_block(content_text: str, header: str) -> str:
     return content_text.split(f"[EXHIBIT {header}]\n", 1)[1].split("\n\n[EXHIBIT ", 1)[
         0
     ]
+
+
+#: A furnished earnings release whose financial table is wide enough that a
+#: fixed-width renderer has to drop characters to fit it. Rendered through
+#: `Attachment.text()` (Issue #156) every figure below came back clipped --
+#: `1,543,…`, `135,8…` -- and the unit caption read `(In thous… except per
+#: share amoun…`, so no quote could be reconciled with the filing (AC16).
+_WIDE_TABLE_RELEASE_HTML = """\
+<html><body>
+<p>Example Corp. Reports Fourth-Quarter and Full-Year Results</p>
+<table>
+<tr>
+<td>(In thousands, except per share amounts)</td>
+<td>Three Months Ended December 31, 2025</td>
+<td>Three Months Ended December 31, 2024</td>
+<td>Percent Change</td>
+<td>Six Months Ended December 31, 2025</td>
+<td>Six Months Ended December 31, 2024</td>
+<td>Percent Change</td>
+<td>Twelve Months Ended December 31, 2025</td>
+<td>Twelve Months Ended December 31, 2024</td>
+<td>Percent Change</td>
+</tr>
+<tr>
+<td>Revenue from operations</td>
+<td>1,543,210</td><td>1,498,765</td><td>3.0</td>
+<td>3,087,654</td><td>2,987,123</td><td>3.4</td>
+<td>6,087,654</td><td>5,987,123</td><td>1.7</td>
+</tr>
+<tr>
+<td>Operating income</td>
+<td>135,876</td><td>145,899</td><td>(6.9)</td>
+<td>1,983,835</td><td>1,987,001</td><td>(0.2)</td>
+<td>2,983,835</td><td>2,987,001</td><td>(0.1)</td>
+</tr>
+<tr>
+<td>Diluted earnings per share</td>
+<td>10.45</td><td>9.87</td><td>5.9</td>
+<td>15.30</td><td>14.88</td><td>2.8</td>
+<td>20.12</td><td>19.44</td><td>3.5</td>
+</tr>
+</table>
+</body></html>
+"""
+
+_WIDE_TABLE_FIGURES = (
+    "1,543,210",
+    "1,498,765",
+    "3,087,654",
+    "2,987,123",
+    "6,087,654",
+    "5,987,123",
+    "135,876",
+    "145,899",
+    "1,983,835",
+    "1,987,001",
+    "2,983,835",
+    "2,987,001",
+    "10.45",
+    "15.30",
+    "20.12",
+)
+
+
+class TestEightKExhibitTableFidelity:
+    """Issue #156: an exhibit's table cells must survive conversion whole."""
+
+    def _release_block(self) -> str:
+        exhibit = FakeAttachment("EX-99.1", "release.htm", _WIDE_TABLE_RELEASE_HTML)
+
+        item = _fetch_one(_eight_k_with_exhibits(exhibit))
+
+        return _exhibit_block(item.content_text, "EX-99.1 release.htm")
+
+    def test_every_figure_in_a_wide_table_survives_with_all_its_digits(self):
+        block = self._release_block()
+
+        assert "…" not in block
+        assert [value for value in _WIDE_TABLE_FIGURES if value not in block] == []
+
+    def test_unit_caption_is_not_clipped(self):
+        assert "(In thousands, except per share amounts)" in self._release_block()
+
+    def test_markup_without_an_html_root_is_kept_verbatim(self, caplog):
+        # A stray doctype with no document under it: there is nothing to
+        # convert, and dropping it would silently lose whatever it carries.
+        orphan_doctype = (
+            '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN">'
+        )
+        exhibit = FakeAttachment("EX-99.1", "release.htm", orphan_doctype)
+
+        with caplog.at_level("WARNING"):
+            item = _fetch_one(_eight_k_with_exhibits(exhibit))
+
+        assert (
+            _exhibit_block(item.content_text, "EX-99.1 release.htm") == orphan_doctype
+        )
+        assert "release.htm has no HTML root" in caplog.text
+
+    def test_plain_text_exhibit_is_appended_unchanged(self):
+        # Not every furnished exhibit is HTML; a plain-text one must not be
+        # run through the HTML converter, which would empty it.
+        exhibit = FakeAttachment(
+            "EX-99.1", "release.txt", "Revenue from operations was 1,543,210."
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(exhibit))
+
+        assert _exhibit_block(item.content_text, "EX-99.1 release.txt") == (
+            "Revenue from operations was 1,543,210."
+        )
 
 
 class TestEightKExhibitBudget:
@@ -1003,7 +1140,7 @@ class TestEightKExhibitBudget:
 
         item = _fetch_one(_eight_k_with_exhibits(*exhibits))
 
-        assert exhibits[1].text_calls == 0
+        assert exhibits[1].content_calls == 0
         assert "supplement.htm" not in item.content_text
 
     def test_partially_spent_budget_truncates_the_next_exhibit(self):
@@ -1079,7 +1216,7 @@ class TestEightKExhibitFailSoft:
             _eight_k_with_exhibits(exhibit), sleep_fn=sleeps.append, clock=clock
         )
 
-        assert exhibit.text_calls == 1
+        assert exhibit.content_calls == 1
         assert sleeps == []
         assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
 
@@ -1094,7 +1231,7 @@ class TestEightKExhibitFailSoft:
             _eight_k_with_exhibits(exhibit), sleep_fn=sleeps.append, clock=clock
         )
 
-        assert exhibit.text_calls == 3
+        assert exhibit.content_calls == 3
         assert sleeps == [1.0, 2.0]
         assert item.content_text == "Item 2.02 Results of Operations. See Exhibit 99.1."
 

@@ -279,17 +279,45 @@ def calendar_source_bodies(analysis_input: AnalysisInput) -> dict[str, str]:
     )
 
 
-def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
+def read_analysis_document(path: Path) -> object:
+    """Read one analysis document off disk and return its parsed JSON.
+
+    Every way the bytes can fail to become JSON -- an unreadable path, a file
+    that is not UTF-8, and text that is not JSON -- leaves as an
+    `AnalysisIngestError`, because callers of `copilot-ingest-analysis` tell a
+    broken artifact from an unexpected fault by that exception type alone. A
+    wrongly encoded artifact is exactly what an unattended run produces and
+    nobody watches, so it must not escape as a raw `UnicodeDecodeError`
+    (Issue #153).
+
+    Exposed because `copilot-verify-analysis` reads the same documents one step
+    earlier, to dispatch on their top-level keys, and its pre-flight verdict
+    must not disagree with ingest about which files are readable.
+
+    Args:
+        path: The document to read.
+
+    Returns:
+        The decoded JSON value, of whatever type the document holds.
+
+    Raises:
+        AnalysisIngestError: The file could not be read, decoded as UTF-8, or
+            parsed as JSON.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         msg = f"Analysis document could not be read: {path}"
         raise AnalysisIngestError(msg) from exc
     try:
-        payload = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         msg = f"Analysis document is not valid JSON: {path}"
         raise AnalysisIngestError(msg) from exc
+
+
+def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
+    payload = read_analysis_document(path)
     try:
         return model.model_validate(payload)
     except ValidationError as exc:

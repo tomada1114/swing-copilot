@@ -256,6 +256,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- UTF-8 として解釈できない `analysis_input.json` / `analysis_result.json` が
+  `AnalysisIngestError` ではなく生の `UnicodeDecodeError` として伝播していた
+  問題を解消。`UnicodeDecodeError` は `ValueError` のサブクラスであって
+  `OSError` ではないため、`analysis/validate.py` の読み取り段の except を
+  すり抜けており、`copilot-ingest-analysis` の呼び出し側（`analysis/cli.py`、
+  `swing-daily` Step 5）が「壊れた成果物」と「想定外の異常」を例外型で
+  区別できなかった。読み取りと JSON パースを `read_analysis_document()` に
+  切り出し、`copilot-verify-analysis` の独自捕捉もこれを呼ぶようにして、
+  事前検査と本番 ingest の失敗型を揃えた
 - 日次runの「保有銘柄」が実オープンポジション（`positions`）だけを見ており、
   実売買前で常に0行のため保有銘柄のニュース・開示収集が一度も発火していなかった
   問題を解消。`pipeline/daily_runner.py::_held_symbols()`が実オープンポジションと

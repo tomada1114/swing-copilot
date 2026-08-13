@@ -44,8 +44,8 @@ _INSERT_VERDICT_SOURCE = """
 _INSERT_ANALYSIS_COVERAGE = """
     INSERT INTO analysis_source_coverage (
         run_id, symbol, source_id, original_chars, exported_chars,
-        is_truncated, selection_mode, sections_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        is_truncated, selection_mode, exhibit_truncated, sections_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _INSERT_VERDICT_OUTCOME = """
@@ -108,6 +108,10 @@ class AnalysisSourceCoverageRecord:
     is_truncated: bool
     selection_mode: str
     sections: tuple[tuple[str, str], ...]
+    #: Whether the filing's 8-K exhibits were cut off at collection, which the
+    #: character counts above cannot express (Issue #157). `None` means the row
+    #: predates the column: not recorded, which is not the same as `False`.
+    exhibit_truncated: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +250,7 @@ def replace_run_verdicts(
                         coverage.exported_chars,
                         coverage.is_truncated,
                         coverage.selection_mode,
+                        coverage.exhibit_truncated,
                         dumps_safe(
                             [
                                 {"name": name, "status": status}
@@ -269,7 +274,7 @@ def get_analysis_source_coverages(
         rows = conn.execute(
             """
             SELECT source_id, original_chars, exported_chars, is_truncated,
-                   selection_mode, sections_json
+                   selection_mode, sections_json, exhibit_truncated
             FROM analysis_source_coverage
             WHERE run_id = ? AND symbol = ?
             ORDER BY source_id
@@ -289,6 +294,7 @@ def get_analysis_source_coverages(
                 (str(section["name"]), str(section["status"]))
                 for section in json.loads(str(row[5]))
             ),
+            exhibit_truncated=row[6],
         )
         for row in rows
     )
@@ -303,7 +309,7 @@ def get_analysis_source_coverages_in_window(
             """
             SELECT DISTINCT ac.run_id, ac.symbol, ac.source_id,
                    ac.original_chars, ac.exported_chars, ac.is_truncated,
-                   ac.selection_mode, ac.sections_json
+                   ac.selection_mode, ac.sections_json, ac.exhibit_truncated
             FROM analysis_source_coverage ac
             JOIN verdict_outcomes vo
               ON vo.run_id = ac.run_id AND vo.symbol = ac.symbol
@@ -325,6 +331,7 @@ def get_analysis_source_coverages_in_window(
                 (str(section["name"]), str(section["status"]))
                 for section in json.loads(str(row[7]))
             ),
+            exhibit_truncated=row[8],
         )
         for row in rows
     )

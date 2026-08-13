@@ -55,7 +55,11 @@ from edgar.files.markdown import to_markdown
 from swing_copilot.clock import SystemClock
 from swing_copilot.retry import retry_external_call
 from swing_copilot.storage.market_store import FundamentalsRecord
-from swing_copilot.text.base import FilingSection, TextItem
+from swing_copilot.text.base import (
+    EXHIBIT_TRUNCATION_MARKER,
+    FilingSection,
+    TextItem,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -91,7 +95,6 @@ _MAX_EXHIBITS_PER_FILING = 3
 #: comfortably inside the per-filing ceiling and lets two of them plus a 10-Q
 #: share the per-symbol ceiling.
 _MAX_EXHIBIT_CHARS_PER_FILING = 60_000
-_EXHIBIT_TRUNCATION_MARKER = "\n[... exhibit truncated ...]"
 #: Document extensions edgartools itself treats as text (`Attachment.is_text`).
 #: Borrowed rather than restated so the two cannot drift apart.
 _TEXT_DOCUMENT_EXTENSIONS = frozenset(text_extensions)
@@ -592,8 +595,13 @@ class EdgarClient:
             continuous text. `""` for a non-8-K, for an 8-K with no readable
             `EX-99*` exhibit, and when the attachment list itself could not be
             retrieved. Total exhibit characters are capped at
-            `_MAX_EXHIBIT_CHARS_PER_FILING`; a cut-off exhibit is marked
-            inline.
+            `_MAX_EXHIBIT_CHARS_PER_FILING`; whatever the cap cost is marked
+            inline with `EXHIBIT_TRUNCATION_MARKER`, whether it cut one exhibit
+            short or consumed the budget before a later one could be fetched.
+            That marker is the only trace of the cap that survives into
+            `content_text`, and `analysis/filing_selection.py` reads it back as
+            `FilingCoverage.exhibit_truncated` (Issue #157), so a silent break
+            here would report the filing as complete.
         """
         if filing.form not in _EXHIBIT_FORMS:
             return ""
@@ -603,6 +611,12 @@ class EdgarClient:
             attachments = self._with_retries(lambda: filing.attachments)
             for exhibit in _earnings_exhibits(attachments):
                 if remaining <= 0:
+                    # The budget, not the filing, ended the exhibit text: this
+                    # exhibit exists and is being dropped whole, so say so --
+                    # unless the exhibit that exhausted the budget was itself
+                    # cut and already carries the marker.
+                    if not blocks[-1].endswith(EXHIBIT_TRUNCATION_MARKER):
+                        blocks.append(EXHIBIT_TRUNCATION_MARKER)
                     break
                 # `None` for an exhibit that carries no text at all (a PDF
                 # slide deck furnished as 99.1, for example): an absence, not
@@ -612,7 +626,7 @@ class EdgarClient:
                     continue
                 kept = text[:remaining]
                 remaining -= len(kept)
-                marker = "" if len(kept) == len(text) else _EXHIBIT_TRUNCATION_MARKER
+                marker = "" if len(kept) == len(text) else EXHIBIT_TRUNCATION_MARKER
                 header = f"[EXHIBIT {exhibit.document_type} {exhibit.document}]"
                 blocks.append(f"\n\n{header}\n{kept}{marker}")
         except Exception:  # exhibit retrieval is a documented fail-soft boundary

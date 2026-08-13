@@ -8,6 +8,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from datetime import datetime
 
+#: Inserted into `TextItem.content_text` where an adapter cut an exhibit off at
+#: its *collection-stage* ceiling (`data/edgar.py`'s
+#: `_MAX_EXHIBIT_CHARS_PER_FILING`), so the loss is visible in the text itself
+#: rather than in a field that stops at the collection boundary (Issue #157).
+#: Declared here, beside `TextItem`, because the writer (`data/edgar.py`) and
+#: the reader (`analysis/filing_selection.py`) must share one literal and
+#: cannot drift apart -- and because `analysis/` importing `data/edgar.py`
+#: would drag edgartools (a ~20s import) into the ingest path for a string.
+EXHIBIT_TRUNCATION_MARKER = "\n[... exhibit truncated ...]"
+
 
 @dataclass(frozen=True, slots=True)
 class FilingSection:

@@ -256,6 +256,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 8-K Exhibit が取得段の 60,000 字上限で切られていても
+  `analysis_input.json` の `coverage` が `is_truncated: false` /
+  `selection_mode: "full"` を主張していた問題を解消（Issue #157）。既存の
+  文字数 3 点は export 段の欠落しか語れず、取得段で切られたテキストが
+  そのまま「原文」として数えられていた。`FilingCoverage` に
+  `exhibit_truncated`（既定 `false`）を追加し、`analysis/filing_selection.py`
+  が `TextItem.content_text` 中の切り詰めマーカー
+  （`text/base.py::EXHIBIT_TRUNCATION_MARKER`、`data/edgar.py` と共有）の
+  有無で判定する。マーカーは永続化される本文の中にあるため、DB から
+  `TextItem` を読み直す（あるいは再取得する）P8 の `retro/surprises.py` でも
+  同じ値になる。`false` は「マーカーが無い」であって「欠落が無い」ではない。
+  既定値により過去の `analysis-input-v2`/`v3` アーカイブは引き続き読める
+  （`input_digest` 検証は生 JSON を対象にするため影響しない）。
+  併せて、予算を使い切って**丸ごと落とす** Exhibit にもマーカーを付けるように
+  した（従来はテキストが 1 文字も入らずマーカーの書き先が無いため、上限が
+  効いた事実自体が消えていた）
+- P8 の振り返りが、取得段で切られた開示を「入力は完全だった」と数えていた問題を
+  解消（Issue #157）。`analysis_source_coverage` に `exhibit_truncated BOOLEAN`
+  （nullable、backfill なし＝既存行は `NULL`＝未記録）を追加し、
+  `retro/collect.py` は pydantic の `model_fields_set` を見てアーカイブが実際に
+  記載していた場合だけ保存する。`input_coverage` の
+  `severe_miss_symbol_count_with_gap` は両方の段の切り詰めで立ち、
+  `without_gap` は全行が「gap 無しかつ記録済み」のときだけ立つ（未記録を含む
+  銘柄は `unknown`）。取得段の件数は新設の `exhibit_truncated_filing_count`
+  （既定 0＝未集計）で出す
 - 8-K Exhibit（EX-99*）由来テキストで、表セル内の単語と数値が途中で切られ
   `…` に置き換わっていた問題を解消（Issue #156）。`data/edgar.py` は
   edgartools の `Attachment.text()` に変換を委ねていたが、これは Exhibit の

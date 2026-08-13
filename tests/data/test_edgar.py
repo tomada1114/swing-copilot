@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from swing_copilot.analysis.filing_selection import select_filing_text
 from swing_copilot.data.edgar import EdgarClient, FilingRef
 from swing_copilot.storage.market_store import FundamentalsRecord
 
@@ -1132,6 +1133,30 @@ class TestEightKExhibitBudget:
 
         assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == "x" * 60_000
 
+    @pytest.mark.parametrize(
+        ("exhibit_chars", "expected"),
+        [
+            pytest.param(59_999, False, id="one-under-the-budget"),
+            pytest.param(60_000, False, id="exactly-at-the-budget"),
+            pytest.param(60_001, True, id="one-over-the-budget"),
+        ],
+    )
+    def test_the_budget_boundary_is_what_the_exported_coverage_reports(
+        self, exhibit_chars: int, expected: bool
+    ) -> None:
+        # Issue #157: the collection-stage cut is invisible to the character
+        # counts (the truncated text *is* the "original"), so the marker in
+        # `content_text` is what carries it across into `coverage`. The
+        # reported filings all sat just past the ceiling like this.
+        exhibit = FakeAttachment("EX-99.1", "release.htm", "x" * exhibit_chars)
+
+        item = _fetch_one(_eight_k_with_exhibits(exhibit))
+        selection = select_filing_text(item, "8-K", 120_000)
+
+        assert selection.coverage.is_truncated is False
+        assert selection.coverage.selection_mode == "full"
+        assert selection.coverage.exhibit_truncated is expected
+
     def test_exhausted_budget_skips_the_next_exhibit_without_downloading_it(self):
         exhibits = (
             FakeAttachment("EX-99.1", "release.htm", "a" * 60_000),
@@ -1142,6 +1167,32 @@ class TestEightKExhibitBudget:
 
         assert exhibits[1].content_calls == 0
         assert "supplement.htm" not in item.content_text
+
+    def test_an_exhibit_dropped_whole_by_the_budget_is_still_marked(self):
+        # The skipped exhibit leaves no text of its own to mark, so without an
+        # explicit marker the filing would claim to be complete (Issue #157).
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "a" * 60_000),
+            FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+        selection = select_filing_text(item, "8-K", 120_000)
+
+        assert item.content_text.endswith("\n[... exhibit truncated ...]")
+        assert selection.coverage.is_truncated is False
+        assert selection.coverage.exhibit_truncated is True
+
+    def test_a_cut_exhibit_that_exhausts_the_budget_is_marked_only_once(self):
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "a" * 59_990),
+            FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
+            FakeAttachment("EX-99.3", "slides.htm", "c" * 50),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert item.content_text.count("[... exhibit truncated ...]") == 1
 
     def test_partially_spent_budget_truncates_the_next_exhibit(self):
         exhibits = (

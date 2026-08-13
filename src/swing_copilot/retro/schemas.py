@@ -188,10 +188,18 @@ class SourceContributionEntry(_StrictModel):
 
 
 class InputCoverageSummary(_StrictModel):
-    """Code-counted relationship between export gaps and severe misses."""
+    """Code-counted relationship between input gaps and severe misses.
+
+    `truncated_filing_count` counts export-stage truncation only.
+    `exhibit_truncated_filing_count` counts filings whose 8-K exhibits were cut
+    off earlier, while being collected, which the character counts cannot see
+    (Issue #157). It defaults to 0 so retrospective dossiers archived before it
+    existed keep parsing; 0 there means "not counted", not "none occurred".
+    """
 
     filing_count: int = Field(ge=0)
     truncated_filing_count: int = Field(ge=0)
+    exhibit_truncated_filing_count: int = Field(default=0, ge=0)
     fallback_filing_count: int = Field(ge=0)
     omitted_filing_count: int = Field(ge=0)
     severe_miss_symbol_count_with_gap: int = Field(ge=0)

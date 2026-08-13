@@ -171,12 +171,43 @@ class FilingSectionCoverage(_StrictModel):
 
 
 class FilingCoverage(_StrictModel):
-    """Code-owned completeness metadata for one exported filing."""
+    """Code-owned completeness metadata for one exported filing.
+
+    `original_chars` / `exported_chars` / `is_truncated` describe the *export*
+    stage only: how much of the collected `TextItem.content_text` reached this
+    document. They cannot see a loss that happened earlier, at collection.
+    An 8-K's `EX-99*` exhibits are cut off at a per-filing ceiling while being
+    fetched, so the truncated text is already what `content_text` holds; the
+    export then copies it whole and reports `is_truncated: false`,
+    `selection_mode: full` (Issue #157).
+
+    `exhibit_truncated` closes that blind spot: it is `true` when
+    `EXHIBIT_TRUNCATION_MARKER` is present in the collected filing text this
+    export was derived from. It is read from the text rather than from a
+    collection-time companion field, because the text is what gets persisted:
+    the signal therefore survives a round trip through storage and is
+    recomputed identically wherever a `TextItem` is selected again.
+
+    `false` means **the marker is absent**, not "nothing is missing" -- the
+    same distinction `FilingSectionCoverage` draws for its optional fields.
+    A filing collected before the marker existed, one whose exhibits failed to
+    download, one dropped for exceeding `_MAX_EXHIBITS_PER_FILING`, and one
+    whose exhibit text was elided by the source itself all report `false`.
+    It defaults to `false` so archived `analysis-input-v2`/`-v3` documents
+    written before the field existed keep parsing (the `input_digest` check
+    hashes the raw document, so the added field does not invalidate them), and
+    so does coverage rebuilt from an `analysis_source_coverage` row whose
+    column is `NULL`. Because that `false` is ambiguous on those paths,
+    `retro/collect.py` stores only what a document actually stated and
+    `retro/export.py` counts a symbol with an unrecorded row as `unknown`
+    rather than as gap-free.
+    """
 
     original_chars: int = Field(ge=0)
     exported_chars: int = Field(ge=0)
     is_truncated: bool
     selection_mode: FilingSelectionMode
+    exhibit_truncated: bool = False
     sections: list[FilingSectionCoverage] = []
 
     @model_validator(mode="after")

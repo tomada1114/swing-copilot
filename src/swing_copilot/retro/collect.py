@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from swing_copilot.analysis.schemas import (
         AnalysisInput,
         AnalysisResult,
+        FilingCoverage,
         SymbolAnalysis,
     )
     from swing_copilot.storage.state_store import StateStore
@@ -306,6 +307,7 @@ def _write_run(
             sections=tuple(
                 (section.name, section.status) for section in coverage.sections
             ),
+            exhibit_truncated=_recorded_exhibit_truncation(coverage),
         )
         for candidate in analysis_input.candidates
         for filing in candidate.filings
@@ -340,6 +342,21 @@ def _write_run(
 
     state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources, coverages)
     return len(verdicts), len(sources), len(coverages)
+
+
+def _recorded_exhibit_truncation(coverage: FilingCoverage) -> bool | None:
+    """Return the archived exhibit-truncation signal, or `None` if absent.
+
+    `FilingCoverage.exhibit_truncated` defaults to `False`, so the parsed model
+    cannot tell an archive that measured "no marker" apart from one written
+    before the field existed. `model_fields_set` can, and the distinction is
+    the point of the field (Issue #157): persisting an old archive's default
+    as `False` would let the retrospective count that run's input as known to
+    be complete. Only what the document actually stated is stored.
+    """
+    if "exhibit_truncated" not in coverage.model_fields_set:
+        return None
+    return coverage.exhibit_truncated
 
 
 class _SourceTypeIndex:

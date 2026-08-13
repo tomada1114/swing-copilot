@@ -454,7 +454,19 @@ def _input_coverage_summary(
     outcomes: Sequence[VerdictOutcomeRecord],
     coverages: Sequence[AnalysisSourceCoverageRecord],
 ) -> InputCoverageSummary:
-    """Count severe misses by whether their original filing input had a gap."""
+    """Count severe misses by whether their original filing input had a gap.
+
+    A gap is either export-stage (`is_truncated`) or collection-stage
+    (`exhibit_truncated`, Issue #157). Counting only the first put a filing
+    whose 8-K exhibits were cut off before export into `without_gap`, which
+    positively told the retrospective that the input had been complete --
+    the misreading this field exists to prevent, one layer down.
+
+    `without_gap` therefore requires every one of the symbol's rows to *know*
+    it has no exhibit gap. A row written before the column existed carries
+    `None`, which is "not recorded"; such a symbol falls through to the
+    `unknown` remainder rather than being claimed as complete.
+    """
     severe_keys = {
         (outcome.run_id, outcome.symbol)
         for outcome in outcomes
@@ -466,16 +478,23 @@ def _input_coverage_summary(
     with_gap = {
         key
         for key in severe_keys
-        if key in by_key and any(row.is_truncated for row in by_key[key])
+        if key in by_key and any(_has_gap(row) for row in by_key[key])
     }
     without_gap = {
         key
         for key in severe_keys
-        if key in by_key and not any(row.is_truncated for row in by_key[key])
+        if key in by_key
+        and all(
+            not _has_gap(row) and row.exhibit_truncated is not None
+            for row in by_key[key]
+        )
     }
     return InputCoverageSummary(
         filing_count=len(coverages),
         truncated_filing_count=sum(row.is_truncated for row in coverages),
+        exhibit_truncated_filing_count=sum(
+            row.exhibit_truncated is True for row in coverages
+        ),
         fallback_filing_count=sum(
             row.selection_mode == "head_fallback" for row in coverages
         ),
@@ -488,13 +507,27 @@ def _input_coverage_summary(
     )
 
 
+def _has_gap(record: AnalysisSourceCoverageRecord) -> bool:
+    """Whether this filing row reports a known gap, at either stage."""
+    return record.is_truncated or record.exhibit_truncated is True
+
+
 def _filing_coverage(record: AnalysisSourceCoverageRecord) -> FilingCoverage:
-    """Rebuild strict coverage metadata from its normalized DB row."""
+    """Rebuild strict coverage metadata from its normalized DB row.
+
+    Faithful to what the row holds, which is less than the exported document
+    held: sections keep only name/status. A row written before
+    `exhibit_truncated` became a column carries `None`, which collapses to the
+    schema's "not recorded" `False` -- the same reading `FilingCoverage`
+    documents for that default, and the reason `_input_coverage_summary`
+    counts such a symbol as `unknown` rather than as gap-free (Issue #157).
+    """
     return FilingCoverage(
         original_chars=record.original_chars,
         exported_chars=record.exported_chars,
         is_truncated=record.is_truncated,
         selection_mode=cast("FilingSelectionMode", record.selection_mode),
+        exhibit_truncated=bool(record.exhibit_truncated),
         sections=[
             FilingSectionCoverage(name=name, status=cast("FilingSectionStatus", status))
             for name, status in record.sections

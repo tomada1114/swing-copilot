@@ -98,7 +98,11 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 6. `input_coverage` と各サプライズの `input_filing_coverage` を確認する。
    `severe_miss_symbol_count_with_gap` は情報不足との併存数であり因果を証明しない。
    `without_gap` / `unknown` と比較し、個別dossierの章状態を読んだうえでのみ
-   `information_present_missed` と `information_absent` を分類する
+   `information_present_missed` と `information_absent` を分類する。
+   gap は export 段（`truncated_filing_count`）だけでなく取得段
+   （`exhibit_truncated_filing_count`＝8-K Exhibit が 60,000 字上限で切られた件数、
+   Issue #157）も含む。`unknown` は「そのrunの入力に取得段の欠落があったか記録が無い」
+   であって「欠落が無い」ではないので、`without_gap` と同じ扱いにしない
 
 ## Step 3: 並列深掘り（サブエージェント fan-out）
 

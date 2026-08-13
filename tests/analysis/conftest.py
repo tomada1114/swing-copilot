@@ -94,6 +94,7 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
                             "exported_chars": 22,
                             "is_truncated": False,
                             "selection_mode": "full",
+                            "exhibit_truncated": False,
                             "sections": [],
                         },
                     }

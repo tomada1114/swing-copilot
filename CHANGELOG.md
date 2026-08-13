@@ -256,6 +256,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 8-K Exhibit（EX-99*）由来テキストで、表セル内の単語と数値が途中で切られ
+  `…` に置き換わっていた問題を解消（Issue #156）。`data/edgar.py` は
+  edgartools の `Attachment.text()` に変換を委ねていたが、これは Exhibit の
+  HTML を Rich で固定コンソール幅にレイアウトし、収まらないセルを省略記号で
+  打ち切る。実測 run では `…` が 1,708 個、うち 540 個が数値の途中
+  （`1,543,…`・`135,8…`）で、単位表記も `(In th… ex… per sh…` となり桁が
+  復元できず、AC16（`text` の数値と `evidence_quote` の数値を桁まで一致させる）
+  が原理的に守れなかった。新設の `_exhibit_plain_text()` が
+  `Attachment.markdown()` と同じ変換（`get_clean_html()` → `to_markdown()`）を
+  行う——markdown の表には収めるべき幅が無いので、列数がいくつでもセルが
+  切られない。バイナリ Exhibit は拡張子で弾き、ダウンロードもしなくなった。
+  10-Q 本文の抽出経路（元から無傷）と Exhibit の 60,000 字上限は変更していない
 - UTF-8 として解釈できない `analysis_input.json` / `analysis_result.json` が
   `AnalysisIngestError` ではなく生の `UnicodeDecodeError` として伝播していた
   問題を解消。`UnicodeDecodeError` は `ValueError` のサブクラスであって

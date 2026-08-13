@@ -26,7 +26,10 @@ press release was furnished; the revenue/EPS figures, the full-year guidance,
 and management's demand commentary all live in Exhibit 99.1 (Issue #128). So
 for 8-K forms the `EX-99*` exhibits are downloaded and appended to the primary
 document's text, under their own character ceiling, producing one combined
-`content_text` per accession.
+`content_text` per accession. Their HTML is converted to markdown rather than
+taken from `Attachment.text()`, which lays tables out at a fixed console width
+and therefore elides cells mid-word and mid-number (Issue #156; see
+`_exhibit_plain_text`).
 
 Requests are throttled to at most 10/second (SEC fair-access, `docs/00_human_
 preparation.md`) via an injectable clock/sleep pair so the throttle itself is
@@ -40,9 +43,14 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 import edgar
+from edgar.core import has_html_content, text_extensions
+from edgar.files.html_documents import get_clean_html
+from edgar.files.markdown import to_markdown
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.retry import retry_external_call
@@ -84,6 +92,9 @@ _MAX_EXHIBITS_PER_FILING = 3
 #: share the per-symbol ceiling.
 _MAX_EXHIBIT_CHARS_PER_FILING = 60_000
 _EXHIBIT_TRUNCATION_MARKER = "\n[... exhibit truncated ...]"
+#: Document extensions edgartools itself treats as text (`Attachment.is_text`).
+#: Borrowed rather than restated so the two cannot drift apart.
+_TEXT_DOCUMENT_EXTENSIONS = frozenset(text_extensions)
 
 # US-GAAP concept tag variants, tried in priority order per metric. Facts are
 # matched by the concept's local name (namespace prefix such as `us-gaap:` is
@@ -117,12 +128,18 @@ _CAPITAL_EXPENDITURES_CONCEPTS = (
 
 
 class _AttachmentLike(Protocol):
-    """One filing attachment, shaped like edgartools' `Attachment`."""
+    """One filing attachment, shaped like edgartools' `Attachment`.
+
+    `content` is the attachment's raw filed bytes/markup, downloaded on
+    access. It is used in place of `Attachment.text()` so the HTML-to-text
+    conversion is ours to choose (Issue #156, `_exhibit_plain_text`).
+    """
 
     document_type: str
     document: str
 
-    def text(self) -> str | None: ...  # pragma: no cover
+    @property
+    def content(self) -> str | bytes | None: ...  # pragma: no cover
 
 
 class _AttachmentsLike(Protocol):
@@ -560,6 +577,9 @@ class EdgarClient:
         `coverage`, and `analysis_source_coverage.selection_mode` all keep
         their existing shape.
 
+        Each exhibit is downloaded and converted to text by
+        `_exhibit_plain_text`, which keeps table cells whole (Issue #156).
+
         Retrieval is fail-soft, like 10-Q section extraction: an exhibit that
         cannot be downloaded or parsed is a data-quality outcome, not a reason
         to lose either the notice text or the exhibits that did arrive.
@@ -584,10 +604,10 @@ class EdgarClient:
             for exhibit in _earnings_exhibits(attachments):
                 if remaining <= 0:
                     break
-                # `Attachment.text()` returns `None` for a binary exhibit (a
-                # PDF slide deck furnished as 99.1, for example), which is an
-                # absence, not a failure.
-                text = self._with_retries(exhibit.text)
+                # `None` for an exhibit that carries no text at all (a PDF
+                # slide deck furnished as 99.1, for example): an absence, not
+                # a failure, so it is skipped rather than raised on.
+                text = self._with_retries(partial(_exhibit_plain_text, exhibit))
                 if not text or not text.strip():
                     continue
                 kept = text[:remaining]
@@ -602,6 +622,58 @@ class EdgarClient:
                 len(blocks),
             )
         return "".join(blocks)
+
+
+def _exhibit_plain_text(exhibit: _AttachmentLike) -> str | None:
+    """Download one exhibit and convert it to text with its tables intact.
+
+    Not `Attachment.text()`: that renders the exhibit's HTML through Rich at a
+    fixed console width, which lays every table out inside that width and
+    elides whatever does not fit, mid-word and mid-digit -- `1,543,…` for a
+    revenue line, `(In th… ex… per sh…` for a unit caption (Issue #156). The
+    lost digits cannot be recovered from the rendered text, so a quote taken
+    from such a table is necessarily wrong (AC16). The same markdown
+    conversion `Attachment.markdown()` performs is used instead: it has no
+    width to fit into, so every cell survives whole, and it is also more
+    compact than the column-aligned rendering, which leaves more of the
+    per-filing character budget for actual content.
+
+    Content that does not look like HTML at all is returned verbatim, and
+    markup that cannot be rooted as an HTML document is kept verbatim too:
+    raw markup still carries its digits, whereas dropping the exhibit would
+    lose the earnings release entirely.
+
+    Returns:
+        The exhibit's text, or `None` when the attachment carries no text: a
+        binary exhibit (a PDF slide deck furnished as 99.1, for example), or
+        HTML the converter itself rejects. Both are an absence, not a failure,
+        and the caller skips them.
+    """
+    # Same gate as `Attachment.is_text()`, and for the same reason: a binary
+    # exhibit's document holds an encoded blob, not prose. Checking it before
+    # touching `content` also means such an exhibit is never downloaded.
+    if PurePosixPath(exhibit.document).suffix not in _TEXT_DOCUMENT_EXTENSIONS:
+        return None
+    content = exhibit.content
+    if not isinstance(content, str):
+        # A text extension whose payload still arrived as bytes: an encoding
+        # we have no safe way to append to the filing's text.
+        return None
+    if not has_html_content(content):
+        return content
+    # `get_clean_html` strips the inline-XBRL header, scripts, styles and
+    # table-of-contents links first, exactly as `Attachment.markdown()` does.
+    clean_html = get_clean_html(content)
+    if clean_html is None:
+        logger.warning(
+            "Exhibit %s has no HTML root to convert; keeping its content verbatim",
+            exhibit.document,
+        )
+        return content
+    # edgartools ships no type information, so the converter's declared
+    # `Optional[str]` arrives as `Any`; pin it back to the contract here.
+    markdown: str | None = to_markdown(clean_html)
+    return markdown
 
 
 def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:

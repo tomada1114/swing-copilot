@@ -331,8 +331,14 @@ class EdgarClient:
 - **1つの開示は1つの`TextItem`のまま**とする。Exhibitを別`source_id`で切り出すと`analysis_source_coverage.selection_mode`に新しい値が必要になるが、当該列はCHECK制約でenumを固定しており、`CREATE TABLE IF NOT EXISTS`は既存テーブルを更新せず、DuckDBは`ALTER ... ADD COLUMN`にCHECKを付けられない。運用者の既存DBだけがINSERTで落ちる形になるため、既存の`selection_mode`集合（`full` / `head_fallback` / `section_priority` / `section_priority_partial` / `omitted_symbol_budget`）を一切増やさない設計を採る。
 - **予算**: 1開示あたりのExhibit合計を60,000字までとし、超過分は`\n[... exhibit truncated ...]`を末尾に付けて切り詰める。8-Kの主文書は数千〜23,000字程度なので、`analysis.max_filing_chars`（既定120,000）の内側に収まり、`max_filing_chars_per_symbol`（既定240,000）でも決算8-K 2件＋10-Q 1件が同居できる。予算は開示単位で共有し、先頭のExhibit（通常99.1のプレスリリース本文）から先に割り当てる。予算を使い切った後続Exhibitはダウンロードもしない。
 - **`coverage.original_chars`の定義**: 「その開示についてパイプラインが保持している監査コピー全体の文字数」であり、本変更後は**主文書＋連結済みExhibit**の長さを指す。主文書だけの長さではない。`select_filing_text()`は従来どおり`len(item.content_text)`を`original_chars`とするので、契約は変わらず意味だけが広がる。8-Kは章抽出の対象外なので、合計が`max_filing_chars`を超える場合の縮退は従来どおり`head_fallback`（先頭スライス）である。
-- **HTML/テキスト変換**: edgartoolsの`Attachment.text()`に委ねる。HTMLはテキストへ変換され、バイナリ（99.1としてfurnishされるPDFのスライド資料など）は`None`が返る。これは失敗ではなく不在として扱い、そのExhibitを飛ばす。
+- **HTML/テキスト変換**: `_exhibit_plain_text()`がExhibitの生コンテンツ（`Attachment.content`）を取得し、HTMLならmarkdownへ変換する。バイナリ（99.1としてfurnishされるPDFのスライド資料など）は`Attachment.is_text()`と同じ拡張子判定で弾き、ダウンロードもしない。これは失敗ではなく不在として扱い、そのExhibitを飛ばす。HTMLに見えない内容はそのまま通し、HTMLのルート要素を特定できない断片は`logger.warning()`を出したうえで生のまま保持する（桁を失うより生マークアップの方がまし）。
 - **fail-soft／レート制限**: Exhibit取得は10-Q章抽出と同じくfail-softで、例外は握って`logger.exception()`で記録し、既に組み立て済みのExhibitと主文書テキストは保持する。添付一覧の取得と各Exhibitのダウンロードはいずれも`_with_retries()`経由なので、10リクエスト/秒のthrottleとretry方針（合計3試行、検証エラーは再試行しない）が全試行に適用される。
+
+**Issue #156実装時追記（Exhibitの表が桁の途中で切れる問題）**: 当初は上記のとおり`Attachment.text()`に変換を委ねていたが、これはExhibitのHTMLをRichで**固定コンソール幅**にレイアウトし、収まらないセルを`…`で打ち切る。実測（run `43358613`、2026-08-12）では8-K Exhibit由来テキストに`…`が1,708個あり、うち540個が数値の途中——`1,543,…`・`135,8…`・`2,98…`、単位表記も`(In th… ex… per sh…`——で、元の桁が復元できないためAC16（`text`の数値と`evidence_quote`の数値を桁まで一致させる）が原理的に守れなかった。10-Q側が無傷なのは`Filing.text()`が同じRich描画を`width=500`で呼ぶためで、Exhibit経路だけが既定幅のままだった。
+
+- **対処**: `Attachment.markdown()`と同じ変換（`get_clean_html()` → `to_markdown()`）を`_exhibit_plain_text()`で直接行う。markdownの表には収めるべき幅が存在しないので、列数がいくつあってもセルが切られない。単に`width`を広げる案は、それを超える幅の表では再発しうるうえ、桁揃えレンダリングより文字数を食う（同じ表でmarkdownの方が短い）ので採らなかった。
+- **副次的な効果**: 主文書は従来どおり`filing.text()`の桁揃えテキスト、Exhibitはmarkdown表という混在になるが、両者は`[EXHIBIT ...]`ヘッダで区切られており、`content_text`の契約（1開示=1`TextItem`）も予算（60,000字）も変えていない。表のヘッダ行が1列ずれることがあるのはedgartoolsのテーブル解析側の挙動で、Rich描画時から同じであり本変更で生じたものではない。
+- **回帰テスト**: `tests/data/test_edgar.py::TestEightKExhibitTableFidelity`。固定幅描画では必ず桁が欠ける10列の決算表HTMLをExhibitとして与え、`…`が1つも出ないこと・全数値が原文どおり残ること・`(In thousands, except per share amounts)`が壊れないことを確認する。
 
 ### 3.7 `storage/database.py` / `storage/market_store.py`
 

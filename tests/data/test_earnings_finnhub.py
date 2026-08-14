@@ -75,6 +75,92 @@ def test_filters_event_dates_at_inclusive_end_boundary(earnings_date, expected_d
     assert (None if event is None else event.earnings_date) == expected_date
 
 
+def test_non_list_calendar_fails_instead_of_reading_as_no_earnings():
+    # `pipeline/earnings.py` turns a raised exception into `fetch_failed` and a
+    # `None` return into `none_in_window`, and the risk guard warns on the
+    # first while staying silent on the second. A malformed payload must take
+    # the loud path: silently reading it as "nothing scheduled" would drop the
+    # earnings-proximity guard for a symbol that is about to report.
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=lambda _url, _params: {"earningsCalendar": {"symbol": "AAPL"}},
+        clock=FakeClock(),
+    )
+
+    with pytest.raises(TypeError, match="earningsCalendar response must be a list"):
+        client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+
+
+def test_unusable_calendar_items_are_skipped_without_hiding_a_real_event():
+    # The endpoint answers for the whole window, so rows for other symbols and
+    # rows with a missing or non-string date do arrive. Skipping them keeps the
+    # symbol's own event reachable; failing on them would report `fetch_failed`
+    # for a symbol whose date was right there in the same response.
+    payload = {
+        "earningsCalendar": [
+            "not-an-object",
+            {"symbol": "MSFT", "date": "2026-07-22", "hour": "amc"},
+            {"symbol": "AAPL", "hour": "bmo"},
+            {"symbol": "AAPL", "date": None, "hour": "bmo"},
+            {"symbol": "AAPL", "date": "2026-08-04", "hour": "amc"},
+            {"symbol": "AAPL", "date": "2026-07-28", "hour": "bmo"},
+        ]
+    }
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=lambda _url, _params: payload,
+        clock=FakeClock(),
+    )
+
+    event = client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+
+    assert event is not None
+    assert (event.symbol, event.earnings_date, event.session) == (
+        "AAPL",
+        date(2026, 7, 28),
+        "bmo",
+    )
+
+
+def test_no_events_for_the_symbol_reads_as_an_empty_window():
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=lambda _url, _params: {
+            "earningsCalendar": [
+                {"symbol": "MSFT", "date": "2026-07-28", "hour": "amc"}
+            ]
+        },
+        clock=FakeClock(),
+    )
+
+    assert (
+        client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20)) is None
+    )
+
+
+def test_rate_limit_does_not_sleep_once_the_interval_has_already_elapsed():
+    # The complement of the throttle-on-every-attempt contract: the limiter
+    # must only wait out the remainder of the interval, never impose a fixed
+    # delay on calls that are already far enough apart.
+    throttle_sleeps: list[float] = []
+    times = iter([0.0, 5.0])
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=lambda _url, _params: _payload(),
+        clock=FakeClock(),
+        timing=EarningsTiming(
+            rate_clock=lambda: next(times),
+            sleep_fn=throttle_sleeps.append,
+            backoff_fn=lambda _seconds: None,
+        ),
+    )
+
+    client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+    client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+
+    assert throttle_sleeps == []
+
+
 def test_timeout_retries_to_total_attempt_ceiling_with_deterministic_backoff():
     attempts = 0
     backoffs: list[float] = []

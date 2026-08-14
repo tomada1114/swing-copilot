@@ -2,8 +2,8 @@
 name: swing-deepdive
 description: >
   Produce an on-demand deep-dive memo for one or more specific equity symbols
-  from an existing analysis_input.json — multi-quarter filing shifts, added or
-  removed risk-factor language, news chronology, an explicit bull case / bear
+  from an existing analysis_input.json — multi-quarter filing shifts,
+  risk-factor language, news chronology, an explicit bull case / bear
   case, and a watch-trigger list — written to a standalone Markdown file that
   never touches analysis_result.json or the daily report. Use PROACTIVELY when:
   深掘り、この銘柄を詳しく、個別銘柄の掘り下げ、単独で深く分析、
@@ -105,8 +105,18 @@ Agent ツール（**`model: opus`**）を、銘柄分**同一メッセージ内�
 ### 深掘りの観点（日次より深く読む部分）
 
 - **開示の時系列変化**: 同一銘柄に複数四半期の `filings` があれば、四半期をまたいだ
-  文言・数値の変化を追う。リスク要因の**新規追加／削除／表現の強まり**を特定する。
-  比較対象が入力内に無ければ「入力からは判定不能」と書く（「変化なし」としない）
+  文言・数値の変化を追う。ただし**リスク要因（Item 1A）の新規性は論点として立てない**
+  （Issue #127）。10-Q の Item 1A は前回提出から重要な変更が無ければ 10-K への参照援用だけで
+  済ませてよく、比較対象となる 10-K 本文は `analysis_input.json` に含まれない。deepdive は
+  日次より深く読むが**入力の範囲は日次と同一**であり、四半期を並べても新規性の判定材料は
+  増えない。よって新規性は**現在の入力範囲では判定不能として扱い、判定を試みない**。
+  「新規追加／削除／表現の強まり」を特定しようとせず、「入力からは判定不能」
+  「比較対象が無い」といった文言も本文・「入力の限界」節のいずれにも書かない
+  （毎回同じ判定不能を書いても情報価値がなく、他の論点を薄めるだけである）。
+  Item 1A に実質本文（リスクの記述本文、あるいはリスク見出し／キャプションの列挙）があれば、
+  新規性ではなく**そこに書かれているリスクの内容そのもの**を読む。リスク要因以外の
+  文言・数値（MD&A、ガイダンス、法的手続など）の四半期比較は従来どおり行ってよい。
+  いずれの場合も「新規リスクなし」「リスクは変化していない」とは書かない（AC8）
 - **ニュースの時系列文脈**: `published_at` 順に並べ、単発の見出しではなく**流れ**として読む。
   古い項目は古い旨を明記する
 - **bull case / bear case の両論併記**: どちらか一方に寄せず、両方を同じ密度で書く。
@@ -180,7 +190,7 @@ Agent ツール（**`model: opus`**）を、銘柄分**同一メッセージ内�
 
 ## 結論（1〜3 行）
 ## スクリーニングの読み直し   <- 決定論的数値は引用のみ
-## 開示の時系列変化           <- 四半期比較、リスク要因の新規/削除、未分析範囲の明記
+## 開示の時系列変化           <- 四半期比較（リスク要因の新規性は扱わない）、未分析範囲の明記
 ## ニュースの時系列文脈
 ## bull case                  <- 各項に根拠 (source_id: ...) と「崩れる条件」
 ## bear case                  <- 同上

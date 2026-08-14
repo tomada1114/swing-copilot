@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `just build` と CI / release ワークフローが引き続き行う。ローカルの
   `just verify` で smoke が 16s → 4.1s、smoke 用ビルドが 21s（cold）→ 1.0s
 
+### Removed
+
+- `retro.approval_mode`（`auto` | `manual`、既定 `auto`）を削除した
+  （Issue #178）。将来の細粒度介入への切替余地として名前だけ予約されていた
+  設定だが、この値を読んで挙動を変えるコードは存在せず、`manual` と書いても
+  L1 提案は従来どおり即時適用されて PR になっていた。「書けるが効かない設定」
+  を受理し続けるのは AGENTS.md の fail-fast validation と衝突するため、
+  予約を取り下げた。`settings.yaml` に `approval_mode` が残っていると
+  `extra="forbid"` により起動時に失敗するので、キーごと削除すること。
+  `retro_input.json` の `config_snapshot.sections.retro` は `max_surprises`
+  のみになり、**その結果 `config_hash` の値が変わる**（過去の dossier /
+  提案台帳との hash 連続性は切れるが、再生成・backfill は行わない）。
+  予約の経緯は `docs/goal-prompts/swing-copilot-retrospective/` に履歴として
+  残る。per-proposal の人手承認が必要になった時点で、改めて設計に載せてから
+  追加する
+
 ### Added
 
 - 自社材料の供給量（`news_supply`、Issue #130）を P8 の振り返りへ取り込み、

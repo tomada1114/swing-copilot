@@ -575,12 +575,11 @@ def test_settings_no_longer_has_an_llm_or_budget_section():
 
 
 class TestRetroConfig:
-    """P8-31 (E31.1): the retrospective's own two settings, and only those."""
+    """P8-31 (E31.1): the retrospective's own single setting, and only that."""
 
     def test_has_documented_defaults(self):
         settings = load_settings("config/settings.yaml")
         assert settings.retro.max_surprises == 5
-        assert settings.retro.approval_mode == "auto"
 
     def test_max_surprises_is_configurable(self):
         settings = Settings.model_validate({"retro": {"max_surprises": 3}})
@@ -590,7 +589,9 @@ class TestRetroConfig:
         "overrides",
         [
             pytest.param({"max_surprises": 0}, id="max-surprises-below-one"),
-            pytest.param({"approval_mode": "sometimes"}, id="unknown-approval-mode"),
+            pytest.param(
+                {"max_surprises": "sometimes"}, id="max-surprises-out-of-domain"
+            ),
             pytest.param({"unknown_field": 1}, id="unknown-field"),
         ],
     )
@@ -605,6 +606,14 @@ class TestRetroConfig:
         for duplicated in ("neutral_threshold_pct", "preliminary_sample_threshold"):
             with pytest.raises(ValidationError):
                 Settings.model_validate({"retro": {duplicated: 1.0}})
+
+    def test_rejects_the_removed_approval_mode_reservation(self):
+        # Issue #178: `approval_mode` was accepted but never read, so `manual`
+        # silently kept the auto-apply behaviour. It is gone, and a settings
+        # file that still carries it must fail loudly instead of being ignored.
+        for value in ("auto", "manual"):
+            with pytest.raises(ValidationError):
+                Settings.model_validate({"retro": {"approval_mode": value}})
 
 
 def test_band_atr_multiple_is_adopted_in_the_repo_settings():

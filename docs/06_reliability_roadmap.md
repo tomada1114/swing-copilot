@@ -841,7 +841,8 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 
 > **現況（P8）**: 完了済み（#72）。`retro/aggregate.py` / `surprises.py` /
 > `export.py` と strict スキーマ `retro-input-v1`、`RetroConfig`
-> （`max_surprises` / 予約済み `approval_mode`）、`prepare` umbrella が入った。
+> （`max_surprises`）、`prepare` umbrella が入った。予約済みの
+> `approval_mode` は挙動を変えないまま誤解を招くため Issue #178 で削除した。
 > 設計の現況は `docs/04_detailed_design.md` 3.23.3〜3.23.4 節を正とする。
 
 - **目的**: 振り返りスキルに渡す証拠 dossier を strict スキーマで出力する。

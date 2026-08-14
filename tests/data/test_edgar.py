@@ -13,7 +13,7 @@ from swing_copilot.data.edgar import EdgarClient, FilingRef
 from swing_copilot.storage.market_store import FundamentalsRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from swing_copilot.text.base import TextItem
 
@@ -74,6 +74,7 @@ class FakeFiling:
         self.filing_url = self.DEFAULT_URL
         self.filing_text = "Full filing text content."
         self.report: FakeTenQReport | None = None
+        self.obj_error: Exception | None = None
         self.documents: list[FakeAttachment] = []
         self.attachments_error: Exception | None = None
         self.attachments_calls = 0
@@ -89,16 +90,28 @@ class FakeFiling:
         return self.filing_text
 
     def obj(self):
+        if self.obj_error is not None:
+            raise self.obj_error
         return self.report
 
 
 class FakeTenQReport:
-    def __init__(self, sections: dict[tuple[str, str], str]) -> None:
+    """A parsed 10-Q, shaped like edgartools' `TenQ`.
+
+    A section's value may be an `Exception` instead of its text: issuer-specific
+    markup defeats section detection per item, so the fake raises for exactly
+    the items that would fail and returns text for the rest (Issue #155).
+    """
+
+    def __init__(self, sections: Mapping[tuple[str, str], str | Exception]) -> None:
         self._sections = sections
 
     def get_item_with_part(self, part, item, markdown=True):
         del markdown
-        return self._sections.get((part, item))
+        section = self._sections.get((part, item))
+        if isinstance(section, Exception):
+            raise section
+        return section
 
 
 @dataclass
@@ -851,6 +864,145 @@ class TestFetchFilingTextsBounds:
         )
 
         assert [item.source_id for item in items] == ["edgar:newest"]
+
+
+def _ten_q_filing(
+    accession: str = "0001-26-000012", filing_date: date = date(2026, 7, 18)
+) -> FakeFiling:
+    """A 10-Q whose primary document is already downloaded when parsing starts."""
+    return FakeFiling(accession, "10-Q", filing_date, date(2026, 6, 30))
+
+
+def _fetch_one_ten_q(filing: FakeFiling) -> TextItem:
+    """Fetch `filing`'s single `TextItem` through the public entry point."""
+    client = EdgarClient(
+        IDENTITY,
+        company_factory=_company_factory(FakeCompany([filing])),
+        sleep_fn=lambda _s: None,
+    )
+    return client.fetch_filing_texts(
+        "AAPL", ["10-Q"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+    )[0]
+
+
+class TestTenQSectionFailSoft:
+    """Issue #155: a parser failure costs the sections, never the filing.
+
+    Section detection runs on issuer-authored markup, so it is the part of a
+    10-Q fetch most likely to break on one company's HTML. By then the filing
+    itself has already been downloaded, so a detection failure is a
+    data-quality outcome: the audit text stays, the structured sections degrade
+    to empty, and the export says `head_fallback`.
+    """
+
+    _LOG_PREFIX = "10-Q section extraction failed for accession 0001-26-000012"
+
+    @staticmethod
+    def _parse_failure() -> Exception:
+        """A fresh parser failure per test; a raised instance keeps its traceback."""
+        return ValueError("edgartools could not parse the primary document")
+
+    def test_report_parse_failure_keeps_the_filing_text_without_sections(self, caplog):
+        filing = _ten_q_filing()
+        filing.obj_error = self._parse_failure()
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one_ten_q(filing)
+
+        assert item.filing_sections == ()
+        assert item.content_text == "Full filing text content."
+        assert self._LOG_PREFIX in caplog.text
+
+    def test_item_lookup_failure_keeps_the_filing_text_without_sections(self, caplog):
+        filing = _ten_q_filing()
+        filing.report = FakeTenQReport(
+            {("Part I", "Item 1"): RuntimeError("item boundary detection failed")}
+        )
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one_ten_q(filing)
+
+        assert item.filing_sections == ()
+        assert item.content_text == "Full filing text content."
+        assert self._LOG_PREFIX in caplog.text
+
+    def test_sections_found_before_the_failure_are_discarded_rather_than_half_kept(
+        self, caplog
+    ):
+        # The requested items are collected as one tuple, so a later item
+        # raising drops the earlier ones too. That is the intended reading:
+        # a partial section set is indistinguishable from a filing that simply
+        # lacks those sections, and `head_fallback` at least keeps the leading
+        # slice of the real filing.
+        filing = _ten_q_filing()
+        filing.report = FakeTenQReport(
+            {
+                ("Part I", "Item 1"): "financial statements",
+                ("Part I", "Item 2"): "management discussion",
+                ("Part II", "Item 1A"): RuntimeError("risk-factor heading not found"),
+            }
+        )
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one_ten_q(filing)
+
+        assert item.filing_sections == ()
+        assert self._LOG_PREFIX in caplog.text
+
+    def test_section_extraction_failure_does_not_abort_the_remaining_filings(
+        self, caplog
+    ):
+        broken = _ten_q_filing()
+        broken.obj_error = self._parse_failure()
+        healthy = _ten_q_filing("0001-26-000013", date(2026, 7, 17))
+        healthy.report = FakeTenQReport({("Part I", "Item 1"): "financial statements"})
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany([broken, healthy])),
+            sleep_fn=lambda _s: None,
+        )
+
+        with caplog.at_level("ERROR"):
+            items = client.fetch_filing_texts(
+                "AAPL", ["10-Q"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+            )
+
+        assert [item.source_id for item in items] == [
+            "edgar:0001-26-000012",
+            "edgar:0001-26-000013",
+        ]
+        assert [len(item.filing_sections) for item in items] == [0, 1]
+
+    def test_the_degraded_filing_is_exported_as_head_fallback(self):
+        # The documented consequence of the fail-soft branch: with no sections
+        # to prefer, the export falls back to the historic leading slice.
+        filing = _ten_q_filing()
+        filing.filing_text = "x" * 200
+        filing.obj_error = self._parse_failure()
+
+        item = _fetch_one_ten_q(filing)
+        selection = select_filing_text(item, "10-Q", 100)
+
+        assert selection.coverage.selection_mode == "head_fallback"
+        assert selection.text == "x" * 100
+
+    def test_the_failure_log_carries_a_traceback_and_no_edgar_identity(self, caplog):
+        # `logger.exception` attaches the traceback, which is what makes an
+        # issuer-specific parser break diagnosable; the identity passed to
+        # `set_identity` is a credential-shaped value and must not ride along.
+        filing = _ten_q_filing()
+        filing.obj_error = self._parse_failure()
+
+        with caplog.at_level("ERROR"):
+            _fetch_one_ten_q(filing)
+
+        record = next(
+            record
+            for record in caplog.records
+            if record.getMessage().startswith(self._LOG_PREFIX)
+        )
+        assert record.exc_info is not None
+        assert IDENTITY not in caplog.text
 
 
 def _eight_k_with_exhibits(*exhibits: FakeAttachment) -> FakeFiling:

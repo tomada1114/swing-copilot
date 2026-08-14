@@ -9,7 +9,6 @@ network), the daily run archives its presentation-neutral `DailyBrief` beside
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -30,7 +29,7 @@ from swing_copilot.analysis.schemas import (
     Sha256Digest,
     canonical_json_digest,
 )
-from swing_copilot.analysis.validate import AnalysisIngestError
+from swing_copilot.analysis.validate import AnalysisIngestError, read_json_document
 from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import DailyBrief
 
@@ -165,14 +164,17 @@ def read_report_context(path: Path) -> ReportContext:
 
 
 def _read_payload(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        msg = f"Report context could not be read: {path}"
-        raise AnalysisIngestError(msg) from exc
-    except json.JSONDecodeError as exc:
-        msg = f"Report context is not valid JSON: {path}"
-        raise AnalysisIngestError(msg) from exc
+    """Return the archived envelope, or fail as a broken artifact.
+
+    Reading goes through the shared ingest reader so a context file that is not
+    UTF-8 arrives as `AnalysisIngestError` rather than a raw
+    `UnicodeDecodeError` (Issue #164). Only the top-level object check is local:
+    the envelope is addressed by key, unlike the documents
+    `read_analysis_document` returns as-is.
+    """
+    payload = read_json_document(
+        path, label="Report context", error_type=AnalysisIngestError
+    )
     if not isinstance(payload, dict):
         msg = f"Report context must be a JSON object: {path}"
         raise AnalysisIngestError(msg)

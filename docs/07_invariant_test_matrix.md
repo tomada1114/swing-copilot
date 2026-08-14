@@ -127,9 +127,13 @@
 
 ## 成果物読み取りの失敗型
 
-要件 ID を持たない、Issue #153 で追加した経路の不変条件。
+要件 ID を持たない、Issue #153 と Issue #164 で追加した経路の不変条件。
+成果物をディスクから読む経路は `analysis/validate.py::read_json_document()`
+に集約されており、境界ごとに変わるのは例外型とメッセージ接頭辞だけである。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
 | `analysis/validate.py` | UTF-8 として読めない成果物も `AnalysisIngestError` として届く | 文字化けした `analysis_result.json` が生の `UnicodeDecodeError` になり、「壊れた成果物」ではなく想定外の異常として無人実行が落ちる | `tests/analysis/test_validate.py::TestHardFailures::test_a_wrongly_encoded_document_is_a_hard_failure` |
 | `analysis/verify_cli.py` | 事前検査と ingest が同じ読み取り関数で同じ失敗型を返す | 新 CLI だけが不正エンコーディングを FAIL 行に落とし、本番 ingest では例外型が揃わない | `tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_a_wrongly_encoded_fragment_is_reported_rather_than_raised` |
+| `analysis/snapshot.py` | UTF-8 として読めない `report_context.json` も `AnalysisIngestError` として届く | レポート再描画のコンテキストだけが `except OSError` に留まり、無人実行が生んだ文字化けが想定外の異常として漏れる | `tests/analysis/test_snapshot.py::TestReadFailures::test_a_wrongly_encoded_context_is_a_hard_failure` |
+| `retro/validate.py` | UTF-8 として読めない振り返り成果物も `RetroIngestError` として届く | `retro_input.json` / `retro_result.json` の文字化けが生の `UnicodeDecodeError` になり、`copilot-retro ingest` の呼び出し側が壊れた成果物と区別できない | `tests/retro/test_validate.py::TestLoading::test_rejects_a_wrongly_encoded_document` |

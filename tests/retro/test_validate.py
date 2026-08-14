@@ -33,6 +33,7 @@ from tests.retro.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 #: A phrase `analysis/safety.py` forbids in any user-visible field (CON-03).
@@ -240,6 +241,32 @@ class TestLoading:
     def test_rejects_a_missing_document(self, tmp_path: Path) -> None:
         with pytest.raises(RetroIngestError, match="could not be read"):
             load_retro_result(tmp_path / "absent.json")
+
+    @pytest.mark.parametrize(
+        ("load", "filename"),
+        [
+            pytest.param(load_retro_input, "retro_input.json", id="input"),
+            pytest.param(load_retro_result, "retro_result.json", id="result"),
+        ],
+    )
+    def test_rejects_a_wrongly_encoded_document(
+        self,
+        tmp_path: Path,
+        load: Callable[[Path], RetroInput | RetroResult],
+        filename: str,
+    ) -> None:
+        """A non-UTF-8 document must arrive as `RetroIngestError` (Issue #164).
+
+        `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so the read
+        step used to let it escape uncaught and callers that tell "broken
+        artifact" from "unexpected fault" by exception type saw the wrong kind
+        of failure.
+        """
+        path = tmp_path / filename
+        path.write_bytes(b'{"as_of": "\xff\xfe"}')
+
+        with pytest.raises(RetroIngestError, match="could not be read"):
+            load(path)
 
     def test_rejects_a_document_that_is_not_json(self, tmp_path: Path) -> None:
         path = tmp_path / "retro_result.json"

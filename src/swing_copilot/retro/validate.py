@@ -28,7 +28,6 @@ withheld *by* CON-03 is reported without any of its own strings.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -36,7 +35,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ValidationError
 
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
-from swing_copilot.analysis.validate import WITHHELD_MESSAGE
+from swing_copilot.analysis.validate import WITHHELD_MESSAGE, read_json_document
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.retro.schemas import RetroInput, RetroResult
 
@@ -233,16 +232,16 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
 
 
 def _load[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        msg = f"Retrospective document could not be read: {path}"
-        raise RetroIngestError(msg) from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        msg = f"Retrospective document is not valid JSON: {path}"
-        raise RetroIngestError(msg) from exc
+    """Read and strictly validate one retrospective document.
+
+    Reading is delegated to the shared ingest reader so that every way the
+    bytes fail to become JSON -- including a file that is not UTF-8 (Issue
+    #164) -- arrives as `RetroIngestError`, the type this boundary's callers
+    use to tell a broken artifact from an unexpected fault.
+    """
+    payload = read_json_document(
+        path, label="Retrospective document", error_type=RetroIngestError
+    )
     try:
         return model.model_validate(payload)
     except ValidationError as exc:

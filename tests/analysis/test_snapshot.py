@@ -193,6 +193,19 @@ class TestReadFailures:
         with pytest.raises(AnalysisIngestError, match="could not be read"):
             read_report_context(tmp_path / "missing.json")
 
+    def test_a_wrongly_encoded_context_is_a_hard_failure(self, tmp_path):
+        """A non-UTF-8 context must arrive as `AnalysisIngestError` (Issue #164).
+
+        `UnicodeDecodeError` is a `ValueError`, so the old `except OSError`
+        never caught it and the unattended run that produced the mojibake
+        surfaced as an unexpected fault instead of a broken artifact.
+        """
+        path = tmp_path / REPORT_CONTEXT_FILENAME
+        path.write_bytes(b'{"schema_version": "\xff\xfe"}')
+
+        with pytest.raises(AnalysisIngestError, match="could not be read"):
+            read_report_context(path)
+
     def test_malformed_json_is_a_hard_failure(self, tmp_path):
         path = tmp_path / REPORT_CONTEXT_FILENAME
         path.write_text("{oops", encoding="utf-8")

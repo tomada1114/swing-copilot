@@ -256,6 +256,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- UTF-8 として解釈できない `report_context.json` / `retro_input.json` /
+  `retro_result.json` が、それぞれ `AnalysisIngestError` / `RetroIngestError`
+  ではなく生の `UnicodeDecodeError` として伝播していた問題を解消
+  （Issue #164）。Issue #153 の修正は `analysis/validate.py` の読み取り経路
+  だけを直しており、`analysis/snapshot.py::_read_payload` と
+  `retro/validate.py::_load` は `except OSError` のままだった
+  （`UnicodeDecodeError` は `ValueError` のサブクラスであって `OSError` では
+  ない）。読み取りと JSON パースを `analysis/validate.py::read_json_document()`
+  に集約し、例外型とメッセージ接頭辞だけを引数で受けるようにして、
+  `read_analysis_document()` を含む 3 経路すべてが同じ実装を通るようにした。
+  無人の定時実行が生成した文字化け成果物こそ「壊れた成果物」として
+  扱われる必要があり、呼び出し側はそれを例外型だけで判別している
 - 8-K Exhibit が取得段の 60,000 字上限で切られていても
   `analysis_input.json` の `coverage` が `is_truncated: false` /
   `selection_mode: "full"` を主張していた問題を解消（Issue #157）。既存の

@@ -38,6 +38,7 @@ from swing_copilot.analysis.schemas import (
     FilingCoverage,
     FilingInput,
     NewsInput,
+    NewsSupply,
     NonBlankText,
     Sha256Digest,
     SourceId,
@@ -135,6 +136,40 @@ class VerdictMixEntry(_StrictModel):
     is_flagged: bool
 
 
+class NewsSupplyCellEntry(_StrictModel):
+    """One `(news supply level, recommendation)` cell of the supply cross-tab."""
+
+    cell_id: NonBlankText
+    #: The graded level, or `unrecorded` for verdicts collected from archives
+    #: written before the measurement existed. Deliberately not the
+    #: `NewsSupplyLevel` literal: the fourth value is retro's own.
+    level: NonBlankText
+    recommendation: NonBlankText
+    verdict_count: int = Field(ge=0)
+    #: `None` only in the `unrecorded` cell, which has no counts to describe.
+    min_symbol_mention_items: int | None
+    max_symbol_mention_items: int | None
+    mean_symbol_mention_items: float | None
+
+
+class NewsSupplySummaryEntry(_StrictModel):
+    """Whether the `sufficient` threshold matches what verdicts did (#154).
+
+    Optional on `AggregateMetrics` so dossiers archived before Issue #154
+    keep parsing and keep their digest; absent means "this export did not
+    measure it", never "no verdict had thin supply".
+    """
+
+    metric_id: NonBlankText
+    #: The `symbol_mention_items` floor the levels were graded at, copied in
+    #: so a proposal to move it can cite the value it is changing.
+    sufficient_threshold: int = Field(ge=1)
+    verdict_count: int = Field(ge=0)
+    recorded_verdict_count: int = Field(ge=0)
+    unrecorded_verdict_count: int = Field(ge=0)
+    cells: list[NewsSupplyCellEntry]
+
+
 class AggregateMetrics(_StrictModel):
     """Design §3.4's headline measures of the qualitative layer."""
 
@@ -142,6 +177,7 @@ class AggregateMetrics(_StrictModel):
     proceed_severe_miss_rate: list[RateMetricEntry]
     skip_hit_rate: list[RateMetricEntry]
     verdict_mix: VerdictMixEntry
+    news_supply: NewsSupplySummaryEntry | None = None
 
 
 class SignalPerformanceEntry(_StrictModel):
@@ -265,6 +301,10 @@ class SurpriseDossier(_StrictModel):
     #: window; `None` when the bars needed to compute it are missing.
     max_adverse_return_pct: float | None
     input_filing_coverage: list[ArchivedFilingCoverage] = []
+    #: The news supply this verdict was made under (Issue #154). `None` when
+    #: the archive predates the measurement -- the material for telling a
+    #: `sufficient` grade that was still too thin from one that held up.
+    news_supply: NewsSupply | None = None
     freshness: FreshnessEntry
 
 
@@ -347,23 +387,29 @@ class RetroInput(_StrictModel):
 
 def retro_input_digest(payload: dict[str, object]) -> str:
     """Hash a retro input while preserving pre-coverage v1 compatibility."""
-    normalized = cast("dict[str, object]", _drop_legacy_coverage_defaults(payload))
+    normalized = cast("dict[str, object]", _drop_legacy_defaults(payload))
     return canonical_json_digest(normalized, excluded_field="input_digest")
 
 
-def _drop_legacy_coverage_defaults(value: object) -> object:
-    """Omit defaults introduced after the original retro-input-v1 contract."""
+def _drop_legacy_defaults(value: object) -> object:
+    """Omit defaults introduced after the original retro-input-v1 contract.
+
+    Each entry is a field added later whose absent form must hash exactly as
+    the document that never had the field did, or every archived dossier's
+    `input_digest` would stop verifying the day the field was added.
+    """
     if isinstance(value, dict):
         return {
-            key: _drop_legacy_coverage_defaults(child)
+            key: _drop_legacy_defaults(child)
             for key, child in value.items()
             if not (
                 (key == "input_coverage" and child is None)
                 or (key == "input_filing_coverage" and child == [])
+                or (key == "news_supply" and child is None)
             )
         }
     if isinstance(value, list):
-        return [_drop_legacy_coverage_defaults(child) for child in value]
+        return [_drop_legacy_defaults(child) for child in value]
     return value
 
 

@@ -32,6 +32,8 @@ from swing_copilot.analysis.schemas import (
     FilingSectionCoverage,
     FilingSectionStatus,
     FilingSelectionMode,
+    NewsSupply,
+    NewsSupplyLevel,
     canonical_json_digest,
 )
 from swing_copilot.pipeline.postmortem import compute_signal_performance
@@ -39,6 +41,7 @@ from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
     compute_human_alignment,
+    compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
     compute_skip_hit_rate,
@@ -57,6 +60,8 @@ from swing_copilot.retro.schemas import (
     FreshnessEntry,
     InputCoverageSummary,
     MetricEntry,
+    NewsSupplyCellEntry,
+    NewsSupplySummaryEntry,
     ProposalsLedger,
     RateMetricEntry,
     RetroInput,
@@ -374,6 +379,20 @@ def _aggregates(
             for row in compute_skip_hit_rate(outcomes, thresholds)
         ],
         verdict_mix=VerdictMixEntry(**asdict(compute_verdict_mix(verdicts))),
+        news_supply=_news_supply_entry(verdicts),
+    )
+
+
+def _news_supply_entry(verdicts: Sequence[VerdictRow]) -> NewsSupplySummaryEntry:
+    """Carry the supply cross-tab across, cell by cell (Issue #154)."""
+    summary = compute_news_supply_mix(verdicts)
+    return NewsSupplySummaryEntry(
+        metric_id=summary.metric_id,
+        sufficient_threshold=summary.sufficient_threshold,
+        verdict_count=summary.verdict_count,
+        recorded_verdict_count=summary.recorded_verdict_count,
+        unrecorded_verdict_count=summary.unrecorded_verdict_count,
+        cells=[NewsSupplyCellEntry(**asdict(cell)) for cell in summary.cells],
     )
 
 
@@ -442,11 +461,32 @@ def _dossier(
                 candidate.run_id, candidate.symbol
             )
         ],
+        news_supply=_archived_news_supply(verdict),
         freshness=FreshnessEntry(
             news=list(freshness.news),
             filings=list(freshness.filings),
             fetch_failed=freshness.fetch_failed,
         ),
+    )
+
+
+def _archived_news_supply(verdict: VerdictRecord) -> NewsSupply | None:
+    """Rebuild the supply block this verdict was made under, if it was measured.
+
+    Re-validated through `NewsSupply` rather than passed as a bare row so the
+    dossier's copy is held to the same internal consistency the export
+    originally wrote it under (`exported <= collected`, `none` iff zero
+    mentions). A stored row that cannot satisfy that is a corrupted archive,
+    not something to publish into the evidence dossier.
+    """
+    supply = verdict.news_supply
+    if supply is None:
+        return None
+    return NewsSupply(
+        collected_items=supply.collected_items,
+        exported_items=supply.exported_items,
+        symbol_mention_items=supply.symbol_mention_items,
+        level=cast("NewsSupplyLevel", supply.level),
     )
 
 

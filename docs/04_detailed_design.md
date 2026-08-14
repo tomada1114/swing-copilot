@@ -1546,7 +1546,7 @@ src/swing_copilot/retro/
 
 | テーブル | 主キー | 役割 |
 |---|---|---|
-| `verdicts` | `(run_id, symbol)` | `analysis_result.json`から取り込んだverdictの正本。`as_of`（runのas_of）/ `strategy_key` / `recommendation`（CHECK `proceed`\|`skip`）/ `reasons_json` / `no_trade` |
+| `verdicts` | `(run_id, symbol)` | `analysis_result.json`から取り込んだverdictの正本。`as_of`（runのas_of）/ `strategy_key` / `recommendation`（CHECK `proceed`\|`skip`）/ `reasons_json` / `no_trade` / `news_supply_*`（Issue #154。`collected_items`・`exported_items`・`symbol_mention_items`・`level`をnullable列で保持し、`analysis_input.json`から解決するコード所有メタデータ。NULLは「未計測」であって`none`ではない） |
 | `verdict_sources` | `(run_id, symbol, source_id)` | その銘柄の分析が引用したsource_id。`source_type`（CHECK `news`\|`filing`\|`calendar`）は`analysis_input.json`（コード所有メタデータ）から解決し、result側の申告を信用しない |
 | `verdict_outcomes` | `(run_id, symbol, horizon_days)` | 当否分類。`horizon_days` CHECK `(5,20)`、`classification` CHECK `HIT`\|`MISS_MILD`\|`MISS_SEVERE`\|`NEUTRAL`、`recommendation`は非正規化コピー |
 
@@ -1596,6 +1596,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 | skip的中率 | skipのうち非`NEUTRAL`に占める`HIT` | 絶対閾値ではなく同期間ベースライン比で判定 |
 | 人間整合 | `trades_journal.decision`（followed/ignored/modified）× recommendation × ホライズンのクロス集計 | 観測のみ。新たな実現損益計算は作らず、`verdict_outcomes`のforward_return_pct/classificationをjoinする |
 | ソース貢献 | `(source_type, provider)`別の引用回数とHIT/MISS/NEUTRAL引用数・HIT引用比率 | 観測のみ。引用されないソース・MISSに偏るソースが削減候補になる |
+| news_supply（Issue #154） | 窓内`verdicts`の`news_supply.level` × recommendationのクロス集計。セルごとに件数と`symbol_mention_items`のmin/max/mean、全体に`sufficient_threshold`と未計測件数 | 観測のみ。`verdict_mix`と同じく`verdicts`を直接読むため成熟を待たずに算出できる。旧アーカイブ由来の未計測行は`none`へ畳まず`unrecorded`という第4のlevelとして数える（計測されたゼロと未計測は別の主張） |
 
 重み合成の値は、値を持つホライズンだけで重みを再正規化する。5日しか満期を迎えていない窓（運用初期の通常状態）で、欠けた20日を0として重み付けすると実在する効果をゼロ方向へ引き戻してしまうため。`sample_size < preliminary_sample_threshold`（既定20）の行は`is_preliminary`が立ち「暫定」表示になる。`value: null`は「この窓では測れない」であって「ゼロ」ではない。
 
@@ -1605,9 +1606,11 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v3`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
 
-内容物: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+内容物（`aggregates`にはIssue #154の`news_supply`クロス集計を含む）: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
 
 `collect`は各runの開示`coverage`を`analysis_source_coverage`へverdictと同じトランザクションで完全置換する。`input_coverage`は開示数、切り詰め（export段の`truncated_filing_count`と取得段の`exhibit_truncated_filing_count`。Issue #157、上記3.15）・fallback・銘柄予算による省略数と、重大外し銘柄の`with_gap` / `without_gap` / `unknown`をコードで数える。`with_gap`はどちらの段の切り詰めでも立ち、`without_gap`は全行が「gap無し」かつ`exhibit_truncated`記録済みのときだけ立つ（未記録を含めば`unknown`）。各サプライズにも当時の`input_filing_coverage`を付ける。この集計は「情報不足と外しの併存」を切り分ける観測であり、情報不足が外しを引き起こしたという因果判定ではない。過去の`analysis-input-v2`はcoverage不明として`unknown`へ数える。
+
+`collect`は各候補の`news_supply`（Issue #130）も`verdicts`のnullable列へ同じトランザクションで取り込む（Issue #154）。levelだけでなく3つの件数も持つのは、後から別のしきい値で再採点するときに`reports/`の再走査を要らなくするため。`aggregates.news_supply`と各サプライズの`news_supply`は既定`null`のoptionalで、`input_digest`はこの既定を落として計算するため、Issue #154以前のdossierも検証を通り続ける。しきい値が緩すぎたか厳しすぎたかのうち、コードが数えられるのは「`sparse`/`none`でどれだけ`proceed`が出たか」までで、「`sufficient`なのに材料が無かった」（偽陰性）はサプライズdossierの`news_supply`を見たスキルの再読に委ねる。
 
 **サプライズ銘柄**（`surprises`）は`MISS_SEVERE`を両方向（proceedの重大逆行・skipの大幅上昇）から選び、`settings.retro.max_surprises`（既定5、要検証）で打ち切る。超過分は`|forward_return|`降順で切り、切った件数を`dropped_count`に必ず残す（silent cap禁止：読み手が「重大な外れはこれだけだった」と「11件中の上位5件だった」を区別できなければならない）。各銘柄に当時のverdict・reasons・引用source_id・実現パス（5/20日リターンと期間内最大逆行）と、**鮮度データ**（runのas_of以降〜retroのas_ofに公開されたニュース・開示を既存textアダプタで今取得したもの）を同梱する。鮮度データは`analysis.*`の件数・文字数予算とtimeout/retry/rate limitをそのまま流用し、取得失敗は当該銘柄の`fetch_failed`を立ててnoteに残すfail-soft（export全体を落とさない）。APIキーが無い側はクライアントを組み立てず、その分の鮮度が空になるだけで失敗にはしない。
 
@@ -1616,6 +1619,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 - 集約指標: `metric:<名前>:<N>d` / `metric:<名前>:composed`
 - 人間整合: `metric:human_alignment:<decision>:<recommendation>:<N>d`
 - ソース貢献: `metric:source_contribution:<source_type>:<provider>`
+- news_supply: `metric:news_supply`（全体）と`metric:news_supply:<level>:<recommendation>`（セル）
 - サプライズ: `surprise:<run_id>:<SYMBOL>`
 - 引用ソース: `source_id`（引用・reasons・鮮度データのnews/filings）
 

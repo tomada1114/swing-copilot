@@ -308,7 +308,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 項目 | 内容 |
 |---|---|
 | 用途 | ニュース解釈、開示（8-K/10-Q）解釈、スクリーニング結果の定性評価、銘柄ごとのverdict決定（FR-08） |
-| 実行主体 | 利用者のClaude Codeセッション。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェント（またはWorkflow）へ並列委譲する |
+| 実行主体 | 利用者のClaude Codeセッション。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェントへ並列委譲する。**標準経路はAgentツールの並列起動**であり、平日定時の無人実行（`CLAUDE.md`の"Scheduled Daily Run"）でもこれを使う——headless実行ではWorkflowツールの利用が明示的に許可されないため。Workflowツールは対話セッションであること・利用が明示的に許可されていること・組の数が閾値を超えることをすべて満たすときだけ選べる**任意の代替手段**であり、どちらを使っても各エージェントへ渡す指示内容と銘柄割り当ては同一とする（条件と閾値は`.claude/skills/swing-daily/SKILL.md`が定める） |
 | 認証 | なし（APIキーを持たない）。利用者のClaude Code環境が実行権限を担う |
 | 渡すもの | `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）。決定論的な文脈ブロックと未信頼テキストをフィールドレベルで分離し、開示にはコード所有のcoverageを含む |
 | 受け取るもの | `reports/<run_date>/<run_id>/analysis_result.json`（schema `analysis-result-v3`。旧`analysis-result-v2`はP8アーカイブ読み込みだけ後方互換で受理し、新規runは`copilot-ingest-analysis`がhard failさせる）。スキルが書く唯一の成果物 |

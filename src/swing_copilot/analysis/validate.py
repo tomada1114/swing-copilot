@@ -27,7 +27,6 @@ by the reviewer, never a withheld analysis.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -46,6 +45,7 @@ from swing_copilot.analysis.schemas import (
     AnalysisInput,
     AnalysisResult,
 )
+from swing_copilot.documents import read_json_document
 from swing_copilot.exceptions import SwingCopilotError
 
 if TYPE_CHECKING:
@@ -277,50 +277,6 @@ def calendar_source_bodies(analysis_input: AnalysisInput) -> dict[str, str]:
         (item.source_id, _text_body(item.title, item.summary))
         for item in analysis_input.context.calendar_events
     )
-
-
-def read_json_document(
-    path: Path, *, label: str, error_type: type[SwingCopilotError]
-) -> object:
-    """Read one on-disk JSON artifact, reporting every read failure as `error_type`.
-
-    The single implementation of "turn a file this pipeline wrote earlier into
-    JSON". Every way the bytes can fail to become JSON -- an unreadable path, a
-    file that is not UTF-8, and text that is not JSON -- leaves as `error_type`,
-    because callers tell a broken artifact from an unexpected fault by the
-    exception type alone. A wrongly encoded artifact is exactly what an
-    unattended run produces and nobody watches, so it must not escape as a raw
-    `UnicodeDecodeError` (Issue #153) -- and `UnicodeDecodeError` is a
-    `ValueError`, not an `OSError`, so a hand-rolled `except OSError` at a new
-    call site silently reopens that hole (Issue #164).
-
-    Only the exception type and the message prefix vary between boundaries, so
-    both are parameters rather than a reason to copy the body: `retro/` raises
-    `RetroIngestError`, `analysis/` raises `AnalysisIngestError`.
-
-    Args:
-        path: The document to read.
-        label: How the message names this kind of document, e.g. `"Report
-            context"`; the failure reads `"<label> could not be read: <path>"`.
-        error_type: The domain error this boundary's callers dispatch on.
-
-    Returns:
-        The decoded JSON value, of whatever type the document holds.
-
-    Raises:
-        SwingCopilotError: An `error_type` instance -- the file could not be
-            read, decoded as UTF-8, or parsed as JSON.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        msg = f"{label} could not be read: {path}"
-        raise error_type(msg) from exc
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        msg = f"{label} is not valid JSON: {path}"
-        raise error_type(msg) from exc
 
 
 def read_analysis_document(path: Path) -> object:

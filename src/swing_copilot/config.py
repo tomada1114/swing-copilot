@@ -22,6 +22,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from swing_copilot.documents import read_text_document
 from swing_copilot.exceptions import ConfigError
 
 FEATURE_SECRET_ATTRS: dict[str, str] = {
@@ -548,16 +549,20 @@ def load_settings(path: str = "config/settings.yaml") -> Settings:
         The validated settings object.
 
     Raises:
-        ConfigError: The file is missing, not valid YAML, or fails schema
-            validation (unknown keys, wrong types, missing required values).
+        ConfigError: The file is missing, unreadable, not valid UTF-8, not
+            valid YAML, or fails schema validation (unknown keys, wrong types,
+            missing required values).
     """
     settings_path = Path(path)
     if not settings_path.is_file():
         msg = f"Settings file not found: {settings_path}"
         raise ConfigError(msg)
 
+    text = read_text_document(
+        settings_path, label="Settings file", error_type=ConfigError
+    )
     try:
-        raw = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         msg = f"Settings file is not valid YAML: {settings_path}"
         raise ConfigError(msg) from exc
@@ -580,15 +585,19 @@ def load_strategies(path: str = "config/strategies.yaml") -> StrategiesConfig:
         composite-ranking score weights that sum to 1.0 (P1-01).
 
     Raises:
-        ConfigError: The file is missing, malformed, or violates the schema.
+        ConfigError: The file is missing, unreadable, not valid UTF-8,
+            malformed, or violates the schema.
     """
     strategies_path = Path(path)
     if not strategies_path.is_file():
         msg = f"Strategies file not found: {strategies_path}"
         raise ConfigError(msg)
 
+    text = read_text_document(
+        strategies_path, label="Strategies file", error_type=ConfigError
+    )
     try:
-        raw = yaml.safe_load(strategies_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         msg = f"Strategies file is not valid YAML: {strategies_path}"
         raise ConfigError(msg) from exc

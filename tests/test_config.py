@@ -50,6 +50,15 @@ class TestLoadSettings:
         with pytest.raises(ConfigError):
             load_settings(str(bad))
 
+    def test_non_utf8_file_raises_config_error(self, tmp_path):
+        # A settings file saved in another encoding must fail as a config
+        # problem, not as a bare `UnicodeDecodeError` from deep inside the
+        # loader -- `copilot-daily` maps `ConfigError` to a fatal message.
+        bad = tmp_path / "settings.yaml"
+        bad.write_bytes("universe:\n  index: 日本\n".encode("shift_jis"))
+        with pytest.raises(ConfigError, match="Settings file could not be read"):
+            load_settings(str(bad))
+
 
 class TestLoadStrategies:
     def test_loads_typed_default_strategy(self):
@@ -215,6 +224,12 @@ class TestLoadStrategies:
         weights = load_strategies(str(good)).strategies["default"].ranking.score_weights
 
         assert weights.atr_pct == pytest.approx(0.2)
+
+    def test_non_utf8_file_raises_config_error(self, tmp_path):
+        bad = tmp_path / "strategies.yaml"
+        bad.write_bytes("strategies:\n  default: 日本\n".encode("shift_jis"))
+        with pytest.raises(ConfigError, match="Strategies file could not be read"):
+            load_strategies(str(bad))
 
 
 class TestLoadSecrets:

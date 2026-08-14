@@ -128,8 +128,14 @@
 ## 成果物読み取りの失敗型
 
 要件 ID を持たない、Issue #153 と Issue #164 で追加した経路の不変条件。
-成果物をディスクから読む経路は `analysis/validate.py::read_json_document()`
-に集約されており、境界ごとに変わるのは例外型とメッセージ接頭辞だけである。
+ファイルをディスクから読む経路は `documents.py` の
+`read_text_document()`（テキスト）と、それを土台にした `read_json_document()`
+（JSON）に集約されており、境界ごとに変わるのは例外型とメッセージ接頭辞だけである。
+JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を通る——
+`UnicodeDecodeError` は `OSError` ではなく `ValueError` なので、
+呼び出し側ごとに `except OSError` を書き足すやり方では必ずどこかで穴が開く。
+`config.py` が呼び出し元に含まれるため、この関数は `analysis/` ではなく
+パッケージ直下に置く（設定ローダーが分析境界を import しないため）。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
@@ -137,3 +143,5 @@
 | `analysis/verify_cli.py` | 事前検査と ingest が同じ読み取り関数で同じ失敗型を返す | 新 CLI だけが不正エンコーディングを FAIL 行に落とし、本番 ingest では例外型が揃わない | `tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_a_wrongly_encoded_fragment_is_reported_rather_than_raised` |
 | `analysis/snapshot.py` | UTF-8 として読めない `report_context.json` も `AnalysisIngestError` として届く | レポート再描画のコンテキストだけが `except OSError` に留まり、無人実行が生んだ文字化けが想定外の異常として漏れる | `tests/analysis/test_snapshot.py::TestReadFailures::test_a_wrongly_encoded_context_is_a_hard_failure` |
 | `retro/validate.py` | UTF-8 として読めない振り返り成果物も `RetroIngestError` として届く | `retro_input.json` / `retro_result.json` の文字化けが生の `UnicodeDecodeError` になり、`copilot-retro ingest` の呼び出し側が壊れた成果物と区別できない | `tests/retro/test_validate.py::TestLoading::test_rejects_a_wrongly_encoded_document` |
+| `config.py` | UTF-8 として読めない `settings.yaml` / `strategies.yaml` も `ConfigError` として届く | 別エンコーディングで保存された設定が生の `UnicodeDecodeError` になり、`ConfigError` を fatal として扱う CLI 境界を素通りする | `tests/test_config.py::TestLoadSettings::test_non_utf8_file_raises_config_error`、`::TestLoadStrategies::test_non_utf8_file_raises_config_error` |
+| `retro/ledger.py` | 存在するのに読めない提案台帳は `RetroIngestError` として届き、「空の台帳」に化けない | 台帳が読めないまま `closed_proposal_keys()` が空になり、却下済みの提案が新しい RP-ID で再び通る | `tests/retro/test_ledger.py::TestReadLedger::test_an_unreadable_ledger_fails_instead_of_reading_as_empty`、`tests/retro/test_cli.py::TestExportCommand::test_exits_when_the_proposal_ledger_cannot_be_read` |

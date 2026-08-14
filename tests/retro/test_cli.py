@@ -343,6 +343,34 @@ class TestExportCommand:
 
         assert "retro_input.json" in capsys.readouterr().out
 
+    def test_exits_when_the_proposal_ledger_cannot_be_read(
+        self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
+    ) -> None:
+        # `export` names the closed proposals a re-proposal must justify, so an
+        # unreadable ledger has to stop it with a message rather than a
+        # traceback -- the same treatment `ingest` already gives it.
+        db_path = tmp_path / "retro.duckdb"
+        _archive(write_run)
+        _seed_prices(db_path)
+        self._collect_and_evaluate(reports_root, db_path)
+        ledger = tmp_path / "proposals.md"
+        ledger.write_bytes("| RP-001 | 却下済み | rejected |\n".encode("shift_jis"))
+
+        with pytest.raises(SystemExit, match="Proposal ledger could not be read"):
+            main(
+                [
+                    "export",
+                    "--as-of",
+                    CALENDAR[10].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--reports-dir",
+                    str(reports_root),
+                    "--ledger",
+                    str(ledger),
+                ]
+            )
+
     def test_prepare_runs_collect_evaluate_and_export_in_one_pass(
         self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
     ) -> None:

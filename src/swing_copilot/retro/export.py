@@ -194,6 +194,8 @@ def export_retro_input(
         Where the document landed, its digest, and per-run counts.
 
     Raises:
+        RetroIngestError: The proposal ledger exists but could not be read.
+            Nothing is written in that case.
         OSError: Writing failed. The previous export is left untouched.
     """
     document = build_retro_input(deps, request)

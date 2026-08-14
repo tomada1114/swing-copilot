@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Literal, Self
+from typing import Self
 
 import yaml
 from pydantic import (
@@ -448,11 +448,6 @@ class RetroConfig(_StrictModel):
     # retrospective pass, not from data). Overflow is truncated by
     # |forward_return| with the dropped count reported, never silently.
     max_surprises: int = Field(default=5, ge=1)
-    # Reserved for a future switch to per-proposal human approval (D10,
-    # design §8.2). Nothing reads it yet: the initial implementation is
-    # `auto`-only, and the name exists so the eventual `manual` mode does not
-    # have to rename a shipped setting.
-    approval_mode: Literal["auto", "manual"] = "auto"
 
 
 class Settings(_StrictModel):

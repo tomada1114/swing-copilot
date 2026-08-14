@@ -1660,7 +1660,6 @@ statusライフサイクルは`proposed` → `applied`（PR番号を記録）/ `
 - **L2/L3（構成変更・設計見直し）**: スキルが設計（変更内容・影響範囲・検証計画・代替案、L3は代替案2案以上）をまとめ、`AskUserQuestion`で**設計の方向性**の承認を得てから適用しPRを作成する。1セッションに収まらない規模は承認後にroadmap P-ID / goal-prompt化して別セッションへ引き継ぐ（台帳は`deferred`）
 - 1提案 = 1ブランチ = 1 PR（原子性とrevert容易性のため）。`main`への直接コミットはしない。この「1提案1 PR」要件はAGENTS.mdのGit Workflowが定める通常の開発フロー（軽微な変更はmain直コミット可）に優先する
 - 証拠ゲート（L1: 該当集約n≥20かつ両ホライズンで方向一致、または2回以上の振り返りでの再現／L2: n≥40または同一`failure_class`が直近3回で累計5件／L3: separation≤0がn≥40で持続、またはsystemic欠陥＋代替案比較）は**床であって上限ではない**。計測を可能にするための構造変更（例: `analysis_result`へのconfidenceフィールド追加）は初回から定性根拠のみで提案してよい（決定D9）
-- `settings.retro.approval_mode`（`auto` | `manual`、既定`auto`）は将来の細粒度介入への切替余地として**名前だけ予約**されており、現時点でどのコードも参照しない
 
 #### 3.23.7 design.mdからの乖離（記録）
 
@@ -1670,6 +1669,7 @@ statusライフサイクルは`proposed` → `applied`（PR番号を記録）/ `
 | 台帳参照の受け渡し | 「status=rejectedのRP-ID一覧」（§5.3項7） | dossierは`rejected_proposal_ids`（RP-ID）を渡し、機械ガードは台帳から読んだ`proposal_key`で判定する | RP-IDは人間・スキルが過去提案の全文へ辿るための参照、ガードの鍵は`proposal_key`。両者は役割が違うので同一視しない |
 | ソース貢献指標 | 敗因分類`information_absent`の件数を併記（§3.4） | 集約には含めない | 敗因分類を生成するのはスキルであってコードではない。件数は`retro_result.json`の`narrations[].failure_class`として残り、振り返りを横断した集計はスキルが台帳と過去の全文から行う |
 | 構造的観察の自問 | 手順の規律としてのみ記述（§6手順4） | `retro-result-v1`の必須フィールド`structural_review_note` | 規律を機械が検出できる形にした（3.23.5） |
+| 承認モードの予約 | `settings.retro.approval_mode: auto \| manual`を将来の細粒度介入用に名前だけ予約（§8.2、決定D10） | フィールドを持たない（Issue #178で削除） | 「書けるが効かない設定」で、`manual`と書いた人はL1提案が承認待ちで止まると誤解する。承認モデルはスキル側（`.claude/skills/swing-retro/SKILL.md`）にあり、設定値は挙動を一切変えなかった。per-proposalの人手承認が必要になった時点で改めて設計に載せてから追加する。予約の経緯は`docs/goal-prompts/swing-copilot-retrospective/`に履歴として残る |
 | 重大外し率のウォッチ水準 | 15%（要検証、config化を示唆） | コード定数`PROCEED_SEVERE_MISS_WATCH_RATE` | `settings.retro`はD6に従い意図的に小さく保つ。この水準を動かす提案自体が本機構の対象なので、変更はL1提案としてコード修正＋PRを経る |
 
 ### 3.24 `tracking/` と `copilot-track`（verdict追跡台帳）

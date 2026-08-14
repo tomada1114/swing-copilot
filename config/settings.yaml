@@ -142,6 +142,3 @@ retro:
   # evidence dossier in retro_input.json. Overflow is truncated by
   # |forward_return| and the dropped count is reported.
   max_surprises: 5
-  # Reserved (D10): the retrospective skill applies L1 proposals without
-  # prior approval today. `manual` is a future switch, not yet read.
-  approval_mode: auto

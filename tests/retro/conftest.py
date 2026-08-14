@@ -196,7 +196,7 @@ def retro_input_unsigned_payload() -> dict[str, Any]:
             ],
         },
         "config_snapshot": {
-            "sections": {"retro": {"max_surprises": 5, "approval_mode": "auto"}},
+            "sections": {"retro": {"max_surprises": 5}},
             "config_hash": "0" * 64,
         },
         "proposals_ledger": {

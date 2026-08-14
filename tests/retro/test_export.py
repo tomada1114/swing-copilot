@@ -645,7 +645,7 @@ class TestBuildRetroInput:
         )
 
         sections = document.config_snapshot.sections
-        assert sections["retro"] == {"max_surprises": 5, "approval_mode": "auto"}
+        assert sections["retro"] == {"max_surprises": 5}
         assert "postmortem" in sections
         # Delivery plumbing is not an analysis parameter, so it stays out.
         assert "notification" not in sections

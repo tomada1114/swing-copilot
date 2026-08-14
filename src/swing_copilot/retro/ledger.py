@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from swing_copilot.analysis.export import write_text_atomically
+from swing_copilot.documents import read_text_document
+from swing_copilot.retro.validate import RetroIngestError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -167,17 +169,31 @@ def read_ledger(path: Path) -> LedgerState:
     empty the re-proposal guard. `proposal_key` is read from the column the
     header names, and is absent when the header does not name one.
 
+    An absent ledger is the ordinary first-run state and reads as empty. A
+    ledger that exists but cannot be read is not: it is the one input the
+    re-proposal guard has, so silently treating a permission error or a
+    wrongly encoded file as "no closed proposals" would let a rejected proposal
+    back in under a fresh RP-ID. Both `export` and `ingest` read it, so both
+    fail loudly instead.
+
     Args:
         path: Ledger location, typically `docs/retro/proposals.md`.
 
     Returns:
         Whether the file exists and every data row it holds.
+
+    Raises:
+        RetroIngestError: The ledger exists but could not be read or decoded
+            as UTF-8.
     """
     if not path.is_file():
         return LedgerState(exists=False, rows=())
+    text = read_text_document(
+        path, label="Proposal ledger", error_type=RetroIngestError
+    )
     key_index: int | None = None
     rows: list[LedgerRow] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         cells = _table_cells(line)
         if cells is None:
             continue

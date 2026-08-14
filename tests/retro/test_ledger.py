@@ -21,6 +21,7 @@ from swing_copilot.retro.ledger import (
     record_proposals,
 )
 from swing_copilot.retro.schemas import Proposal
+from swing_copilot.retro.validate import RetroIngestError
 from tests.retro.conftest import proposal_payload
 
 AS_OF = date(2027, 3, 29)
@@ -83,6 +84,18 @@ class TestReadLedger:
 
         assert state.closed_proposal_keys() == frozenset()
         assert state.rows[0].rp_id == "RP-007"
+
+    def test_an_unreadable_ledger_fails_instead_of_reading_as_empty(
+        self, tmp_path: Path
+    ) -> None:
+        # An absent ledger is the first-run state; a ledger that exists but
+        # cannot be decoded is not. Reading it as empty would silently empty
+        # the re-proposal guard and let a rejected proposal back in.
+        path = tmp_path / "proposals.md"
+        path.write_bytes("| RP-001 | 却下済み | rejected |\n".encode("shift_jis"))
+
+        with pytest.raises(RetroIngestError, match="Proposal ledger could not be read"):
+            read_ledger(path)
 
 
 class TestRecordProposals:

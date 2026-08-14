@@ -35,7 +35,8 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ValidationError
 
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
-from swing_copilot.analysis.validate import WITHHELD_MESSAGE, read_json_document
+from swing_copilot.analysis.validate import WITHHELD_MESSAGE
+from swing_copilot.documents import read_json_document
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.retro.schemas import RetroInput, RetroResult
 

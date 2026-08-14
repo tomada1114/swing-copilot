@@ -165,18 +165,24 @@ def _run_export(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
     settings = _load_settings(args.settings)
-    summary = export_retro_input(
-        RetroExportDependencies(
-            market_store=_market_store(state_store, args.db),
-            state_store=state_store,
-            settings=settings,
-            clock=SystemClock(),
-            freshness=_freshness_sources(),
-        ),
-        RetroExportRequest(
-            as_of=args.as_of, reports_root=args.reports_dir, ledger_path=args.ledger
-        ),
-    )
+    try:
+        summary = export_retro_input(
+            RetroExportDependencies(
+                market_store=_market_store(state_store, args.db),
+                state_store=state_store,
+                settings=settings,
+                clock=SystemClock(),
+                freshness=_freshness_sources(),
+            ),
+            RetroExportRequest(
+                as_of=args.as_of, reports_root=args.reports_dir, ledger_path=args.ledger
+            ),
+        )
+    except RetroIngestError as exc:
+        # `export` reads the proposal ledger to name the closed proposals a
+        # re-proposal must justify. An unreadable ledger is an operator-facing
+        # message here, exactly as it is in `ingest`.
+        raise SystemExit(str(exc)) from exc
     console.print(
         f"評価 {summary.outcome_count} 行 / "
         f"サプライズ {summary.surprise_count} 件（上限超過 "
@@ -251,8 +257,8 @@ def main(argv: list[str] | None = None) -> None:
 
     Raises:
         SystemExit: Argument parsing failed, the settings file named by
-            `--settings` is missing or invalid, or `ingest` was given documents
-            it cannot trust.
+            `--settings` is missing or invalid, the proposal ledger exists but
+            cannot be read, or `ingest` was given documents it cannot trust.
     """
     args = _parse_args(argv)
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)

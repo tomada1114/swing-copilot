@@ -29,7 +29,8 @@ from swing_copilot.analysis.schemas import (
     Sha256Digest,
     canonical_json_digest,
 )
-from swing_copilot.analysis.validate import AnalysisIngestError, read_json_document
+from swing_copilot.analysis.validate import AnalysisIngestError
+from swing_copilot.documents import read_json_document
 from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import DailyBrief
 

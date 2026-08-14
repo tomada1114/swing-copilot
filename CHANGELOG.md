@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 8-K の export 選別を先頭スライスから**価値ベースの Exhibit 選別**へ変更した
+  （Issue #181）。`analysis/filing_selection.py` が `content_text` を
+  `[EXHIBIT ...]` ヘッダで主文書と各 Exhibit へ分割し、主文書＋プレスリリース
+  （`EX-99` / `EX-99.1` / `EX-99.01`、無ければ先頭 Exhibit）と supplemental
+  package へ 4:1 で配分したうえで、余りを不足率順ではなく優先層→文書順で配る。
+  割当に収まらない Exhibit は末尾切りではなく、空行で分けたブロックを
+  markdown テーブル → 通常本文 → 定型文（forward-looking statements 免責、
+  About、IR/メディア連絡先、conference call / webcast 案内）の順に採用し、
+  落ちた箇所へ `[... omitted lower-value exhibit passage ...]` を挿入する。
+  末尾に置かれる財務諸表・非 GAAP 調整表が真っ先に落ちていた問題
+  （Issue #157 の GOOG 申告）への対処。選別結果は `selection_mode`
+  （`section_priority_partial`、値は増やしていない）と `sections_json`
+  （`exhibit_primary` / `exhibit_ex_99_1` …）へ記録され、P8 から読める。
+  取得段・export 予算値（120,000 / 240,000）・10-Q の章選別・CON-03 検査と
+  provenance 検証の経路は変更していない
+- `FilingSectionOmissionShape` に `value_selected` を追加した（Issue #181）。
+  Exhibit の欠落位置が「章の中間」（`head_and_tail`）でも「先頭以降」
+  （`head_only`）でもなく、本文中のマーカーの位置であることを表す。追加のみで
+  既存アーカイブは読めるため、スキーマは `analysis-input-v3` に据え置き
+
 - 8-K Exhibit の取得段上限（`data/edgar.py` の `_MAX_EXHIBIT_CHARS_PER_FILING`）を
   60,000 字から 500,000 字へ引き上げ、その意味を「export 予算からの逆算値」から
   「病的な文書に対する安全弁」へ変えた（Issue #180）。取得段で切ると

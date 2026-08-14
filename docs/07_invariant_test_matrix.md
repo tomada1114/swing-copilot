@@ -94,6 +94,9 @@
 | `data/edgar.py` | 予算を使い切った後続 Exhibit はダウンロードもしない | 捨てる本文のために SEC へリクエストを投げる | `tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhausted_budget_skips_the_next_exhibit_without_downloading_it` |
 | `data/edgar.py` | Exhibit 取得の失敗は fail-soft で、主文書と取得済み Exhibit を保持する | 添付 1 件の 404 で開示そのものが入力から消える | `tests/data/test_edgar.py::TestEightKExhibitFailSoft::test_failing_exhibit_keeps_the_exhibits_already_retrieved` |
 | `data/edgar.py` | 添付ダウンロードにも 10 リクエスト/秒の throttle を適用する | Exhibit 取得だけがレート制限を迂回する | `tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download` |
+| `analysis/filing_selection.py` | 予算逼迫時は主文書と EX-99.1 を supplement より優先して配分する | 数倍大きい supplemental package が予算を食い、プレスリリースが削られる | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_budget_pressure_serves_the_press_release_before_a_supplement` |
+| `analysis/filing_selection.py` | 割当超過の Exhibit は末尾切りではなく、定型文から落として markdown テーブルを最後まで残す | 末尾に置かれる財務諸表・非 GAAP 調整表が真っ先に落ちる（Issue #157 の GOOG 申告） | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_a_far_over_allocation_keeps_the_tables_after_everything_else` |
+| `analysis/filing_selection.py` | Exhibit 選別は `selection_mode` / `sections_json` へ Exhibit 語彙で記録され、P8 から読める | 「開示が切れた」までしか分からず、どの Exhibit が削られたか追跡できない | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_exhibit_coverage_survives_the_analysis_source_coverage_round_trip` |
 
 ## 自社材料の供給量の申告
 

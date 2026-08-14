@@ -122,11 +122,20 @@ FilingSelectionMode = Literal[
 FilingSectionStatus = Literal[
     "full", "partial", "absent_from_filing", "not_parsed", "missing"
 ]
-FilingSectionOmissionShape = Literal["head_only", "head_and_tail"]
+# Issue #181: "value_selected" is the 8-K exhibit shape -- passages were kept
+# or dropped by value (financial tables first, boilerplate first out), so the
+# gap is neither the middle nor the tail but wherever the inline marker sits.
+FilingSectionOmissionShape = Literal["head_only", "head_and_tail", "value_selected"]
 
 
 class FilingSectionCoverage(_StrictModel):
-    """How much of one priority 10-Q section reached the exported text.
+    """How much of one priority filing part reached the exported text.
+
+    A "part" is a priority 10-Q section (`part_i_item_1` …) or, for an 8-K,
+    one component of the collected text: the primary document
+    (`exhibit_primary`) or one appended exhibit (`exhibit_ex_99_1` …,
+    Issue #181). Both are chosen deterministically under one budget, so both
+    report their deficit the same way.
 
     `status` alone cannot say how much a `partial` section lost, nor where the
     gap sits. That became load-bearing once truncation started keeping a
@@ -134,7 +143,8 @@ class FilingSectionCoverage(_StrictModel):
     range is the tail. The character pair mirrors `FilingCoverage` at section
     granularity, and `omission_shape` names the retained shape —
     `head_and_tail` means the middle was dropped, `head_only` means everything
-    past the head was.
+    past the head was, `value_selected` means lower-value passages were
+    dropped wherever they sat and every gap is marked inline.
 
     All three stay optional so they can be added without moving off
     `analysis-input-v3`: archived inputs written before these fields existed,

@@ -482,6 +482,51 @@ class TestNumericConsistencyWarnings:
         assert validated.outcomes[0].error is None
         assert caplog.records == []
 
+    def test_a_misconverted_order_of_magnitude_is_warned_about(
+        self, write_documents, caplog
+    ):
+        """$119.8 billion restated as 119.8億ドル is a factor of ten low (#158)."""
+        with caplog.at_level(logging.WARNING):
+            _validated(
+                write_documents,
+                **_statement_documents(
+                    "売上高は119.8億ドルだった。", _BILLIONS_LINE, _BILLIONS_LINE
+                ),
+            )
+
+        assert "119.8億" in caplog.text
+        assert "AAPL" in caplog.text
+
+    def test_an_order_of_magnitude_warning_still_renders_the_symbol(
+        self, write_documents
+    ):
+        """The check stays a warning channel, never a fail-closed withholding."""
+        validated = _validated(
+            write_documents,
+            **_statement_documents(
+                "売上高は119.8億ドルだった。", _BILLIONS_LINE, _BILLIONS_LINE
+            ),
+        )
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is None
+        assert outcome.filings[0].analysis.facts[0].text.endswith("ドルだった。")
+        assert outcome.verdict is not None
+
+    def test_the_corrected_order_of_magnitude_is_not_warned_about(
+        self, write_documents, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            validated = _validated(
+                write_documents,
+                **_statement_documents(
+                    "売上高は1,198億ドルだった。", _BILLIONS_LINE, _BILLIONS_LINE
+                ),
+            )
+
+        assert validated.outcomes[0].error is None
+        assert caplog.records == []
+
     def test_a_withheld_symbol_is_not_also_warned_about_its_figures(
         self, write_documents, caplog
     ):
@@ -504,16 +549,22 @@ _STATEMENT_LINE = (
 )
 _STATEMENT_QUOTE = "Total operating revenues 3,495,296 2,928,181"
 
+#: The 2026-08-12 GOOG headline Issue #158 was found against: the quote names
+#: billions, so a fact restating it in 億 pins both powers of ten.
+_BILLIONS_LINE = "Alphabet reported revenue growth to $119.8 billion in the quarter"
 
-def _statement_documents(fact_text: str) -> dict[str, Any]:
-    """Build `_validated` overrides whose only filing body is `_STATEMENT_LINE`."""
+
+def _statement_documents(
+    fact_text: str, body: str = _STATEMENT_LINE, quote: str = _STATEMENT_QUOTE
+) -> dict[str, Any]:
+    """Build `_validated` overrides whose only filing body is `body`."""
     candidate = input_payload()["candidates"][0]
     filing = {
         **candidate["filings"][0],
-        "text": _STATEMENT_LINE,
+        "text": body,
         "coverage": {
-            "original_chars": len(_STATEMENT_LINE),
-            "exported_chars": len(_STATEMENT_LINE),
+            "original_chars": len(body),
+            "exported_chars": len(body),
             "is_truncated": False,
             "selection_mode": "full",
             "sections": [],
@@ -528,7 +579,7 @@ def _statement_documents(fact_text: str) -> dict[str, Any]:
                     {
                         "text": fact_text,
                         "source_ids": [FILING_ID],
-                        "evidence_quote": _STATEMENT_QUOTE,
+                        "evidence_quote": quote,
                     }
                 ]
             )

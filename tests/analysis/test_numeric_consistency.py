@@ -50,6 +50,102 @@ class TestTheIssueCase:
         ) == ("35億9,530万",)
 
 
+#: The 2026-08-12 GOOG news excerpt Issue #158 was found in: the quote states
+#: billions and the fact restated it in 億, so both sides name a magnitude.
+GOOG_NEWS_QUOTE = (
+    "Alphabet reported 24% YoY revenue growth to $119.8B and 82% YoY Cloud growth"
+)
+
+
+class TestOrderOfMagnitude:
+    """Both sides naming a magnitude makes the power of ten checkable (#158)."""
+
+    def test_the_misconverted_order_of_magnitude_is_reported(self):
+        """$119.8 billion is 1,198億, not 119.8億; the significands agree."""
+        assert unsupported_magnitudes(
+            "前年同期比+24%の売上高119.8億ドル", "revenue grew to $119.8 billion"
+        ) == ("119.8億",)
+
+    def test_the_correct_order_of_magnitude_is_not_reported(self):
+        assert (
+            unsupported_magnitudes(
+                "前年同期比+24%の売上高1,198億ドル", "revenue grew to $119.8 billion"
+            )
+            == ()
+        )
+
+    def test_the_issue_quote_is_reconciled_as_written(self):
+        """`$119.8B` names its magnitude just as `billion` does."""
+        assert unsupported_magnitudes(
+            "前年同期比+24%の売上高119.8億ドル", GOOG_NEWS_QUOTE
+        ) == ("119.8億",)
+
+    def test_the_corrected_fact_of_the_issue_quote_is_not_reported(self):
+        assert (
+            unsupported_magnitudes("前年同期比+24%の売上高1,198億ドル", GOOG_NEWS_QUOTE)
+            == ()
+        )
+
+    def test_a_coarser_quote_still_sets_the_precision_of_the_comparison(self):
+        """`$3.50 billion` explains 34億9,530万 at two digits, same power."""
+        assert (
+            unsupported_magnitudes("連結営業収益は34億9,530万ドル", "$3.50 billion")
+            == ()
+        )
+
+    def test_a_composite_across_scale_systems_still_reconciles(self):
+        assert (
+            unsupported_magnitudes("売上高は1兆2,345億円", "1,234.5 billion yen") == ()
+        )
+
+    def test_a_composite_off_by_a_power_of_ten_is_reported(self):
+        assert unsupported_magnitudes(
+            "売上高は1,234億5,000万円", "1,234.5 billion yen"
+        ) == ("1,234億5,000万",)
+
+    @pytest.mark.parametrize(
+        ("text", "quote"),
+        [
+            pytest.param(
+                "売上高は119.8億ドル",
+                "total revenues 119,800",
+                id="an-unscaled-quote-still-admits-any-power-of-ten",
+            ),
+            pytest.param(
+                "revenues reached $3.50 billion",
+                STATEMENT_QUOTE,
+                id="a-thousands-table-that-does-not-say-so",
+            ),
+            pytest.param(
+                "1株当たり $9.99 と記載",
+                "diluted earnings per share 9.99",
+                id="a-currency-marker-alone-names-no-magnitude",
+            ),
+        ],
+    )
+    def test_a_one_sided_magnitude_is_judged_as_before(self, text, quote):
+        assert unsupported_magnitudes(text, quote) == ()
+
+    def test_a_letter_is_only_a_magnitude_behind_a_currency_symbol(self):
+        """A bare `119.8b` could be a note reference, so it names no magnitude.
+
+        Read as billions it would make 119.8億ドル a power of ten too small;
+        left unread, the quote merely fails to pin the unit down, which is the
+        pre-existing lenient behaviour.
+        """
+        assert (
+            unsupported_magnitudes("売上高は119.8億ドル", "item 119.8b of note") == ()
+        )
+
+    def test_a_rule_number_is_not_read_as_billions(self):
+        assert (
+            unsupported_magnitudes(
+                "自社株買いは10億ドル規模", "adopted a rule 10b-5 plan for $1.0 billion"
+            )
+            == ()
+        )
+
+
 class TestUnitConversions:
     @pytest.mark.parametrize(
         ("text", "quote"),

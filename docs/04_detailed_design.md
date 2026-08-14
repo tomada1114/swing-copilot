@@ -2104,6 +2104,8 @@ universe:
 
 risk:
   account_equity_usd: null      # 実運用の株数計算に使用。未設定なら株数はnot_calculable
+                                # （スキーマ上のデフォルトはnull。同梱のconfig/settings.yamlは
+                                #   2026-08-13以降 5000.0 を設定して運用している）
   max_position_pct: 0.10      # 1銘柄=資金の10%上限
   max_trade_risk_pct: 0.01    # 1トレードのリスク=資金の1%（ストップ幅基準）
   max_sector_pct: 0.30        # 同一セクター上限30%

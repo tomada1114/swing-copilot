@@ -6,7 +6,11 @@ universe:
   manual_exclude: [] # ticker symbols to force-exclude
 
 risk:
-  account_equity_usd: null # unset -> position sizing returns not_calculable
+  # null にすると position sizing が全候補で not_calculable を返し、株数・
+  # portfolio heat・サーキットブレーカーがいずれも評価されない。2026-08-13 に
+  # 運用資金 5,000 USD を設定（10% = 500 USD/銘柄、1% = 50 USD/トレード）。
+  # 実際の口座残高と乖離させると建玉サイズが過大になるため、入金・出金の都度更新する。
+  account_equity_usd: 5000.0
   max_position_pct: 0.10 # 1 symbol <= 10% of equity
   max_trade_risk_pct: 0.01 # 1 trade risk <= 1% of equity (stop-distance based)
   max_sector_pct: 0.30 # same-sector exposure cap

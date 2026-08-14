@@ -32,6 +32,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 自社材料の供給量（`news_supply`、Issue #130）を P8 の振り返りへ取り込み、
+  しきい値 `SUFFICIENT_SYMBOL_MENTION_ITEMS = 5` の妥当性を実績で検証できる
+  ようにした（Issue #154）。`retro/collect.py` が `analysis_input.json` から
+  `verdicts` の `news_supply_*` 4 列（nullable、`ADD COLUMN IF NOT EXISTS`、
+  backfill なし＝`NULL` は「未計測」であって `none` ではない）へ取り込み、
+  `retro_input.json` の `aggregates.news_supply` に level × recommendation の
+  クロス集計（セルごとの件数と `symbol_mention_items` の min/max/mean、全体の
+  `sufficient_threshold` と未計測件数）を出す。`verdict_mix` と同じく窓内
+  `verdicts` を直接読むため成熟を待たずに算出できる。level だけでなく 3 つの
+  件数も持つのは、後から別のしきい値で再採点するときに `reports/` の再走査を
+  要らなくするため。旧アーカイブ由来の未計測行は `none` へ畳まず
+  `unrecorded` という第 4 の level として数える。各サプライズ dossier にも
+  当時の `news_supply` を付ける——コードが数えられるのは「`sparse`/`none` で
+  どれだけ `proceed` が出たか」までで、`sufficient` なのに材料が薄かった
+  偽陰性はスキルの再読でしか言えないため（`symbol_mention_items` は
+  ティッカー出現数であり自社材料数の下限値）。`aggregates.news_supply` と
+  サプライズの `news_supply` は既定 `null` の optional で、`input_digest` は
+  この既定を落として計算するため、過去の `retro-input-v1` dossier も検証を
+  通り続ける。しきい値 5 自体は変更していない
 - `copilot-dd-forward`（`regime/dd_forward_cli.py`、コアは`regime/dd_forward.py`
   と`regime/dd_forward_sweep.py`）。保存済み履歴を1日ずつ`as_of`として再生し、
   `_calculate_regime_snapshot`と同一の分類を出したうえで、その後に実際に起きた

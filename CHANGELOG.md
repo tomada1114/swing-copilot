@@ -256,6 +256,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 8-K の `EX-99*` 添付が取得段の**件数上限**（1 開示 3 件）で落とされていても
+  `analysis_input.json` の `coverage` が `exhibit_truncated: false` を主張して
+  いた問題を解消（Issue #163）。Issue #157 が塞いだのは文字数上限だけで、
+  4 本目以降の添付は文字数予算の経路へ入る前に落ちるためマーカーも警告も
+  残らなかった。`data/edgar.py` は件数上限で取得しなかった添付を
+  `text/base.py::EXHIBIT_OMISSION_MARKER`
+  （`\n[... exhibit omitted: per-filing exhibit count cap ...]`）として本文へ
+  申告し、`analysis/filing_selection.py` は `EXHIBIT_LOSS_MARKERS` の
+  いずれかで `exhibit_truncated` を立てる。「末尾が切れた Exhibit」と
+  「1 文字も取得していない Exhibit」は本文中の別リテラルで区別でき、
+  `coverage` 側は既存の 1 つの boolean にまとめる（新フィールドも DB 列も
+  増やしていないので、過去のアーカイブと `analysis_source_coverage` の
+  スキーマは変わらない）。件数上限のマーカーは fail-soft の外で付けるため、
+  後続のダウンロード失敗があっても「そもそも取得機会が無かった」事実は残る。
+  `_MAX_EXHIBITS_PER_FILING = 3` という値自体は変更していない
 - UTF-8 として解釈できない `report_context.json` / `retro_input.json` /
   `retro_result.json` が、それぞれ `AnalysisIngestError` / `RetroIngestError`
   ではなく生の `UnicodeDecodeError` として伝播していた問題を解消

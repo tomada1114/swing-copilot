@@ -79,8 +79,7 @@ name). It re-runs `copilot-daily` itself if needed, then:
 1. reads `analysis_input.json`;
 2. fans out per-symbol news, filing, and screening interpretation to the
    `analyze-news`, `analyze-filings`, and `interpret-screening` expert skills,
-   running them in parallel subagents (or via the Workflow tool for a large
-   symbol count);
+   running them in parallel subagents regardless of symbol count;
 3. reconciles their findings and decides a per-symbol `proceed`/`skip`
    verdict — a recommendation only, never an order, and never a rewrite of
    the deterministic scores/ranking;

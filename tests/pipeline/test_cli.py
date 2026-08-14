@@ -402,7 +402,7 @@ class TestPreflight:
     def test_equity_unset_zero_closed_warns_and_continues(
         self, settings, state_store, caplog
     ):
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with caplog.at_level(logging.WARNING):
             _preflight(deps, DailyRunOptions())
@@ -411,7 +411,7 @@ class TestPreflight:
 
     def test_equity_unset_one_closed_aborts(self, settings, state_store):
         state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with pytest.raises(
             PreflightAbort, match=r"risk\.account_equity_usd"
@@ -424,14 +424,14 @@ class TestPreflight:
         self, settings, state_store
     ):
         state_store.upsert_position(_closed_position(close_price=None))
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with pytest.raises(PreflightAbort):
             _preflight(deps, DailyRunOptions())
 
     def test_dry_run_applies_the_same_rules(self, settings, state_store):
         state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with pytest.raises(PreflightAbort):
             _preflight(deps, DailyRunOptions(is_dry_run=True))
@@ -440,7 +440,7 @@ class TestPreflight:
         self, settings, state_store, caplog
     ):
         state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with caplog.at_level(logging.WARNING):
             _preflight(deps, DailyRunOptions(as_of=date(2027, 1, 15)))
@@ -450,7 +450,7 @@ class TestPreflight:
     def test_abort_does_not_touch_storage(self, settings, state_store):
         position = _closed_position()
         state_store.upsert_position(position)
-        deps = _preflight_deps(state_store, settings)
+        deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with pytest.raises(PreflightAbort):
             _preflight(deps, DailyRunOptions())
@@ -460,6 +460,7 @@ class TestPreflight:
     def test_main_exits_with_code_two_and_creates_no_run(
         self, monkeypatch, capsys, settings, state_store
     ):
+        settings = _equity_settings(settings, None)
         state_store.upsert_position(_closed_position())
         run_daily_calls = []
         monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)

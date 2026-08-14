@@ -220,6 +220,12 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
         )
         for entry in group
     }
+    # `verdict_mix` is the one aggregate that never falls silent: the rate
+    # metrics above lose their denominator in a zero-proceed window, which is
+    # exactly the window a proposal most needs to argue about (P8-120). Leaving
+    # its ID out of the space made that argument unwritable -- the skill is
+    # told to read the metric first and could not then cite it.
+    ids.add(aggregates.verdict_mix.metric_id)
     ids.update(cell.cell_id for cell in retro_input.human_alignment)
     ids.update(row.contribution_id for row in retro_input.source_contribution)
     if (news_supply := aggregates.news_supply) is not None:

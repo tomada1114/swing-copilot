@@ -181,18 +181,25 @@ class FilingCoverage(_StrictModel):
     export then copies it whole and reports `is_truncated: false`,
     `selection_mode: full` (Issue #157).
 
-    `exhibit_truncated` closes that blind spot: it is `true` when
-    `EXHIBIT_TRUNCATION_MARKER` is present in the collected filing text this
-    export was derived from. It is read from the text rather than from a
-    collection-time companion field, because the text is what gets persisted:
-    the signal therefore survives a round trip through storage and is
-    recomputed identically wherever a `TextItem` is selected again.
+    `exhibit_truncated` closes that blind spot: it is `true` when any marker in
+    `EXHIBIT_LOSS_MARKERS` is present in the collected filing text this export
+    was derived from -- an exhibit cut at the character ceiling, or one never
+    fetched because the filing offered more than `_MAX_EXHIBITS_PER_FILING`
+    (Issue #163). It is read from the text rather than from a collection-time
+    companion field, because the text is what gets persisted: the signal
+    therefore survives a round trip through storage and is recomputed
+    identically wherever a `TextItem` is selected again.
 
-    `false` means **the marker is absent**, not "nothing is missing" -- the
+    One boolean deliberately covers both causes: what the reader has to decide
+    is whether the filing text is complete, and it is not, either way. Which
+    cap applied stays legible in the text itself, where the two markers read
+    differently, rather than costing a second field and a second column.
+
+    `false` means **no marker is present**, not "nothing is missing" -- the
     same distinction `FilingSectionCoverage` draws for its optional fields.
-    A filing collected before the marker existed, one whose exhibits failed to
-    download, one dropped for exceeding `_MAX_EXHIBITS_PER_FILING`, and one
-    whose exhibit text was elided by the source itself all report `false`.
+    A filing collected before the markers existed, one whose exhibits failed to
+    download, and one whose exhibit text was elided by the source itself all
+    report `false`.
     It defaults to `false` so archived `analysis-input-v2`/`-v3` documents
     written before the field existed keep parsing (the `input_digest` check
     hashes the raw document, so the added field does not invalidate them), and

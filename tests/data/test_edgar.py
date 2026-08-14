@@ -1207,6 +1207,86 @@ class TestEightKExhibitBudget:
         )
 
 
+class TestEightKExhibitCountCap:
+    """Issue #163: three exhibits per filing, and the rest must be declared."""
+
+    _OMISSION_MARKER = "\n[... exhibit omitted: per-filing exhibit count cap ...]"
+
+    def _exhibits(self, count: int) -> tuple[FakeAttachment, ...]:
+        return tuple(
+            FakeAttachment(f"EX-99.{n}", f"doc{n}.htm", f"body {n}")
+            for n in range(1, count + 1)
+        )
+
+    @pytest.mark.parametrize(
+        ("exhibit_count", "expected"),
+        [
+            pytest.param(2, False, id="one-under-the-cap"),
+            pytest.param(3, False, id="exactly-at-the-cap"),
+            pytest.param(4, True, id="one-over-the-cap"),
+        ],
+    )
+    def test_the_count_boundary_is_what_the_exported_coverage_reports(
+        self, exhibit_count: int, expected: bool
+    ) -> None:
+        # Like the character ceiling, the count cap cuts before export, so the
+        # character counts see nothing and only the marker crosses over.
+        item = _fetch_one(_eight_k_with_exhibits(*self._exhibits(exhibit_count)))
+        selection = select_filing_text(item, "8-K", 120_000)
+
+        assert selection.coverage.is_truncated is False
+        assert selection.coverage.selection_mode == "full"
+        assert selection.coverage.exhibit_truncated is expected
+
+    def test_a_filing_at_the_cap_keeps_every_exhibit_and_stays_unmarked(self):
+        item = _fetch_one(_eight_k_with_exhibits(*self._exhibits(3)))
+
+        assert "exhibit omitted" not in item.content_text
+        assert item.content_text.endswith("\n\n[EXHIBIT EX-99.3 doc3.htm]\nbody 3")
+
+    def test_exhibits_past_the_cap_are_declared_without_being_downloaded(self):
+        exhibits = self._exhibits(5)
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert [exhibit.content_calls for exhibit in exhibits] == [1, 1, 1, 0, 0]
+        assert item.content_text.endswith(self._OMISSION_MARKER)
+
+    def test_the_two_collection_caps_stay_distinguishable_in_the_text(self):
+        # One filing that hit both ceilings: 99.1 exhausts the character
+        # budget and 99.4 is past the count cap. A shortened exhibit and one
+        # that was never fetched call for different readings, so the text
+        # keeps them apart even though `coverage` reports one boolean.
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "a" * 70_000),
+            FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
+            FakeAttachment("EX-99.3", "slides.htm", "c" * 100),
+            FakeAttachment("EX-99.4", "tables.htm", "d" * 100),
+        )
+
+        item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert item.content_text.count("[... exhibit truncated ...]") == 1
+        assert item.content_text.endswith(self._OMISSION_MARKER)
+
+    def test_a_failed_exhibit_download_does_not_swallow_the_count_cap(self, caplog):
+        # The cap is decided from the attachment list alone: a fail-soft
+        # download failure must not also erase the exhibits that were never
+        # offered a chance to be fetched.
+        exhibits = (
+            FakeAttachment("EX-99.1", "release.htm", "press release"),
+            FakeAttachment("EX-99.2", "gone.htm", error=ConnectionError("404")),
+            FakeAttachment("EX-99.3", "slides.htm", "slides"),
+            FakeAttachment("EX-99.4", "tables.htm", "tables"),
+        )
+
+        with caplog.at_level("ERROR"):
+            item = _fetch_one(_eight_k_with_exhibits(*exhibits))
+
+        assert "keeping 1 exhibit(s)" in caplog.text
+        assert item.content_text.endswith(self._OMISSION_MARKER)
+
+
 class TestEightKExhibitFailSoft:
     def test_unavailable_attachment_list_falls_back_to_the_primary_document(
         self, caplog

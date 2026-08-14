@@ -113,14 +113,18 @@ description: >
   `partial` / `absent_from_filing` / `not_parsed` / `missing` を無視しない。
   欠落した章について事実が無かったとは結論せず、
   どの範囲が未分析かを `interpretation` または `red_flags` に具体的に記す。
-- **`exhibit_truncated: true` は「取得段で Exhibit が切られている」**（8-K の
-  Exhibit 99 系は 1 開示 60,000 字の上限で切られ、本文に
-  `[... exhibit truncated ...]` が入る）。この欠落は `is_truncated` にも
-  `original_chars` / `exported_chars` にも現れないので、`is_truncated: false` /
-  `selection_mode: "full"` と同時に立ちうる。立っていたら
-  「プレスリリース本文の末尾が入力に含まれていない。欠落の範囲・位置は入力からは
-  特定できない」旨を `interpretation` に書き、末尾に置かれがちな非GAAP調整表・
-  補足表・ガイダンス表について「記載が無かった」と結論しない。
+- **`exhibit_truncated: true` は「取得段で Exhibit が欠けている」**。この欠落は
+  `is_truncated` にも `original_chars` / `exported_chars` にも現れないので、
+  `is_truncated: false` / `selection_mode: "full"` と同時に立ちうる。
+  どちらの上限で欠けたかは **本文中のマーカーで区別する**（両方入ることもある）。
+  - `[... exhibit truncated ...]` → 1 開示 60,000 字の上限。
+    「プレスリリース本文の末尾が入力に含まれていない。欠落の範囲・位置は入力からは
+    特定できない」旨を `interpretation` に書き、末尾に置かれがちな非GAAP調整表・
+    補足表・ガイダンス表について「記載が無かった」と結論しない
+  - `[... exhibit omitted: per-filing exhibit count cap ...]` → 1 開示 3 件の
+    件数上限。4 本目以降の `EX-99` 添付は**取得されておらず、本文が一切無い**。
+    「補足資料・プレゼン等の添付が入力に含まれていない」旨を書き、
+    その内容について何も推測しない
 - **`exhibit_truncated: false` は「マーカーが無い」であって「欠落が無い」ではない。**
   Exhibit の取得自体に失敗した開示や、マーカー導入前のアーカイブも `false` になる。
   非網羅である旨（AC13）は `false` でも省略しない。

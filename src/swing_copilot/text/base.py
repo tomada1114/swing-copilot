@@ -18,6 +18,35 @@ if TYPE_CHECKING:
 #: would drag edgartools (a ~20s import) into the ingest path for a string.
 EXHIBIT_TRUNCATION_MARKER = "\n[... exhibit truncated ...]"
 
+#: Inserted into `TextItem.content_text` where an adapter never fetched an
+#: exhibit at all because the filing already offered more than the
+#: *count* ceiling (`data/edgar.py`'s `_MAX_EXHIBITS_PER_FILING`, Issue #163).
+#: Same reason as the marker above -- the count cap is applied before any
+#: character budget is spent, so it leaves no exhibit text to mark and would
+#: otherwise vanish entirely. Kept as its own literal rather than reusing the
+#: truncation marker so the reader of the filing text can tell a shortened
+#: exhibit from an exhibit that was never fetched; `FilingCoverage` reports
+#: both under one boolean (see `has_exhibit_loss_marker`).
+EXHIBIT_OMISSION_MARKER = "\n[... exhibit omitted: per-filing exhibit count cap ...]"
+
+#: Every in-text signal that the collection stage lost exhibit content.
+EXHIBIT_LOSS_MARKERS = (EXHIBIT_TRUNCATION_MARKER, EXHIBIT_OMISSION_MARKER)
+
+
+def has_exhibit_loss_marker(text: str) -> bool:
+    """Whether collected filing text declares a collection-stage exhibit loss.
+
+    Args:
+        text: The collected `TextItem.content_text`, before any export-stage
+            slicing -- a head slice can drop a trailing marker.
+
+    Returns:
+        `True` when the text carries any marker in `EXHIBIT_LOSS_MARKERS`.
+        `False` means **no marker is present**, which is not the same as
+        "nothing is missing"; see `analysis.schemas.FilingCoverage`.
+    """
+    return any(marker in text for marker in EXHIBIT_LOSS_MARKERS)
+
 
 @dataclass(frozen=True, slots=True)
 class FilingSection:

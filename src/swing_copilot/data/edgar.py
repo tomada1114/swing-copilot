@@ -56,6 +56,7 @@ from swing_copilot.clock import SystemClock
 from swing_copilot.retry import retry_external_call
 from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.text.base import (
+    EXHIBIT_OMISSION_MARKER,
     EXHIBIT_TRUNCATION_MARKER,
     FilingSection,
     TextItem,
@@ -86,7 +87,9 @@ _EXHIBIT_FORMS = frozenset({"8-K", "8-K/A"})
 _EXHIBIT_DOCUMENT_TYPE_PREFIX = "EX-99"
 #: A furnished earnings release occasionally splits across 99.1 (release) and
 #: 99.2 (supplement/presentation); beyond three, an 8-K is attaching a document
-#: set rather than one release.
+#: set rather than one release. What the cap costs is declared in the collected
+#: text with `EXHIBIT_OMISSION_MARKER` (Issue #163) -- the value is a judgement
+#: about how much is worth fetching, never a claim that nothing was lost.
 _MAX_EXHIBITS_PER_FILING = 3
 #: Total exhibit characters appended to one filing. Sized against the export
 #: ceilings in `config/settings.yaml` (`max_filing_chars: 120000`,
@@ -598,18 +601,23 @@ class EdgarClient:
             `_MAX_EXHIBIT_CHARS_PER_FILING`; whatever the cap cost is marked
             inline with `EXHIBIT_TRUNCATION_MARKER`, whether it cut one exhibit
             short or consumed the budget before a later one could be fetched.
-            That marker is the only trace of the cap that survives into
-            `content_text`, and `analysis/filing_selection.py` reads it back as
-            `FilingCoverage.exhibit_truncated` (Issue #157), so a silent break
-            here would report the filing as complete.
+            Exhibits past `_MAX_EXHIBITS_PER_FILING` are never fetched and are
+            marked with `EXHIBIT_OMISSION_MARKER` instead (Issue #163).
+            Those markers are the only trace of either cap that survives into
+            `content_text`, and `analysis/filing_selection.py` reads them back
+            as `FilingCoverage.exhibit_truncated` (Issue #157), so a silent
+            break here would report the filing as complete.
         """
         if filing.form not in _EXHIBIT_FORMS:
             return ""
         blocks: list[str] = []
         remaining = _MAX_EXHIBIT_CHARS_PER_FILING
+        omitted_count = 0
         try:
             attachments = self._with_retries(lambda: filing.attachments)
-            for exhibit in _earnings_exhibits(attachments):
+            exhibits = _earnings_exhibits(attachments)
+            omitted_count = max(len(exhibits) - _MAX_EXHIBITS_PER_FILING, 0)
+            for exhibit in exhibits[:_MAX_EXHIBITS_PER_FILING]:
                 if remaining <= 0:
                     # The budget, not the filing, ended the exhibit text: this
                     # exhibit exists and is being dropped whole, so say so --
@@ -635,6 +643,11 @@ class EdgarClient:
                 filing.accession_number,
                 len(blocks),
             )
+        if omitted_count:
+            # Outside the `try` on purpose: the count cap is decided from the
+            # attachment list alone, so a later download failure must not also
+            # swallow the fact that exhibits were never offered a chance.
+            blocks.append(EXHIBIT_OMISSION_MARKER)
         return "".join(blocks)
 
 
@@ -691,10 +704,15 @@ def _exhibit_plain_text(exhibit: _AttachmentLike) -> str | None:
 
 
 def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:
-    """Return the filing's `EX-99*` exhibits, capped and in filed order.
+    """Return every `EX-99*` exhibit the filing offers, in filed order.
 
     Filed order is EDGAR's own sequence numbering, so 99.1 (the press release)
     precedes 99.2 (supplements) and gets the character budget first.
+
+    Uncapped on purpose: `_MAX_EXHIBITS_PER_FILING` is applied by the caller,
+    which needs the full count to tell how many exhibits the cap cost and to
+    declare that loss in the collected text (Issue #163). Nothing here is
+    downloaded, so returning the tail costs no request.
     """
     return [
         attachment
@@ -703,7 +721,7 @@ def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:
         .strip()
         .upper()
         .startswith(_EXHIBIT_DOCUMENT_TYPE_PREFIX)
-    ][:_MAX_EXHIBITS_PER_FILING]
+    ]
 
 
 def _extract_ten_q_sections(filing: _FilingLike) -> tuple[FilingSection, ...]:

@@ -134,6 +134,15 @@ description: >
     読み、章の**中間**約 2,110 字は未分析」。#79 以降は先頭と末尾が残るため、
     未分析なのは末尾ではなく中間である。「末尾が読めていない」とは書かない
   - `omission_shape: "head_only"` → 「先頭 N 字のみで、以降 M 字は未分析」
+  - `omission_shape: "value_selected"`（8-K の Exhibit。Issue #181）→
+    落ちたのは末尾でも中間でもなく、本文中の
+    `[... omitted lower-value exhibit passage ...]` が入っている箇所である。
+    「exhibit_ex_99_1 は 179,761 字中 96,400 字を読み、マーカーの位置に
+    未分析の段落がある」と書く。定型文から先に落ちるため財務諸表・非 GAAP
+    調整表は残りやすいが、**残っている表が全てだとは書かない**
+  - 章名が `exhibit_primary` / `exhibit_ex_99_1` / `exhibit_ex_99_2` … の場合、
+    それぞれ 8-K の主文書・Exhibit 99.1（プレスリリース）・後続 Exhibit
+    （補足資料）を指す。どの Exhibit が `partial` なのかまで書く
   - 3 値が `null`（古いアーカイブや復元された coverage）→ 欠落量・位置は不明として
     「未分析範囲の特定不能」と書く。欠落が無かったことにはしない
   - `status: "absent_from_filing"` → 同じPartの他の章はパーサが取れているため、

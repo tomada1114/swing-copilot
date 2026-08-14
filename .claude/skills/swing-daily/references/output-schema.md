@@ -226,9 +226,15 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   （章自体が提出書類に無い可能性が高い。10-Qは前回提出から重要な変更が無ければ
   Item 1A等を省略できる）、`not_parsed`は同じPart自体の構造をパーサが取れず
   この章の有無が判定できない場合。
+- 8-Kの`sections[]`は章ではなくExhibit単位で、`exhibit_primary`（主文書）/
+  `exhibit_ex_99_1`（プレスリリース）/ `exhibit_ex_99_2`…（補足資料）という名前を
+  取る（Issue #181）。`selection_mode`は`section_priority_partial`のまま
+  （値は増やしていない）。
 - `sections[]`の`original_chars` / `exported_chars` / `omission_shape`は**任意**
   （スキーマは`analysis-input-v3`のまま）。`omission_shape`は残した形を表し、
-  `head_and_tail`＝章の中間が欠落、`head_only`＝先頭スライスのみで以降が欠落。
+  `head_and_tail`＝章の中間が欠落、`head_only`＝先頭スライスのみで以降が欠落、
+  `value_selected`＝価値の低い段落から落としたので欠落位置は本文中の
+  `[... omitted lower-value exhibit passage ...]`マーカーの位置。
   `status: "partial"`以外には付かない。3値が`null`のときは「未記録」であって
   「欠落なし」ではない（フィールド追加前のアーカイブと、P8がDB行から復元した
   coverageが該当する）。欠落量は`original_chars - exported_chars`で読む。

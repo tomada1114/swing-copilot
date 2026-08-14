@@ -238,7 +238,8 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 原子的に書き出す。含まれるのはseparation（proceed群−skip群の平均リターン）・
 proceed重大外し率（候補全体ベースライン併記、ウォッチ水準0.15超または
 ベースライン超でフラグ）・skip的中率（ベースライン比）・人間整合クロス集計
-（`trades_journal`×verdict×当否）・ソース貢献表・既存`signal_outcomes`の
+（`trades_journal`×verdict×当否）・ソース貢献表・news_supply水準×verdictの
+クロス集計（自社材料の供給量しきい値を実績で検証するための観測）・既存`signal_outcomes`の
 シグナル成績・サプライズ銘柄の証拠一式（当時のverdictとreasons、実現パス、
 run以降の鮮度データ）・提案対象になりうる設定のスナップショットと
 `config_hash`・提案台帳の参照・`input_digest`。サプライズは

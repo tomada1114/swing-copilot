@@ -29,6 +29,7 @@ from tests.retro.conftest import (
     narration_payload,
     proposal_payload,
     retro_input_payload,
+    retro_input_unsigned_payload,
     retro_result_payload,
 )
 
@@ -38,6 +39,32 @@ if TYPE_CHECKING:
 
 #: A phrase `analysis/safety.py` forbids in any user-visible field (CON-03).
 FORBIDDEN_TEXT = "この銘柄は今すぐ買うべき"
+
+
+def _aggregates_with_news_supply() -> dict[str, Any]:
+    """The fixture's aggregates plus Issue #154's supply cross-tab."""
+    aggregates = retro_input_unsigned_payload()["aggregates"]
+    return {
+        **aggregates,
+        "news_supply": {
+            "metric_id": "metric:news_supply",
+            "sufficient_threshold": 5,
+            "verdict_count": 1,
+            "recorded_verdict_count": 1,
+            "unrecorded_verdict_count": 0,
+            "cells": [
+                {
+                    "cell_id": "metric:news_supply:sparse:proceed",
+                    "level": "sparse",
+                    "recommendation": "proceed",
+                    "verdict_count": 1,
+                    "min_symbol_mention_items": 3,
+                    "max_symbol_mention_items": 3,
+                    "mean_symbol_mention_items": 3.0,
+                }
+            ],
+        },
+    }
 
 
 def _input(**overrides: Any) -> RetroInput:
@@ -90,6 +117,42 @@ class TestEvidenceReferences:
 
         assert validated.withheld == ()
         assert len(validated.proposals) == 1
+
+    def test_accepts_the_supply_cross_tab_ids_when_the_dossier_carries_them(
+        self,
+    ) -> None:
+        # Issue #154: a proposal about the `sufficient` threshold has to be
+        # able to cite the evidence for it, both the whole cross-tab and one
+        # `(level, recommendation)` cell.
+        retro_input = _input(aggregates=_aggregates_with_news_supply())
+        result = _result(
+            proposals=[
+                proposal_payload(
+                    evidence_refs=[
+                        "metric:news_supply",
+                        "metric:news_supply:sparse:proceed",
+                    ]
+                )
+            ],
+        )
+
+        validated = validate_retro_result(retro_input, result, frozenset())
+
+        assert validated.withheld == ()
+
+    def test_withholds_a_supply_reference_a_dossier_without_the_cross_tab(
+        self,
+    ) -> None:
+        # The evidence space is closed: an older dossier that never measured
+        # the supply cannot have a proposal argue from it.
+        validated = _validated(
+            _result(
+                proposals=[proposal_payload(evidence_refs=["metric:news_supply"])],
+            )
+        )
+
+        assert len(validated.withheld) == 1
+        assert "metric:news_supply" in validated.withheld[0].reason
 
     def test_withholds_only_the_proposal_citing_an_invented_reference(self) -> None:
         validated = _validated(

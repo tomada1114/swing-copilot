@@ -85,7 +85,8 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    求めていなければ**上書きしない**。既存の提案を要約して報告し、再実行するか確認する
 2. `retro_input.json` を読み、`as_of` / `input_digest` / `window_start` を控える
    （2 値は後段で result に逐語転記する。不一致は run ごと hard fail）
-3. 読む順序: `aggregates`（verdict_mix → separation → proceed 重大外し率 → skip 的中率）→
+3. 読む順序: `aggregates`（verdict_mix → separation → proceed 重大外し率 → skip 的中率
+   → news_supply）→
    `signal_performance` → `human_alignment` → `source_contribution` → `surprises` →
    `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
    proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、
@@ -103,6 +104,14 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    （`exhibit_truncated_filing_count`＝8-K Exhibit が 60,000 字上限で切られた件数、
    Issue #157）も含む。`unknown` は「そのrunの入力に取得段の欠落があったか記録が無い」
    であって「欠落が無い」ではないので、`without_gap` と同じ扱いにしない
+7. `aggregates.news_supply`（Issue #154。旧 dossier では `null`）を確認する。
+   `sufficient_threshold`（自社材料の件数しきい値）に対し、`sparse` / `none` 判定の
+   銘柄でどれだけ `proceed` が出たか、各セルの `symbol_mention_items` の min/max/mean
+   が境界の内外どちらへ寄っているかを読む。`level: "unrecorded"` は Issue #130 以前の
+   アーカイブで**未計測**であり、計測された `none` と同じ扱いにしない。
+   `symbol_mention_items` はティッカー出現数なので実際の自社材料数の**下限値**であり、
+   `sufficient` でも材料が薄い場合はありうる。この偽陰性はサプライズ dossier の
+   `news_supply` と当時の reasons を読んで初めて言えることで、集計だけでは言えない
 
 ## Step 3: 並列深掘り（サブエージェント fan-out）
 
@@ -128,7 +137,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 
 | 観点 | 担当 | 出力 |
 |---|---|---|
-| サプライズ敗因分析 | `surprises.items[]` の 1 銘柄ずつ。当時の verdict・reasons・`input_filing_coverage`・引用 facts と、`freshness`（run 以降に公開されたニュース・開示）を突き合わせる | 銘柄ごとの `failure_class` 1 値 + 叙述 + `evidence_refs` |
+| サプライズ敗因分析 | `surprises.items[]` の 1 銘柄ずつ。当時の verdict・reasons・`input_filing_coverage`・`news_supply`・引用 facts と、`freshness`（run 以降に公開されたニュース・開示）を突き合わせる | 銘柄ごとの `failure_class` 1 値 + 叙述 + `evidence_refs` |
 | シグナル×verdict 突合 | `signal_performance` と `aggregates` を並べ、「シグナルが外した」のか「読みが外した」のかを切り分ける | 指標の取捨選択観点の観察 |
 | ソース貢献レビュー | `source_contribution` の引用回数と HIT/MISS 引用比率、`information_absent` の反復 | ニュース源の増減観点の観察 |
 

@@ -32,8 +32,10 @@ if TYPE_CHECKING:
 
 _INSERT_VERDICT = """
     INSERT INTO verdicts (
-        run_id, symbol, as_of, strategy_key, recommendation, reasons_json, no_trade
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        run_id, symbol, as_of, strategy_key, recommendation, reasons_json, no_trade,
+        news_supply_collected_items, news_supply_exported_items,
+        news_supply_symbol_mention_items, news_supply_level
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _INSERT_VERDICT_SOURCE = """
@@ -70,6 +72,23 @@ class VerdictReasonRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class NewsSupplyRecord:
+    """How much company-specific news the verdict was made under (Issue #130).
+
+    Archived alongside the verdict rather than derived later: the exported
+    feed is not kept, so the only place this can be observed is the
+    `analysis_input.json` that produced the judgement. All three counts are
+    stored, not just `level`, so a retrospective can re-grade the window at a
+    different threshold without re-scanning `reports/`.
+    """
+
+    collected_items: int
+    exported_items: int
+    symbol_mention_items: int
+    level: str
+
+
+@dataclass(frozen=True, slots=True)
 class VerdictRecord:
     """One symbol's qualitative verdict from one past run."""
 
@@ -80,6 +99,10 @@ class VerdictRecord:
     recommendation: str
     reasons: tuple[VerdictReasonRecord, ...]
     no_trade: bool
+    #: Code-owned, resolved from `analysis_input.json` like `strategy_key`.
+    #: `None` means the archive predates Issue #130's measurement: not
+    #: recorded, which readers must not conflate with a measured `none`.
+    news_supply: NewsSupplyRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +158,9 @@ class VerdictRow:
     symbol: str
     as_of: date
     recommendation: str
+    #: The news supply the verdict was made under, or `None` when the row was
+    #: collected from an archive written before Issue #130 measured it.
+    news_supply: NewsSupplyRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +199,50 @@ class VerdictDecisionRow:
     horizon_days: int
     forward_return_pct: float
     classification: str
+
+
+def _news_supply_columns(
+    supply: NewsSupplyRecord | None,
+) -> tuple[int | None, int | None, int | None, str | None]:
+    """Flatten the optional supply block into its four nullable columns.
+
+    An absent measurement writes four `NULL`s rather than zeros: the column
+    has to keep saying "not recorded", which is not the `none` level.
+    """
+    if supply is None:
+        return (None, None, None, None)
+    return (
+        supply.collected_items,
+        supply.exported_items,
+        supply.symbol_mention_items,
+        supply.level,
+    )
+
+
+def _news_supply_from_row(
+    collected_items: int | None,
+    exported_items: int | None,
+    symbol_mention_items: int | None,
+    level: str | None,
+) -> NewsSupplyRecord | None:
+    """Rebuild the supply block, or `None` when the row never recorded one.
+
+    `level` is the discriminator: `_news_supply_columns` writes all four
+    together or none of them, so a row with a level has the counts too.
+    """
+    if (
+        level is None
+        or collected_items is None
+        or exported_items is None
+        or symbol_mention_items is None
+    ):
+        return None
+    return NewsSupplyRecord(
+        collected_items=collected_items,
+        exported_items=exported_items,
+        symbol_mention_items=symbol_mention_items,
+        level=level,
+    )
 
 
 def replace_run_verdicts(
@@ -227,6 +297,7 @@ def replace_run_verdicts(
                             ]
                         ),
                         verdict.no_trade,
+                        *_news_supply_columns(verdict.news_supply),
                     ],
                 )
             for source in sources:
@@ -409,7 +480,9 @@ def get_verdicts_in_window(
     with database.connect() as conn:
         rows = conn.execute(
             """
-            SELECT run_id, symbol, as_of, recommendation
+            SELECT run_id, symbol, as_of, recommendation,
+                   news_supply_collected_items, news_supply_exported_items,
+                   news_supply_symbol_mention_items, news_supply_level
             FROM verdicts
             WHERE as_of >= ? AND as_of <= ?
             ORDER BY as_of, run_id, symbol
@@ -418,12 +491,13 @@ def get_verdicts_in_window(
         ).fetchall()
     return tuple(
         VerdictRow(
-            run_id=UUID(str(run_id)),
-            symbol=symbol,
-            as_of=row_as_of,
-            recommendation=recommendation,
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            as_of=row[2],
+            recommendation=row[3],
+            news_supply=_news_supply_from_row(row[4], row[5], row[6], row[7]),
         )
-        for run_id, symbol, row_as_of, recommendation in rows
+        for row in rows
     )
 
 
@@ -485,7 +559,9 @@ def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, .
         rows = conn.execute(
             """
             SELECT run_id, symbol, as_of, strategy_key, recommendation,
-                   reasons_json, no_trade
+                   reasons_json, no_trade, news_supply_collected_items,
+                   news_supply_exported_items, news_supply_symbol_mention_items,
+                   news_supply_level
             FROM verdicts
             WHERE run_id = ?
             ORDER BY symbol
@@ -501,6 +577,7 @@ def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, .
             recommendation=row[4],
             reasons=_reasons_from_json(row[5]),
             no_trade=row[6],
+            news_supply=_news_supply_from_row(row[7], row[8], row[9], row[10]),
         )
         for row in rows
     )

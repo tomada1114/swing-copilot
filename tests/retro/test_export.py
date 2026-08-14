@@ -7,12 +7,14 @@ the freshness fetch through injected fakes -- the suite stays offline.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pytest
 
+from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.config import Settings
 from swing_copilot.retro.export import (
     RETRO_INPUT_FILENAME,
@@ -29,6 +31,7 @@ from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
+    NewsSupplyRecord,
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -103,6 +106,21 @@ def _verdict(
             VerdictReasonRecord(text="受注は堅調に見える", source_ids=("finnhub:1",)),
         ),
         no_trade=False,
+    )
+
+
+def _measured_verdict(
+    symbol: str, recommendation: str, *, mentions: int, level: str
+) -> VerdictRecord:
+    """A verdict carrying Issue #130's archived news-supply measurement."""
+    return replace(
+        _verdict(symbol, recommendation),
+        news_supply=NewsSupplyRecord(
+            collected_items=20,
+            exported_items=15,
+            symbol_mention_items=mentions,
+            level=level,
+        ),
     )
 
 
@@ -314,6 +332,72 @@ class TestBuildRetroInput:
             row for row in document.aggregates.separation if row.horizon_days is None
         )
         assert composed_separation.value is None
+
+    def test_crosses_the_news_supply_level_against_the_verdicts(
+        self, state_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # Issue #154: the threshold is only reviewable if the dossier says how
+        # often a `sparse` feed still produced `proceed`.
+        state_store.replace_run_verdicts(
+            RUN_ID,
+            [
+                _measured_verdict("AAPL", "proceed", mentions=3, level="sparse"),
+                _measured_verdict("MSFT", "skip", mentions=9, level="sufficient"),
+                _verdict("IBM", "proceed"),
+            ],
+            [],
+        )
+
+        document = build_retro_input(
+            _deps(state_store, market_store), _request(tmp_path)
+        )
+
+        supply = document.aggregates.news_supply
+        assert supply is not None
+        assert supply.sufficient_threshold == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert (supply.recorded_verdict_count, supply.unrecorded_verdict_count) == (
+            2,
+            1,
+        )
+        assert [
+            (cell.level, cell.recommendation, cell.verdict_count)
+            for cell in supply.cells
+        ] == [
+            ("sparse", "proceed", 1),
+            ("sufficient", "skip", 1),
+            ("unrecorded", "proceed", 1),
+        ]
+
+    def test_a_surprise_carries_the_news_supply_its_verdict_was_made_under(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # The counts the skill needs to tell a `sufficient` grade that was
+        # still too thin from one that held up -- which no aggregate can say.
+        populated_store.replace_run_verdicts(
+            RUN_ID,
+            [
+                _measured_verdict("AAPL", "proceed", mentions=6, level="sufficient"),
+                _verdict("MSFT", "skip"),
+            ],
+            [],
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        supply = document.surprises.items[0].news_supply
+        assert supply is not None
+        assert (supply.symbol_mention_items, supply.level) == (6, "sufficient")
+
+    def test_a_surprise_from_an_unmeasured_archive_states_no_supply(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.surprises.items[0].news_supply is None
 
     def test_records_the_evaluation_settings_the_numbers_came_from(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

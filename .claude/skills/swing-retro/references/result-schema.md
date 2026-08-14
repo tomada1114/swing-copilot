@@ -68,6 +68,7 @@ CON-03 機械検査の対象なので、断定的売買指示・命令形はこ�
 | 集約指標（重み合成） | `metric:<名前>:composed` | `metric:proceed_severe_miss_rate:composed` |
 | 人間整合クロス集計 | `metric:human_alignment:<decision>:<recommendation>:<N>d` | `metric:human_alignment:followed:proceed:5d` |
 | ソース貢献 | `metric:source_contribution:<source_type>:<provider>` | `metric:source_contribution:news:finnhub` |
+| news_supply（全体 / セル） | `metric:news_supply` / `metric:news_supply:<level>:<recommendation>` | `metric:news_supply:sparse:proceed` |
 | サプライズ銘柄 | `surprise:<run_id>:<SYMBOL>` | `surprises.items[].surprise_id` をそのまま |
 | 引用ソース | `source_id` | `surprises.items[]` の `cited_source_ids` / `reasons[].source_ids` / `freshness.news[].source_id` / `freshness.filings[].source_id` |
 

@@ -20,6 +20,7 @@ from swing_copilot.retro.schemas import (
     RETRO_RESULT_SCHEMA_VERSION,
     RetroInput,
     RetroResult,
+    retro_input_digest,
 )
 from tests.retro.conftest import (
     narration_payload,
@@ -35,6 +36,37 @@ from tests.retro.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def _news_supply_aggregate() -> dict[str, Any]:
+    """Issue #154's supply cross-tab, as an export would write it."""
+    return {
+        "metric_id": "metric:news_supply",
+        "sufficient_threshold": 5,
+        "verdict_count": 2,
+        "recorded_verdict_count": 1,
+        "unrecorded_verdict_count": 1,
+        "cells": [
+            {
+                "cell_id": "metric:news_supply:sparse:proceed",
+                "level": "sparse",
+                "recommendation": "proceed",
+                "verdict_count": 1,
+                "min_symbol_mention_items": 3,
+                "max_symbol_mention_items": 3,
+                "mean_symbol_mention_items": 3.0,
+            },
+            {
+                "cell_id": "metric:news_supply:unrecorded:skip",
+                "level": "unrecorded",
+                "recommendation": "skip",
+                "verdict_count": 1,
+                "min_symbol_mention_items": None,
+                "max_symbol_mention_items": None,
+                "mean_symbol_mention_items": None,
+            },
+        ],
+    }
 
 
 class TestRetroInput:
@@ -131,6 +163,43 @@ class TestRetroInput:
                         payload, excluded_field="input_digest"
                     ),
                 }
+            )
+
+    def test_a_dossier_archived_before_the_supply_cross_tab_still_verifies(
+        self,
+    ) -> None:
+        # Issue #154 added `aggregates.news_supply` and the per-surprise
+        # `news_supply`. Both default to `None`, and the digest must ignore
+        # that default, or every dossier written before the change would stop
+        # verifying the day it landed.
+        document = RetroInput.model_validate(_payload())
+
+        assert document.aggregates.news_supply is None
+        assert document.surprises.items[0].news_supply is None
+
+    def test_a_dossier_carrying_the_supply_cross_tab_verifies_its_digest(
+        self,
+    ) -> None:
+        payload = _unsigned_payload()
+        payload["aggregates"]["news_supply"] = _news_supply_aggregate()
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": retro_input_digest(payload)}
+        )
+
+        supply = document.aggregates.news_supply
+        assert supply is not None
+        assert supply.cells[0].cell_id == "metric:news_supply:sparse:proceed"
+
+    def test_rejects_an_unknown_field_inside_a_supply_cell(self) -> None:
+        payload = _unsigned_payload()
+        aggregate = _news_supply_aggregate()
+        aggregate["cells"][0]["unexpected"] = 1
+        payload["aggregates"]["news_supply"] = aggregate
+
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            RetroInput.model_validate(
+                {**payload, "input_digest": retro_input_digest(payload)}
             )
 
     def test_accepts_an_empty_window_with_no_metrics_or_surprises(self) -> None:

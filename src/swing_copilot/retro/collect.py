@@ -39,6 +39,7 @@ from swing_copilot.analysis.validate import (
 from swing_copilot.retro.adoption import adopt_one_run_per_date
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
+    NewsSupplyRecord,
     VerdictReasonRecord,
     VerdictRecord,
     VerdictSourceRecord,
@@ -293,6 +294,7 @@ def _write_run(
     label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
     analysis_input, result = loaded.analysis_input, loaded.result
     source_types = _SourceTypeIndex(analysis_input)
+    news_supply = _news_supply_index(analysis_input)
     verdicts: list[VerdictRecord] = []
     sources: list[VerdictSourceRecord] = []
     coverages = [
@@ -328,6 +330,7 @@ def _write_run(
                     for reason in analysis.verdict.reasons
                 ),
                 no_trade=result.no_trade,
+                news_supply=news_supply.get(analysis.symbol),
             )
         )
         sources.extend(
@@ -342,6 +345,30 @@ def _write_run(
 
     state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources, coverages)
     return len(verdicts), len(sources), len(coverages)
+
+
+def _news_supply_index(
+    analysis_input: AnalysisInput,
+) -> dict[str, NewsSupplyRecord]:
+    """Index each candidate's code-owned news-supply measurement by symbol.
+
+    Read from the input side, like `strategy_key` and every `source_type`: the
+    supply is what the pipeline counted before the skill saw anything, and the
+    retrospective's whole question (Issue #154) is whether that count predicts
+    what the verdict then did. A candidate whose archive predates Issue #130
+    has no entry, so its verdict stores `NULL` -- "not measured", never a
+    measured `none`.
+    """
+    return {
+        candidate.symbol: NewsSupplyRecord(
+            collected_items=supply.collected_items,
+            exported_items=supply.exported_items,
+            symbol_mention_items=supply.symbol_mention_items,
+            level=supply.level,
+        )
+        for candidate in analysis_input.candidates
+        if (supply := candidate.news_supply) is not None
+    }
 
 
 def _recorded_exhibit_truncation(coverage: FilingCoverage) -> bool | None:

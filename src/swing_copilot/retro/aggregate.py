@@ -31,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.retro.evaluate import (
     HIT,
     HORIZON_DAYS,
@@ -58,10 +59,17 @@ if TYPE_CHECKING:
 #: mechanism is meant to review.
 PROCEED_SEVERE_MISS_WATCH_RATE = 0.15
 
+#: Issue #154: the level a verdict row carries when its archive predates the
+#: measurement. A separate bucket rather than folding into `none`, which is a
+#: measured zero -- collapsing the two would let unmeasured history argue for
+#: or against the threshold it never saw.
+UNRECORDED_NEWS_SUPPLY_LEVEL = "unrecorded"
+
 _SEPARATION = "separation"
 _PROCEED_SEVERE_MISS_RATE = "proceed_severe_miss_rate"
 _SKIP_HIT_RATE = "skip_hit_rate"
 _VERDICT_MIX = "verdict_mix"
+_NEWS_SUPPLY = "news_supply"
 _METRIC_PREFIX = "metric"
 _COMPOSED = "composed"
 
@@ -124,6 +132,46 @@ class VerdictMixSummary:
     skip_count: int
     proceed_ratio: float | None
     is_flagged: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NewsSupplyCell:
+    """One `(news supply level, recommendation)` cell of the supply cross-tab.
+
+    The mention statistics are `None` only for the `unrecorded` level, where
+    there is no count to describe -- everywhere else they are what the
+    threshold is actually being judged against.
+    """
+
+    cell_id: str
+    level: str
+    recommendation: str
+    verdict_count: int
+    min_symbol_mention_items: int | None
+    max_symbol_mention_items: int | None
+    mean_symbol_mention_items: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class NewsSupplySummary:
+    """Whether the `sufficient` threshold matches what the verdicts did (#154).
+
+    Computed from the window's `verdicts` rather than `verdict_outcomes`, like
+    `verdict_mix`: the question is which supply levels the layer was willing
+    to say `proceed` under, which is answerable the day the verdict is made
+    and must not wait for maturity.
+
+    `sufficient_threshold` travels with the counts so a dossier read months
+    later says which boundary produced its cells, and a proposal to move it
+    can cite the value it is changing.
+    """
+
+    metric_id: str
+    sufficient_threshold: int
+    verdict_count: int
+    recorded_verdict_count: int
+    unrecorded_verdict_count: int
+    cells: tuple[NewsSupplyCell, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +423,68 @@ def compute_verdict_mix(verdicts: Sequence[VerdictRow]) -> VerdictMixSummary:
         is_flagged=(
             verdict_count >= _VERDICT_MIX_FLAG_MIN_VERDICT_COUNT and proceed_count == 0
         ),
+    )
+
+
+def compute_news_supply_mix(
+    verdicts: Sequence[VerdictRow],
+) -> NewsSupplySummary:
+    """Cross the archived news-supply level against what the verdict said.
+
+    The measurable half of Issue #154: how often the layer said `proceed`
+    under a supply it had itself graded `sparse` or `none`. Whether a
+    `sufficient` grade was wrong in the other direction (an expert who still
+    found nothing company-specific) is not visible from these counts and is
+    left to the skill's re-reading of the surprise dossiers.
+
+    Args:
+        verdicts: Every verdict in the window, unfiltered by maturity.
+
+    Returns:
+        One cell per `(level, recommendation)` actually seen, ordered by that
+        key, plus how many rows carried no measurement at all. An empty
+        window yields no cells rather than zero-filled ones.
+    """
+    grouped: dict[tuple[str, str], list[VerdictRow]] = defaultdict(list)
+    for row in verdicts:
+        level = (
+            UNRECORDED_NEWS_SUPPLY_LEVEL
+            if row.news_supply is None
+            else row.news_supply.level
+        )
+        grouped[(level, row.recommendation)].append(row)
+
+    unrecorded = sum(1 for row in verdicts if row.news_supply is None)
+    return NewsSupplySummary(
+        metric_id=f"{_METRIC_PREFIX}:{_NEWS_SUPPLY}",
+        sufficient_threshold=SUFFICIENT_SYMBOL_MENTION_ITEMS,
+        verdict_count=len(verdicts),
+        recorded_verdict_count=len(verdicts) - unrecorded,
+        unrecorded_verdict_count=unrecorded,
+        cells=tuple(
+            _news_supply_cell(level, recommendation, cell)
+            for (level, recommendation), cell in sorted(grouped.items())
+        ),
+    )
+
+
+def _news_supply_cell(
+    level: str, recommendation: str, cell: Sequence[VerdictRow]
+) -> NewsSupplyCell:
+    """Summarize one cell's mention counts, which `unrecorded` rows lack."""
+    mentions = [
+        row.news_supply.symbol_mention_items
+        for row in cell
+        if row.news_supply is not None
+    ]
+    return NewsSupplyCell(
+        cell_id=f"{_METRIC_PREFIX}:{_NEWS_SUPPLY}:{level}:{recommendation}",
+        level=level,
+        recommendation=recommendation,
+        verdict_count=len(cell),
+        min_symbol_mention_items=min(mentions) if mentions else None,
+        max_symbol_mention_items=max(mentions) if mentions else None,
+        mean_symbol_mention_items=(sum(mentions) / len(mentions) if mentions else None),
     )
 
 

@@ -221,6 +221,12 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
     }
     ids.update(cell.cell_id for cell in retro_input.human_alignment)
     ids.update(row.contribution_id for row in retro_input.source_contribution)
+    if (news_supply := aggregates.news_supply) is not None:
+        # Issue #154: both the summary and its cells are citable, because a
+        # proposal about the `sufficient` threshold argues from the whole
+        # cross-tab as often as from one `(level, recommendation)` cell.
+        ids.add(news_supply.metric_id)
+        ids.update(cell.cell_id for cell in news_supply.cells)
     for surprise in retro_input.surprises.items:
         ids.add(surprise.surprise_id)
         ids.update(surprise.cited_source_ids)

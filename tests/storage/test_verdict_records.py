@@ -9,6 +9,7 @@ must leave the previous state intact.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -19,6 +20,7 @@ import pytest
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
+    NewsSupplyRecord,
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -48,6 +50,22 @@ def _verdict(
         recommendation=recommendation,
         reasons=reasons,
         no_trade=False,
+    )
+
+
+def _verdict_measured(
+    run_id: UUID, symbol: str, *, level: str = "sparse"
+) -> VerdictRecord:
+    """A verdict carrying Issue #154's archived news-supply measurement."""
+    return replace(_verdict(run_id, symbol), news_supply=_news_supply(level=level))
+
+
+def _news_supply(*, level: str = "sparse") -> NewsSupplyRecord:
+    return NewsSupplyRecord(
+        collected_items=20,
+        exported_items=12,
+        symbol_mention_items=4,
+        level=level,
     )
 
 
@@ -560,10 +578,90 @@ class TestGetVerdictsInWindow:
             (run_id, "AAPL", "skip")
         ]
 
+    def test_carries_the_archived_news_supply_for_the_threshold_review(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #154: the window read is what the retrospective crosses the
+        # supply level against, so the measurement has to travel with the row.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict_measured(run_id, "AAPL")],
+            [],
+        )
+
+        rows = state_store.get_verdicts_in_window(AS_OF, AS_OF)
+
+        assert rows[0].news_supply == NewsSupplyRecord(
+            collected_items=20,
+            exported_items=12,
+            symbol_mention_items=4,
+            level="sparse",
+        )
+
     def test_returns_nothing_for_an_empty_database(
         self, state_store: StateStore
     ) -> None:
         assert state_store.get_verdicts_in_window(AS_OF, AS_OF) == ()
+
+
+class TestNewsSupplyColumns:
+    """Issue #154: the supply a verdict was made under, stored beside it."""
+
+    def test_round_trips_every_count_and_the_graded_level(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict_measured(run_id, "AAPL")],
+            [],
+        )
+
+        assert state_store.get_run_verdicts(run_id)[0].news_supply == _news_supply()
+
+    def test_an_unmeasured_verdict_stores_null_rather_than_zero(
+        self, state_store: StateStore
+    ) -> None:
+        # An archive written before Issue #130 measured nothing. Writing zeros
+        # would read back as a measured `none`, which is a different claim.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        assert _rows(
+            state_store,
+            "SELECT news_supply_collected_items, news_supply_exported_items, "
+            "news_supply_symbol_mention_items, news_supply_level FROM verdicts",
+        ) == [(None, None, None, None)]
+        assert state_store.get_run_verdicts(run_id)[0].news_supply is None
+
+    def test_a_recollected_run_picks_up_a_measurement_it_lacked(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict_measured(run_id, "AAPL", level="sufficient")],
+            [],
+        )
+
+        stored = state_store.get_run_verdicts(run_id)[0].news_supply
+        assert stored is not None
+        assert stored.level == "sufficient"
+
+    def test_rejects_a_level_outside_the_schema_check(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+
+        with pytest.raises(duckdb.ConstraintException):
+            state_store.replace_run_verdicts(
+                run_id,
+                [_verdict_measured(run_id, "AAPL", level="plenty")],
+                [],
+            )
 
 
 class TestGetVerdictOutcomesInWindow:

@@ -211,6 +211,17 @@ INIT_SCHEMA_STATEMENTS = (
             CHECK (recommendation IN ('proceed','skip')),
         reasons_json   JSON NOT NULL,
         no_trade       BOOLEAN NOT NULL,
+        -- Issue #154: the code-owned news-supply measurement the verdict was
+        -- made under (`analysis-input-v3`'s `news_supply`, Issue #130), so the
+        -- retrospective can test the `sufficient` threshold against what the
+        -- verdicts actually did. All four are nullable, and NULL means "the
+        -- archive predates the measurement", never `none`/zero -- an archive
+        -- written before Issue #130 has nothing to say here.
+        news_supply_collected_items      INTEGER,
+        news_supply_exported_items       INTEGER,
+        news_supply_symbol_mention_items INTEGER,
+        news_supply_level                VARCHAR
+            CHECK (news_supply_level IN ('sufficient','sparse','none')),
         PRIMARY KEY (run_id, symbol)
     )
     """,
@@ -400,4 +411,16 @@ ALTER_SCHEMA_STATEMENTS = (
     # cut", and readers must treat the two differently.
     "ALTER TABLE analysis_source_coverage "
     "ADD COLUMN IF NOT EXISTS exhibit_truncated BOOLEAN",
+    # Issue #154: the news-supply measurement each verdict was made under, so
+    # the `sufficient` threshold can be checked against outcomes. Not
+    # backfilled, for the same reason as `exhibit_truncated` above: nothing in
+    # an existing row says how much company-specific news that run supplied,
+    # and a backfilled 0 would read as a measured `none`. A re-`collect` of an
+    # archive that does carry the field fills the columns in, because
+    # `replace_run_verdicts` replaces the run wholesale.
+    "ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS news_supply_collected_items INTEGER",
+    "ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS news_supply_exported_items INTEGER",
+    "ALTER TABLE verdicts "
+    "ADD COLUMN IF NOT EXISTS news_supply_symbol_mention_items INTEGER",
+    "ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS news_supply_level VARCHAR",
 )

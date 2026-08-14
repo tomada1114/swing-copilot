@@ -13,10 +13,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.config import PostmortemConfig
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
     compute_human_alignment,
+    compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
     compute_skip_hit_rate,
@@ -24,6 +26,7 @@ from swing_copilot.retro.aggregate import (
     compute_verdict_mix,
 )
 from swing_copilot.storage.verdict_records import (
+    NewsSupplyRecord,
     VerdictCitationRow,
     VerdictDecisionRow,
     VerdictOutcomeRecord,
@@ -514,3 +517,115 @@ class TestVerdictMix:
 
         assert summary.run_count == 2
         assert summary.verdict_count == 5
+
+
+def _measured(
+    symbol: str,
+    recommendation: str,
+    mentions: int,
+    level: str,
+    *,
+    run_id: UUID = RUN_A,
+) -> VerdictRow:
+    """A verdict row carrying Issue #130's archived supply measurement."""
+    return replace(
+        _verdict(symbol, recommendation, run_id=run_id),
+        news_supply=NewsSupplyRecord(
+            collected_items=20,
+            exported_items=15,
+            symbol_mention_items=mentions,
+            level=level,
+        ),
+    )
+
+
+class TestNewsSupplyMix:
+    """Issue #154: is the `sufficient` threshold borne out by the verdicts?"""
+
+    def test_reports_the_threshold_the_levels_were_graded_at(self) -> None:
+        # Copied into the document so a proposal to move the boundary can cite
+        # the value it is changing, instead of the reader guessing it.
+        summary = compute_news_supply_mix(())
+
+        assert summary.sufficient_threshold == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert summary.metric_id == "metric:news_supply"
+
+    def test_empty_window_reports_no_cells(self) -> None:
+        summary = compute_news_supply_mix(())
+
+        assert summary.cells == ()
+        assert (summary.verdict_count, summary.recorded_verdict_count) == (0, 0)
+
+    def test_crosses_each_level_against_what_the_verdict_said(self) -> None:
+        # Two sparse candidates were still waved through, one was not: exactly
+        # the count the issue asks for.
+        verdicts = (
+            _measured("A", "proceed", 4, "sparse"),
+            _measured("B", "proceed", 3, "sparse"),
+            _measured("C", "skip", 1, "sparse"),
+            _measured("D", "proceed", 9, "sufficient"),
+        )
+
+        summary = compute_news_supply_mix(verdicts)
+
+        assert [
+            (cell.level, cell.recommendation, cell.verdict_count)
+            for cell in summary.cells
+        ] == [
+            ("sparse", "proceed", 2),
+            ("sparse", "skip", 1),
+            ("sufficient", "proceed", 1),
+        ]
+
+    def test_cell_ids_name_the_level_and_the_recommendation(self) -> None:
+        summary = compute_news_supply_mix((_measured("A", "proceed", 0, "none"),))
+
+        assert summary.cells[0].cell_id == "metric:news_supply:none:proceed"
+
+    def test_summarizes_the_mention_counts_the_threshold_is_judged_on(self) -> None:
+        # 4, 2, 3 -> min 2, max 4, mean 3.0.
+        verdicts = (
+            _measured("A", "proceed", 4, "sparse"),
+            _measured("B", "proceed", 2, "sparse"),
+            _measured("C", "proceed", 3, "sparse"),
+        )
+
+        cell = compute_news_supply_mix(verdicts).cells[0]
+
+        assert (cell.min_symbol_mention_items, cell.max_symbol_mention_items) == (2, 4)
+        assert cell.mean_symbol_mention_items == pytest.approx(3.0)
+
+    def test_unmeasured_verdicts_form_their_own_level_not_none(self) -> None:
+        # A row collected from a pre-#130 archive never saw the threshold, so
+        # folding it into `none` would let it argue about a grade it never got.
+        verdicts = (
+            _verdict("A", "proceed"),
+            _measured("B", "proceed", 0, "none"),
+        )
+
+        summary = compute_news_supply_mix(verdicts)
+
+        assert [(cell.level, cell.verdict_count) for cell in summary.cells] == [
+            ("none", 1),
+            ("unrecorded", 1),
+        ]
+        assert (summary.recorded_verdict_count, summary.unrecorded_verdict_count) == (
+            1,
+            1,
+        )
+
+    def test_the_unrecorded_cell_states_no_mention_statistics(self) -> None:
+        cell = compute_news_supply_mix((_verdict("A", "proceed"),)).cells[0]
+
+        assert cell.min_symbol_mention_items is None
+        assert cell.max_symbol_mention_items is None
+        assert cell.mean_symbol_mention_items is None
+
+    def test_counts_the_same_symbol_from_two_runs_separately(self) -> None:
+        other_run = uuid4()
+        verdicts = (
+            _measured("A", "proceed", 4, "sparse"),
+            _measured("A", "proceed", 4, "sparse", run_id=other_run),
+        )
+
+        assert compute_news_supply_mix(verdicts).cells[0].verdict_count == 2

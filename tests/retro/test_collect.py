@@ -60,6 +60,25 @@ def _input_declaring_exhibit_truncation(
     return payload
 
 
+def _input_declaring_news_supply(
+    supply: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """An `analysis_input.json` payload stating -- or omitting -- `news_supply`.
+
+    `None` drops the key entirely, which is the shape of every archive written
+    before Issue #130 measured the candidate's own news supply.
+    """
+    payload = input_payload()
+    if supply is None:
+        del payload["candidates"][0]["news_supply"]
+    else:
+        payload["candidates"][0]["news_supply"] = supply
+    payload["input_digest"] = canonical_json_digest(
+        payload, excluded_field="input_digest"
+    )
+    return payload
+
+
 def _insert_run(
     state_store: StateStore, run_id: str, run_date: date, started_at: datetime
 ) -> None:
@@ -127,6 +146,48 @@ class TestCollectHappyPath:
 
         coverage = state_store.get_analysis_source_coverages(UUID(RUN_ID), "AAPL")
         assert coverage[0].exhibit_truncated is None
+
+    def test_persists_the_news_supply_the_verdict_was_made_under(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # Issue #154: the supply is code-owned input-side metadata, resolved
+        # from `analysis_input.json` like `strategy_key`, so the retrospective
+        # can cross the graded level against what the verdict then said.
+        write_run(
+            _input_declaring_news_supply(
+                {
+                    "collected_items": 20,
+                    "exported_items": 12,
+                    "symbol_mention_items": 7,
+                    "level": "sufficient",
+                }
+            )
+        )
+
+        collect_verdicts(state_store, reports_root)
+
+        stored = state_store.get_run_verdicts(UUID(RUN_ID))[0].news_supply
+        assert stored is not None
+        assert (stored.collected_items, stored.exported_items) == (20, 12)
+        assert (stored.symbol_mention_items, stored.level) == (7, "sufficient")
+
+    def test_an_archive_predating_the_news_supply_measurement_stores_nothing(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # `news_supply` is optional under `analysis-input-v3`, so a v3 archive
+        # written before Issue #130 has none. Storing zeros would claim the run
+        # was measured and found to supply no company-specific news at all.
+        write_run(_input_declaring_news_supply(None))
+
+        collect_verdicts(state_store, reports_root)
+
+        assert state_store.get_run_verdicts(UUID(RUN_ID))[0].news_supply is None
 
     def test_persists_every_cited_source_with_its_input_resolved_type(
         self,

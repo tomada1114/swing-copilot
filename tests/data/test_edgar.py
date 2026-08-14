@@ -1266,31 +1266,64 @@ class TestEightKExhibitTableFidelity:
         )
 
 
+#: `data/edgar.py::_MAX_EXHIBIT_CHARS_PER_FILING`, restated so the tests pin the
+#: value rather than follow it (Issue #180).
+_EXHIBIT_SAFETY_VALVE_CHARS = 500_000
+#: Per-filing export ceiling used where the assertion is about the collection
+#: stage alone. Deliberately above the safety valve: with the real 120,000 the
+#: export stage would truncate too, and `coverage.is_truncated` could no longer
+#: show that the collection-stage cut is invisible to the character counts.
+_EXPORT_CEILING_ABOVE_THE_VALVE = _EXHIBIT_SAFETY_VALVE_CHARS + 100_000
+
+
 class TestEightKExhibitBudget:
-    """60,000 exhibit characters per filing, shared across its exhibits."""
+    """A 500,000-character safety valve per filing, shared across its exhibits.
+
+    Issue #180: the collection stage stores the whole exhibit and leaves fitting
+    the export budget to `analysis/filing_selection.py`, because a cut made here
+    is persisted into `text_items.content_text`. What remains is a bound on a
+    pathological document, and it still declares itself in the text.
+    """
 
     def test_exhibit_longer_than_the_budget_is_cut_with_an_inline_marker(self):
-        oversized = FakeAttachment("EX-99.1", "release.htm", "x" * 70_000)
+        oversized = FakeAttachment(
+            "EX-99.1", "release.htm", "x" * (_EXHIBIT_SAFETY_VALVE_CHARS + 1)
+        )
 
         item = _fetch_one(_eight_k_with_exhibits(oversized))
 
         assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == (
-            "x" * 60_000 + "\n[... exhibit truncated ...]"
+            "x" * _EXHIBIT_SAFETY_VALVE_CHARS + "\n[... exhibit truncated ...]"
         )
 
-    def test_exhibit_exactly_at_the_budget_is_kept_whole_and_unmarked(self):
-        exact = FakeAttachment("EX-99.1", "release.htm", "x" * 60_000)
+    @pytest.mark.parametrize(
+        "exhibit_chars",
+        [
+            pytest.param(_EXHIBIT_SAFETY_VALVE_CHARS - 1, id="one-under-the-valve"),
+            pytest.param(_EXHIBIT_SAFETY_VALVE_CHARS, id="exactly-at-the-valve"),
+        ],
+    )
+    def test_exhibit_up_to_the_budget_is_kept_whole_and_unmarked(
+        self, exhibit_chars: int
+    ) -> None:
+        exact = FakeAttachment("EX-99.1", "release.htm", "x" * exhibit_chars)
 
         item = _fetch_one(_eight_k_with_exhibits(exact))
 
-        assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == "x" * 60_000
+        assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == (
+            "x" * exhibit_chars
+        )
 
     @pytest.mark.parametrize(
         ("exhibit_chars", "expected"),
         [
-            pytest.param(59_999, False, id="one-under-the-budget"),
-            pytest.param(60_000, False, id="exactly-at-the-budget"),
-            pytest.param(60_001, True, id="one-over-the-budget"),
+            pytest.param(
+                _EXHIBIT_SAFETY_VALVE_CHARS - 1, False, id="one-under-the-valve"
+            ),
+            pytest.param(_EXHIBIT_SAFETY_VALVE_CHARS, False, id="exactly-at-the-valve"),
+            pytest.param(
+                _EXHIBIT_SAFETY_VALVE_CHARS + 1, True, id="one-over-the-valve"
+            ),
         ],
     )
     def test_the_budget_boundary_is_what_the_exported_coverage_reports(
@@ -1298,12 +1331,11 @@ class TestEightKExhibitBudget:
     ) -> None:
         # Issue #157: the collection-stage cut is invisible to the character
         # counts (the truncated text *is* the "original"), so the marker in
-        # `content_text` is what carries it across into `coverage`. The
-        # reported filings all sat just past the ceiling like this.
+        # `content_text` is what carries it across into `coverage`.
         exhibit = FakeAttachment("EX-99.1", "release.htm", "x" * exhibit_chars)
 
         item = _fetch_one(_eight_k_with_exhibits(exhibit))
-        selection = select_filing_text(item, "8-K", 120_000)
+        selection = select_filing_text(item, "8-K", _EXPORT_CEILING_ABOVE_THE_VALVE)
 
         assert selection.coverage.is_truncated is False
         assert selection.coverage.selection_mode == "full"
@@ -1311,7 +1343,7 @@ class TestEightKExhibitBudget:
 
     def test_exhausted_budget_skips_the_next_exhibit_without_downloading_it(self):
         exhibits = (
-            FakeAttachment("EX-99.1", "release.htm", "a" * 60_000),
+            FakeAttachment("EX-99.1", "release.htm", "a" * _EXHIBIT_SAFETY_VALVE_CHARS),
             FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
         )
 
@@ -1324,12 +1356,12 @@ class TestEightKExhibitBudget:
         # The skipped exhibit leaves no text of its own to mark, so without an
         # explicit marker the filing would claim to be complete (Issue #157).
         exhibits = (
-            FakeAttachment("EX-99.1", "release.htm", "a" * 60_000),
+            FakeAttachment("EX-99.1", "release.htm", "a" * _EXHIBIT_SAFETY_VALVE_CHARS),
             FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
         )
 
         item = _fetch_one(_eight_k_with_exhibits(*exhibits))
-        selection = select_filing_text(item, "8-K", 120_000)
+        selection = select_filing_text(item, "8-K", _EXPORT_CEILING_ABOVE_THE_VALVE)
 
         assert item.content_text.endswith("\n[... exhibit truncated ...]")
         assert selection.coverage.is_truncated is False
@@ -1337,7 +1369,9 @@ class TestEightKExhibitBudget:
 
     def test_a_cut_exhibit_that_exhausts_the_budget_is_marked_only_once(self):
         exhibits = (
-            FakeAttachment("EX-99.1", "release.htm", "a" * 59_990),
+            FakeAttachment(
+                "EX-99.1", "release.htm", "a" * (_EXHIBIT_SAFETY_VALVE_CHARS - 10)
+            ),
             FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
             FakeAttachment("EX-99.3", "slides.htm", "c" * 50),
         )
@@ -1348,7 +1382,9 @@ class TestEightKExhibitBudget:
 
     def test_partially_spent_budget_truncates_the_next_exhibit(self):
         exhibits = (
-            FakeAttachment("EX-99.1", "release.htm", "a" * 59_990),
+            FakeAttachment(
+                "EX-99.1", "release.htm", "a" * (_EXHIBIT_SAFETY_VALVE_CHARS - 10)
+            ),
             FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
         )
 
@@ -1357,6 +1393,27 @@ class TestEightKExhibitBudget:
         assert _exhibit_block(item.content_text, "EX-99.2 supplement.htm") == (
             "b" * 10 + "\n[... exhibit truncated ...]"
         )
+
+    def test_a_filing_past_the_old_export_budget_is_stored_whole(self):
+        # Issue #180's point: everything between the old 60,000 ceiling and the
+        # safety valve now reaches `content_text` intact, so the export stage --
+        # not the collection stage -- decides what a reader sees. The largest
+        # 8-K measured in the Issue #165 replay was 375,403 characters.
+        measured_worst_case = 375_403
+        exhibit = FakeAttachment("EX-99.1", "release.htm", "x" * measured_worst_case)
+
+        item = _fetch_one(_eight_k_with_exhibits(exhibit))
+        selection = select_filing_text(item, "8-K", 120_000)
+
+        assert "exhibit truncated" not in item.content_text
+        assert _exhibit_block(item.content_text, "EX-99.1 release.htm") == (
+            "x" * measured_worst_case
+        )
+        # The export stage takes over from here: the ceiling is unchanged, so
+        # the same filing is now cut where a `coverage` reader can see it.
+        assert selection.coverage.exhibit_truncated is False
+        assert selection.coverage.is_truncated is True
+        assert selection.coverage.exported_chars == 120_000
 
 
 class TestEightKExhibitCountCap:
@@ -1410,7 +1467,9 @@ class TestEightKExhibitCountCap:
         # that was never fetched call for different readings, so the text
         # keeps them apart even though `coverage` reports one boolean.
         exhibits = (
-            FakeAttachment("EX-99.1", "release.htm", "a" * 70_000),
+            FakeAttachment(
+                "EX-99.1", "release.htm", "a" * (_EXHIBIT_SAFETY_VALVE_CHARS + 10_000)
+            ),
             FakeAttachment("EX-99.2", "supplement.htm", "b" * 100),
             FakeAttachment("EX-99.3", "slides.htm", "c" * 100),
             FakeAttachment("EX-99.4", "tables.htm", "d" * 100),

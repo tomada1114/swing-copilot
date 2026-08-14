@@ -90,7 +90,7 @@
 | --- | --- | --- | --- |
 | `data/edgar.py` | 8-K の `EX-99*` 本文を主文書と同じ `content_text` へ連結する | Item 2.02 の告知だけが入力に載り、ガイダンスが存在しない | `tests/data/test_edgar.py::TestEightKExhibits::test_exhibit_text_is_appended_to_the_primary_document_text` |
 | `data/edgar.py` | 8-K 以外は添付一覧を取りに行かない | 10-Q ごとに不要な添付リクエストが増える | `tests/data/test_edgar.py::TestEightKExhibits::test_forms_other_than_eight_k_never_request_attachments` |
-| `data/edgar.py` | Exhibit 合計は 1 開示 60,000 字で打ち切り、切り詰めを本文に明示する | 予算超過が黙って落ち、読み手が連結を連続本文と誤認する | `tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhibit_longer_than_the_budget_is_cut_with_an_inline_marker` |
+| `data/edgar.py` | Exhibit 合計は 1 開示 500,000 字の安全弁で打ち切り、切り詰めを本文に明示する | 安全弁超過が黙って落ち、読み手が連結を連続本文と誤認する | `tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhibit_longer_than_the_budget_is_cut_with_an_inline_marker` |
 | `data/edgar.py` | 予算を使い切った後続 Exhibit はダウンロードもしない | 捨てる本文のために SEC へリクエストを投げる | `tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhausted_budget_skips_the_next_exhibit_without_downloading_it` |
 | `data/edgar.py` | Exhibit 取得の失敗は fail-soft で、主文書と取得済み Exhibit を保持する | 添付 1 件の 404 で開示そのものが入力から消える | `tests/data/test_edgar.py::TestEightKExhibitFailSoft::test_failing_exhibit_keeps_the_exhibits_already_retrieved` |
 | `data/edgar.py` | 添付ダウンロードにも 10 リクエスト/秒の throttle を適用する | Exhibit 取得だけがレート制限を迂回する | `tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download` |

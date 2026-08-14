@@ -91,13 +91,16 @@ _EXHIBIT_DOCUMENT_TYPE_PREFIX = "EX-99"
 #: text with `EXHIBIT_OMISSION_MARKER` (Issue #163) -- the value is a judgement
 #: about how much is worth fetching, never a claim that nothing was lost.
 _MAX_EXHIBITS_PER_FILING = 3
-#: Total exhibit characters appended to one filing. Sized against the export
-#: ceilings in `config/settings.yaml` (`max_filing_chars: 120000`,
-#: `max_filing_chars_per_symbol: 240000`): an 8-K primary document runs a few
-#: thousand to ~23,000 characters, so 60,000 leaves a typical earnings 8-K
-#: comfortably inside the per-filing ceiling and lets two of them plus a 10-Q
-#: share the per-symbol ceiling.
-_MAX_EXHIBIT_CHARS_PER_FILING = 60_000
+#: Safety valve on the exhibit characters appended to one filing, not an export
+#: budget (Issue #180). Fitting the export ceilings is `analysis/
+#: filing_selection.py`'s job: it runs per export and can choose *what* to keep,
+#: whereas a cut here is written into `text_items.content_text` and is
+#: irreversible short of a same-key rerun. So collection keeps the whole
+#: exhibit and only a pathological document is stopped: the largest earnings
+#: 8-K measured in the Issue #165 replay came to 375,000 characters, and
+#: markdown conversion shrinks even a 3.1 MB raw HTML exhibit to roughly a
+#: tenth of its size.
+_MAX_EXHIBIT_CHARS_PER_FILING = 500_000
 #: Document extensions edgartools itself treats as text (`Attachment.is_text`).
 #: Borrowed rather than restated so the two cannot drift apart.
 _TEXT_DOCUMENT_EXTENSIONS = frozenset(text_extensions)
@@ -597,10 +600,10 @@ class EdgarClient:
             `[EXHIBIT ...]` header so a reader never mistakes the join for
             continuous text. `""` for a non-8-K, for an 8-K with no readable
             `EX-99*` exhibit, and when the attachment list itself could not be
-            retrieved. Total exhibit characters are capped at
-            `_MAX_EXHIBIT_CHARS_PER_FILING`; whatever the cap cost is marked
-            inline with `EXHIBIT_TRUNCATION_MARKER`, whether it cut one exhibit
-            short or consumed the budget before a later one could be fetched.
+            retrieved. Total exhibit characters are bounded only by the
+            `_MAX_EXHIBIT_CHARS_PER_FILING` safety valve; whatever it costs is
+            marked inline with `EXHIBIT_TRUNCATION_MARKER`, whether it cut one
+            exhibit short or was spent before a later one could be fetched.
             Exhibits past `_MAX_EXHIBITS_PER_FILING` are never fetched and are
             marked with `EXHIBIT_OMISSION_MARKER` instead (Issue #163).
             Those markers are the only trace of either cap that survives into

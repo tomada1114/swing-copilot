@@ -66,6 +66,7 @@ CON-03 機械検査の対象なので、断定的売買指示・命令形はこ�
 |---|---|---|
 | 集約指標（ホライズン別） | `metric:<名前>:<N>d` | `metric:separation:5d`, `metric:skip_hit_rate:20d` |
 | 集約指標（重み合成） | `metric:<名前>:composed` | `metric:proceed_severe_miss_rate:composed` |
+| verdict_mix | `verdict_mix`（接頭辞なし） | `aggregates.verdict_mix.metric_id` をそのまま。`metric:` を補わない |
 | 人間整合クロス集計 | `metric:human_alignment:<decision>:<recommendation>:<N>d` | `metric:human_alignment:followed:proceed:5d` |
 | ソース貢献 | `metric:source_contribution:<source_type>:<provider>` | `metric:source_contribution:news:finnhub` |
 | news_supply（全体 / セル） | `metric:news_supply` / `metric:news_supply:<level>:<recommendation>` | `metric:news_supply:sparse:proceed` |

@@ -118,6 +118,18 @@ class TestEvidenceReferences:
         assert validated.withheld == ()
         assert len(validated.proposals) == 1
 
+    def test_accepts_the_verdict_mix_metric_id(self) -> None:
+        # `verdict_mix` is the aggregate that stays measurable when a
+        # zero-proceed window silences the rate metrics, so a proposal about
+        # that very window has nothing else to cite. Its ID is the bare
+        # `verdict_mix` the dossier carries -- copied, never constructed.
+        validated = _validated(
+            _result(proposals=[proposal_payload(evidence_refs=["verdict_mix"])])
+        )
+
+        assert validated.withheld == ()
+        assert len(validated.proposals) == 1
+
     def test_accepts_the_supply_cross_tab_ids_when_the_dossier_carries_them(
         self,
     ) -> None:

@@ -88,13 +88,13 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする。
 10-Q/10-Q-Aは財務諸表、MD&A、リスク要因、法的手続を章優先で構成し、抽出不能時のみ
 先頭スライスへ縮退する。8-Kは主文書に加えてExhibit 99系（プレスリリース本文、
-合計60,000字まで）を同じ本文へ連結して取り込むため、`coverage`の`original_chars`は
+合計500,000字の安全弁まで）を同じ本文へ連結して取り込むため、`coverage`の`original_chars`は
 主文書とExhibitを合わせた文字数を指す（Issue #128）。各開示の`coverage`には
 元/出力文字数、選択方式、章の`full`/`partial`/`missing`が入り、
 過去の`analysis-input-v2`はP8アーカイブ読み込みだけ
 後方互換で受理する。
 `original_chars`/`exported_chars`/`is_truncated`が語るのはexport段の欠落だけで、
-Exhibitが取得段の上限（1開示60,000字／最大3件）で失われた分は含まれない。これは
+Exhibitが取得段の上限（1開示500,000字の安全弁／最大3件）で失われた分は含まれない。これは
 `coverage.exhibit_truncated`が本文中のマーカー
 （文字数上限は`[... exhibit truncated ...]`、件数上限は
 `[... exhibit omitted: per-filing exhibit count cap ...]`）の有無として

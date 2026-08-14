@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -23,7 +24,7 @@ from swing_copilot.screening.base import (
 from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
-from swing_copilot.text.base import TextItem
+from swing_copilot.text.base import EXHIBIT_TRUNCATION_MARKER, TextItem
 from swing_copilot.universe import UniverseMember
 
 
@@ -1632,6 +1633,24 @@ def _text_item(
     )
 
 
+def _filing_text_item(source_id: str, content_text: str) -> TextItem:
+    """A collected filing, whose `content_text` is its whole audit copy."""
+    return replace(
+        _text_item(source_id, "https://example.com/8-K", source_type="filing"),
+        content_text=content_text,
+    )
+
+
+def _text_item_content(state_store: StateStore, source_id: str) -> str:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT content_text FROM text_items WHERE source_id = ?",
+            [source_id],
+        ).fetchone()
+    assert row is not None
+    return cast("str", row[0])
+
+
 def _text_item_related_symbols_and_category(
     state_store: StateStore, source_id: str
 ) -> tuple[str | None, str | None]:
@@ -1683,6 +1702,25 @@ class TestTextItems:
         result = state_store.get_source_urls(["finnhub-1"])
 
         assert result == {"finnhub-1": "https://example.com/new"}
+
+    def test_rerecording_corrects_a_body_stored_short_by_the_collection_stage(
+        self, state_store
+    ):
+        # Issue #180: an exhibit cut at collection time is persisted as the
+        # filing's whole audit copy, so the same-key rerun is the only path
+        # back to the full text. `ON CONFLICT DO NOTHING` here would freeze
+        # every filing collected under the old 60,000-character ceiling.
+        stored_short = "a" * 60_000 + EXHIBIT_TRUNCATION_MARKER
+        full_text = "a" * 375_403
+        state_store.record_text_items(
+            [_filing_text_item("edgar:0001-26-000009", stored_short)]
+        )
+
+        state_store.record_text_items(
+            [_filing_text_item("edgar:0001-26-000009", full_text)]
+        )
+
+        assert _text_item_content(state_store, "edgar:0001-26-000009") == full_text
 
     def test_batch_rolls_back_entirely_when_a_later_item_is_invalid(self, state_store):
         valid = _text_item("finnhub-1", "https://example.com/1")

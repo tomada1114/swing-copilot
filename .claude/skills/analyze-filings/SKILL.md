@@ -117,7 +117,7 @@ description: >
   `is_truncated` にも `original_chars` / `exported_chars` にも現れないので、
   `is_truncated: false` / `selection_mode: "full"` と同時に立ちうる。
   どちらの上限で欠けたかは **本文中のマーカーで区別する**（両方入ることもある）。
-  - `[... exhibit truncated ...]` → 1 開示 60,000 字の上限。
+  - `[... exhibit truncated ...]` → 1 開示 500,000 字の安全弁（Issue #180）。
     「プレスリリース本文の末尾が入力に含まれていない。欠落の範囲・位置は入力からは
     特定できない」旨を `interpretation` に書き、末尾に置かれがちな非GAAP調整表・
     補足表・ガイダンス表について「記載が無かった」と結論しない

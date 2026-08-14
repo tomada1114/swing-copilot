@@ -110,11 +110,14 @@ def select_filing_text(
     context. A parser miss is fail-soft and visibly falls back to the historic
     leading slice.
 
-    `content_text` is the collected text, which is not necessarily the whole
-    filing: an 8-K's exhibits were already capped while being fetched, by
-    total characters and by count alike. The resulting coverage therefore
-    reports export-stage loss (`is_truncated`) and collection-stage loss
-    (`exhibit_truncated`) separately -- see `FilingCoverage`.
+    Fitting the export budget is this function's job, not the collecting
+    adapter's (Issue #180): a cut made here is redone on every export, whereas
+    `data/edgar.py` persists what it collects. Its remaining exhibit limits --
+    a character safety valve and a count cap -- are for pathological filings,
+    so `content_text` is usually but not always the whole filing. The resulting
+    coverage therefore reports export-stage loss (`is_truncated`) and
+    collection-stage loss (`exhibit_truncated`) separately -- see
+    `FilingCoverage`.
     """
     original = item.content_text
     if budget <= 0:

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 8-K Exhibit の取得段上限（`data/edgar.py` の `_MAX_EXHIBIT_CHARS_PER_FILING`）を
+  60,000 字から 500,000 字へ引き上げ、その意味を「export 予算からの逆算値」から
+  「病的な文書に対する安全弁」へ変えた（Issue #180）。取得段で切ると
+  `text_items.content_text` に切れた状態が保存されて不可逆になるため、切り詰めの
+  一次責務は export 段（`analysis/filing_selection.py`）へ一元化する。Issue #165 の
+  リプレイ実測では対象 5 件すべてが旧上限を超えていた（最大 375,403 字）。
+  `analysis_input.json` の上限は据え置き（1 開示 120,000 字、1 銘柄 240,000 字）で、
+  8-K の実効サイズが 1 開示あたり最大 120,000 字へ漸近する。上限の消費方式・
+  `[... exhibit truncated ...]` marker・`coverage.exhibit_truncated` の読み戻しは
+  変更していない
 - `technical_signals.pullback.band_atr_multiple` を `null` から `2.0` へ変更し、
   プルバック帯の判定を絶対%（`sma_band_pct`）から ATR14 単位へ切り替えた。
   `reports/backtests/2026-07-30-strategy-comparison.md` の R2（期待値・PF・

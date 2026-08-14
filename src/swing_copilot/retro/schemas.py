@@ -192,9 +192,10 @@ class InputCoverageSummary(_StrictModel):
 
     `truncated_filing_count` counts export-stage truncation only.
     `exhibit_truncated_filing_count` counts filings whose 8-K exhibits were cut
-    off earlier, while being collected, which the character counts cannot see
-    (Issue #157). It defaults to 0 so retrospective dossiers archived before it
-    existed keep parsing; 0 there means "not counted", not "none occurred".
+    short or dropped whole earlier, while being collected, which the character
+    counts cannot see (Issues #157/#163). It defaults to 0 so retrospective
+    dossiers archived before it existed keep parsing; 0 there means "not
+    counted", not "none occurred".
     """
 
     filing_count: int = Field(ge=0)

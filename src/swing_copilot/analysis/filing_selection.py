@@ -12,7 +12,7 @@ from swing_copilot.analysis.schemas import (
     FilingSectionOmissionShape,
     FilingSelectionMode,
 )
-from swing_copilot.text.base import EXHIBIT_TRUNCATION_MARKER
+from swing_copilot.text.base import has_exhibit_loss_marker
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -111,10 +111,10 @@ def select_filing_text(
     leading slice.
 
     `content_text` is the collected text, which is not necessarily the whole
-    filing: an 8-K's exhibits were already capped while being fetched. The
-    resulting coverage therefore reports export-stage loss (`is_truncated`)
-    and collection-stage loss (`exhibit_truncated`) separately -- see
-    `FilingCoverage`.
+    filing: an 8-K's exhibits were already capped while being fetched, by
+    total characters and by count alike. The resulting coverage therefore
+    reports export-stage loss (`is_truncated`) and collection-stage loss
+    (`exhibit_truncated`) separately -- see `FilingCoverage`.
     """
     original = item.content_text
     if budget <= 0:
@@ -299,10 +299,10 @@ def _selection(
     Args:
         text: The excerpt offered to the analysis context.
         original: The collected filing text `text` was cut from. Passed whole
-            rather than as a length because the collection-stage truncation
-            signal is a marker *inside* it (Issue #157); reading it here keeps
+            rather than as a length because the collection-stage loss signals
+            are markers *inside* it (Issues #157/#163); reading it here keeps
             every branch of `select_filing_text` from having to remember to
-            report it.
+            report them.
         mode: How `text` was chosen.
         sections: Per-section coverage, empty outside section-priority mode.
     """
@@ -316,7 +316,7 @@ def _selection(
             # Detected on the collected text, not on `text`: a head slice can
             # drop the trailing marker, and the exhibit loss it reports is a
             # property of the filing as collected either way.
-            exhibit_truncated=EXHIBIT_TRUNCATION_MARKER in original,
+            exhibit_truncated=has_exhibit_loss_marker(original),
             sections=list(sections),
         ),
     )

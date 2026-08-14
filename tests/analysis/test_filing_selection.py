@@ -16,6 +16,7 @@ from swing_copilot.analysis.filing_selection import (
 from swing_copilot.analysis.schemas import FilingSectionCoverage, canonical_json_digest
 from swing_copilot.analysis.validate import load_analysis_input
 from swing_copilot.text.base import (
+    EXHIBIT_OMISSION_MARKER,
     EXHIBIT_TRUNCATION_MARKER,
     FilingSection,
     TextItem,
@@ -472,6 +473,53 @@ class TestCollectionStageExhibitTruncation:
         coverage = loaded.candidates[0].filings[0].coverage
         assert coverage is not None
         assert coverage.exhibit_truncated is False
+
+
+class TestCollectionStageExhibitOmission:
+    """Issue #163: the exhibit *count* cap is the same blind spot as #157.
+
+    Exhibits past `_MAX_EXHIBITS_PER_FILING` are never fetched, so they leave
+    no text of their own to shorten -- without the marker the filing reports
+    itself complete exactly as a character-capped one used to.
+    """
+
+    def test_an_omitted_exhibit_is_reported_like_a_truncated_one(self) -> None:
+        collected = (
+            "Item 2.02 Results of Operations. See Exhibit 99.1."
+            "\n\n[EXHIBIT EX-99.1 release.htm]\npress release" + EXHIBIT_OMISSION_MARKER
+        )
+
+        selected = select_filing_text(_item(collected), "8-K", 120_000)
+
+        assert selected.text == collected
+        assert selected.coverage.is_truncated is False
+        assert selected.coverage.selection_mode == "full"
+        assert selected.coverage.exhibit_truncated is True
+
+    def test_an_export_slice_that_drops_the_omission_marker_still_reports_it(
+        self,
+    ) -> None:
+        collected = "x" * 60_000 + EXHIBIT_OMISSION_MARKER
+
+        selected = select_filing_text(_item(collected), "8-K", 500)
+
+        assert EXHIBIT_OMISSION_MARKER not in selected.text
+        assert selected.coverage.selection_mode == "head_fallback"
+        assert selected.coverage.exhibit_truncated is True
+
+    def test_both_collection_markers_report_one_gap(self) -> None:
+        # A filing that hit both ceilings reports the same single boolean;
+        # which cap applied stays readable in the text itself.
+        collected = (
+            "\n\n[EXHIBIT EX-99.1 release.htm]\n"
+            + "x" * 60_000
+            + EXHIBIT_TRUNCATION_MARKER
+            + EXHIBIT_OMISSION_MARKER
+        )
+
+        selected = select_filing_text(_item(collected), "8-K", 120_000)
+
+        assert selected.coverage.exhibit_truncated is True
 
 
 def test_an_archived_missing_section_status_still_parses(tmp_path: Path) -> None:

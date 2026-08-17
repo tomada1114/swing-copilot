@@ -37,6 +37,10 @@ _MINERVINI_SMA200_WINDOW = 200
 _MINERVINI_52_WEEK_WINDOW = 252
 _MINERVINI_MIN_52_WEEK_BARS = 200
 _MINERVINI_RS_PERIODS = (63, 126, 189, 252)
+#: Bars kept ahead of the longest admissible VCP pattern so the zigzag ATR
+#: and the 50-bar dry-up volume baseline are warmed up before the earliest
+#: bar a pattern may start on.
+_VCP_WARMUP_BARS = 60
 
 
 @register_signal("vcp_breakout")
@@ -49,6 +53,7 @@ class VcpBreakoutSignal:
         """Create the signal from explicitly configurable P5-24 thresholds."""
         config = settings.technical_signals.vcp
         self._thresholds = VcpThresholds(**config.model_dump())
+        self.required_bars = self._thresholds.pattern_days_max + _VCP_WARMUP_BARS
 
     def evaluate(self, data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
         """Return non-chasing valid VCP setups with quantitative evidence."""
@@ -57,11 +62,16 @@ class VcpBreakoutSignal:
             series = symbol_bars(data.bars, symbol, data.as_of)
             if series is None:
                 continue
+            # Evaluate a fixed-width recent window: ATR and the zigzag it
+            # gates are computed over whatever history arrives, so without
+            # this cut the same symbol/as_of flips verdicts between the
+            # daily and backtest callers' different lookbacks (Issue #186).
+            series = series.tail(self.required_bars)
             atr = wilder_atr(series["high"], series["low"], series["close"])
             swings = detect_atr_zigzag(
                 series["close"], atr, self._thresholds.zigzag_atr_multiplier
             )
-            pattern = extract_pattern(swings, series["volume"])
+            pattern = extract_pattern(swings, series["volume"], self._thresholds)
             if pattern is None or pattern.dry_up_ratio is None:
                 continue
             validation = validate_contractions(
@@ -105,6 +115,10 @@ class MinerviniStage2Signal:
     """Seven-condition Minervini Stage 2 trend template (P5-21)."""
 
     name = "minervini_stage2"
+
+    #: A 252-day RS return needs 253 closes — the longest of the seven
+    #: conditions' inputs.
+    required_bars = max(_MINERVINI_RS_PERIODS) + 1
 
     def __init__(self, settings: Settings, *, min_criteria: int = 6) -> None:
         """Create the signal with its strategy-specific inclusive pass line."""
@@ -264,6 +278,7 @@ class TrendSMASignal:
             settings: Loaded application settings.
         """
         self._config = settings.technical_signals.trend
+        self.required_bars = max(self._config.sma_short, self._config.sma_long)
 
     def evaluate(self, data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
         """Return trend hits among `symbols`.
@@ -317,6 +332,7 @@ class PullbackRSISignal:
             settings: Loaded application settings.
         """
         self._config = settings.technical_signals.pullback
+        self.required_bars = max(self._config.rsi_period, _PULLBACK_SMA_WINDOW)
 
     def evaluate(self, data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
         """Return pullback hits among `symbols`.

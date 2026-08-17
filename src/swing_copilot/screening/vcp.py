@@ -23,6 +23,7 @@ class VcpThresholds:
     small_cap_first_depth_max: float = 0.50
     contraction_ratio_max: float = 0.75
     min_contractions: int = 2
+    max_contractions: int = 4
     pattern_days_min: int = 15
     pattern_days_max: int = 325
     dry_up_ideal_max: float = 0.30
@@ -108,13 +109,23 @@ def detect_atr_zigzag(
 
 
 def extract_pattern(
-    swings: tuple[SwingPoint, ...], volumes: pd.Series
+    swings: tuple[SwingPoint, ...],
+    volumes: pd.Series,
+    thresholds: VcpThresholds = _DEFAULT_THRESHOLDS,
 ) -> VcpPattern | None:
-    """Extract high-to-low contractions and final-contraction pivot evidence."""
+    """Extract high-to-low contractions and final-contraction pivot evidence.
+
+    Only the most recent `thresholds.max_contractions` contractions form the
+    pattern: a VCP is a base that tightens *into the present*, so older
+    contractions are prior history, not part of the setup. Bounding the
+    window here is also what keeps the verdict — including `pattern_days` —
+    independent of how much price history the caller happened to supply.
+    """
     contractions: list[tuple[SwingPoint, SwingPoint]] = []
     for high, low in pairwise(swings):
         if high.kind == "high" and low.kind == "low" and high.price > 0.0:
             contractions.append((high, low))
+    contractions = contractions[-thresholds.max_contractions :]
     if len(contractions) < _MIN_PATTERN_CONTRACTIONS:
         return None
     depths = tuple((high.price - low.price) / high.price for high, low in contractions)

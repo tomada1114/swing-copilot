@@ -71,6 +71,7 @@ technical_signals:
     small_cap_first_depth_max: 0.50
     contraction_ratio_max: 0.75
     min_contractions: 2
+    max_contractions: 4
     pattern_days_min: 15
     pattern_days_max: 325
     dry_up_ideal_max: 0.30

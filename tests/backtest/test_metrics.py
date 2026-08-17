@@ -10,15 +10,21 @@ import pytest
 
 from swing_copilot.backtest.engine import Trade
 from swing_copilot.backtest.metrics import (
+    ENTRY_BLOCK_REASONS,
+    ENTRY_BLOCK_REGIME,
     LOOKAHEAD_SUSPICION_WARNING,
+    DailyExposure,
     HoldingDaysStats,
+    compute_avg_invested_pct,
     compute_avg_r_multiple,
     compute_expectancy_per_trade,
+    compute_max_concurrent_reached,
     compute_max_drawdown_pct,
     compute_profit_factor,
     compute_reliability_warnings,
     compute_sharpe,
     compute_win_rate,
+    entry_block_breakdown,
     exit_reason_breakdown,
     holding_days_stats,
     max_hold_binding_rate,
@@ -297,3 +303,57 @@ def test_exit_reason_breakdown_keeps_an_unknown_reason_so_counts_stay_complete()
 
     assert breakdown["stall"] == 1
     assert sum(breakdown.values()) == len(trades)
+
+
+class TestEntryBlockBreakdown:
+    def test_every_known_reason_is_reported_even_at_zero(self):
+        breakdown = entry_block_breakdown({ENTRY_BLOCK_REGIME: 3})
+
+        assert breakdown[ENTRY_BLOCK_REGIME] == 3
+        assert set(breakdown) == set(ENTRY_BLOCK_REASONS)
+
+    def test_an_unknown_reason_keeps_its_own_key(self):
+        breakdown = entry_block_breakdown({"future_gate": 2})
+
+        assert breakdown["future_gate"] == 2
+
+    def test_an_empty_tally_reports_only_zeros(self):
+        assert entry_block_breakdown({}) == dict.fromkeys(ENTRY_BLOCK_REASONS, 0)
+
+
+def _exposure(*rows: tuple[float, float, int]) -> tuple[DailyExposure, ...]:
+    return tuple(
+        DailyExposure(
+            day=_D0,
+            invested_usd=invested,
+            equity_usd=equity,
+            open_position_count=count,
+        )
+        for invested, equity, count in rows
+    )
+
+
+class TestAvgInvestedPct:
+    def test_mean_of_the_daily_deployment_ratios(self):
+        exposure = _exposure((0.0, 100.0, 0), (50.0, 100.0, 1), (100.0, 100.0, 2))
+
+        assert compute_avg_invested_pct(exposure) == pytest.approx(0.5)
+
+    def test_a_session_without_positive_equity_is_excluded_not_counted_as_zero(self):
+        exposure = _exposure((0.0, 0.0, 0), (100.0, 100.0, 1))
+
+        assert compute_avg_invested_pct(exposure) == pytest.approx(1.0)
+
+    def test_no_valid_session_reports_none(self):
+        assert compute_avg_invested_pct(()) is None
+        assert compute_avg_invested_pct(_exposure((0.0, 0.0, 0))) is None
+
+
+class TestMaxConcurrentReached:
+    def test_reports_the_peak_open_position_count(self):
+        exposure = _exposure((0.0, 100.0, 0), (10.0, 100.0, 3), (10.0, 100.0, 1))
+
+        assert compute_max_concurrent_reached(exposure) == 3
+
+    def test_no_sessions_report_zero(self):
+        assert compute_max_concurrent_reached(()) == 0

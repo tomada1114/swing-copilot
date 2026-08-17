@@ -73,6 +73,16 @@ Add `--pessimistic` to also run a higher-slippage scenario (1.75x) and print a
 normal-vs-pessimistic comparison, checking the strategy doesn't rely on
 unrealistically favorable fills.
 
+`--policy` decides which of the production entry gates the simulation applies
+between a candidate and a fill. Pass several arms to compare them over one
+identical candidate stream, so the difference is attributable to the gates and
+nothing else:
+
+```bash
+uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 \
+    --limit 30 --policy none,regime,regime+risk
+```
+
 Check whether a strategy is overfit to its ATR-stop/max-hold parameters with a
 sensitivity grid:
 
@@ -83,8 +93,9 @@ uv run copilot-backtest grid --strategy default --start 2025-01-01 --end 2026-06
 Diagnose configured thresholds read-only, without touching `settings.yaml`.
 `copilot-filter-matrix` applies each screening filter/signal independently to
 the whole universe; `copilot-dd-forward` replays the stored history and reports
-the forward return and drawdown that followed each Distribution Day level, which
-`copilot-backtest` cannot measure at all (it never imports `regime/`):
+the forward return and drawdown that followed each Distribution Day level,
+isolating the levels themselves rather than a whole gated strategy the way
+`copilot-backtest --policy` does:
 
 ```bash
 uv run copilot-filter-matrix --as-of 2026-07-29

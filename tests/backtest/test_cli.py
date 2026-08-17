@@ -30,15 +30,20 @@ from swing_copilot.backtest.cli import (
     render_grid_terminal,
     render_markdown,
     render_markdown_comparison,
+    render_policy_comparison_markdown,
+    render_policy_comparison_terminal,
     render_terminal,
     render_terminal_comparison,
 )
 from swing_copilot.backtest.engine import BacktestResult, Trade
 from swing_copilot.backtest.metrics import (
+    ENTRY_BLOCK_REGIME,
+    entry_block_breakdown,
     exit_reason_breakdown,
     holding_days_stats,
     max_hold_binding_rate,
 )
+from swing_copilot.backtest.policy import EntryPolicyArm
 from swing_copilot.backtest.runner import run_backtest
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
@@ -67,7 +72,10 @@ def _with_provider_columns(rows: list[dict[str, object]]) -> list[dict[str, obje
 
 
 def _result(
-    *, trades: tuple[Trade, ...] = (), warnings: tuple[str, ...] = ()
+    *,
+    trades: tuple[Trade, ...] = (),
+    warnings: tuple[str, ...] = (),
+    blocked: int = 4,
 ) -> BacktestResult:
     equity_curve = ((_D0, 100_000.0), (_D1, 101_000.0))
     return BacktestResult(
@@ -87,6 +95,14 @@ def _result(
         exit_reason_counts=tuple(exit_reason_breakdown(trades).items()),
         max_hold_binding_rate=max_hold_binding_rate(trades),
         holding_days=holding_days_stats(trades),
+        entry_block_counts=tuple(
+            entry_block_breakdown({ENTRY_BLOCK_REGIME: blocked}).items()
+        ),
+        entry_block_days=tuple(
+            entry_block_breakdown({ENTRY_BLOCK_REGIME: min(blocked, 1)}).items()
+        ),
+        avg_invested_pct=0.42,
+        max_concurrent_reached=3,
     )
 
 
@@ -573,6 +589,11 @@ def seeded_db(tmp_path):
     days = [date(2027, 1, 1 + i) for i in range(10)]
     rows = [
         *flat_bars("SPY", days, 400.0),
+        # QQQ/^VIX are what `--policy` needs to evaluate the regime at all;
+        # `load_market_frame` always loads them, so seeding them here matches
+        # what a real database holds.
+        *flat_bars("QQQ", days, 350.0),
+        *flat_bars("^VIX", days, 15.0),
         *flat_bars("AAA", days, 100.0),
         # BBB intentionally has no bars -- exercises the missing-data warning.
     ]
@@ -1304,3 +1325,234 @@ class TestCandidateCache:
 
         assert len(screenings) == 1
         assert len(engine_runs) == 2
+
+
+class TestPolicyArgument:
+    def test_default_is_the_ungated_arm(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2027-01-01", "--end", "2027-01-10"]
+        )
+
+        assert args.policy == EntryPolicyArm.NONE.value
+
+    def test_unknown_arm_fails_fast(self):
+        strategies = load_strategies(DEFAULT_STRATEGIES_PATH)
+        args = _parse_args(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                "2027-01-01",
+                "--end",
+                "2027-01-10",
+                "--policy",
+                "bogus",
+            ]
+        )
+
+        with pytest.raises(BacktestCliError, match=r"未知の --policy"):
+            _validate_args(args, strategies)
+
+    def test_multi_arm_policy_with_pessimistic_is_rejected(self):
+        strategies = load_strategies(DEFAULT_STRATEGIES_PATH)
+        args = _parse_args(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                "2027-01-01",
+                "--end",
+                "2027-01-10",
+                "--policy",
+                "none,regime",
+                "--pessimistic",
+            ]
+        )
+
+        with pytest.raises(BacktestCliError, match=r"--pessimistic"):
+            _validate_args(args, strategies)
+
+    def test_single_arm_policy_with_pessimistic_is_allowed(self):
+        strategies = load_strategies(DEFAULT_STRATEGIES_PATH)
+        args = _parse_args(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                "2027-01-01",
+                "--end",
+                "2027-01-10",
+                "--policy",
+                "regime",
+                "--pessimistic",
+            ]
+        )
+
+        _validate_args(args, strategies)
+
+
+class TestRenderPolicyComparison:
+    _META = ReportMeta(
+        strategy="default", start=_D0, end=_D1, missing_data_symbols=["BBB"]
+    )
+
+    @staticmethod
+    def _arms() -> list[tuple[str, BacktestResult]]:
+        return [
+            ("none", _result(blocked=0)),
+            ("regime", _result(warnings=("低サンプル",), blocked=7)),
+        ]
+
+    def test_terminal_shows_one_column_per_arm(self):
+        text = render_policy_comparison_terminal(self._arms(), self._META)
+
+        assert "none" in text
+        assert "regime" in text
+        assert "avg_invested_pct" in text
+        assert "Entry blocks by policy" in text
+
+    def test_markdown_reports_each_arms_block_counts_and_warnings(self):
+        text = render_policy_comparison_markdown(self._arms(), self._META)
+
+        assert "-- policy A/B" in text
+        assert "| Metric | none | regime |" in text
+        assert "| regime | 0 (0d) | 7 (1d) |" in text
+        assert "- regime: 低サンプル" in text
+        assert "データ不足のためスキップ: BBB" in text
+
+    def test_terminal_omits_the_data_quality_note_when_nothing_was_skipped(self):
+        text = render_policy_comparison_terminal(
+            [("none", _result())], ReportMeta("default", _D0, _D1, [])
+        )
+
+        assert "データ不足のためスキップ" not in text
+
+    def test_markdown_omits_the_warning_section_when_no_arm_warns(self):
+        text = render_policy_comparison_markdown(
+            [("none", _result())], ReportMeta("default", _D0, _D1, [])
+        )
+
+        assert "## Warnings" not in text
+        assert "## Data quality" not in text
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestPolicyEndToEnd:
+    def test_ab_run_compares_arms_over_one_candidate_stream(
+        self, seeded_db, tmp_path, capsys, monkeypatch
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "policy.md"
+        screenings: list[int] = []
+        original_generate = generate_candidate_stream
+
+        def counting_generate(*args, **kwargs):
+            screenings.append(1)
+            return original_generate(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "generate_candidate_stream", counting_generate)
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+                "--policy",
+                "none,regime+risk",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Backtest metrics by policy" in captured.out
+        # One screening pass feeds both arms: the diff is attributable to the
+        # gates and nothing else.
+        assert len(screenings) == 1
+        report_text = output_path.read_text(encoding="utf-8")
+        assert "| Metric | none | regime+risk |" in report_text
+
+    def test_missing_regime_bars_abort_the_run_with_a_clear_message(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "copilot.duckdb"
+        store = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+        days = [date(2027, 1, 1 + i) for i in range(10)]
+        store.write_bars(
+            bars_frame(
+                _with_provider_columns(
+                    [*flat_bars("SPY", days, 400.0), *flat_bars("AAA", days, 100.0)]
+                )
+            )
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "get_sp500_universe",
+            lambda *_args, **_kwargs: [
+                UniverseMember(
+                    symbol="AAA",
+                    company_name="AAA Inc.",
+                    gics_sector="Information Technology",
+                    source_symbol="AAA",
+                )
+            ],
+        )
+
+        with pytest.raises(SystemExit, match=r"レジームゲートに必要なバー"):
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "out.md"),
+                    "--policy",
+                    "regime",
+                ]
+            )
+
+    def test_grid_refuses_a_policy_instead_of_ignoring_it(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        monkeypatch.setattr(
+            cli_module,
+            "get_sp500_universe",
+            lambda *_args, **_kwargs: [
+                UniverseMember(
+                    symbol="AAA",
+                    company_name="AAA Inc.",
+                    gics_sector="Information Technology",
+                    source_symbol="AAA",
+                )
+            ],
+        )
+
+        with pytest.raises(SystemExit, match=r"grid サブコマンドは --policy"):
+            main(
+                [
+                    "--policy",
+                    "regime",
+                    "grid",
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "grid.md"),
+                ]
+            )

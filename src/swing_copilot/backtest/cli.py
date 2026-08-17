@@ -31,6 +31,12 @@ from swing_copilot.backtest.candidate_stream import (
     load_market_frame,
     save_candidate_stream,
 )
+from swing_copilot.backtest.policy import (
+    EntryPolicyArm,
+    EntryPolicyError,
+    build_entry_policy,
+    parse_policy_arms,
+)
 from swing_copilot.backtest.runner import (
     BacktestCostOverrides,
     BacktestDependencies,
@@ -74,6 +80,9 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # weighting variant needs its own override alongside --settings.
 DEFAULT_STRATEGIES_PATH = "config/strategies.yaml"
 _CONSOLE_WIDTH = 200
+#: `--policy` default: the pre-Issue-#184 behaviour, so an existing command
+#: line keeps measuring what it used to measure.
+_DEFAULT_POLICY = EntryPolicyArm.NONE.value
 
 
 class BacktestCliError(SwingCopilotError):
@@ -120,6 +129,10 @@ def _add_common_args(
     parser.add_argument("--settings", default=default(DEFAULT_SETTINGS_PATH))
     parser.add_argument("--strategies", default=default(DEFAULT_STRATEGIES_PATH))
     parser.add_argument("--candidate-cache", type=Path, default=default(None))
+    # Issue #184: a comma-separated list turns one invocation into an A/B over
+    # the same candidate stream, which is the only way to answer "did the
+    # regime gate improve the result?".
+    parser.add_argument("--policy", default=default(_DEFAULT_POLICY))
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -160,6 +173,35 @@ def _validate_args(args: argparse.Namespace, strategies: StrategiesConfig) -> No
     if args.strategy not in strategies.strategies:
         available = ", ".join(sorted(strategies.strategies))
         msg = f"戦略 '{args.strategy}' は見つかりません。利用可能: {available}"
+        raise BacktestCliError(msg)
+    arms = _policy_arms(args)
+    if args.pessimistic and len(arms) > 1:
+        msg = (
+            "--pessimistic と複数アームの --policy は同時に指定できません"
+            "（比較軸が2つになり、どちらの効果か読めなくなるため）。"
+        )
+        raise BacktestCliError(msg)
+
+
+def _policy_arms(args: argparse.Namespace) -> tuple[EntryPolicyArm, ...]:
+    """Parse `--policy`, re-raising as the CLI's own fail-fast error."""
+    try:
+        return parse_policy_arms(args.policy)
+    except EntryPolicyError as exc:
+        raise BacktestCliError(str(exc)) from exc
+
+
+def _reject_grid_policy(args: argparse.Namespace) -> None:
+    """Refuse `grid --policy <non-default>` instead of ignoring it silently.
+
+    Ignoring the flag would print a report labelled as one thing and measured
+    as another.
+    """
+    if _policy_arms(args) != (EntryPolicyArm.NONE,):
+        msg = (
+            "grid サブコマンドは --policy に対応していません"
+            f"（--policy {_DEFAULT_POLICY} のみ）。"
+        )
         raise BacktestCliError(msg)
 
 
@@ -234,18 +276,21 @@ _METRIC_ROWS: tuple[tuple[str, str], ...] = (
     ("profit_factor", "profit_factor"),
     ("expectancy_per_trade", "expectancy_per_trade"),
     ("avg_r_multiple", "avg_r_multiple"),
+    ("avg_invested_pct", "avg_invested_pct"),
+    ("max_concurrent_reached", "max_concurrent_reached"),
     ("final_equity", "final_equity"),
     ("benchmark_final_equity", "benchmark_final_equity"),
 )
-_PCT_FIELDS = frozenset({"max_drawdown_pct", "win_rate"})
+_PCT_FIELDS = frozenset({"max_drawdown_pct", "win_rate", "avg_invested_pct"})
 _MONEY_FIELDS = frozenset(
     {"expectancy_per_trade", "final_equity", "benchmark_final_equity"}
 )
+_INT_FIELDS = frozenset({"trade_count", "max_concurrent_reached"})
 
 
 def _metric_value(result: BacktestResult, field: str) -> str:
     value = getattr(result, field)
-    if field == "trade_count":
+    if field in _INT_FIELDS:
         return str(value)
     if field in _PCT_FIELDS:
         return _fmt_pct(value)
@@ -292,6 +337,21 @@ def _exit_breakdown_comparison_rows(
     ]
 
 
+def _entry_block_rows(result: BacktestResult) -> list[tuple[str, str]]:
+    """Label/value rows for the "why an entry was not taken" instrumentation.
+
+    Each row reads `<candidate-days> (<sessions>)`: the first number counts
+    blocked candidates, the second the distinct sessions on which that reason
+    fired at least once — a gate that blocks 40 candidates on one panicky day
+    is a very different finding from one that blocks one candidate on 40 days.
+    """
+    days = dict(result.entry_block_days)
+    return [
+        (reason, f"{count} ({days.get(reason, 0)}d)")
+        for reason, count in result.entry_block_counts
+    ]
+
+
 def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
     if not result.equity_curve:
         return ["Equity curve: (no trading days)"]
@@ -329,6 +389,15 @@ def render_terminal(result: BacktestResult, meta: ReportMeta) -> str:
     for label, value in _exit_breakdown_rows(result):
         exit_table.add_row(label, value)
     console.print(exit_table)
+
+    block_table = Table(
+        title="Entry blocks: candidates (sessions)", header_style="bold"
+    )
+    block_table.add_column("Reason")
+    block_table.add_column("Value", justify="right")
+    for label, value in _entry_block_rows(result):
+        block_table.add_row(label, value)
+    console.print(block_table)
 
     for warning in result.warnings:
         console.print(f"[yellow]{warning}[/yellow]")
@@ -390,6 +459,17 @@ def render_markdown(result: BacktestResult, meta: ReportMeta) -> str:
 
     lines += ["## Exit breakdown", "", "| Exit | Value |", "|---|---:|"]
     lines += [f"| {label} | {value} |" for label, value in _exit_breakdown_rows(result)]
+    lines.append("")
+
+    lines += [
+        "## Entry blocks",
+        "",
+        "候補件数（発動セッション数）",
+        "",
+        "| Reason | Value |",
+        "|---|---:|",
+    ]
+    lines += [f"| {label} | {value} |" for label, value in _entry_block_rows(result)]
     lines.append("")
 
     if result.warnings:
@@ -525,6 +605,127 @@ def render_markdown_comparison(
 
     lines += ["## Survivorship bias", "", normal.survivorship_bias_note, ""]
     return "\n".join(lines)
+
+
+def render_policy_comparison_terminal(
+    arms: Sequence[tuple[str, BacktestResult]], meta: ReportMeta
+) -> str:
+    """Render one metrics/gate table per policy arm, side by side (Issue #184).
+
+    Every arm ran against the identical candidate stream, so a column-to-column
+    difference is attributable to the gates alone.
+    """
+    buffer = StringIO()
+    console = Console(file=buffer, width=_CONSOLE_WIDTH)
+    labels = [label for label, _ in arms]
+    console.print(
+        f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
+        f"{meta.start.isoformat()}..{meta.end.isoformat()} "
+        f"(policy: {' vs '.join(labels)})"
+    )
+
+    metrics_table = Table(title="Backtest metrics by policy", header_style="bold")
+    metrics_table.add_column("Metric")
+    for label in labels:
+        metrics_table.add_column(label, justify="right")
+    for label, field in _METRIC_ROWS:
+        metrics_table.add_row(
+            label, *[_metric_value(result, field) for _, result in arms]
+        )
+    console.print(metrics_table)
+
+    block_table = Table(
+        title="Entry blocks by policy: candidates (sessions)", header_style="bold"
+    )
+    block_table.add_column("Reason")
+    for label in labels:
+        block_table.add_column(label, justify="right")
+    for reason, values in _entry_block_comparison_rows(arms):
+        block_table.add_row(reason, *values)
+    console.print(block_table)
+
+    if meta.missing_data_symbols:
+        console.print(
+            "[yellow]データ不足のためスキップ: "
+            f"{', '.join(meta.missing_data_symbols)}[/yellow]"
+        )
+    for label, result in arms:
+        for warning in result.warnings:
+            console.print(f"[yellow]{label}: {warning}[/yellow]")
+    console.print(f"[dim]{arms[0][1].survivorship_bias_note}[/dim]")
+
+    return buffer.getvalue()
+
+
+def render_policy_comparison_markdown(
+    arms: Sequence[tuple[str, BacktestResult]], meta: ReportMeta
+) -> str:
+    """Render the policy A/B as a markdown diff table (Issue #184)."""
+    labels = [label for label, _ in arms]
+    header = "| Metric | " + " | ".join(labels) + " |"
+    separator = "|---|" + "---:|" * len(labels)
+    lines = [
+        f"# Backtest: {meta.strategy} ({meta.start.isoformat()} .. "
+        f"{meta.end.isoformat()}) -- policy A/B",
+        "",
+        f"同一候補ストリームに対して {', '.join(labels)} を比較した。",
+        "",
+        "## Metrics",
+        "",
+        header,
+        separator,
+    ]
+    lines += [
+        f"| {label} | "
+        + " | ".join(_metric_value(result, field) for _, result in arms)
+        + " |"
+        for label, field in _METRIC_ROWS
+    ]
+    lines.append("")
+
+    lines += [
+        "## Entry blocks",
+        "",
+        "候補件数（発動セッション数）",
+        "",
+        "| Reason | " + " | ".join(labels) + " |",
+        separator,
+    ]
+    lines += [
+        f"| {reason} | " + " | ".join(values) + " |"
+        for reason, values in _entry_block_comparison_rows(arms)
+    ]
+    lines.append("")
+
+    if meta.missing_data_symbols:
+        lines += [
+            "## Data quality",
+            "",
+            f"データ不足のためスキップ: {', '.join(meta.missing_data_symbols)}",
+            "",
+        ]
+
+    warning_lines = [
+        f"- {label}: {warning}" for label, result in arms for warning in result.warnings
+    ]
+    if warning_lines:
+        lines += ["## Warnings", "", *warning_lines, ""]
+
+    lines += ["## Survivorship bias", "", arms[0][1].survivorship_bias_note, ""]
+    return "\n".join(lines)
+
+
+def _entry_block_comparison_rows(
+    arms: Sequence[tuple[str, BacktestResult]],
+) -> list[tuple[str, list[str]]]:
+    """`_entry_block_rows` for every arm, aligned on a shared reason set."""
+    per_arm = [dict(_entry_block_rows(result)) for _, result in arms]
+    reasons: list[str] = []
+    for rows in per_arm:
+        reasons += [reason for reason in rows if reason not in reasons]
+    return [
+        (reason, [rows.get(reason, "0 (0d)") for rows in per_arm]) for reason in reasons
+    ]
 
 
 def _cell_text(cell: GridCell, gray_threshold: int) -> str:
@@ -728,6 +929,12 @@ def _run_backtest_command(
         # scenarios share one frame and one stream.
         frame = load_market_frame(request, deps)
         stream = _resolve_candidate_stream(request, deps, frame, args.candidate_cache)
+        # One stream, one frame, N arms: the whole point of the A/B is that
+        # nothing but the gates differs between the columns (Issue #184).
+        arms = _policy_arms(args)
+        policies = [
+            build_entry_policy(arm, settings, deps.universe, frame.bars) for arm in arms
+        ]
         if args.pessimistic:
             normal_result = run_backtest(
                 request,
@@ -735,6 +942,7 @@ def _run_backtest_command(
                 BacktestCostOverrides(slippage_multiplier=1.0),
                 candidate_stream=stream,
                 market_frame=frame,
+                entry_policy=policies[0],
             )
             pessimistic_result = run_backtest(
                 request,
@@ -744,12 +952,23 @@ def _run_backtest_command(
                 ),
                 candidate_stream=stream,
                 market_frame=frame,
+                entry_policy=policies[0],
             )
         else:
-            result = run_backtest(
-                request, deps, candidate_stream=stream, market_frame=frame
-            )
-    except (BacktestCliError, CandidateStreamError) as exc:
+            arm_results = [
+                (
+                    arm.value,
+                    run_backtest(
+                        request,
+                        deps,
+                        candidate_stream=stream,
+                        market_frame=frame,
+                        entry_policy=policy,
+                    ),
+                )
+                for arm, policy in zip(arms, policies, strict=True)
+            ]
+    except (BacktestCliError, CandidateStreamError, EntryPolicyError) as exc:
         raise SystemExit(str(exc)) from exc
 
     meta = ReportMeta(
@@ -765,9 +984,12 @@ def _run_backtest_command(
         markdown_text = render_markdown_comparison(
             normal_result, pessimistic_result, meta
         )
+    elif len(arm_results) > 1:
+        terminal_text = render_policy_comparison_terminal(arm_results, meta)
+        markdown_text = render_policy_comparison_markdown(arm_results, meta)
     else:
-        terminal_text = render_terminal(result, meta)
-        markdown_text = render_markdown(result, meta)
+        terminal_text = render_terminal(arm_results[0][1], meta)
+        markdown_text = render_markdown(arm_results[0][1], meta)
 
     sys.stdout.write(terminal_text)
 
@@ -782,6 +1004,7 @@ def _run_grid_command(
 ) -> None:
     try:
         _validate_args(args, strategies)
+        _reject_grid_policy(args)
         deps, symbols, missing_data_symbols = _compose_dependencies(
             args, settings, strategies
         )

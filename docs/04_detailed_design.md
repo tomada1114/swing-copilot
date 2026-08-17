@@ -1222,6 +1222,7 @@ def run_backtest(
 - 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。
 - トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。25営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
+- **サイジング基底はequity（Issue #184で変更）**: 1建玉のサイジングは`cash`ではなく`equity = cash + 建玉時価`を基底とする。時価はシグナル日（＝候補生成日）の終値で評価し、約定日当日の終値は使わない（寄付時点では未知のため）。同一日の全約定は同じ基底を共有するので、当日どの候補が先に約定したかでサイズが変わらない。本番`pipeline/daily.py`が固定の`risk.account_equity_usd`基準でサイジングするのと同じ意味論であり、旧cash基準（保有n件でサイズが0.9^nに縮み、10件満玉でも投下資本≒65%）とは別系だった問題を解消する。equity基底により「10%×10件＝100%＋手数料」が現金残高を超える場合があり、その候補は`insufficient_cash`として計上される（本番も同じ性質を持つ）。
 - `start`以前のバーはスクリーニング指標のウォームアップ（最大325取引バー）にのみ使い、注文生成と約定日は`start..end`の取引日に限定する。
 - `copilot-backtest`は`end`以前の最新`universe_membership`を優先する。ただし日ごとの歴史的membershipは復元しないため、履歴が無い場合のcurrent-universeフォールバックを含め、単一構成銘柄集合を全期間へ適用する限界と生存者バイアスを結果へ必ず表示する。
 - 最終日後に残るpositionは最終日以前の最新観測価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。途中の欠損日も最新終値を繰り越して時価評価する。SPY benchmarkも同じ欠損規約とし、整数株購入後の残cashをcurveへ含める。
@@ -1232,7 +1233,8 @@ def run_backtest(
 
 ```text
 uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
-    [--limit N] [--output PATH] [--pessimistic] [--db PATH]
+    [--limit N] [--output PATH] [--pessimistic] [--db PATH] \
+    [--candidate-cache PATH] [--policy none|regime|regime+risk[,...]]
 ```
 
 `--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
@@ -1246,6 +1248,20 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 **Issue #185実装時追記**: 候補生成をエンジン走行から分離し、新規`backtest/candidate_stream.py`へ移した（`_SCREENING_WARMUP_CALENDAR_DAYS`と`_trading_days`も`runner.py`から本モジュールへ移動）。`load_market_frame`が取引日・バー・ファンダを1回だけ読んで`MarketFrame`（内容ダイジェスト付き）にし、`generate_candidate_stream`が全取引日を先行スクリーニングして`CandidateStream`（`date -> ランク順candidate列`、候補0件の日はキーを持たない）にする。`run_backtest(request, deps, overrides, *, candidate_stream=None, market_frame=None)`は両者を注入でき、省略時は従来どおり内部で生成するため既存呼び出しと後方互換である。`copilot-backtest grid`の25セルと`--pessimistic`の2シナリオは1本のストリームを共有し、スクリーニングは1回しか走らない（従来はセルごとに1回、25回走っていた——フル期間1 run 54分×25セル≒22時間で、一度も完走していなかった）。
 
 **キャッシュキー契約（本issueの核心）**: `compute_cache_key`はスクリーニングが読む入力だけをダイジェストする——`strategy_key`とその`StrategySpec`、`settings.technical_signals`、`settings.fundamental_filters`、ユニバース、`request.symbols`、`start`/`end`、`benchmark_symbol`（取引日カレンダーの源泉なので必要）、バー/ファンダの内容ダイジェスト、および`CACHE_KEY_VERSION`。**`settings.backtest`・`settings.risk`・`request.initial_cash`は含めない**。`ScreeningPipeline`は`technical_signals`と`fundamental_filters`しか読まないため、手仕舞い・コストパラメータを振ってもキーは動かず、同一ストリームがグリッド全セルで再利用できる（この等価性は`tests/backtest/test_candidate_stream.py::test_screening_ignores_backtest_settings`が固定する）。注入されたストリームのキーは`run_backtest`が毎回再検証し、不一致は`CandidateStreamMismatchError`でfail-fastする（黙って別のユニバースを測らない）。バー行の順序が変わってもダイジェストは不変である。
+
+**Issue #184実装時追記（本番リスクゲートの注入）**: 候補→建玉の間にある本番の6ゲート（レジーム`CASH_PRIORITY`/`REDUCE_ONLY`、portfolio heat、決算ブロック、サーキットブレーカー、セクター上限）をバックテストへ通す。新規`backtest/policy.py`が唯一のポート`EntryPolicy`（`decide(EntryPolicyRequest) -> Mapping[str, EntryDecision]`）を定義し、その実装`RiskCheckerEntryPolicy`は**`risk/checks.py::RiskChecker`をラップする**。エンジン側にゲートを再実装しない（二重実装は「別の系を測る」という本issueの原因そのものであるため禁止）。
+
+- **as-of規律**: `EntryPolicyRequest.as_of`は約定日ではなく**シグナル日**（候補の`as_of`）である。翌営業日寄付の時点で観測可能な最新事実は前日終値なので、約定日当日のバーでレジームを判定すればそれ自体がlook-aheadになる。`calculate_regime_snapshot`はシグナル日で呼び、`RiskChecker`の決算判定も`candidate.as_of`を見る。境界（直前/同日/直後）は`tests/backtest/test_policy.py::TestAsOfDiscipline`が固定する。
+- **株数はエンジンが決める**: `RiskChecker`はシグナル日終値でサイジングし、エンジンは翌寄付＋スリッページで約定するため、両者が別々に株数を出すと必ず食い違う。`EntryDecision`が返すのは可否と**実効`max_trade_risk_pct`**（`REDUCE_ONLY`の乗数適用済み）だけで、`calc_position_size`の呼び出しはエンジン側の1箇所に保つ。
+- **バッチ評価**: `decide()`は1日分の候補をまとめて受ける。`RiskChecker`はランク順にportfolio heatを累積する仕様で、候補ごとに呼ぶとこの累積が黙って消えるためである。
+- **アーム**: `EntryPolicyArm` = `none`（ポリシー無し＝従来挙動）/ `regime`（レジームのみ。heat・セクター上限は`settings`のコピー側で事実上無効化＝`max_portfolio_heat_pct`/`max_sector_pct`をともに`1e12`にする。`model_copy(update=...)`はフィールドの`le=1.0`を再検証しない——セクター判定は簿価と現在equityを比べるため、素直に`1.0`を入れるとドローダウン中に第2のゲートとして効いてしまう。ゲートを迂回する分岐をエンジンへ書かないための手段である）/ `regime+risk`（レジーム＋heat＋セクター＋サーキットブレーカー）。サーキットブレーカーはrun自身の決済済みトレード（`(exit_date, pnl)`）を`evaluate_circuit_breaker`へ流すので、`risk.circuit_*`が初めてバックテストの数字を動かす。
+- **決算ブロックの限界**: バックテストは過去の決算カレンダーを持たないため、`build_entry_policy(..., earnings_guard_fn=...)`（point-in-timeの`EarningsGuardInput`を返す注入口）を渡さない限り決算ゲートは不活性（カウント0）である。捏造した日付でゲートを動かすより0と報告する方を選んだ。
+- **相関警告のバー読み出し**: `RiskChecker`がstoreへ触れるのは相関「警告」だけ（ブロックはしない）なので、`_FrameBarReader`がエンジンの手持ちバーからas-ofカットオフ付きで供給する。ストレージ接続を増やさず、テストもオフラインのままにできる。`RiskChecker.__init__`の型注釈は広げない（checks registryのリファクタはIssue #193の範囲）ため、呼び出し側で1箇所だけ明示的な`cast`を置いている。
+- **`REGIME_SYMBOLS = ("SPY", "QQQ", "^VIX")`** は`load_market_frame`が**常に**読み込む。アーム依存で読み分けると`bars_digest`＝`cache_key`がアームごとに変わり、A/Bが1本のストリームを共有できなくなるためである。スクリーニングは`universe`を走査するので余分な銘柄の影響を受けない。これらのバーが無い状態で`--policy`を指定した場合は`EntryPolicyError`でfail-fastする（レジームがUNKNOWN→fail-closedで全期間全候補ブロック、という無意味な結果を黙って出さない）。
+
+**`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`＝`regime` / `circuit_breaker` / `portfolio_heat` / `earnings` / `sector` / `not_calculable` / `max_concurrent` / `already_held` / `missing_data` / `invalid_stop` / `zero_shares` / `insufficient_cash`を0件でも必ず全件報告する。複数ゲートが同時に成立した候補はこの順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
+
+**CLI**: `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
 
 **永続化**: `--candidate-cache PATH`でストリームをParquetへ保存し、CLI実行をまたいで再利用する。列は`as_of`/`symbol`/`rank`/`signal_names_json`/`metrics_json`/`execution_state`/`execution_distance`で、行は`(as_of, rank)`昇順、`cache_key`はpyarrowのschema metadataへ格納する。JSON列は`storage/json_guard.dumps_safe`を通すのでNaN/Infは書き込み前に拒否され、`float`はJSONの往復でビット一致する。書き込みは同一ディレクトリの一時ファイル＋`os.replace`（REQ-008、`market_store._write_partition`と同型）で、失敗時は旧キャッシュを保持し一時ファイルを消す。読めないキャッシュは`CandidateStreamError`だが、CLIはこれをミス扱いにして再生成する（キャッシュ破損でバックテストを落とさない）。保存→読込→注入した結果が素通しの`run_backtest`と`BacktestResult`レベルで完全一致することをテストで保証している。
 

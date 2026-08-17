@@ -2,6 +2,34 @@
 
 ::: swing_copilot
 
+## リサーチ読み取りAPI（`swing_copilot.research`）
+
+蓄積された判断履歴（verdict・当否・スコア内訳・追跡台帳・レジーム・落選理由）を
+pandas DataFrame として読み出す読み取り専用モジュール。各関数はクエリごとに
+read-only の DuckDB 接続を開いて即閉じるため、運用データを書き換える経路を持たず、
+接続保持による日次実行のロック奪取も起きない。使い方・データ辞書・安全上の規約は
+[リサーチガイド](09_research_guide.md)を正とする。
+
+```python
+from swing_copilot import research
+
+research.scorecard()            # verdict × 当否 × スコア内訳 × レジーム × 追跡 × セクター
+research.candidates()           # 候補とスコア内訳（JSON展開済みの型付き列）
+research.tracked_positions()    # 追跡台帳 + recommendation
+research.screening_rejections() # 落選理由
+research.bars(["AAPL"])        # Parquet 直読の日足（DBファイルに触れない）
+research.query("SELECT ...")   # 任意の read-only SQL
+research.ensure_views(path)     # ビュー未作成の古い DB を修復
+```
+
+結合済みビュー（`v_verdict_scorecard` / `v_candidates` / `v_tracked_positions` /
+`v_symbol_sector_asof`）は `storage/schema.py` が定義し、`StateStore.init_schema()`
+（毎日次実行）が `CREATE OR REPLACE` で自己移行する。セクターの as-of 解決
+（`snapshot_date <= run_date` の inclusive 境界）は `v_symbol_sector_asof` に
+一元化されており、分析側で universe_membership を自前 JOIN してはならない。
+
+::: swing_copilot.research.frames
+
 ## スクリーニング戦略
 
 日次実行では`--strategy`で`config/strategies.yaml`に定義した戦略を選択できる。

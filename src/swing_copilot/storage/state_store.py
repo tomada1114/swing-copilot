@@ -28,7 +28,11 @@ from swing_copilot.storage import (
     tracking_records,
     verdict_records,
 )
-from swing_copilot.storage.schema import ALTER_SCHEMA_STATEMENTS, INIT_SCHEMA_STATEMENTS
+from swing_copilot.storage.schema import (
+    ALTER_SCHEMA_STATEMENTS,
+    ANALYSIS_VIEW_STATEMENTS,
+    INIT_SCHEMA_STATEMENTS,
+)
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
@@ -99,12 +103,16 @@ class StateStore:
 
         Also applies `ALTER_SCHEMA_STATEMENTS` so an existing database from
         before an additive column change (e.g. P1-03's `risk_assessments`
-        columns) picks them up; both statement sets are safe to re-run.
+        columns) picks them up, then `ANALYSIS_VIEW_STATEMENTS` (CREATE OR
+        REPLACE, so edited view definitions self-migrate); every statement
+        set is safe to re-run.
         """
         with self._database.connect() as conn:
             for statement in INIT_SCHEMA_STATEMENTS:
                 conn.execute(statement)
             for statement in ALTER_SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            for statement in ANALYSIS_VIEW_STATEMENTS:
                 conn.execute(statement)
 
     def record_regime_snapshot(self, run_id: UUID, snapshot: RegimeSnapshot) -> None:

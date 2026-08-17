@@ -70,6 +70,8 @@ nav:
       - UI Design: 05_ui_design.md
       - Reliability Roadmap: 06_reliability_roadmap.md
       - Invariant Test Matrix: 07_invariant_test_matrix.md
+      - Architecture Review 2026-08: 08_architecture_review_2026-08.md
+  - Research Guide: 09_research_guide.md
   - Getting Started: getting-started.md
   - API Reference: reference.md
   - Contributing: contributing.md

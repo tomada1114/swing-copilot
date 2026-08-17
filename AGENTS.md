@@ -45,6 +45,7 @@ src/swing_copilot/
 ├── backtest/            # Deterministic point-in-time simulator
 ├── analysis/            # Skill boundary: export, strict schemas, provenance, safety
 ├── storage/             # DuckDB/Parquet repositories and transactions
+├── research/            # Read-only DataFrame accessors for notebooks/ad-hoc SQL
 └── pipeline/            # Composition root and imperative orchestration
 ```
 

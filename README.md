@@ -49,6 +49,19 @@ uv run copilot-history symbol AAPL
 uv run copilot-history performance
 ```
 
+For ad-hoc analysis in Python (notebooks, scripts), `swing_copilot.research`
+returns the accumulated history as pandas DataFrames over read-only DuckDB
+connections — e.g. `research.scorecard()` joins each verdict to its forward
+return, score breakdown, market regime, tracked exit, and sector in one call.
+See `docs/09_research_guide.md`:
+
+```python
+from swing_copilot import research
+
+df = research.scorecard()
+df.groupby(["gate_verdict", "recommendation"])["forward_return_pct"].mean()
+```
+
 Backtest a strategy over a historical window, with risk-adjusted metrics
 (Sharpe, max drawdown, win rate, profit factor, expectancy, R-multiple):
 

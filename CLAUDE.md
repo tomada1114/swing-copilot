@@ -41,6 +41,17 @@ run aborts on its own if the branch is not `main`, or if `src`, `config`,
 fires while the machine is awake and online; unlike launchd, a missed run is
 never retried later.
 
+Two consequences for feature work done in a worktree:
+
+- A worktree has no `data/`, `.env`, or `.venv`. If a task there needs the
+  cached price/filing history (e.g. regenerating a backtest report), **copy**
+  the main checkout's `data/` into the worktree (`cp -R`); never symlink it,
+  and never open the main checkout's `data/copilot.duckdb` from a worktree —
+  its file lock is exclusive and a held handle can fail the 18:30 routine.
+- After a PR merges to `main`, fast-forward this working copy
+  (`git fetch --prune && git pull --ff-only`) so the next scheduled run
+  executes the merged code instead of a stale checkout.
+
 `AGENTS.md` is the canonical cross-tool contract for domain invariants,
 source-of-truth precedence, test expectations, and the Japanese/English
 language policy. Do not duplicate or weaken those rules here.

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-backtest` の候補生成をエンジン走行から分離した
+  （`backtest/candidate_stream.py`、Issue #185）。`grid` の 25 セルと
+  `--pessimistic` の 2 シナリオは 1 本の候補ストリームを共有し、支配的
+  コストだったスクリーニングを 1 回しか払わない（フル期間で従来
+  25 セル ≒ 22 時間 → 1 スクリーニング + 25 エンジン走行）。新フラグ
+  `--candidate-cache PATH` で候補ストリームを Parquet に永続化し、CLI
+  実行をまたいで再利用できる。キャッシュキーはスクリーニングが読む入力
+  （戦略 spec・`technical_signals`・`fundamental_filters`・ユニバース・
+  銘柄・期間・ベンチマーク・価格/ファンダの内容ダイジェスト）のみで構成し、
+  `settings.backtest`・`settings.risk`・初期資金では無効化されない。
+  注入ストリームのキーは実行毎に再検証され、不一致は fail-fast。
+  キャッシュ有無で `BacktestResult` は bit-exact に一致する
 - 読み取り専用のリサーチ API `swing_copilot.research` を追加した。蓄積された
   判断履歴（verdict・当否・スコア内訳・追跡台帳・レジーム・落選理由）を
   pandas DataFrame として読み出す。`research.scorecard()` は verdict × 当否 ×

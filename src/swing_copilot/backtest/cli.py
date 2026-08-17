@@ -23,6 +23,14 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 from rich.table import Table
 
+from swing_copilot.backtest.candidate_stream import (
+    CandidateStreamError,
+    compute_cache_key,
+    generate_candidate_stream,
+    load_candidate_stream,
+    load_market_frame,
+    save_candidate_stream,
+)
 from swing_copilot.backtest.runner import (
     BacktestCostOverrides,
     BacktestDependencies,
@@ -51,6 +59,7 @@ from swing_copilot.universe import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
     from swing_copilot.backtest.engine import BacktestResult
     from swing_copilot.backtest.sensitivity import SensitivityGridResult
     from swing_copilot.config import Settings, StrategiesConfig
@@ -110,6 +119,7 @@ def _add_common_args(
     parser.add_argument("--db", type=Path, default=default(DEFAULT_DB_PATH))
     parser.add_argument("--settings", default=default(DEFAULT_SETTINGS_PATH))
     parser.add_argument("--strategies", default=default(DEFAULT_STRATEGIES_PATH))
+    parser.add_argument("--candidate-cache", type=Path, default=default(None))
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -651,6 +661,53 @@ def _compose_dependencies(
     return deps, symbols, missing_data_symbols
 
 
+def _resolve_candidate_stream(
+    request: BacktestRequest,
+    deps: BacktestDependencies,
+    frame: MarketFrame,
+    cache_path: Path | None,
+) -> CandidateStream:
+    """Reuse the persisted candidate stream when it matches, else screen anew.
+
+    The cache key covers only what screening reads, so a cache written by a
+    baseline run stays valid across an exit-parameter or cost sweep and is
+    invalidated the moment the universe, window, strategy, screening settings,
+    or price data move. A cache that cannot be read is a miss, not a failure.
+
+    Args:
+        request: What to backtest.
+        deps: Real collaborators (store, universe, settings, strategies).
+        frame: The already-loaded market frame.
+        cache_path: `--candidate-cache`; `None` disables persistence.
+
+    Returns:
+        The stream to hand to every `run_backtest` call for this invocation.
+    """
+    expected_key = compute_cache_key(request, deps, frame)
+    if cache_path is not None and cache_path.exists():
+        try:
+            cached = load_candidate_stream(cache_path)
+        except CandidateStreamError as exc:
+            sys.stdout.write(
+                f"候補ストリームキャッシュを読めませんでした（{exc}）。再生成します。\n"
+            )
+        else:
+            if cached.cache_key == expected_key:
+                sys.stdout.write(f"候補ストリームキャッシュを再利用: {cache_path}\n")
+                return cached
+            sys.stdout.write(
+                "候補ストリームキャッシュのキーが一致しません。再生成して上書きします: "
+                f"{cache_path}\n"
+            )
+
+    stream = generate_candidate_stream(request, deps, frame)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        save_candidate_stream(stream, cache_path)
+        sys.stdout.write(f"候補ストリームキャッシュを保存: {cache_path}\n")
+    return stream
+
+
 def _run_backtest_command(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
 ) -> None:
@@ -666,9 +723,18 @@ def _run_backtest_command(
             initial_cash=settings.backtest.initial_cash_usd,
             strategy_key=args.strategy,
         )
+        # Screening is identical across the normal/pessimistic pair -- only
+        # slippage differs, and no Filter or Signal reads it -- so both
+        # scenarios share one frame and one stream.
+        frame = load_market_frame(request, deps)
+        stream = _resolve_candidate_stream(request, deps, frame, args.candidate_cache)
         if args.pessimistic:
             normal_result = run_backtest(
-                request, deps, BacktestCostOverrides(slippage_multiplier=1.0)
+                request,
+                deps,
+                BacktestCostOverrides(slippage_multiplier=1.0),
+                candidate_stream=stream,
+                market_frame=frame,
             )
             pessimistic_result = run_backtest(
                 request,
@@ -676,10 +742,14 @@ def _run_backtest_command(
                 BacktestCostOverrides(
                     slippage_multiplier=settings.backtest.pessimistic_slippage_multiplier
                 ),
+                candidate_stream=stream,
+                market_frame=frame,
             )
         else:
-            result = run_backtest(request, deps)
-    except BacktestCliError as exc:
+            result = run_backtest(
+                request, deps, candidate_stream=stream, market_frame=frame
+            )
+    except (BacktestCliError, CandidateStreamError) as exc:
         raise SystemExit(str(exc)) from exc
 
     meta = ReportMeta(
@@ -715,16 +785,21 @@ def _run_grid_command(
         deps, symbols, missing_data_symbols = _compose_dependencies(
             args, settings, strategies
         )
-    except BacktestCliError as exc:
+        request = BacktestRequest(
+            symbols=symbols,
+            start=args.start,
+            end=args.end,
+            initial_cash=settings.backtest.initial_cash_usd,
+            strategy_key=args.strategy,
+        )
+        # The 25 cells vary only `exit_atr_multiple`/`max_hold_days`, which
+        # the engine consumes and screening never reads: one frame and one
+        # candidate stream serve the whole grid (Issue #185).
+        frame = load_market_frame(request, deps)
+        stream = _resolve_candidate_stream(request, deps, frame, args.candidate_cache)
+    except (BacktestCliError, CandidateStreamError) as exc:
         raise SystemExit(str(exc)) from exc
 
-    request = BacktestRequest(
-        symbols=symbols,
-        start=args.start,
-        end=args.end,
-        initial_cash=settings.backtest.initial_cash_usd,
-        strategy_key=args.strategy,
-    )
     cells: list[GridCell] = []
     for atr_pct, max_hold_pct, atr_value, max_hold_value in grid_param_values(
         settings.backtest.exit_atr_multiple, settings.backtest.max_hold_days
@@ -735,6 +810,8 @@ def _run_grid_command(
             BacktestCostOverrides(
                 exit_atr_multiple=atr_value, max_hold_days=max_hold_value
             ),
+            candidate_stream=stream,
+            market_frame=frame,
         )
         cells.append(
             GridCell(

@@ -252,7 +252,7 @@ def scan_forward(request: ForwardScanRequest) -> ForwardScan:
     """Replay every trading date in `[start, as_of]` and attach forward outcomes.
 
     SPY's stored dates are the trading calendar, matching
-    `backtest/runner.py::_trading_days`.
+    `backtest/candidate_stream.py::_trading_days`.
 
     Args:
         request: Bars, window, thresholds, and horizons for one scan.

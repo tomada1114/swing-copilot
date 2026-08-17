@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from swing_copilot.backtest import cli as cli_module
+from swing_copilot.backtest.candidate_stream import generate_candidate_stream
 from swing_copilot.backtest.cli import (
     DEFAULT_SETTINGS_PATH,
     DEFAULT_STRATEGIES_PATH,
@@ -38,6 +39,7 @@ from swing_copilot.backtest.metrics import (
     holding_days_stats,
     max_hold_binding_rate,
 )
+from swing_copilot.backtest.runner import run_backtest
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
     MAX_HOLD_PCT_GRID,
@@ -1103,3 +1105,202 @@ class TestStrategiesOverride:
             )
 
         assert not (tmp_path / "report.md").exists()
+
+
+def _screening_settings_copy(tmp_path: Path, *, min_equity_ratio: float) -> Path:
+    """A real settings.yaml with one *screening* value replaced, for --settings.
+
+    Deliberately not a `backtest.*` value: those are engine inputs and must
+    leave the candidate cache valid (Issue #185).
+    """
+    raw = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
+    raw["fundamental_filters"]["min_equity_ratio"] = min_equity_ratio
+    override = tmp_path / "settings-screening-variant.yaml"
+    override.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return override
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestCandidateCache:
+    """`--candidate-cache`: screening is paid for once, even across processes."""
+
+    def _argv(
+        self,
+        db_path: Path,
+        days: list[date],
+        tmp_path: Path,
+        cache_path: Path,
+        *extra: str,
+    ) -> list[str]:
+        return [
+            "--strategy",
+            "default",
+            "--start",
+            days[0].isoformat(),
+            "--end",
+            days[-1].isoformat(),
+            "--db",
+            str(db_path),
+            "--output",
+            str(tmp_path / "out" / "report.md"),
+            "--candidate-cache",
+            str(cache_path),
+            *extra,
+        ]
+
+    def test_candidate_cache_flag_defaults_to_none(self):
+        args = _parse_args(
+            ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
+        )
+
+        assert args.candidate_cache is None
+
+    def test_candidate_cache_given_before_the_grid_subcommand_survives(self, tmp_path):
+        args = _parse_args(
+            [
+                "--candidate-cache",
+                str(tmp_path / "cache.parquet"),
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+
+        assert args.candidate_cache == tmp_path / "cache.parquet"
+
+    def test_first_run_writes_the_cache_and_the_second_reuses_it(
+        self, seeded_db, tmp_path, capsys, monkeypatch
+    ):
+        db_path, days = seeded_db
+        cache_path = tmp_path / "cache" / "candidates.parquet"
+
+        main(self._argv(db_path, days, tmp_path, cache_path))
+
+        assert cache_path.exists()
+        assert "候補ストリームキャッシュを保存" in capsys.readouterr().out
+
+        monkeypatch.setattr(
+            cli_module,
+            "generate_candidate_stream",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a matching cache must not trigger a second screening pass"
+            ),
+        )
+        main(self._argv(db_path, days, tmp_path, cache_path))
+
+        assert "候補ストリームキャッシュを再利用" in capsys.readouterr().out
+
+    def test_a_changed_screening_setting_invalidates_and_overwrites_the_cache(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        cache_path = tmp_path / "candidates.parquet"
+        main(self._argv(db_path, days, tmp_path, cache_path))
+        capsys.readouterr()
+        first_bytes = cache_path.read_bytes()
+        override = _screening_settings_copy(tmp_path, min_equity_ratio=0.55)
+
+        main(
+            self._argv(db_path, days, tmp_path, cache_path, "--settings", str(override))
+        )
+
+        captured = capsys.readouterr()
+        assert "キーが一致しません" in captured.out
+        assert "候補ストリームキャッシュを保存" in captured.out
+        assert cache_path.read_bytes() != first_bytes
+
+    def test_an_unreadable_cache_is_regenerated_rather_than_failing(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        cache_path = tmp_path / "candidates.parquet"
+        cache_path.write_bytes(b"corrupted")
+
+        main(self._argv(db_path, days, tmp_path, cache_path))
+
+        captured = capsys.readouterr()
+        assert "候補ストリームキャッシュを読めませんでした" in captured.out
+        assert "候補ストリームキャッシュを保存" in captured.out
+        assert cache_path.read_bytes() != b"corrupted"
+
+    def test_grid_screens_once_and_still_runs_every_cell(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        screenings: list[int] = []
+        engine_runs: list[int] = []
+        original_generate = generate_candidate_stream
+        original_run = run_backtest
+
+        def counting_generate(*args, **kwargs):
+            screenings.append(1)
+            return original_generate(*args, **kwargs)
+
+        def counting_run(*args, **kwargs):
+            engine_runs.append(1)
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "generate_candidate_stream", counting_generate)
+        monkeypatch.setattr(cli_module, "run_backtest", counting_run)
+
+        main(
+            [
+                "grid",
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(tmp_path / "grid.md"),
+            ]
+        )
+
+        assert len(screenings) == 1
+        assert len(engine_runs) == len(ATR_MULTIPLIER_PCT_GRID) * len(MAX_HOLD_PCT_GRID)
+
+    def test_pessimistic_shares_one_screening_pass_across_both_scenarios(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        screenings: list[int] = []
+        engine_runs: list[int] = []
+        original_generate = generate_candidate_stream
+        original_run = run_backtest
+
+        def counting_generate(*args, **kwargs):
+            screenings.append(1)
+            return original_generate(*args, **kwargs)
+
+        def counting_run(*args, **kwargs):
+            engine_runs.append(1)
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "generate_candidate_stream", counting_generate)
+        monkeypatch.setattr(cli_module, "run_backtest", counting_run)
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(tmp_path / "report.md"),
+                "--pessimistic",
+            ]
+        )
+
+        assert len(screenings) == 1
+        assert len(engine_runs) == 2

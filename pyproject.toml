@@ -193,6 +193,10 @@ warn_redundant_casts = true
 warn_unreachable = true
 show_error_codes = true
 enable_error_code = ["ignore-without-code", "redundant-cast", "truthy-bool"]
+# pyarrow ships `py.typed`, but `pyarrow.parquet` itself is still unannotated,
+# so its read/write entry points would fail `disallow_untyped_calls`. Exempt
+# just that submodule rather than relaxing the flag anywhere in our own code.
+untyped_calls_exclude = ["pyarrow.parquet"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"

@@ -611,6 +611,36 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 「そのパラメータが効かない」のか「一度も発火していない」のかを区別するために
 ある。binding rateが0%に近ければ、`max_hold_days`をどう振っても結果は動かない。
 
+## 候補ストリームキャッシュ（`--candidate-cache`）
+
+`copilot-backtest`の実行時間の大半はスクリーニングであり、エンジン走行では
+ない。そこで候補生成をエンジン走行から切り離し、`--candidate-cache PATH`で
+Parquetへ永続化できるようにした。
+
+```bash
+copilot-backtest grid --strategy default --start 2020-01-02 --end 2026-07-30 \
+  --candidate-cache /tmp/candidates-default-2026-07-30.parquet
+```
+
+キャッシュキーは**スクリーニングが読む入力だけ**で構成する: 戦略キーと
+そのspec（`candidate_limit`・`score_weights`等）、`technical_signals`、
+`fundamental_filters`、ユニバース、対象銘柄、`--start`/`--end`、ベンチマーク
+（取引日カレンダーの源泉）、そして価格・ファンダの内容ダイジェストである。
+
+`settings.backtest`（`exit_atr_multiple`・`max_hold_days`・`commission_pct`・
+`slippage_pct`・`slippage_multiplier`）と`settings.risk`、初期資金は
+**キーに含めない**。これらはエンジンの入力であってFilter/Signalは一切読まない
+ため、手仕舞いパラメータやコストを振ってもキャッシュは無効化されない——
+感応度グリッドやコスト比較を同じキャッシュで回せることが、この設計の目的で
+ある。逆に、銘柄・期間・戦略・スクリーニング設定・価格データのいずれかが
+動けばキーは変わり、キャッシュは自動で再生成・上書きされる。読めない
+キャッシュファイルもエラーではなくミス扱いで再生成する。
+
+`--candidate-cache`を付けなくても、**1回のコマンド実行の中では候補生成は
+1回だけ**である。`grid`の25セルも`--pessimistic`の通常/悲観2シナリオも、
+同一の候補ストリームを共有する（`--candidate-cache`が足すのは、CLI実行を
+またいだ再利用だけである）。
+
 ## 低ボラバイアス是正の2つのスイッチ
 
 スクリーニング候補が構造的に低ボラ銘柄へ偏る原因は2つあり、それぞれに

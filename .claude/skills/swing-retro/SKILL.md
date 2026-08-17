@@ -23,6 +23,12 @@ Python 側（`copilot-retro`）には config / コードを書き換える経路
 変更を行うのはこのスキルの適用段階だけで、必ず提案ごとのブランチ +
 検証合格 + PR を経由する。`main` へ直接コミットしない。
 
+`retro_input.json` の定型集約に無い切り口を確かめたくなったら（提案の裏取り、
+「この差はレジームで説明できないか」等）、`swing-research` の読み取り専用
+DataFrame（`swing_copilot.research`）で検証できる。ただし提案の証拠として
+使うのは `retro_input.json` の metric_id 付き数値だけであり、research の
+アドホック集計は補助的な確認に留める。
+
 作業前に必ず読む:
 
 - `.claude/skills/swing-daily/references/analysis-conventions.md` — AC1〜AC16 の

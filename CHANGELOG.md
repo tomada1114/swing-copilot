@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 読み取り専用のリサーチ API `swing_copilot.research` を追加した。蓄積された
+  判断履歴（verdict・当否・スコア内訳・追跡台帳・レジーム・落選理由）を
+  pandas DataFrame として読み出す。`research.scorecard()` は verdict × 当否 ×
+  スコア内訳 × リスク制約 × レジーム × 追跡結果 × セクターを 1 行で返す。
+  `Database` に `read_only=True` を追加し、各アクセサはクエリ毎に read-only
+  接続を即開閉する（誤書き込み・DDL の構造的排除と、ロック保持の最小化）。
+  結合済み分析ビュー `v_verdict_scorecard` / `v_candidates` /
+  `v_tracked_positions` / `v_symbol_sector_asof`（as-of inclusive なセクター
+  解決の唯一の実装）を `storage/schema.py` に定義し、`init_schema()` が
+  `CREATE OR REPLACE` で自己移行する。使い方とデータ辞書は
+  `docs/09_research_guide.md`、アドホック分析の入口は `swing-research`
+  スキル。2026-08 アーキテクチャレビュー（`docs/08_architecture_review_2026-08.md`、
+  改修計画は Issue #184〜#195）の実装第一弾
+
+### Fixed
+
+- `record_risk_assessments` が銘柄ごとに独立コミットしており、途中失敗で
+  1 run 分のリスク評価が部分的に残り得た（「1 論理書き込み = 1 トランザク
+  ション」不変条件の違反）。明示トランザクションで包み、失敗時は全行
+  ロールバックするようにした
+- `copilot-daily` の exit code 2（preflight abort）が「同日再実行」と
+  「`risk.account_equity_usd` 未設定」を区別できず、無人実行の swing-daily
+  スキルが設定不備を「本日は分析済み」と誤要約してサイレントに no-op し
+  続けるリスクがあった。`PreflightAbort` に閉集合の `reason` を持たせ、
+  stderr 先頭へ機械可読な `PREFLIGHT_ABORT[<reason>]:` プレフィックスを
+  書く契約へ変更し、スキル側の分岐を更新した
+
 ### Changed
 
 - 8-K の export 選別を先頭スライスから**価値ベースの Exhibit 選別**へ変更した

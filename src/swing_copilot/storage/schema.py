@@ -424,3 +424,143 @@ ALTER_SCHEMA_STATEMENTS = (
     "ADD COLUMN IF NOT EXISTS news_supply_symbol_mention_items INTEGER",
     "ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS news_supply_level VARCHAR",
 )
+
+# Read-only analysis views for `swing_copilot.research` and ad-hoc SQL
+# (notebook / duckdb CLI). `CREATE OR REPLACE` makes every definition
+# self-migrating: `init_schema()` re-runs them on each start, so editing a
+# view here needs no ALTER bookkeeping. Views are catalog-persisted, which is
+# what lets a `read_only=True` connection (no DDL allowed) still query them.
+# Ordering matters: later views reference earlier ones.
+#
+# JSON extraction note: `metrics_json->>'key'` yields VARCHAR (NULL when the
+# key is absent, e.g. rows written before a component existed), so every
+# numeric field is CAST explicitly. The key names mirror
+# `screening/pipeline.py`'s score components and `ranking_metrics`.
+ANALYSIS_VIEW_STATEMENTS = (
+    # The single blessed as-of sector resolution (`snapshot_date <= run_date`,
+    # inclusive), so notebooks never re-implement the point-in-time rule.
+    """
+    CREATE OR REPLACE VIEW v_symbol_sector_asof AS
+    SELECT
+        r.run_id,
+        um.symbol,
+        um.gics_sector,
+        um.company_name
+    FROM runs r
+    JOIN universe_membership um
+      ON um.snapshot_date = (
+          SELECT max(u2.snapshot_date)
+          FROM universe_membership u2
+          WHERE u2.snapshot_date <= r.run_date
+            AND u2.symbol = um.symbol
+      )
+    """,
+    """
+    CREATE OR REPLACE VIEW v_candidates AS
+    SELECT
+        r.run_date,
+        r.mode,
+        r.status AS run_status,
+        r.config_hash,
+        c.run_id,
+        c.symbol,
+        c.strategy_key,
+        c.rank,
+        c.signal_names,
+        CAST(c.metrics_json->>'score' AS DOUBLE)               AS score,
+        CAST(c.metrics_json->>'score_rsi_pullback' AS DOUBLE)  AS score_rsi_pullback,
+        CAST(c.metrics_json->>'score_trend_quality' AS DOUBLE) AS score_trend_quality,
+        CAST(c.metrics_json->>'score_liquidity' AS DOUBLE)     AS score_liquidity,
+        CAST(c.metrics_json->>'score_atr_pct' AS DOUBLE)       AS score_atr_pct,
+        CAST(c.metrics_json->>'rsi14' AS DOUBLE)               AS rsi14,
+        CAST(c.metrics_json->>'sma50' AS DOUBLE)               AS sma50,
+        CAST(c.metrics_json->>'sma200' AS DOUBLE)              AS sma200,
+        CAST(c.metrics_json->>'atr14' AS DOUBLE)               AS atr14,
+        CAST(c.metrics_json->>'close' AS DOUBLE)               AS close,
+        CAST(c.metrics_json->>'avg_volume' AS DOUBLE)          AS avg_volume,
+        c.metrics_json
+    FROM candidates c
+    JOIN runs r ON r.run_id = c.run_id
+    """,
+    """
+    CREATE OR REPLACE VIEW v_tracked_positions AS
+    SELECT
+        r.run_date,
+        p.run_id,
+        p.symbol,
+        p.strategy_key,
+        v.recommendation,
+        p.no_trade,
+        p.entry_date,
+        p.entry_price,
+        p.stop_price,
+        p.days_held,
+        p.status,
+        p.exit_date,
+        p.exit_price,
+        p.exit_reason,
+        p.realized_return_pct,
+        p.last_marked_date
+    FROM verdict_positions p
+    JOIN runs r ON r.run_id = p.run_id
+    LEFT JOIN verdicts v ON v.run_id = p.run_id AND v.symbol = p.symbol
+    """,
+    # One row per (verdict, matured horizon); a verdict with no matured
+    # outcome yet keeps a single row with NULL horizon columns, so the view
+    # also serves "what did we decide today" queries. All joins besides
+    # `runs` are LEFT: a scorecard row must survive any single missing leg
+    # (no candidate row for a strategy mismatch, no regime snapshot on a
+    # degraded run, ...).
+    """
+    CREATE OR REPLACE VIEW v_verdict_scorecard AS
+    SELECT
+        r.run_date,
+        r.mode,
+        r.config_hash,
+        v.run_id,
+        v.symbol,
+        v.strategy_key,
+        v.recommendation,
+        v.no_trade,
+        v.news_supply_level,
+        o.horizon_days,
+        o.forward_return_pct,
+        o.classification,
+        c.rank,
+        c.score,
+        c.score_rsi_pullback,
+        c.score_trend_quality,
+        c.score_liquidity,
+        c.score_atr_pct,
+        c.rsi14,
+        c.atr14,
+        c.close,
+        c.avg_volume,
+        ra.status AS risk_status,
+        ra.binding_constraint,
+        g.gate_verdict,
+        g.dd_level,
+        g.dd_count_spy,
+        g.dd_count_qqq,
+        p.status AS position_status,
+        p.exit_reason,
+        p.realized_return_pct,
+        p.days_held,
+        s.gics_sector
+    FROM verdicts v
+    JOIN runs r ON r.run_id = v.run_id
+    LEFT JOIN verdict_outcomes o
+      ON o.run_id = v.run_id AND o.symbol = v.symbol
+    LEFT JOIN v_candidates c
+      ON c.run_id = v.run_id
+     AND c.symbol = v.symbol
+     AND c.strategy_key = v.strategy_key
+    LEFT JOIN risk_assessments ra
+      ON ra.run_id = v.run_id AND ra.symbol = v.symbol
+    LEFT JOIN regime_snapshots g ON g.run_id = v.run_id
+    LEFT JOIN verdict_positions p
+      ON p.run_id = v.run_id AND p.symbol = v.symbol
+    LEFT JOIN v_symbol_sector_asof s
+      ON s.run_id = v.run_id AND s.symbol = v.symbol
+    """,
+)

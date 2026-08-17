@@ -222,7 +222,7 @@ def _preflight(deps: DailyDependencies, options: DailyRunOptions) -> None:
                 "サーキットブレーカーが全候補を CIRCUIT_BREAKER_HALTED で reject するため、"
                 "run を中止しました。"
             )
-            raise PreflightAbort(msg)
+            raise PreflightAbort(msg, reason="account_equity_unset")
     logger.warning(ACCOUNT_EQUITY_UNSET_NOTICE)
 
 
@@ -293,7 +293,11 @@ def main(argv: list[str] | None = None) -> None:
         # `_preflight` catches the account-equity trap; `run_daily` itself
         # raises the same exception for the same-day rerun guard (P8-118),
         # since `run_date` only resolves after prefetch, deep inside the run.
-        sys.stderr.write(f"{exc}\n")
+        # The machine-readable prefix is a contract with the swing-daily
+        # skill: both causes share exit code 2, and without the tag the
+        # skill's "already analyzed today" summary would swallow a
+        # configuration problem.
+        sys.stderr.write(f"PREFLIGHT_ABORT[{exc.reason}]: {exc}\n")
         raise SystemExit(2) from exc
     paths = TerminalPaths(
         report=result.report_path,

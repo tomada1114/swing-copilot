@@ -1294,6 +1294,36 @@ class TestRecordScreeningResults:
 
 
 class TestRecordRiskAssessments:
+    def test_rolls_back_entirely_when_a_later_row_fails(self, state_store):
+        # One run's assessments are one logical write (AGENTS.md): inject a
+        # failure after the first row has been inserted — the CHECK
+        # constraint rejects the second row's status — and assert the first
+        # row did not survive on its own.
+        run_id = uuid4()
+        valid = RiskAssessment(
+            symbol="AAPL",
+            status="approved",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+        )
+        invalid = RiskAssessment(
+            symbol="MSFT",
+            status="bogus_status",
+            max_shares=10,
+            entry_price=100.0,
+            stop_price=95.0,
+            reasons=(),
+        )
+
+        with pytest.raises(duckdb.Error):
+            state_store.record_risk_assessments([valid, invalid], run_id)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM risk_assessments").fetchone()
+        assert count == (0,)
+
     def test_records_status_and_warnings(self, state_store):
         run_id = uuid4()
         assessment = RiskAssessment(

@@ -102,10 +102,15 @@ uv run copilot-daily <ユーザー指定の引数>
 
 引数（対象日、dry-run/live 等）はユーザーの指示に従う。指定が無ければ引数なしで実行。
 
-**終了コード 2（preflight abort）を再入シグナルとして扱う（#118）。** これは
-同一 `run_date` に対して成功済みの run が既にあることを意味する（同日重複起動
-ガード。`run_date` は最新 bar 由来でプリフェッチ後にしか確定しないため、Step 0
-の事前確認をすり抜けることがある）。この場合:
+**終了コード 2（preflight abort）は stderr の機械可読プレフィックスで分岐する。**
+stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式で、
+`<reason>` により意味が正反対になる。プレフィックスを読まずに「分析済み」と
+決め打ちしてはならない。
+
+**`PREFLIGHT_ABORT[same_day_rerun]`** — 同一 `run_date` に対して成功済みの run が
+既にあることを意味する（同日重複起動ガード #118。`run_date` は最新 bar 由来で
+プリフェッチ後にしか確定しないため、Step 0 の事前確認をすり抜けることがある）。
+この場合:
 
 1. stderr のメッセージから既存の `run_id` とレポートパスを読み取る
 2. 既存レポート（`reports/<as_of>/<run_id>.md`）または
@@ -115,7 +120,15 @@ uv run copilot-daily <ユーザー指定の引数>
 4. ユーザーが明示的に再実行を求めている場合のみ、`--allow-same-day-rerun` を
    付けて Step 1 を再実行し、通常どおり続行する
 
-終了コード 0/1 は従来どおり続行する。
+**`PREFLIGHT_ABORT[account_equity_unset]`** — `config/settings.yaml` の
+`risk.account_equity_usd` が未設定のまま決済済みポジションが存在する、
+**設定不備による中止**。分析済みではない。この場合は既存レポートを探しに
+行かず、stderr のメッセージを引用して「設定不備で run が中止された。
+`risk.account_equity_usd` を設定するまで日次分析は実行されない」と
+ユーザーに明示報告して終了する。`analysis_result.json` は書かない。
+
+プレフィックスが読み取れない終了コード 2 は、いずれとも断定せず stderr 全文を
+そのまま報告して終了する。終了コード 0/1 は従来どおり続行する。
 
 ターミナル出力から **`analysis_input.json` の絶対パス**を拾う。
 

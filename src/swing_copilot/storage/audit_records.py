@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from datetime import date
     from uuid import UUID
 
+    import duckdb
+
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
     from swing_copilot.storage.database import Database
@@ -278,11 +280,32 @@ def replace_signal_outcomes(
 def record_risk_assessments(
     database: Database, assessments: Sequence[RiskAssessment], run_id: UUID
 ) -> None:
-    """Record one run's risk assessments, keyed by `(run_id, symbol)`."""
+    """Record one run's risk assessments, keyed by `(run_id, symbol)`.
+
+    One run's assessments are one logical write: they commit together or not
+    at all. Without the explicit transaction, DuckDB autocommits per row, and
+    a mid-batch failure would leave a partial run — indistinguishable, when
+    read back, from a run whose later symbols were never assessed.
+    """
     with database.connect() as conn:
-        for assessment in assessments:
-            conn.execute(
-                """
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            _insert_risk_assessments(conn, assessments, run_id)
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+
+
+def _insert_risk_assessments(
+    conn: duckdb.DuckDBPyConnection,
+    assessments: Sequence[RiskAssessment],
+    run_id: UUID,
+) -> None:
+    for assessment in assessments:
+        conn.execute(
+            """
                 INSERT INTO risk_assessments (
                     run_id, symbol, status, max_shares, entry_price,
                     stop_price, reasons_json, warnings_json,
@@ -301,39 +324,39 @@ def record_risk_assessments(
                     binding_constraint = EXCLUDED.binding_constraint,
                     sizing_warnings_json = EXCLUDED.sizing_warnings_json
                 """,
-                [
-                    str(run_id),
-                    assessment.symbol,
-                    assessment.status,
-                    assessment.max_shares,
-                    assessment.entry_price,
-                    assessment.stop_price,
-                    dumps_safe(list(assessment.reasons)),
-                    dumps_safe(
-                        [
-                            {
-                                "warning_type": warning.warning_type,
-                                "correlated_symbol": warning.correlated_symbol,
-                                # P1-04: risk/checks.py intentionally uses NaN
-                                # as `CorrelationWarning.correlation`'s
-                                # sentinel for "data_quality" (insufficient
-                                # history to compute a correlation). JSON has
-                                # no NaN literal, so persist that sentinel as
-                                # `null` -- the spec-compliant representation
-                                # of "not computable" -- rather than letting
-                                # dumps_safe reject the whole row.
-                                "correlation": (
-                                    warning.correlation
-                                    if math.isfinite(warning.correlation)
-                                    else None
-                                ),
-                            }
-                            for warning in assessment.warnings
-                        ]
-                    ),
-                    assessment.shares_by_risk,
-                    assessment.shares_by_position_cap,
-                    assessment.binding_constraint,
-                    dumps_safe(list(assessment.sizing_warnings)),
-                ],
-            )
+            [
+                str(run_id),
+                assessment.symbol,
+                assessment.status,
+                assessment.max_shares,
+                assessment.entry_price,
+                assessment.stop_price,
+                dumps_safe(list(assessment.reasons)),
+                dumps_safe(
+                    [
+                        {
+                            "warning_type": warning.warning_type,
+                            "correlated_symbol": warning.correlated_symbol,
+                            # P1-04: risk/checks.py intentionally uses NaN
+                            # as `CorrelationWarning.correlation`'s
+                            # sentinel for "data_quality" (insufficient
+                            # history to compute a correlation). JSON has
+                            # no NaN literal, so persist that sentinel as
+                            # `null` -- the spec-compliant representation
+                            # of "not computable" -- rather than letting
+                            # dumps_safe reject the whole row.
+                            "correlation": (
+                                warning.correlation
+                                if math.isfinite(warning.correlation)
+                                else None
+                            ),
+                        }
+                        for warning in assessment.warnings
+                    ]
+                ),
+                assessment.shares_by_risk,
+                assessment.shares_by_position_cap,
+                assessment.binding_constraint,
+                dumps_safe(list(assessment.sizing_warnings)),
+            ],
+        )

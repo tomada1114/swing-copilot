@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- バックテストが本番と同じ系を測るようになった（Issue #184、2026-08
+  アーキテクチャレビューの P1）。本番は候補と建玉の間にレジーム
+  （`CASH_PRIORITY` / `REDUCE_ONLY`）・portfolio heat・決算・サーキット
+  ブレーカー・セクター上限の 6 ゲートを置くが、シミュレータはどれも通して
+  おらず、`reduce_only_risk_multiplier` / `max_portfolio_heat_pct` /
+  `earnings_block_business_days` / `circuit_*` は定義上バックテストの数字を
+  1 つも動かせなかった。新規 `backtest/policy.py` が唯一のポート
+  `EntryPolicy` を定義し、本番の `RiskChecker` を**包んで**注入する
+  （エンジン側にゲートを再実装しない）。ゲートの入力は必ずシグナル日の
+  バーだけで評価する（約定は翌営業日寄付のため、当日バーでの判定は
+  look-ahead になる）
+- `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数
+  指定可）。複数アームは同一の候補ストリーム・同一の `MarketFrame` で走り、
+  指標とゲート発動回数を列比較したレポートを 1 コマンドで出す。`grid` は
+  `--policy` 非対応で、既定以外を渡すと fail-fast する
+- `BacktestResult` にエントリー計器を追加した。`entry_block_counts` /
+  `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数、
+  発火 0 件の理由も 0 として必ず報告）、`avg_invested_pct`（各日の建玉時価 /
+  equity の平均）、`max_concurrent_reached`
 - `copilot-backtest` の候補生成をエンジン走行から分離した
   （`backtest/candidate_stream.py`、Issue #185）。`grid` の 25 セルと
   `--pessimistic` の 2 シナリオは 1 本の候補ストリームを共有し、支配的
@@ -62,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **バックテストのサイジング基底を `cash` から `equity`（現金＋建玉時価）へ
+  変更した**（Issue #184、既存の数値は新基準で読み直しが必要）。旧来の現金
+  基準は保有が増えるたびにサイズを `0.9^n` で縮め、10 銘柄満玉でも投下資本が
+  約 65% にしかならず、固定 `account_equity_usd` 基準で建てる本番とは別の系を
+  測っていた。時価評価はシグナル日の終値までで行う。`copilot-backtest` は
+  `--policy` の指定有無にかかわらず SPY / QQQ / ^VIX のバーを常に読み込む
+  （アームごとに候補ストリームのキャッシュキーが変わると A/B が成立しない
+  ため）。この変更で既存の `--candidate-cache` は一度だけ再生成される
 - 8-K の export 選別を先頭スライスから**価値ベースの Exhibit 選別**へ変更した
   （Issue #181）。`analysis/filing_selection.py` が `content_text` を
   `[EXHIBIT ...]` ヘッダで主文書と各 Exhibit へ分割し、主文書＋プレスリリース

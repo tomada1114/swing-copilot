@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pandas.api.types import is_numeric_dtype
 
+from swing_copilot.backtest.policy import REGIME_SYMBOLS
 from swing_copilot.config import StrategiesConfig
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.screening.base import Candidate, ScreeningInput
@@ -173,7 +174,13 @@ def load_market_frame(
     trading_days = _trading_days(
         deps.market_store, resolved_benchmark, request.start, request.end
     )
-    all_symbols = sorted({*request.symbols, resolved_benchmark})
+    # `REGIME_SYMBOLS` are loaded unconditionally, not only when a regime
+    # policy is requested (Issue #184): they are part of the frame's content
+    # digest, so making them conditional would give each `--policy` arm a
+    # different cache key and force the A/B to re-screen per arm — the exact
+    # opposite of what the comparison needs. Screening ignores them (it
+    # iterates `universe`, not the bars frame).
+    all_symbols = sorted({*request.symbols, resolved_benchmark, *REGIME_SYMBOLS})
     # Warmup sized from the strategy's own declared bar requirement, so the
     # backtest and the daily pipeline can never again screen the same code
     # over structurally different history windows (Issue #186).

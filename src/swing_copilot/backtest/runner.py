@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from datetime import date
 
     from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
+    from swing_copilot.backtest.policy import EntryPolicy
     from swing_copilot.config import Settings
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import MarketStore
@@ -61,13 +62,16 @@ class BacktestCostOverrides:
     max_hold_days: int | None = None  # P2-10: sensitivity grid parameter
 
 
-def run_backtest(
+def run_backtest(  # noqa: PLR0913 - the three keyword-only injection seams
+    # (stream, frame, policy) are independent optional reuse points; folding
+    # them into one object would force every caller to build it.
     request: BacktestRequest,
     deps: BacktestDependencies,
     overrides: BacktestCostOverrides | None = None,
     *,
     candidate_stream: CandidateStream | None = None,
     market_frame: MarketFrame | None = None,
+    entry_policy: EntryPolicy | None = None,
 ) -> BacktestResult:
     """Run a deterministic multi-symbol backtest using production screening logic.
 
@@ -76,6 +80,10 @@ def run_backtest(
         deps: Real collaborators (store, universe, settings, strategies).
         overrides: Cost/benchmark overrides; defaults to `settings.backtest`'s
             own commission/slippage and `"SPY"`.
+        entry_policy: Production entry gates to apply between candidate and
+            fill (`backtest/policy.build_entry_policy`). `None` is the
+            `--policy none` arm. The policy is an engine-side concern only, so
+            an A/B over arms reuses one candidate stream unchanged.
         candidate_stream: A stream already screened for exactly these inputs
             (`candidate_stream.generate_candidate_stream`). Supplying it is
             what lets a sensitivity grid or a `--pessimistic` pair screen once
@@ -156,7 +164,7 @@ def run_backtest(
     def candidates_fn(day: date) -> list[Candidate]:
         return list(stream.candidates_by_day.get(day, ()))
 
-    engine = BacktestEngine(effective_settings)
+    engine = BacktestEngine(effective_settings, entry_policy)
     return engine.run(
         list(frame.trading_days),
         frame.bars,

@@ -7,6 +7,16 @@ from typing import TYPE_CHECKING
 import pytest
 
 from swing_copilot.backtest.engine import BacktestEngine, Trade
+from swing_copilot.backtest.metrics import (
+    ENTRY_BLOCK_ALREADY_HELD,
+    ENTRY_BLOCK_INSUFFICIENT_CASH,
+    ENTRY_BLOCK_INVALID_STOP,
+    ENTRY_BLOCK_MAX_CONCURRENT,
+    ENTRY_BLOCK_MISSING_DATA,
+    ENTRY_BLOCK_REASONS,
+    ENTRY_BLOCK_REGIME,
+)
+from swing_copilot.backtest.policy import EntryDecision, EntryPolicyRequest
 from swing_copilot.risk.position_sizing import calc_position_size
 from swing_copilot.screening.base import Candidate
 from tests.backtest.conftest import (
@@ -620,3 +630,366 @@ class TestEdgeCasesAndDefensiveBranches:
         assert result.benchmark_final_equity == pytest.approx(
             result.benchmark_curve[-1][1]
         )
+
+
+class _RecordingPolicy:
+    """Fake `EntryPolicy` that records exactly what the engine asked it."""
+
+    def __init__(
+        self,
+        *,
+        blocked: frozenset[str] = frozenset(),
+        reject_reason: str = ENTRY_BLOCK_REGIME,
+        max_trade_risk_pct: float | None = None,
+    ) -> None:
+        self.requests: list[EntryPolicyRequest] = []
+        self._blocked = blocked
+        self._reject_reason = reject_reason
+        self._max_trade_risk_pct = max_trade_risk_pct
+
+    def decide(self, request: EntryPolicyRequest) -> dict[str, EntryDecision]:
+        self.requests.append(request)
+        return {
+            candidate.symbol: (
+                EntryDecision(is_allowed=False, reject_reason=self._reject_reason)
+                if candidate.symbol in self._blocked
+                else EntryDecision(
+                    is_allowed=True, max_trade_risk_pct=self._max_trade_risk_pct
+                )
+            )
+            for candidate in request.candidates
+        }
+
+
+def _sized(
+    settings: Settings, equity: float, *, price: float = 100.0, atr14: float = 2.0
+) -> int:
+    entry_price = price * (1 + settings.backtest.slippage_pct)
+    stop_price = entry_price - settings.backtest.exit_atr_multiple * atr14
+    return calc_position_size(
+        equity,
+        entry_price,
+        stop_price,
+        settings.risk.max_position_pct,
+        settings.risk.max_trade_risk_pct,
+    ).shares
+
+
+class TestEquityBasedSizing:
+    """Issue #184: the sizing basis is equity, not the shrinking cash balance."""
+
+    def test_second_entry_sizes_from_equity_not_remaining_cash(self, settings, engine):
+        days = TRADING_DAYS[:6]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days, 100.0),
+            *flat_bars("BBB", days, 100.0),
+        ]
+        candidates_by_day = {
+            days[0]: [_candidate("AAA", as_of=days[0])],
+            days[1]: [_candidate("BBB", as_of=days[1])],
+        }
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        slippage = settings.backtest.slippage_pct
+        commission = settings.backtest.commission_pct
+        entry_price = 100.0 * (1 + slippage)
+        first_shares = _sized(settings, INITIAL_CASH)
+        cash_after_first = INITIAL_CASH - first_shares * entry_price * (1 + commission)
+        # AAA is marked at the signal day's close, so the second fill is sized
+        # against the whole account, not against what is left in cash.
+        equity_basis = cash_after_first + first_shares * 100.0
+        second_shares = _sized(settings, equity_basis)
+        cash_basis_shares = _sized(settings, cash_after_first)
+
+        trades = {trade.symbol: trade for trade in result.trades}
+        assert second_shares > cash_basis_shares  # the regression this pins
+        assert trades["BBB"].shares == second_shares
+
+        # Hand-calculated exact final equity: both positions survive to the
+        # end and are liquidated at the last close, with adverse slippage and
+        # commission applied on that exit as well as on both entries.
+        cash_after_second = cash_after_first - second_shares * entry_price * (
+            1 + commission
+        )
+        exit_price = 100.0 * (1 - slippage)
+        proceeds = (first_shares + second_shares) * exit_price * (1 - commission)
+        assert result.final_equity == pytest.approx(cash_after_second + proceeds)
+
+    def test_equity_basis_uses_the_signal_days_close_not_the_fill_days(
+        self, settings, engine
+    ):
+        days = TRADING_DAYS[:5]
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[0], (100, 101, 99, 100)),
+            bar_row("AAA", days[1], (100, 101, 99, 100)),
+            # A violent mark-up on BBB's own fill day. Sizing BBB against it
+            # would be look-ahead: at that day's open it has not happened yet.
+            bar_row("AAA", days[2], (300, 301, 299, 300)),
+            bar_row("AAA", days[3], (300, 301, 299, 300)),
+            bar_row("AAA", days[4], (300, 301, 299, 300)),
+            *flat_bars("BBB", days, 100.0),
+        ]
+        candidates_by_day = {
+            days[0]: [_candidate("AAA", as_of=days[0])],
+            days[1]: [_candidate("BBB", as_of=days[1])],
+        }
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        commission = settings.backtest.commission_pct
+        entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
+        first_shares = _sized(settings, INITIAL_CASH)
+        cash_after_first = INITIAL_CASH - first_shares * entry_price * (1 + commission)
+        as_of_signal_day = _sized(settings, cash_after_first + first_shares * 100.0)
+        as_of_fill_day = _sized(settings, cash_after_first + first_shares * 300.0)
+
+        trades = {trade.symbol: trade for trade in result.trades}
+        assert as_of_fill_day > as_of_signal_day
+        assert trades["BBB"].shares == as_of_signal_day
+
+
+class TestEntryPolicyInjection:
+    def test_blocked_candidate_never_fills_and_is_counted_under_its_reason(
+        self, settings
+    ):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        policy = _RecordingPolicy(blocked=frozenset({"AAA"}))
+        candidates_by_day = {days[1]: [_candidate("AAA", as_of=days[1])]}
+
+        result = BacktestEngine(settings, policy).run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert result.trades == ()
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_REGIME] == 1
+        assert dict(result.entry_block_days)[ENTRY_BLOCK_REGIME] == 1
+        assert result.final_equity == pytest.approx(INITIAL_CASH)
+
+    def test_policy_is_asked_as_of_the_signal_day_with_the_simulated_equity(
+        self, settings
+    ):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        policy = _RecordingPolicy(blocked=frozenset({"AAA"}))
+        candidates_by_day = {days[1]: [_candidate("AAA", as_of=days[1])]}
+
+        BacktestEngine(settings, policy).run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert len(policy.requests) == 1
+        request = policy.requests[0]
+        # The fill happens on days[2]; the gate is evaluated on days[1].
+        assert request.as_of == days[1]
+        assert request.equity == pytest.approx(INITIAL_CASH)
+        assert request.open_positions == ()
+
+    def test_reduced_risk_budget_from_the_policy_shrinks_the_position(self, settings):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        halved = settings.risk.max_trade_risk_pct / 2
+        policy = _RecordingPolicy(max_trade_risk_pct=halved)
+        # A wide ATR makes the *risk* cap the binding one, so halving the
+        # budget is actually observable in the share count.
+        candidates_by_day = {days[1]: [_candidate("AAA", atr14=20.0, as_of=days[1])]}
+
+        result = BacktestEngine(settings, policy).run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
+        stop_price = entry_price - settings.backtest.exit_atr_multiple * 20.0
+        expected = calc_position_size(
+            INITIAL_CASH,
+            entry_price,
+            stop_price,
+            settings.risk.max_position_pct,
+            halved,
+        ).shares
+        assert result.trades[0].shares == expected
+        assert expected < _sized(settings, INITIAL_CASH, atr14=20.0)
+
+    def test_open_positions_reach_the_policy_with_their_current_stop(self, settings):
+        days = TRADING_DAYS[:6]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days, 100.0),
+            *flat_bars("BBB", days, 100.0),
+        ]
+        policy = _RecordingPolicy()
+        candidates_by_day = {
+            days[0]: [_candidate("AAA", as_of=days[0])],
+            days[1]: [_candidate("BBB", as_of=days[1])],
+        }
+
+        BacktestEngine(settings, policy).run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        second_request = policy.requests[1]
+        assert [p.symbol for p in second_request.open_positions] == ["AAA"]
+        assert second_request.open_positions[0].stop_price is not None
+
+    def test_closed_trades_are_offered_to_the_policy_as_realized_pnl(self, settings):
+        days = TRADING_DAYS[:6]
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[0], (100, 101, 99, 100)),
+            bar_row("AAA", days[1], (100, 101, 99, 100)),
+            # Collapses below the stop the day after the fill.
+            bar_row("AAA", days[2], (50, 51, 49, 50)),
+            bar_row("AAA", days[3], (50, 51, 49, 50)),
+            bar_row("AAA", days[4], (50, 51, 49, 50)),
+            bar_row("AAA", days[5], (50, 51, 49, 50)),
+            *flat_bars("BBB", days, 100.0),
+        ]
+        policy = _RecordingPolicy()
+        candidates_by_day = {
+            days[0]: [_candidate("AAA", as_of=days[0])],
+            days[3]: [_candidate("BBB", as_of=days[3])],
+        }
+
+        result = BacktestEngine(settings, policy).run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        stop_trade = next(t for t in result.trades if t.symbol == "AAA")
+        history = policy.requests[-1].realized_pnl_history
+        assert len(history) == 1
+        assert history[0][0] == stop_trade.exit_date
+        assert history[0][1] == pytest.approx(stop_trade.pnl)
+
+
+class TestEntryInstrumentation:
+    def test_every_known_reason_is_reported_even_when_it_never_fired(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+
+        result = engine.run(days, bars_frame(rows), _no_candidates, INITIAL_CASH)
+
+        assert dict(result.entry_block_counts) == dict.fromkeys(ENTRY_BLOCK_REASONS, 0)
+        assert dict(result.entry_block_days) == dict.fromkeys(ENTRY_BLOCK_REASONS, 0)
+
+    def test_repeated_candidate_for_a_held_symbol_counts_as_already_held(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates_by_day = {
+            days[1]: [_candidate("AAA", as_of=days[1])],
+            days[2]: [_candidate("AAA", as_of=days[2])],
+        }
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_ALREADY_HELD] == 1
+
+    def test_candidate_beyond_the_concurrency_cap_counts_as_max_concurrent(
+        self, settings, engine
+    ):
+        days = TRADING_DAYS[:3]
+        symbols = [f"SYM{index}" for index in range(20)]
+        rows = list(_spy_bars(days))
+        for symbol in symbols:
+            rows += flat_bars(symbol, days, 10.0)
+        candidates_by_day = {
+            days[1]: [
+                _candidate(symbol, atr14=0.5, rank=index + 1, as_of=days[1])
+                for index, symbol in enumerate(symbols)
+            ]
+        }
+
+        result = engine.run(
+            days,
+            bars_frame(rows),
+            lambda d: candidates_by_day.get(d, []),
+            initial_cash=1_000_000.0,
+        )
+
+        max_concurrent = max(1, int(1 / settings.risk.max_position_pct))
+        counts = dict(result.entry_block_counts)
+        assert counts[ENTRY_BLOCK_MAX_CONCURRENT] == len(symbols) - max_concurrent
+        assert result.max_concurrent_reached == max_concurrent
+
+    def test_position_sized_beyond_the_cash_balance_counts_as_insufficient_cash(
+        self, engine
+    ):
+        # Equity-based sizing can outrun the cash balance once open positions
+        # are marked up: 10% of a $1.08M equity is more than the ~$90k left in
+        # cash. The entry is skipped, not filled on credit.
+        days = TRADING_DAYS[:5]
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[0], (100, 101, 99, 100)),
+            bar_row("AAA", days[1], (100, 101, 99, 100)),
+            bar_row("AAA", days[2], (10_000, 10_001, 9_999, 10_000)),
+            bar_row("AAA", days[3], (10_000, 10_001, 9_999, 10_000)),
+            bar_row("AAA", days[4], (10_000, 10_001, 9_999, 10_000)),
+            *flat_bars("BBB", days, 100.0),
+        ]
+        candidates_by_day = {
+            days[0]: [_candidate("AAA", as_of=days[0])],
+            days[2]: [_candidate("BBB", as_of=days[2])],
+        }
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert {trade.symbol for trade in result.trades} == {"AAA"}
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_INSUFFICIENT_CASH] == 1
+
+    def test_missing_fill_day_bar_counts_as_missing_data(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[1], (100, 101, 99, 100)),
+        ]
+        candidates_by_day = {days[1]: [_candidate("AAA", as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_MISSING_DATA] == 1
+
+    def test_zero_atr_counts_as_an_invalid_stop(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates_by_day = {days[1]: [_candidate("AAA", atr14=0.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_INVALID_STOP] == 1
+
+    def test_exposure_metrics_report_capital_deployment(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
+        candidates_by_day = {days[0]: [_candidate("AAA", as_of=days[0])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert result.max_concurrent_reached == 1
+        # Day 0 is entirely in cash and the later days hold one ~10%
+        # position, so the mean sits strictly between the two.
+        assert result.avg_invested_pct is not None
+        assert 0.0 < result.avg_invested_pct < 0.10
+
+    def test_empty_calendar_reports_no_deployment(self, engine):
+        result = engine.run([], bars_frame([]), _no_candidates, INITIAL_CASH)
+
+        assert result.avg_invested_pct is None
+        assert result.max_concurrent_reached == 0
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_REGIME] == 0

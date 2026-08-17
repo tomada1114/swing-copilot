@@ -148,3 +148,23 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 | `retro/validate.py` | UTF-8 として読めない振り返り成果物も `RetroIngestError` として届く | `retro_input.json` / `retro_result.json` の文字化けが生の `UnicodeDecodeError` になり、`copilot-retro ingest` の呼び出し側が壊れた成果物と区別できない | `tests/retro/test_validate.py::TestLoading::test_rejects_a_wrongly_encoded_document` |
 | `config.py` | UTF-8 として読めない `settings.yaml` / `strategies.yaml` も `ConfigError` として届く | 別エンコーディングで保存された設定が生の `UnicodeDecodeError` になり、`ConfigError` を fatal として扱う CLI 境界を素通りする | `tests/test_config.py::TestLoadSettings::test_non_utf8_file_raises_config_error`、`::TestLoadStrategies::test_non_utf8_file_raises_config_error` |
 | `retro/ledger.py` | 存在するのに読めない提案台帳は `RetroIngestError` として届き、「空の台帳」に化けない | 台帳が読めないまま `closed_proposal_keys()` が空になり、却下済みの提案が新しい RP-ID で再び通る | `tests/retro/test_ledger.py::TestReadLedger::test_an_unreadable_ledger_fails_instead_of_reading_as_empty`、`tests/retro/test_cli.py::TestExportCommand::test_exits_when_the_proposal_ledger_cannot_be_read` |
+
+## バックテストへの本番リスクゲート注入（Issue #184）
+
+本番は候補と建玉の間に6つのゲートを置き、サイジングは固定 `account_equity_usd`
+基準で行う。バックテストはそのどちらも持たず、`reduce_only_risk_multiplier` /
+`max_portfolio_heat_pct` / `earnings_block_business_days` / `circuit_*` は
+定義上バックテストの数字を1つも動かせなかった。ここで固定するのは「同じ系を
+測っている」ことと、ゲート入力にも as-of 規律が効いていることである。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `backtest/engine.py` | サイジングは equity 基準で、清算後の最終 equity が手計算値と厳密に一致する | 2件目を残現金基準で建て、保有が増えるほどサイズが `0.9^n` に縮む | `tests/backtest/test_engine.py::TestEquityBasedSizing::test_second_entry_sizes_from_equity_not_remaining_cash` |
+| `backtest/engine.py` | サイジングの時価評価はシグナル日の終値までで、約定日当日の終値を見ない | 約定日に急騰した保有銘柄の時価で当日の新規建玉を大きくする | `tests/backtest/test_engine.py::TestEquityBasedSizing::test_equity_basis_uses_the_signal_days_close_not_the_fill_days` |
+| `backtest/policy.py` | レジーム判定はシグナル日のバーだけを見る（直前・同日・直後の3点） | 翌日の VIX 急騰が前日の判断を後ろ向きに書き換える | `tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_immediately_before_the_cutoff_leaves_entries_allowed`、`tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_exactly_at_the_cutoff_is_included_and_blocks`、`tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_after_the_cutoff_cannot_reach_back_and_block_an_earlier_day` |
+| `backtest/policy.py` | `CASH_PRIORITY` は全候補を `regime` 理由でブロックする | レジームが閉じた日にバックテストだけが建玉を作る | `tests/backtest/test_policy.py::TestRegimeGate::test_cash_priority_blocks_every_candidate_with_the_regime_reason` |
+| `backtest/policy.py` | `REDUCE_ONLY` は実効 `max_trade_risk_pct` を乗数どおり縮める | レジームが半減を指示してもサイズが変わらない | `tests/backtest/test_policy.py::TestRegimeGate::test_reduce_only_halves_the_effective_trade_risk_budget`、`tests/backtest/test_engine.py::TestEntryPolicyInjection::test_reduced_risk_budget_from_the_policy_shrinks_the_position` |
+| `backtest/policy.py` | サイジング不能な候補は fail-closed で建てない | `close`/`atr14` を欠く候補を既定値で建てる | `tests/backtest/test_policy.py::TestRegimeGate::test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed` |
+| `backtest/policy.py` | SPY/QQQ/^VIX のバーが無い状態の `--policy` は実行前に落ちる | レジーム UNKNOWN の fail-closed で全期間ゼロ取引のレポートを黙って出す | `tests/backtest/test_policy.py::TestArmSelection::test_missing_regime_bars_fail_fast_instead_of_blocking_silently` |
+| `backtest/cli.py` | `--policy` の A/B は 1 本の候補ストリームを共有する | アームごとにスクリーニングし直し、差分がゲート以外にも由来する | `tests/backtest/test_cli.py::TestPolicyEndToEnd::test_ab_run_compares_arms_over_one_candidate_stream` |
+| `backtest/metrics.py` | 発火 0 件のエントリー阻止理由も 0 として必ず報告する | 一度も効かなかったゲートがレポートから消え、「効いた」と読めてしまう | `tests/backtest/test_metrics.py::TestEntryBlockBreakdown::test_every_known_reason_is_reported_even_at_zero` |

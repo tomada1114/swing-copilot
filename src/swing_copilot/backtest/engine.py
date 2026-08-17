@@ -17,23 +17,47 @@ Per-day order of operations (never looks past the current day's own bars):
 3. Update trailing stops after today's close (effective from tomorrow).
 4. Generate today's candidates and queue them for tomorrow's fill.
 5. Record today's closing equity.
+
+Issue #184 changed two things about step 1. Sizing is based on *equity* (cash
+plus marked positions) rather than on remaining cash, matching
+`pipeline/daily.py`'s fixed `risk.account_equity_usd` basis — cash-based
+sizing shrank every position by 0.9^n and deployed only ~65% of the account at
+ten holdings, so the simulator was measuring a system nobody trades. And the
+production entry gates are consulted through the injected `EntryPolicy` port
+(`backtest/policy.py`), which wraps `risk/checks.py` rather than reimplementing
+it here. Both the equity basis and the gate inputs are resolved as of the
+*signal* day, never the fill day: at tomorrow's open the newest observable
+fact is today's close.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
 from swing_copilot.backtest.exits import atr14_as_of, evaluate_exit, next_trailing_stop
+from swing_copilot.backtest.metrics import (
+    ENTRY_BLOCK_ALREADY_HELD,
+    ENTRY_BLOCK_INSUFFICIENT_CASH,
+    ENTRY_BLOCK_INVALID_STOP,
+    ENTRY_BLOCK_MAX_CONCURRENT,
+    ENTRY_BLOCK_MISSING_DATA,
+    ENTRY_BLOCK_NOT_CALCULABLE,
+    ENTRY_BLOCK_ZERO_SHARES,
+    DailyExposure,
+)
+from swing_copilot.backtest.policy import EntryPolicyRequest, as_position
 from swing_copilot.risk.position_sizing import calc_position_size
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from datetime import date
 
     import pandas as pd
 
+    from swing_copilot.backtest.policy import EntryDecision, EntryPolicy
     from swing_copilot.config import Settings
     from swing_copilot.screening.base import Candidate
 
@@ -100,6 +124,17 @@ class BacktestResult:
     exit_reason_counts: tuple[tuple[str, int], ...]
     max_hold_binding_rate: float | None
     holding_days: metrics.HoldingDaysStats | None
+    # Entry instrumentation (Issue #184): which gate or constraint stopped a
+    # ranked candidate from becoming a position. `entry_block_counts` counts
+    # candidate-days; `entry_block_days` counts the distinct sessions on which
+    # each reason fired at least once, which is the "how often was the market
+    # closed to us?" reading.
+    entry_block_counts: tuple[tuple[str, int], ...] = ()
+    entry_block_days: tuple[tuple[str, int], ...] = ()
+    # Capital deployment (Issue #184): without these, a weak return cannot be
+    # split into "picked badly" and "never invested".
+    avg_invested_pct: float | None = None
+    max_concurrent_reached: int = 0
     survivorship_bias_note: str = SURVIVORSHIP_BIAS_NOTE
 
 
@@ -125,6 +160,58 @@ class _SimState:
     benchmark_shares: int = 0
     benchmark_cash: float = 0.0
     benchmark_initialized: bool = False
+    entry_block_counts: defaultdict[str, int] = field(
+        default_factory=lambda: defaultdict(int)
+    )
+    entry_block_days: defaultdict[str, set[date]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
+    daily_exposure: list[DailyExposure] = field(default_factory=list)
+
+    def equity(self, bars: pd.DataFrame, day: date) -> float:
+        """Account equity as of `day`'s close: cash plus marked positions.
+
+        Args:
+            bars: The whole tidy OHLCV frame.
+            day: Inclusive valuation cutoff; positions without a bar on that
+                exact day carry their newest earlier close forward.
+
+        Returns:
+            Total equity in USD.
+        """
+        return self.cash + _mark_to_market(self, bars, day)
+
+    def record_block(self, day: date, reason: str) -> None:
+        """Record that `reason` stopped one candidate from filling on `day`."""
+        self.entry_block_counts[reason] += 1
+        self.entry_block_days[reason].add(day)
+
+
+@dataclass(frozen=True, slots=True)
+class _FillContext:
+    """Everything one day's entry fills are evaluated against."""
+
+    day: date
+    bars: pd.DataFrame
+    #: Equity as of the signal day's close — the sizing basis for every fill
+    #: attempted on `day`, so a candidate's size never depends on which of the
+    #: day's other candidates happened to fill first.
+    equity_basis: float
+    state: _SimState
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultInputs:
+    """Everything `_build_result` renders, bundled to keep the arity sane."""
+
+    trades: tuple[Trade, ...]
+    equity_curve: tuple[tuple[date, float], ...]
+    benchmark_curve: tuple[tuple[date, float], ...]
+    final_equity: float
+    benchmark_final_equity: float
+    exposure: tuple[DailyExposure, ...] = ()
+    entry_block_counts: Mapping[str, int] = field(default_factory=dict)
+    entry_block_days: Mapping[str, set[date]] = field(default_factory=dict)
 
 
 def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
@@ -138,6 +225,16 @@ def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
         "low": float(row["low"]),
         "close": float(row["close"]),
     }
+
+
+def _mark_to_market(state: _SimState, bars: pd.DataFrame, day: date) -> float:
+    """Value every open position at its newest close on or before `day`."""
+    total = 0.0
+    for position in state.open_positions.values():
+        bar = _latest_bar(bars, position.symbol, day)
+        if bar is not None:
+            total += position.shares * bar["close"]
+    return total
 
 
 def _latest_bar(
@@ -159,12 +256,18 @@ def _latest_bar(
 class BacktestEngine:
     """Runs the fixed fill/stop/hold rules over injected candidates and bars."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, entry_policy: EntryPolicy | None = None
+    ) -> None:
         """Create the engine.
 
         Args:
             settings: Loaded application settings (`backtest.*`, `risk.*`).
+            entry_policy: Production entry gates to consult before each fill
+                (`backtest/policy.py`). `None` runs the deterministic
+                screening/sizing path alone, which is the `--policy none` arm.
         """
+        self._entry_policy = entry_policy
         self._backtest_config = settings.backtest
         self._max_concurrent_positions = max(1, int(1 / settings.risk.max_position_pct))
         self._max_position_pct = settings.risk.max_position_pct
@@ -200,18 +303,22 @@ class BacktestEngine:
             The full trade log, equity curves, and survivorship bias note.
         """
         if not trading_days:
-            return self._build_result((), (), (), initial_cash, initial_cash)
+            return self._build_result(
+                _ResultInputs((), (), (), initial_cash, initial_cash)
+            )
 
         state = _SimState(cash=initial_cash, benchmark_cash=initial_cash)
         pending_entries: list[Candidate] = []
         equity_curve: list[tuple[date, float]] = []
         benchmark_curve: list[tuple[date, float]] = []
+        signal_day: date | None = None
 
         for day in trading_days:
-            self._fill_pending_entries(day, bars, pending_entries, state)
+            self._fill_pending_entries(day, signal_day, bars, pending_entries, state)
             self._process_exits(day, bars, state)
             self._update_trailing_stops(day, bars, state)
             pending_entries = candidates_fn(day)
+            signal_day = day
 
             if not state.benchmark_initialized:
                 benchmark_bar = _bar(bars, benchmark_symbol, day)
@@ -222,8 +329,15 @@ class BacktestEngine:
                     )
                     state.benchmark_initialized = True
 
-            equity_curve.append(
-                (day, state.cash + self._mark_to_market(state, bars, day))
+            invested = _mark_to_market(state, bars, day)
+            equity_curve.append((day, state.cash + invested))
+            state.daily_exposure.append(
+                DailyExposure(
+                    day=day,
+                    invested_usd=invested,
+                    equity_usd=state.cash + invested,
+                    open_position_count=len(state.open_positions),
+                )
             )
             benchmark_bar = _latest_bar(bars, benchmark_symbol, day)
             benchmark_curve.append(
@@ -240,29 +354,32 @@ class BacktestEngine:
         equity_curve[-1] = (trading_days[-1], state.cash)
 
         return self._build_result(
-            tuple(state.closed_trades),
-            tuple(equity_curve),
-            tuple(benchmark_curve),
-            equity_curve[-1][1] if equity_curve else initial_cash,
-            benchmark_curve[-1][1] if benchmark_curve else initial_cash,
+            _ResultInputs(
+                trades=tuple(state.closed_trades),
+                equity_curve=tuple(equity_curve),
+                benchmark_curve=tuple(benchmark_curve),
+                final_equity=equity_curve[-1][1] if equity_curve else initial_cash,
+                benchmark_final_equity=(
+                    benchmark_curve[-1][1] if benchmark_curve else initial_cash
+                ),
+                exposure=tuple(state.daily_exposure),
+                entry_block_counts=dict(state.entry_block_counts),
+                entry_block_days=dict(state.entry_block_days),
+            )
         )
 
-    def _build_result(
-        self,
-        trades: tuple[Trade, ...],
-        equity_curve: tuple[tuple[date, float], ...],
-        benchmark_curve: tuple[tuple[date, float], ...],
-        final_equity: float,
-        benchmark_final_equity: float,
-    ) -> BacktestResult:
+    def _build_result(self, inputs: _ResultInputs) -> BacktestResult:
+        trades = inputs.trades
+        equity_curve = inputs.equity_curve
         win_rate = metrics.compute_win_rate(trades)
         max_drawdown_pct = metrics.compute_max_drawdown_pct(equity_curve)
+        block_counts = metrics.entry_block_breakdown(inputs.entry_block_counts)
         return BacktestResult(
             trades=trades,
             equity_curve=equity_curve,
-            benchmark_curve=benchmark_curve,
-            final_equity=final_equity,
-            benchmark_final_equity=benchmark_final_equity,
+            benchmark_curve=inputs.benchmark_curve,
+            final_equity=inputs.final_equity,
+            benchmark_final_equity=inputs.benchmark_final_equity,
             trade_count=len(trades),
             sharpe=metrics.compute_sharpe(equity_curve),
             max_drawdown_pct=max_drawdown_pct,
@@ -276,56 +393,156 @@ class BacktestEngine:
             exit_reason_counts=tuple(metrics.exit_reason_breakdown(trades).items()),
             max_hold_binding_rate=metrics.max_hold_binding_rate(trades),
             holding_days=metrics.holding_days_stats(trades),
+            entry_block_counts=tuple(block_counts.items()),
+            entry_block_days=tuple(
+                (reason, len(inputs.entry_block_days.get(reason, ())))
+                for reason in block_counts
+            ),
+            avg_invested_pct=metrics.compute_avg_invested_pct(inputs.exposure),
+            max_concurrent_reached=metrics.compute_max_concurrent_reached(
+                inputs.exposure
+            ),
         )
 
     def _fill_pending_entries(
         self,
         day: date,
+        signal_day: date | None,
         bars: pd.DataFrame,
         pending_entries: list[Candidate],
         state: _SimState,
     ) -> None:
+        """Fill yesterday's candidates at today's open, subject to the gates.
+
+        Args:
+            day: The fill day.
+            signal_day: The day `pending_entries` were screened on — the
+                as-of date for both the sizing equity and every gate input.
+                `None` only on the very first simulated day, when nothing can
+                be pending yet.
+            bars: The whole tidy OHLCV frame.
+            pending_entries: Yesterday's ranked candidates.
+            state: Mutable simulation state.
+        """
+        if not pending_entries or signal_day is None:
+            return
+        considered: list[Candidate] = []
         for candidate in sorted(pending_entries, key=lambda c: c.rank):
             if candidate.symbol in state.open_positions:
-                continue
+                state.record_block(day, ENTRY_BLOCK_ALREADY_HELD)
+            else:
+                considered.append(candidate)
+        if not considered:
+            return
+
+        # One basis for the whole day, marked at the signal day's close: the
+        # fill happens at today's open, where today's close is still unknown.
+        context = _FillContext(
+            day=day,
+            bars=bars,
+            equity_basis=state.equity(bars, signal_day),
+            state=state,
+        )
+        decisions = self._policy_decisions(signal_day, considered, context)
+
+        for index, candidate in enumerate(considered):
             if len(state.open_positions) >= self._max_concurrent_positions:
+                for _blocked in considered[index:]:
+                    state.record_block(day, ENTRY_BLOCK_MAX_CONCURRENT)
                 break
-            bar = _bar(bars, candidate.symbol, day)
-            atr14 = candidate.metrics.get("atr14")
-            if bar is None or atr14 is None:
-                continue
+            reason = self._try_fill(context, candidate, decisions.get(candidate.symbol))
+            if reason is not None:
+                state.record_block(day, reason)
 
-            entry_price = bar["open"] * (1 + self._slippage_pct)
-            stop_price = entry_price - self._backtest_config.exit_atr_multiple * atr14
-            try:
-                shares = calc_position_size(
-                    state.cash,
-                    entry_price,
-                    stop_price,
-                    self._max_position_pct,
-                    self._max_trade_risk_pct,
-                ).shares
-            except ValueError:
-                continue
-            if shares <= 0:
-                continue
+    def _policy_decisions(
+        self,
+        signal_day: date,
+        candidates: list[Candidate],
+        context: _FillContext,
+    ) -> Mapping[str, EntryDecision]:
+        """Consult the injected production gates once for the whole day.
 
-            entry_notional = shares * entry_price
-            entry_commission = entry_notional * self._backtest_config.commission_pct
-            cost = entry_notional + entry_commission
-            if cost > state.cash:
-                continue
-
-            state.cash -= cost
-            state.open_positions[candidate.symbol] = _OpenPosition(
-                symbol=candidate.symbol,
-                entry_date=day,
-                entry_price=entry_price,
-                shares=shares,
-                stop_price=stop_price,
-                initial_stop_price=stop_price,
-                entry_commission_usd=entry_commission,
+        The batch call is deliberate: `RiskChecker` accumulates portfolio heat
+        across a day's candidates in rank order, exactly as `pipeline/daily.py`
+        does, and a per-candidate call would quietly drop that accumulation.
+        """
+        if self._entry_policy is None:
+            return {}
+        state = context.state
+        return self._entry_policy.decide(
+            EntryPolicyRequest(
+                as_of=signal_day,
+                candidates=tuple(candidates),
+                open_positions=tuple(
+                    as_position(
+                        position.symbol,
+                        position.entry_date,
+                        position.entry_price,
+                        position.shares,
+                        position.stop_price,
+                    )
+                    for position in state.open_positions.values()
+                ),
+                equity=context.equity_basis,
+                realized_pnl_history=tuple(
+                    (trade.exit_date, trade.pnl) for trade in state.closed_trades
+                ),
             )
+        )
+
+    def _try_fill(
+        self,
+        context: _FillContext,
+        candidate: Candidate,
+        decision: EntryDecision | None,
+    ) -> str | None:
+        """Attempt one entry; return the block reason, or `None` on a fill."""
+        state = context.state
+        bar = _bar(context.bars, candidate.symbol, context.day)
+        atr14 = candidate.metrics.get("atr14")
+        if bar is None or atr14 is None:
+            return ENTRY_BLOCK_MISSING_DATA
+        if decision is not None and not decision.is_allowed:
+            return decision.reject_reason or ENTRY_BLOCK_NOT_CALCULABLE
+
+        risk_pct = self._max_trade_risk_pct
+        if decision is not None and decision.max_trade_risk_pct is not None:
+            # Already halved by the checker under REDUCE_ONLY; the engine
+            # never reapplies the multiplier itself.
+            risk_pct = decision.max_trade_risk_pct
+
+        entry_price = bar["open"] * (1 + self._slippage_pct)
+        stop_price = entry_price - self._backtest_config.exit_atr_multiple * atr14
+        try:
+            shares = calc_position_size(
+                context.equity_basis,
+                entry_price,
+                stop_price,
+                self._max_position_pct,
+                risk_pct,
+            ).shares
+        except ValueError:
+            return ENTRY_BLOCK_INVALID_STOP
+        if shares <= 0:
+            return ENTRY_BLOCK_ZERO_SHARES
+
+        entry_notional = shares * entry_price
+        entry_commission = entry_notional * self._backtest_config.commission_pct
+        cost = entry_notional + entry_commission
+        if cost > state.cash:
+            return ENTRY_BLOCK_INSUFFICIENT_CASH
+
+        state.cash -= cost
+        state.open_positions[candidate.symbol] = _OpenPosition(
+            symbol=candidate.symbol,
+            entry_date=context.day,
+            entry_price=entry_price,
+            shares=shares,
+            stop_price=stop_price,
+            initial_stop_price=stop_price,
+            entry_commission_usd=entry_commission,
+        )
+        return None
 
     def _process_exits(self, day: date, bars: pd.DataFrame, state: _SimState) -> None:
         for position in list(state.open_positions.values()):
@@ -391,14 +608,6 @@ class BacktestEngine:
                 atr=atr14,
                 exit_atr_multiple=self._backtest_config.exit_atr_multiple,
             )
-
-    def _mark_to_market(self, state: _SimState, bars: pd.DataFrame, day: date) -> float:
-        total = 0.0
-        for position in state.open_positions.values():
-            bar = _latest_bar(bars, position.symbol, day)
-            if bar is not None:
-                total += position.shares * bar["close"]
-        return total
 
     def _liquidate_remaining(
         self, final_day: date, bars: pd.DataFrame, state: _SimState

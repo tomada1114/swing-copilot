@@ -525,12 +525,16 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 ## `copilot-dd-forward`とDistribution Day水準の予測力
 
 `regime.dd_*`は roadmap §5 P3-13 で**要検証**のまま本番に入っていた。しかも
-検証する手段が無かった。`backtest/`は`regime.exposure`も`regime.distribution`も
-importしておらず（`backtest/engine.py`のサイジングは`risk/position_sizing.py`を
-直接呼ぶ）、`dd_*`をどう動かしても`copilot-backtest`の数字は1つも動かない。
-一方で`SEVERE`は`_base_exposure`で単独に`CASH_PRIORITY`まで落とし、その日の
-候補は全銘柄`shares=0`になる。**効果を測れないまま、最も強い制約を課している
-パラメーターだった。**
+当初は検証する手段が無かった。`backtest/`は`regime.exposure`も
+`regime.distribution`もimportしておらず、`dd_*`をどう動かしても
+`copilot-backtest`の数字は1つも動かなかった。一方で`SEVERE`は`_base_exposure`で
+単独に`CASH_PRIORITY`まで落とし、その日の候補は全銘柄`shares=0`になる。
+**効果を測れないまま、最も強い制約を課しているパラメーターだった。**
+
+Issue #184の`copilot-backtest --policy none|regime|regime+risk`は、この閉路を
+戦略まるごとの水準で開いた（`backtest/policy.py`が本番の`RiskChecker`を包んで
+注入する）。以下の`copilot-dd-forward`はそれと補完関係にあり、戦略の勝ち負けに
+混ぜず**水準そのもの**の予測力だけを分離して見る道具である。
 
 `copilot-dd-forward`（`regime/dd_forward_cli.py`）は保存済み履歴を1日ずつ
 `as_of`として再生し、`pipeline/daily.py::_calculate_regime_snapshot`と同一の
@@ -611,6 +615,42 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 中央値と四分位である。感応度グリッドのMaxHold列が全て同値だったとき、
 「そのパラメータが効かない」のか「一度も発火していない」のかを区別するために
 ある。binding rateが0%に近ければ、`max_hold_days`をどう振っても結果は動かない。
+
+## 本番ゲートのA/B（`--policy`）
+
+`--policy`は「候補→建玉」の間に本番の6ゲート（レジーム
+`CASH_PRIORITY`/`REDUCE_ONLY`、portfolio heat、決算ブロック、サーキット
+ブレーカー、セクター上限）をどこまで通すかを選ぶ。カンマ区切りで複数指定すると、
+**同一の候補ストリーム**に対してアームごとにエンジンだけを走らせ、指標と
+ゲート発動回数を列比較する。
+
+```bash
+copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
+  --policy none,regime,regime+risk
+```
+
+- `none`: ゲート無し（従来の挙動）
+- `regime`: レジームのExposure Ceilingのみ
+- `regime+risk`: レジーム＋portfolio heat＋セクター上限＋サーキットブレーカー
+  （run自身の決済損益から評価する）
+
+レポートの`Entry blocks`は「入らなかった理由」を*候補件数（発動セッション数）*
+の形で出す。`regime`が`120 (37d)`なら、37営業日でレジームが閉じ、その日の候補
+延べ120件が入らなかった、という読み方になる。
+
+ゲートの入力は必ず**シグナル日**（＝候補生成日）のバーだけで評価する。約定は
+翌営業日寄付なので、約定日当日のバーでレジームを判定すればlook-aheadになる。
+なお`SPY`/`QQQ`/`^VIX`のバーは`--policy`の指定有無にかかわらず常に読み込む
+（アームごとにキャッシュキーが変わると、A/Bが1本のストリームを共有できなく
+なるため）。これらの価格履歴が無い状態で`--policy`を指定すると、レジームが
+UNKNOWNのまま全期間を塞ぐ結果を黙って出す代わりに、実行前にエラーで止まる。
+
+`--policy`はサイジング基底の変更（Issue #184）とセットである。1建玉のサイズは
+残現金ではなく`equity = cash + 建玉時価`から決まる。旧来の現金基準は保有が
+増えるたびにサイズを`0.9^n`で縮め、10銘柄満玉でも投下資本が約65%にしかならず、
+固定`account_equity_usd`基準で建てる本番とは別の系を測っていた。`run`の指標に
+出る`avg_invested_pct`（各日の建玉時価/equityの平均）と
+`max_concurrent_reached`が、この投下度合いをそのまま数字にする。
 
 ## 候補ストリームキャッシュ（`--candidate-cache`）
 

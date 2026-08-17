@@ -78,6 +78,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   続けるリスクがあった。`PreflightAbort` に閉集合の `reason` を持たせ、
   stderr 先頭へ機械可読な `PREFLIGHT_ABORT[<reason>]:` プレフィックスを
   書く契約へ変更し、スキル側の分岐を更新した
+- `backtest.exit_atr_period` が死んだ設定キーだった（`settings.yaml` にあり
+  strict スキーマも受け付けるのに、`backtest/exits.py` の `ATR_PERIOD = 14`
+  固定でどこからも読まれず、「設定した = 検証した」の誤認を招いていた）。
+  `atr14_as_of` / `atr14_by_date` を `atr_as_of` / `atr_by_date`
+  （`period` 引数は既定値なし）へ一般化し、`BacktestEngine` のトレーリング
+  ストップと `tracking/update.py` の台帳リプレイが
+  `settings.backtest.exit_atr_period` を渡すようにした（Issue #194）。
+  これで #185 の感応度グリッドの 1 次元スイープ対象にできる。エントリー側の
+  ストップ距離はランキング指標 `atr14`（`screening/pipeline.py` の
+  `_ATR_WINDOW`、本番 `risk/checks.py` と同じ値）のままで、意図的に統合
+  していない
+- `copilot-backtest --limit N` が `ORDER BY symbol` の先頭 N 件、つまり
+  「A で始まる N 銘柄」を返していた（Issue #194）。セクター構成が S&P 500 と
+  別物になるうえ、Minervini の RS パーセンタイル（条件 7）のように*渡された
+  集合内の相対順位*で決まるチェックは条件の意味自体が変わる。`gics_sector`
+  で比例配分（最大剰余法）したうえで各セクター内を salt 付き blake2b の
+  ハッシュ順に選ぶ決定論的サンプリングへ変更し、採用方式・実銘柄数・
+  セクター構成を terminal と markdown 双方のレポート冒頭に必ず出すように
+  した（生存者バイアス注記と同じ扱い）
 
 ### Changed
 

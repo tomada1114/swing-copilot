@@ -264,6 +264,10 @@ class BacktestConfig(_StrictModel):
     initial_cash_usd: float = Field(default=100_000, gt=0.0)
     entry: str = "next_open"
     exit_atr_multiple: float = Field(default=2.5, gt=0.0)
+    # Wilder period of the ATR the *exit* side uses: the backtest's trailing
+    # stop and the tracking ledger's replay of it (Issue #194). The entry-side
+    # stop distance keeps using screening's `atr14` ranking metric, so this key
+    # can be swept without moving position sizing or the ranking.
     exit_atr_period: int = Field(default=14, ge=1)
     max_hold_days: int = Field(default=60, ge=1)
     commission_pct: float = Field(default=0.001, ge=0.0, lt=1.0)

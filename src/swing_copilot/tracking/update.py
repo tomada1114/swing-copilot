@@ -31,9 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
 from swing_copilot.backtest.exits import (
-    ATR_PERIOD,
-    atr14_as_of,
-    atr14_by_date,
+    atr_as_of,
+    atr_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
@@ -128,8 +127,8 @@ def update_tracking(
     Args:
         state_store: Verdict source and tracking-ledger target.
         market_store: Stored bars; nothing is fetched.
-        backtest_config: `exit_atr_multiple` and `max_hold_days`, the same
-            values the simulator uses.
+        backtest_config: `exit_atr_multiple`, `exit_atr_period` and
+            `max_hold_days`, the same values the simulator uses.
         as_of: Inclusive point-in-time cutoff. No bar dated later is read, and
             no verdict from a later run is opened.
 
@@ -331,11 +330,11 @@ def _seed_position(
 
     stop_price = candidate.stop_price
     if stop_price is None:
-        atr = atr14_as_of(bars, candidate.symbol, candidate.as_of)
+        atr = atr_as_of(bars, candidate.symbol, candidate.as_of, config.exit_atr_period)
         if atr is None:
             notes.append(
                 f"{candidate.symbol} {candidate.as_of.isoformat()}: "
-                f"ATR({ATR_PERIOD})を算出できずストップ未設定で追跡する"
+                f"ATR({config.exit_atr_period})を算出できずストップ未設定で追跡する"
                 "（最大保有日数のみで手仕舞い判定）"
             )
         else:
@@ -387,7 +386,11 @@ def _advance(
     sessions = _sessions(work.bars, position.symbol, resume_after, as_of)
     # One smoothing pass for the whole replay, and none at all on the common
     # rerun where `last_marked_date` already sits on `as_of`.
-    atr_by_date = atr14_by_date(work.bars, position.symbol, as_of) if sessions else {}
+    atr_per_session = (
+        atr_by_date(work.bars, position.symbol, as_of, config.exit_atr_period)
+        if sessions
+        else {}
+    )
 
     for record in sessions:
         session_date: date = record["date"]
@@ -425,7 +428,7 @@ def _advance(
             break
 
         stop_price = position.stop_price
-        atr = atr_by_date.get(session_date)
+        atr = atr_per_session.get(session_date)
         if atr is not None:
             stop_price = next_trailing_stop(
                 current_stop=stop_price,

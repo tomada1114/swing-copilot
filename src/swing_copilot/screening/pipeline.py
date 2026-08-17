@@ -49,6 +49,11 @@ if TYPE_CHECKING:
     from swing_copilot.storage.market_store import MarketStore
 
 _RSI_WINDOW = 14
+#: Window of the `atr14` ranking metric. Deliberately *not* unified with
+#: `settings.backtest.exit_atr_period` (Issue #194): that key is the exit
+#: side's smoothing period and may be swept on its own, while this one feeds
+#: ranking and -- through `risk/checks.py` -- the entry stop distance, so
+#: moving it would silently redefine the score and the position size.
 _ATR_WINDOW = 14
 _AVG_VOLUME_WINDOW = 20
 _SMA_SHORT_WINDOW = 50

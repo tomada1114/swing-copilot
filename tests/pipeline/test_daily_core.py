@@ -636,6 +636,7 @@ class TestSameDayRerunGuard:
         with pytest.raises(PreflightAbort) as exc_info:
             run_daily(DailyRunOptions(is_dry_run=True), deps)
 
+        assert exc_info.value.reason == "same_day_rerun"
         message = str(exc_info.value)
         assert str(existing_id) in message
         assert _LIVE_RUN_DATE.isoformat() in message

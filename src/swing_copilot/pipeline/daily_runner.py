@@ -174,7 +174,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
                 f"report={report if report is not None else '不明'})。"
                 "再実行するには --allow-same-day-rerun を指定してください。"
             )
-            raise PreflightAbort(msg)
+            raise PreflightAbort(msg, reason="same_day_rerun")
 
     config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
     run_id = deps.state_store.start_run(

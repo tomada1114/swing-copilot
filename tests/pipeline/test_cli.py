@@ -419,6 +419,9 @@ class TestPreflight:
             _preflight(deps, DailyRunOptions())
 
         assert "CIRCUIT_BREAKER_HALTED" in str(exc_info.value)
+        # The consuming skill branches on this tag: without it, a config
+        # problem is indistinguishable from "already analyzed today".
+        assert exc_info.value.reason == "account_equity_unset"
 
     def test_a_close_price_of_none_still_counts_as_one_closed_position(
         self, settings, state_store
@@ -482,7 +485,11 @@ class TestPreflight:
 
         assert exc_info.value.code == 2
         assert run_daily_calls == []
-        assert "risk.account_equity_usd" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "risk.account_equity_usd" in err
+        # Machine-readable prefix contract with the swing-daily skill: both
+        # abort causes share exit code 2, so stderr must carry the reason.
+        assert "PREFLIGHT_ABORT[account_equity_unset]:" in err
         with state_store._database.connect() as conn:  # noqa: SLF001
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)

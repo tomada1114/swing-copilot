@@ -526,6 +526,14 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
             {"technical_signals": {"vcp": {"contraction_ratio_max": 1.1}}},
             id="vcp-ratio",
         ),
+        pytest.param(
+            {
+                "technical_signals": {
+                    "vcp": {"min_contractions": 3, "max_contractions": 2}
+                }
+            },
+            id="vcp-max-contractions-below-min",
+        ),
     ],
 )
 def test_settings_rejects_invalid_quantitative_thresholds(overrides):

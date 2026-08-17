@@ -26,7 +26,12 @@ from swing_copilot.screening.base import (
     SignalHit,
     register_signal,
 )
-from swing_copilot.screening.pipeline import ScreeningPipeline
+from swing_copilot.screening.pipeline import (
+    PRICE_HISTORY_LOOKBACK_DAYS,
+    ScreeningPipeline,
+    price_history_lookback_days,
+    strategy_required_bars,
+)
 from swing_copilot.universe import UniverseMember
 from tests.screening.conftest import FundamentalsSpec, make_bars, make_fundamentals_row
 
@@ -271,6 +276,7 @@ class TestCandidateAggregationAndRanking:
         @register_signal("always_hit_short_history_test_signal")
         class _AlwaysHitSignal:
             name = "always_hit_short_history_test_signal"
+            required_bars = 1
 
             def __init__(self, settings: object) -> None:
                 pass
@@ -457,6 +463,7 @@ class TestCompositeScoring:
         @register_signal("score_test_signal")
         class _AlwaysHitSignal:
             name = "score_test_signal"
+            required_bars = 1
 
             def __init__(self, settings: object) -> None:
                 pass
@@ -687,6 +694,7 @@ class TestAtrPctScoreComponent:
         @register_signal("score_test_signal")
         class _AlwaysHitSignal:
             name = "score_test_signal"
+            required_bars = 1
 
             def __init__(self, settings: object) -> None:
                 pass
@@ -772,6 +780,7 @@ class TestExtensibility:
         @register_signal("always_hit_test_signal")
         class _AlwaysHitSignal:
             name = "always_hit_test_signal"
+            required_bars = 1
 
             def __init__(self, settings: object) -> None:
                 pass
@@ -1157,3 +1166,67 @@ class TestRunMatchesRunWithRejections:
             (c.symbol, c.rank, c.metrics)
             for c in pipeline.run_with_rejections(data).candidates
         ]
+
+
+class TestRequiredBars:
+    """#186: signals declare their bar needs; callers derive lookback from them."""
+
+    @staticmethod
+    def _pipeline(settings: Settings, signals: list[str]) -> ScreeningPipeline:
+        return ScreeningPipeline(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": signals,
+                        "candidate_limit": 10,
+                    }
+                }
+            },
+            market_store=None,
+            settings=settings,
+        )
+
+    def test_required_bars_is_the_ranking_window_when_no_signal_needs_more(
+        self, settings
+    ):
+        # trend_sma (200) and pullback_rsi (50) never exceed the SMA200
+        # ranking warmup.
+        pipeline = self._pipeline(settings, ["trend_sma", "pullback_rsi"])
+
+        assert pipeline.required_bars == 200
+
+    def test_required_bars_extends_to_the_vcp_pattern_window(self, settings):
+        pipeline = self._pipeline(settings, ["vcp_breakout"])
+
+        expected = settings.technical_signals.vcp.pattern_days_max + 60
+        assert pipeline.required_bars == expected
+
+    def test_required_bars_floors_at_ranking_window_with_no_signals(self, settings):
+        assert self._pipeline(settings, []).required_bars == 200
+
+    def test_lookback_days_keeps_the_pre_186_floor(self):
+        # 200 bars is exactly what the long-standing 400-day constant served.
+        assert price_history_lookback_days(200) == PRICE_HISTORY_LOOKBACK_DAYS
+        assert price_history_lookback_days(1) == PRICE_HISTORY_LOOKBACK_DAYS
+
+    def test_lookback_days_scales_past_the_floor(self, settings):
+        pipeline = self._pipeline(settings, ["vcp_breakout"])
+
+        assert price_history_lookback_days(pipeline.required_bars) == 770
+
+    def test_strategy_required_bars_matches_the_pipeline_property(self, settings):
+        config = {
+            "strategies": {
+                "vcp": {
+                    "filters_all": [],
+                    "signals_all": ["vcp_breakout"],
+                    "candidate_limit": 10,
+                }
+            }
+        }
+
+        assert (
+            strategy_required_bars(config, settings, "vcp")
+            == ScreeningPipeline(config, None, settings, "vcp").required_bars
+        )

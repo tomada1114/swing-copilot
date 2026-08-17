@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
 
-from swing_copilot.screening.base import ScreeningInput
+from swing_copilot.screening.base import ScreeningInput, SignalHit
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.screening.technical_signals import VcpBreakoutSignal
 from swing_copilot.screening.vcp import (
@@ -95,6 +96,93 @@ def test_atr_zigzag_extracts_two_decreasing_contractions_and_pivot() -> None:
     assert pattern is not None
     assert pattern.depths == pytest.approx((0.18, 3.0 / 95.0))
     assert pattern.pivot == 95.0
+
+
+def _alternating_swings(low_prices: list[float]) -> tuple[SwingPoint, ...]:
+    """High(100)->low pairs spaced 5 bars apart, starting at index 60."""
+    swings: list[SwingPoint] = []
+    for pair_index, low in enumerate(low_prices):
+        base = 60 + pair_index * 10
+        swings.append(SwingPoint(base, "high", 100.0))
+        swings.append(SwingPoint(base + 5, "low", low))
+    return tuple(swings)
+
+
+def test_extract_pattern_keeps_only_the_most_recent_max_contractions() -> None:
+    # Five contractions with depths 0.5/0.4/0.3/0.2/0.1; the default
+    # max_contractions=4 must drop the oldest one entirely.
+    swings = _alternating_swings([50.0, 60.0, 70.0, 80.0, 90.0])
+    volumes = pd.Series([2_000_000] * 110)
+
+    pattern = extract_pattern(swings, volumes)
+
+    assert pattern is not None
+    assert pattern.depths == pytest.approx((0.4, 0.3, 0.2, 0.1))
+    # pattern_days spans the *retained* window: high at 70 to low at 105.
+    assert pattern.pattern_days == 36
+    assert pattern.pivot == 100.0
+
+
+def test_extract_pattern_window_tracks_configured_max_contractions() -> None:
+    swings = _alternating_swings([50.0, 60.0, 70.0, 80.0, 90.0])
+    volumes = pd.Series([2_000_000] * 110)
+
+    pattern = extract_pattern(swings, volumes, VcpThresholds(max_contractions=2))
+
+    assert pattern is not None
+    assert pattern.depths == pytest.approx((0.2, 0.1))
+    assert pattern.pattern_days == 16
+
+
+def _vcp_hit_closes() -> list[float]:
+    """A rising warmup ending in a two-contraction VCP that must hit.
+
+    Depths are 22.8/110.8 (~0.206) then 9.9/99 (0.1, a <=0.75x
+    contraction); the final close 93.0 sits below the 99.0 pivot.
+    """
+    closes = [100.0 + index * 0.03 for index in range(360)]  # ends at 110.77
+    high1 = 110.8
+    closes.append(high1)
+    closes += [high1 - (index + 1) * 2.85 for index in range(8)]  # low 88.0
+    closes += [88.0 + (index + 1) * 1.375 for index in range(8)]  # high 99.0
+    closes += [99.0 - (index + 1) * 1.2375 for index in range(8)]  # low 89.1
+    closes += [89.1 + (index + 1) * 0.65 for index in range(6)]  # close 93.0
+    return closes
+
+
+def test_vcp_verdict_is_independent_of_supplied_history_length(
+    settings: Settings,
+) -> None:
+    # Issue #186 DoD: the same symbol/as_of must screen identically whether
+    # the caller supplied the daily pipeline's shorter window or the
+    # backtest's longer one. The long supply prepends old turbulence whose
+    # 50%-deep swings would have joined (and invalidated) the pattern under
+    # the unbounded pre-#186 definition.
+    recent = _vcp_hit_closes()
+    turbulence: list[float] = []
+    for _cycle in range(10):
+        turbulence += [100.0 - index * 5.0 for index in range(10)]  # to 55.0
+        turbulence += [55.0 + index * 5.0 for index in range(10)]  # back to 100
+    start = pd.Timestamp("2024-01-01").date()
+    long_bars = make_bars("VCP", turbulence + recent, start=start)
+    short_bars = make_bars("VCP", recent, start=start + timedelta(days=len(turbulence)))
+    as_of = start + timedelta(days=len(turbulence) + len(recent))
+    signal = VcpBreakoutSignal(settings)
+
+    def _evaluate(bars: pd.DataFrame) -> list[SignalHit]:
+        data = ScreeningInput(
+            as_of=as_of,
+            universe=(),
+            fundamentals=pd.DataFrame(),
+            bars=bars,
+        )
+        return signal.evaluate(data, {"VCP"})
+
+    long_hits = _evaluate(long_bars)
+    short_hits = _evaluate(short_bars)
+
+    assert len(long_hits) == 1
+    assert long_hits == short_hits
 
 
 def test_vcp_signal_records_pattern_metrics_and_rejects_chasing(

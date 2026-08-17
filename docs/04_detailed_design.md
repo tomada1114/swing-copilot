@@ -2278,7 +2278,9 @@ strategies:
 
 P5-23では、ランキング後の各候補に`d = (close - SMA50) / ATR14`による実行状態を付す。`d < -3`は`DAMAGED`、`[-3, 0)`は`PULLBACK_ZONE`、`[0, 2)`は`FAIR`、`[2, 4)`は`EXTENDED`、`d >= 4`は`OVEREXTENDED`である（閾値は`technical_signals.execution`の要検証設定）。`PULLBACK_ZONE`/`FAIR`は「即検討可」、`EXTENDED`は「様子見」、`DAMAGED`/`OVEREXTENDED`および指標不足の`UNKNOWN`は「見送り」とする。状態はスコアより優先し、見送りを必ず候補リスト末尾へ降格するが、候補から削除しない。terminal/Markdownは3バケット見出しと状態・d値を併記する。
 
-P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略である。終値の局所高安をATR14の2.0倍以上の反転だけに絞るジグザグから高値→安値の収縮列を作り、初回深さ・逓減率・最低2回・15〜325営業日を検証する。最終収縮高値をピボットとし、手前10本平均出来高/50日平均でdry-upを表す。closeがピボットを5%より大きく超える場合は追いかけとして候補にしない。収縮数・各深さ・dry-up比・ピボットはmetricsを通じて根拠列に表示する。全閾値は`technical_signals.vcp`の要検証設定である。
+P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略である。終値の局所高安をATR14の2.0倍以上の反転だけに絞るジグザグから高値→安値の収縮列を作り、**直近`max_contractions`個（既定4）の収縮だけを1パターンとして採用**した上で、初回深さ・逓減率・最低2回・15〜325営業日（`pattern_days`は採用範囲で算出）を検証する（Issue #186: 履歴全域を1パターンと扱う旧定義の構造欠陥修正）。最終収縮高値をピボットとし、手前10本平均出来高/50日平均でdry-upを表す。closeがピボットを5%より大きく超える場合は追いかけとして候補にしない。収縮数・各深さ・dry-up比・ピボットはmetricsを通じて根拠列に表示する。全閾値は`technical_signals.vcp`の要検証設定である。
+
+シグナルは評価前に入力系列を自身の`required_bars`（`pattern_days_max + 60`本のウォームアップ）へ切り詰めるため、判定は呼び出し側の履歴供給長に依存しない。各Signalは必要バー数を`required_bars`属性で宣言し、`ScreeningPipeline.required_bars`がランキングのSMA200要件との最大値を公開する。日次パイプラインとバックテストランナーは`price_history_lookback_days()`（既存の400暦日をフロアに`required_bars × 2`暦日）から読むため、旧来の本番400日/バックテスト730日というハードコード乖離は存在しない。
 
 **既知の設計ギャップ**: `validate_contractions()`は小型株用の初回深さ上限（既定50%）を受け取れるが、現行のpoint-in-timeデータモデルには時価総額がなく、`VcpBreakoutSignal`は`is_small_cap=False`でのみ呼び出す。そのため本番経路は通常上限（既定35%）を適用する。将来対応では取得時点の株価と発行済株式数をas-of境界つきで保存するか、別のpoint-in-time分類ソースを設計してから配線する。現在値による過去分類や固定銘柄リストで代用してはならない。
 

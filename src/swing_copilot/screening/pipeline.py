@@ -60,7 +60,14 @@ _SMA_LONG_WINDOW = 200
 #: screening indicators, and read-only screening diagnostics must be able to
 #: read the same window without importing the daily orchestration module.
 #: Unrelated to `edgar.py`'s own fundamentals-fetch lookback constant.
+#: Since Issue #186 this is the *floor*: a strategy whose signals declare a
+#: longer `required_bars` extends it via `price_history_lookback_days`.
 PRICE_HISTORY_LOOKBACK_DAYS = 400
+
+#: Calendar days reserved per required trading bar. Two-to-one is the margin
+#: the long-standing 400-day constant already gave the 200-bar ranking SMA;
+#: it absorbs weekends, holidays, and ordinary data gaps.
+_CALENDAR_DAYS_PER_BAR = 2
 
 # Composite ranking score (P1-01, roadmap §5): normalization width for the
 # trend_quality component's (sma50/sma200 - 1) ratio.
@@ -126,6 +133,47 @@ def build_strategy_components(
     return filters, signals
 
 
+def price_history_lookback_days(required_bars: int) -> int:
+    """Calendar days of history a caller must read back to cover `required_bars`.
+
+    Args:
+        required_bars: Trading bars the screening run needs at one `as_of`,
+            normally `ScreeningPipeline.required_bars`.
+
+    Returns:
+        At least `PRICE_HISTORY_LOOKBACK_DAYS`, so no caller ever reads a
+        shorter window than the pre-#186 constant supplied.
+    """
+    return max(PRICE_HISTORY_LOOKBACK_DAYS, required_bars * _CALENDAR_DAYS_PER_BAR)
+
+
+def strategy_required_bars(
+    strategies_config: StrategiesConfig | dict[str, Any],
+    settings: Settings,
+    strategy_key: str = "default",
+) -> int:
+    """Trading bars the named strategy needs, without keeping the pipeline.
+
+    For callers (price fetch, prefetch) that must size their read before the
+    screening step builds its own `ScreeningPipeline`.
+
+    Args:
+        strategies_config: Parsed `strategies.yaml`.
+        settings: Loaded application settings.
+        strategy_key: Which `strategies.yaml` entry will screen.
+
+    Returns:
+        `ScreeningPipeline.required_bars` for that strategy.
+
+    Raises:
+        KeyError: `strategy_key`, or one of its filter/signal keys, is not
+            registered.
+    """
+    return ScreeningPipeline(
+        strategies_config, None, settings, strategy_key
+    ).required_bars
+
+
 class ScreeningPipeline:
     """Runs Filter -> Signal -> deterministic Candidate ranking for one strategy."""
 
@@ -165,6 +213,19 @@ class ScreeningPipeline:
         self._score_weights: ScoreWeights = spec.ranking.score_weights
         self._settings = settings
         self._execution_config = settings.technical_signals.execution
+
+    @property
+    def required_bars(self) -> int:
+        """Trading bars one screening run needs at a single `as_of`.
+
+        The maximum of every configured Signal's declared `required_bars`
+        and the ranking indicators' `_SMA_LONG_WINDOW`, so both the daily
+        pipeline and the backtest runner size their history reads from one
+        declaration instead of two divergent hardcoded lookbacks (#186).
+        """
+        return max(
+            [_SMA_LONG_WINDOW, *(signal.required_bars for signal in self._signals)]
+        )
 
     def run(self, data: ScreeningInput) -> list[Candidate]:
         """Run the two-stage screen and return a ranked, capped candidate list.

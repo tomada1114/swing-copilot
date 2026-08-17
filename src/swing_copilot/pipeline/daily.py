@@ -27,6 +27,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from pydantic import ValidationError
+
 from swing_copilot import __version__
 from swing_copilot.analysis.export import (
     ExportCandidate,
@@ -89,6 +91,8 @@ from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import (
     PRICE_HISTORY_LOOKBACK_DAYS,
     ScreeningPipeline,
+    price_history_lookback_days,
+    strategy_required_bars,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import DEFAULT_DB_PATH
@@ -476,6 +480,22 @@ def _stamp_bars(
     return stamped
 
 
+def _screening_lookback_days(deps: DailyDependencies) -> int:
+    """Calendar days of price history the configured strategy screens over.
+
+    A broken strategy configuration (unknown key, unregistered component,
+    invalid shape) stays the screening step's fatal error to report; the
+    price fetch falls back to the floor lookback instead of failing first.
+    """
+    try:
+        required = strategy_required_bars(
+            deps.strategies_config, deps.settings, deps.strategy_key
+        )
+    except KeyError, ValidationError:
+        return PRICE_HISTORY_LOOKBACK_DAYS
+    return price_history_lookback_days(required)
+
+
 def _run_step_prices(
     deps: DailyDependencies,
     symbols: list[str],
@@ -483,7 +503,7 @@ def _run_step_prices(
     prefetched: BarFetchResult | None = None,
 ) -> _StepOutcome:
     if prefetched is None:
-        start = as_of - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS)
+        start = as_of - timedelta(days=_screening_lookback_days(deps))
         result = deps.data_provider.get_daily_bars(
             symbols, start, as_of + timedelta(days=1)
         )
@@ -622,7 +642,10 @@ def _run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
 ) -> tuple[_StepOutcome, ScreeningResult]:
     fundamentals = deps.market_store.read_fundamentals(as_of)
-    start = as_of - timedelta(days=PRICE_HISTORY_LOOKBACK_DAYS)
+    pipeline = ScreeningPipeline(
+        deps.strategies_config, deps.market_store, deps.settings, deps.strategy_key
+    )
+    start = as_of - timedelta(days=price_history_lookback_days(pipeline.required_bars))
     bars = deps.market_store.read_bars(symbols, start, as_of, as_of)
 
     # Scope `ScreeningInput.universe` to this run's actual `symbols` (which

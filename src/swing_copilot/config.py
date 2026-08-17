@@ -219,6 +219,7 @@ class VcpSignalConfig(_StrictModel):
     small_cap_first_depth_max: float = Field(default=0.50, gt=0.0, le=1.0)
     contraction_ratio_max: float = Field(default=0.75, gt=0.0, le=1.0)
     min_contractions: int = Field(default=2, ge=2)
+    max_contractions: int = Field(default=4, ge=2)
     pattern_days_min: int = Field(default=15, ge=1)
     pattern_days_max: int = Field(default=325, ge=1)
     dry_up_ideal_max: float = Field(default=0.30, gt=0.0, le=1.0)
@@ -236,6 +237,9 @@ class VcpSignalConfig(_StrictModel):
             raise ValueError(msg)
         if self.pattern_days_max < self.pattern_days_min:
             msg = "VCP pattern_days_max must be >= pattern_days_min"
+            raise ValueError(msg)
+        if self.max_contractions < self.min_contractions:
+            msg = "VCP max_contractions must be >= min_contractions"
             raise ValueError(msg)
         if self.dry_up_weak_min <= self.dry_up_ideal_max:
             msg = "VCP dry-up weak threshold must exceed ideal threshold"

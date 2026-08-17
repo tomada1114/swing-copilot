@@ -37,7 +37,11 @@ from pandas.api.types import is_numeric_dtype
 from swing_copilot.config import StrategiesConfig
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.screening.base import Candidate, ScreeningInput
-from swing_copilot.screening.pipeline import ScreeningPipeline
+from swing_copilot.screening.pipeline import (
+    ScreeningPipeline,
+    price_history_lookback_days,
+    strategy_required_bars,
+)
 from swing_copilot.storage.json_guard import dumps_safe
 
 if TYPE_CHECKING:
@@ -51,11 +55,6 @@ if TYPE_CHECKING:
 #: on-disk cache written by an older build is rejected as a mismatch instead of
 #: being silently reused against different semantics.
 CACHE_KEY_VERSION = "1"
-
-# The longest production screening feature currently uses 325 trading bars
-# (VCP). Two calendar years comfortably covers that window across weekends,
-# holidays, and ordinary data gaps without allowing a trade before start.
-_SCREENING_WARMUP_CALENDAR_DAYS = 730
 
 _CACHE_KEY_METADATA = b"swing_copilot.cache_key"
 _CACHE_VERSION_METADATA = b"swing_copilot.cache_version"
@@ -175,7 +174,15 @@ def load_market_frame(
         deps.market_store, resolved_benchmark, request.start, request.end
     )
     all_symbols = sorted({*request.symbols, resolved_benchmark})
-    bars_start = request.start - timedelta(days=_SCREENING_WARMUP_CALENDAR_DAYS)
+    # Warmup sized from the strategy's own declared bar requirement, so the
+    # backtest and the daily pipeline can never again screen the same code
+    # over structurally different history windows (Issue #186).
+    lookback_days = price_history_lookback_days(
+        strategy_required_bars(
+            deps.strategies_config, deps.settings, request.strategy_key
+        )
+    )
+    bars_start = request.start - timedelta(days=lookback_days)
     bars = deps.market_store.read_bars(
         all_symbols, bars_start, request.end, as_of=request.end
     )

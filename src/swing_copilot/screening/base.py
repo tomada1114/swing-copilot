@@ -161,6 +161,11 @@ class Signal(Protocol):
     """Stage 2: technical evaluation over the filtered symbol set."""
 
     name: str
+    #: Trading bars of history this signal needs for a full evaluation at one
+    #: `as_of`. Declared by each Signal so `ScreeningPipeline.required_bars`
+    #: can tell callers how much history to supply, instead of every caller
+    #: hardcoding its own lookback guess (Issue #186).
+    required_bars: int
 
     def __init__(self, settings: Settings) -> None:
         """Every Signal takes the full Settings; it plucks its own section."""

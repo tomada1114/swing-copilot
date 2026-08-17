@@ -1,29 +1,31 @@
 """CLI-facing backtest entry point.
 
 Wires the real `MarketStore`/`ScreeningPipeline` into `BacktestEngine` (FR-10).
+Candidate generation itself lives in `backtest/candidate_stream.py`, so one
+screening pass can feed many engine runs (Issue #185).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
+from swing_copilot.backtest.candidate_stream import (
+    CandidateStreamMismatchError,
+    compute_cache_key,
+    generate_candidate_stream,
+    load_market_frame,
+)
 from swing_copilot.backtest.engine import BacktestEngine, BacktestResult
-from swing_copilot.screening.base import Candidate, ScreeningInput
-from swing_copilot.screening.pipeline import ScreeningPipeline
 
 if TYPE_CHECKING:
     from datetime import date
 
+    from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
     from swing_copilot.config import Settings
+    from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
-
-# The longest production screening feature currently uses 325 trading bars
-# (VCP). Two calendar years comfortably covers that window across weekends,
-# holidays, and ordinary data gaps without allowing a trade before start.
-_SCREENING_WARMUP_CALENDAR_DAYS = 730
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,17 +61,13 @@ class BacktestCostOverrides:
     max_hold_days: int | None = None  # P2-10: sensitivity grid parameter
 
 
-def _trading_days(
-    market_store: MarketStore, benchmark_symbol: str, start: date, end: date
-) -> list[date]:
-    bars = market_store.read_bars([benchmark_symbol], start, end, as_of=end)
-    return sorted(bars["date"].unique().tolist())
-
-
 def run_backtest(
     request: BacktestRequest,
     deps: BacktestDependencies,
     overrides: BacktestCostOverrides | None = None,
+    *,
+    candidate_stream: CandidateStream | None = None,
+    market_frame: MarketFrame | None = None,
 ) -> BacktestResult:
     """Run a deterministic multi-symbol backtest using production screening logic.
 
@@ -78,12 +76,23 @@ def run_backtest(
         deps: Real collaborators (store, universe, settings, strategies).
         overrides: Cost/benchmark overrides; defaults to `settings.backtest`'s
             own commission/slippage and `"SPY"`.
+        candidate_stream: A stream already screened for exactly these inputs
+            (`candidate_stream.generate_candidate_stream`). Supplying it is
+            what lets a sensitivity grid or a `--pessimistic` pair screen once
+            and run the engine many times; its cache key is re-verified here,
+            so a stale stream fails loudly instead of quietly measuring the
+            wrong universe. Omitted, one is generated internally.
+        market_frame: Bars/fundamentals/trading days already loaded for this
+            window, so a sweep reads storage once.
 
     Returns:
         The full trade log, equity curves, and survivorship bias note.
+
+    Raises:
+        CandidateStreamMismatchError: `candidate_stream` or `market_frame` was
+            built from different screening inputs than this request implies.
     """
     overrides = overrides or BacktestCostOverrides()
-    start, end = request.start, request.end
     benchmark_symbol = overrides.benchmark_symbol or deps.settings.backtest.benchmark
     commission_pct = (
         overrides.commission_pct
@@ -126,46 +135,56 @@ def run_backtest(
         }
     )
 
-    trading_days = _trading_days(deps.market_store, benchmark_symbol, start, end)
-    all_symbols = sorted({*request.symbols, benchmark_symbol})
-    bars_start = start - timedelta(days=_SCREENING_WARMUP_CALENDAR_DAYS)
-    bars = deps.market_store.read_bars(all_symbols, bars_start, end, as_of=end)
-    fundamentals = deps.market_store.read_fundamentals(end)
-    pipeline = ScreeningPipeline(
-        deps.strategies_config,
-        deps.market_store,
-        effective_settings,
-        request.strategy_key,
+    frame = market_frame or load_market_frame(
+        request, deps, benchmark_symbol=benchmark_symbol
     )
+    if frame.benchmark_symbol != benchmark_symbol:
+        msg = (
+            "渡された market_frame のベンチマーク "
+            f"'{frame.benchmark_symbol}' が今回の '{benchmark_symbol}' と一致しません。"
+            "取引日カレンダーが変わるため、フレームを読み直してください。"
+        )
+        raise CandidateStreamMismatchError(msg)
+    stream = _resolve_stream(request, deps, frame, candidate_stream)
 
+    # The pipeline behind `stream` was built from `deps.settings`, not from
+    # `effective_settings`: screening reads only `technical_signals` and
+    # `fundamental_filters`, so the cost/exit overrides applied above cannot
+    # change a candidate. That equivalence is what makes one stream reusable
+    # across a whole parameter sweep, and it is pinned by
+    # `tests/backtest/test_candidate_stream.py`.
     def candidates_fn(day: date) -> list[Candidate]:
-        # Bars are handed over whole, not pre-sliced to `day`. Screening reads
-        # price history only through `indicators.symbol_bars`, which always
-        # applies the `as_of` cutoff itself, so this cannot leak look-ahead --
-        # `tests/backtest/test_runner.py` pins that equivalence. Reusing one
-        # frame lets `symbol_bars` cache its per-symbol index across the whole
-        # run; re-slicing per day would rebuild it on every simulated day and
-        # was the dominant cost of a multi-year backtest.
-        point_in_time_bars = bars
-        # `filed_at` is TIMESTAMPTZ; a bare `date` can't be compared against
-        # it directly (pandas raises TypeError). Match
-        # `screening/fundamental_filters.py`'s end-of-day-UTC cutoff idiom for
-        # an inclusive as-of boundary.
-        day_cutoff = datetime.combine(day, time.max, tzinfo=UTC)
-        point_in_time_fundamentals = (
-            fundamentals[fundamentals["filed_at"] <= day_cutoff]
-            if not fundamentals.empty
-            else fundamentals
-        )
-        data = ScreeningInput(
-            as_of=day,
-            universe=deps.universe,
-            fundamentals=point_in_time_fundamentals,
-            bars=point_in_time_bars,
-        )
-        return pipeline.run(data)
+        return list(stream.candidates_by_day.get(day, ()))
 
     engine = BacktestEngine(effective_settings)
     return engine.run(
-        trading_days, bars, candidates_fn, request.initial_cash, benchmark_symbol
+        list(frame.trading_days),
+        frame.bars,
+        candidates_fn,
+        request.initial_cash,
+        benchmark_symbol,
     )
+
+
+def _resolve_stream(
+    request: BacktestRequest,
+    deps: BacktestDependencies,
+    frame: MarketFrame,
+    candidate_stream: CandidateStream | None,
+) -> CandidateStream:
+    """Verify a supplied stream, or screen one now.
+
+    Verification is cheap: `frame` already carries its content digests, so
+    this re-derives the key without touching storage or re-screening.
+    """
+    if candidate_stream is None:
+        return generate_candidate_stream(request, deps, frame)
+    expected = compute_cache_key(request, deps, frame)
+    if candidate_stream.cache_key != expected:
+        msg = (
+            "渡された候補ストリームは今回のスクリーニング入力から生成されたものでは"
+            "ありません（cache_key 不一致）。銘柄・期間・戦略・設定・価格データの"
+            "いずれかが変わっています。ストリームを再生成してください。"
+        )
+        raise CandidateStreamMismatchError(msg)
+    return candidate_stream

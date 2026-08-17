@@ -4,8 +4,9 @@ Extracted from `pipeline/postmortem.py` so the retrospective mechanism
 (`retro/`) can reuse exactly the same calendar and return arithmetic instead
 of growing a second, silently divergent copy. Both consumers derive their
 trading calendar from one benchmark symbol's own distinct bar dates -- this
-repo has no dedicated trading-calendar module; `backtest/runner.py`'s
-`_trading_days()` is the third mirror of the same idea.
+repo has no dedicated trading-calendar module;
+`backtest/candidate_stream.py`'s `_trading_days()` is the third mirror of the
+same idea.
 
 Two directions are offered over that one calendar:
 

@@ -96,6 +96,12 @@ the divergence, and update the stale canonical source or request a decision.
 - Parquet/report replacement uses a temporary file in the destination
   directory and `os.replace`; failure must preserve the previous destination
   and clean up temporary artifacts.
+- Ad-hoc/notebook reads of the shared DuckDB file go through
+  `swing_copilot.research` (read-only, one short-lived connection per query).
+  Never hold a connection open across analysis think-time — DuckDB's file
+  lock is exclusive between a read-write process and everything else — and
+  never re-implement the sector as-of join by hand; `v_symbol_sector_asof`
+  is the single blessed implementation.
 
 ### Quantitative correctness
 

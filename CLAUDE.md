@@ -17,7 +17,9 @@ above). This repo additionally ships Claude Code configuration:
   lightweight feedback loop, not completion evidence; use `just verify` before
   a PR or final completion claim
 - `.claude/skills/` — `create-pr`, `smart-commit`, and `merge-dependabot`
-  workflow skills
+  workflow skills, plus the trading loop (`swing-daily`, `swing-track`,
+  `swing-retro`, `swing-deepdive`) and read-only data analysis
+  (`swing-research`)
 - `.claude/settings.json` — shared permission allowlist for local build,
   lint, and test commands; personal preferences (model, output style, extra
   permissions) belong in `.claude/settings.local.json`, never here
@@ -43,13 +45,34 @@ never retried later.
 source-of-truth precedence, test expectations, and the Japanese/English
 language policy. Do not duplicate or weaken those rules here.
 
-`copilot-daily` guards against a same-day double run (Issue #118): if a
-`status='success'` run already exists for the resolved `run_date` (the
-`swing-copilot-daily` routine only fires once, but a cron edit or a manual
-re-run of an already-completed day would otherwise write a second `verdicts`
-set for that date), it exits `2` before creating a `runs` row or `reports/`
-directory instead of proceeding. The `swing-daily` skill treats exit code `2`
-as a re-entry signal: it summarizes the existing run from the abort message
-and terminates without writing `analysis_result.json`, rather than treating it
-as a failure. `--allow-same-day-rerun` bypasses the guard for an intentional
-re-run.
+`copilot-daily` exits `2` (preflight abort) for two different reasons, and
+stderr's first line carries a machine-readable tag the `swing-daily` skill
+branches on — never assume exit 2 means "already ran":
+
+- `PREFLIGHT_ABORT[same_day_rerun]:` — a `status='success'` run already exists
+  for the resolved `run_date` (Issue #118: the `swing-copilot-daily` routine
+  only fires once, but a cron edit or manual re-run of a completed day would
+  otherwise write a second `verdicts` set). It exits before creating a `runs`
+  row or `reports/` directory. The skill summarizes the existing run and
+  terminates without writing `analysis_result.json`.
+  `--allow-same-day-rerun` bypasses the guard for an intentional re-run.
+- `PREFLIGHT_ABORT[account_equity_unset]:` — `risk.account_equity_usd` is
+  unset while closed positions exist; continuing would only produce
+  circuit-breaker-forced rejections. This is a configuration problem the
+  skill must report to the user, **not** an "already analyzed" summary.
+
+## Reading the Accumulated Data
+
+Ad-hoc analysis of the DuckDB history (verdict outcomes, score breakdowns,
+tracking ledger, regimes, rejections) goes through `swing_copilot.research` —
+read-only, one connection per query, joined views included. Use the
+`swing-research` skill for these questions; `docs/09_research_guide.md` is the
+canonical how-to and data dictionary. Never open a raw read-write
+`duckdb.connect()` against `data/copilot.duckdb` for exploration, and never
+hold any connection across think-time: this working copy is the unattended
+execution environment, and DuckDB's file lock is exclusive between a
+read-write process and everything else, so a held connection can make the
+18:30 routine fail its whole day. Improvement work discovered while analyzing
+follows `docs/08_architecture_review_2026-08.md`'s principles (no config
+changes on point estimates alone; route proposals through issues or
+`swing-retro`).

@@ -72,6 +72,11 @@ paths:
 - Centralize provenance (`source_ids` ⊆ the IDs supplied for that symbol) and
   CON-03 output-policy checks in `analysis/validate.py`, before anything is
   rendered. Withhold a failing symbol fail-closed, without retrying
+- `swing_copilot.research` is strictly read-only: accessors open a
+  `read_only=True` connection per query and close it before returning. Do not
+  add write paths there, do not hold connections, and read joined data
+  through the `v_*` views in `storage/schema.py` (CREATE OR REPLACE,
+  self-migrating) rather than duplicating join/as-of logic in Python
 
 ## Constants and Naming
 

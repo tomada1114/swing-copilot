@@ -325,7 +325,8 @@ copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 台帳が空になって定性判断の質を測る材料が集まらないため、`verdicts.no_trade`を
 そのまま`verdict_positions.no_trade`へ引き継いで建玉する。エントリー価格は
 `risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
-NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR14`で代替する。
+NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
+代替する（ATR期間はバックテストと同じ`settings.backtest.exit_atr_period`）。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
 前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
@@ -616,6 +617,31 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 「そのパラメータが効かない」のか「一度も発火していない」のかを区別するために
 ある。binding rateが0%に近ければ、`max_hold_days`をどう振っても結果は動かない。
 
+## `--limit` の銘柄サンプリング
+
+`copilot-backtest --limit N`は**ユニバースのサンプル**を測る。以前の
+`symbols[:limit]`は`ORDER BY symbol`の先頭N件、つまり「Aで始まるN銘柄」を
+返していた。セクター構成がS&P500と別物になるうえ、Minerviniの
+RSパーセンタイル（条件7）のように*渡された集合内の相対順位*で決まるチェックは
+条件の意味自体が変わってしまう。
+
+現在は`gics_sector`ごとに比例配分（最大剰余法、端数は剰余の大きい順・同率は
+セクター名順）し、各セクター内はsalt付きblake2bのハッシュ順で選ぶ。
+アルファベット順とは無関係で、同じユニバースと同じ`N`なら実行環境や実行日を
+問わず必ず同じ銘柄集合になる（saltは固定。変えると過去レポートとの比較可能性が
+失われる）。`N`がユニバース規模以上なら全銘柄と同義である。
+
+採用した方式・実銘柄数・セクター構成は、terminal出力とmarkdownレポートの冒頭に
+必ず出る（`run`・`--pessimistic`比較・`--policy`比較・`grid`の全レポート共通）。
+
+```text
+ユニバース: 60/503 銘柄の決定論的サンプル（gics_sector 比例配分 + blake2b ハッシュ順、シード固定・再現可能）
+セクター構成: Communication Services 3, Consumer Discretionary 6, ...
+```
+
+生存者バイアス注記と同じ扱いで、指標だけを切り出して読まれないようにするための
+但し書きである。
+
 ## 本番ゲートのA/B（`--policy`）
 
 `--policy`は「候補→建玉」の間に本番の6ゲート（レジーム
@@ -668,8 +694,8 @@ copilot-backtest grid --strategy default --start 2020-01-02 --end 2026-07-30 \
 `fundamental_filters`、ユニバース、対象銘柄、`--start`/`--end`、ベンチマーク
 （取引日カレンダーの源泉）、そして価格・ファンダの内容ダイジェストである。
 
-`settings.backtest`（`exit_atr_multiple`・`max_hold_days`・`commission_pct`・
-`slippage_pct`・`slippage_multiplier`）と`settings.risk`、初期資金は
+`settings.backtest`（`exit_atr_multiple`・`exit_atr_period`・`max_hold_days`・
+`commission_pct`・`slippage_pct`・`slippage_multiplier`）と`settings.risk`、初期資金は
 **キーに含めない**。これらはエンジンの入力であってFilter/Signalは一切読まない
 ため、手仕舞いパラメータやコストを振ってもキャッシュは無効化されない——
 感応度グリッドやコスト比較を同じキャッシュで回せることが、この設計の目的で

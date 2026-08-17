@@ -1277,3 +1277,107 @@ class TestSplitRebase:
         assert [mark.as_of_date for mark in marks] == [ENTRY_DATE]
         assert marks[0].close == pytest.approx(FLAT_CLOSE)
         assert marks[0].stop_price == pytest.approx(RISK_STOP)
+
+
+class TestExitAtrPeriod:
+    """Issue #194: the ledger's ATR period is `backtest.exit_atr_period` too.
+
+    The prelude's true range is exactly 2.00 every session, so ATR is 2.00 for
+    any period. `_QUIET_DAY` then drops the true range to 0.40, which the
+    shorter period absorbs faster: ATR(5) = 1.68 (stop 95.80) against
+    ATR(14) = 1.885714... (stop 95.285714...).
+    """
+
+    _SHORT_PERIOD = 5
+
+    def _quiet_day(self) -> dict[str, Any]:
+        return bar(DAY_1, open_price=100.0, high=100.2, low=99.8, close=100.0)
+
+    def _gap_between_the_two_stops(self) -> dict[str, Any]:
+        return bar(DAY_2, open_price=95.5, high=95.9, low=95.4, close=95.6)
+
+    def test_shorter_period_ratchets_the_stop_higher_and_closes_the_position(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        config = backtest_config.model_copy(
+            update={"exit_atr_period": self._SHORT_PERIOD}
+        )
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [self._quiet_day(), self._gap_between_the_two_stops()])
+
+        update_tracking(state_store, market_store, config, as_of=DAY_2)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "closed"
+        assert position.exit_date == DAY_2
+        # The open gaps through the 95.80 stop, so it fills at the open.
+        assert position.exit_price == pytest.approx(95.5)
+        assert position.exit_reason == "stop"
+        assert position.realized_return_pct == pytest.approx(-4.5)
+
+    def test_default_period_keeps_the_position_open_on_the_same_bars(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # The pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline:
+        # 95.285714... sits below DAY_2's low, so nothing closes.
+        assert backtest_config.exit_atr_period == 14
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [self._quiet_day(), self._gap_between_the_two_stops()])
+
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_2)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+        assert position.stop_price == pytest.approx(
+            FLAT_CLOSE - EXIT_ATR_MULTIPLE * (2.0 - 1.6 / 14)
+        )
+
+    def test_seeding_a_stop_uses_the_configured_period_for_its_history_minimum(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Six sessions are too few for ATR(14) but enough for ATR(5), so the
+        # configured period decides whether a verdict without a risk stop is
+        # tracked with one at all -- and the note quotes that same period.
+        seed_verdict(state_store)
+        seed_risk(state_store, stop_price=None)
+        write_bars(market_store, flat_prelude(sessions=6))
+
+        default_result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.stop_price is None
+        assert any("ATR(14)を算出できず" in note for note in default_result.notes)
+
+        short_run_id = uuid4()
+        seed_verdict(state_store, run_id=short_run_id, symbol="BBB")
+        seed_risk(state_store, run_id=short_run_id, symbol="BBB", stop_price=None)
+        write_bars(market_store, flat_prelude(sessions=6, symbol="BBB"))
+        short_result = update_tracking(
+            state_store,
+            market_store,
+            backtest_config.model_copy(update={"exit_atr_period": self._SHORT_PERIOD}),
+            as_of=ENTRY_DATE,
+        )
+
+        assert short_result.notes == ()
+        seeded = state_store.get_verdict_position(short_run_id, "BBB")
+        assert seeded is not None
+        assert seeded.stop_price == pytest.approx(RISK_STOP)

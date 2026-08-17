@@ -1237,7 +1237,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
     [--candidate-cache PATH] [--policy none|regime|regime+risk[,...]]
 ```
 
-`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限（`copilot-daily --limit`と同じ`universe[:limit]`規約、0は空リスト）。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。**`copilot-daily --limit`の`universe[:limit]`規約とは異なり**、`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
 
 **バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
 
@@ -1755,12 +1755,12 @@ src/swing_copilot/tracking/
 3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
-   - ATR14は1ポジションにつき1パス（`backtest/exits.py::atr14_by_date`）で全セッション分を求め、日ごとに`atr14_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
+   - ATRは1ポジションにつき1パス（`backtest/exits.py::atr_by_date`）で全セッション分を求め、日ごとに`atr_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
    - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは5のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
 4. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
 5. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
 
-手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間14はエンジンと同じくハードコード（`settings.backtest.exit_atr_period`は未配線のまま。3.19の既知事項）。
+手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間はエンジンと同じく`settings.backtest.exit_atr_period`から渡す（Issue #194で配線。`atr_as_of`/`atr_by_date`は既定値を持たず、呼び出し側が必ず設定値を明示する）。
 
 手動操作は2つだけである。`close_manually()`は`exit_reason='manual'`・`exit_price`=`as_of`の終値（バーが無ければ最終マークの終値）でクローズし、`record_note()`は日付付きのメモを残す。存在しない／既にクローズ済みのポジション、エントリー日より前のクローズ、**最終マーク日より前のクローズ**、空メモはいずれも`TrackingError`で拒否する。最終マーク日より前を弾くのは、`exit_date`だけ過去に置かれて日次マーク・`days_held`・再開位置が先の日付を指したままになり、`list`/`show`が自己矛盾した行を表示するのを防ぐためである。
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from swing_copilot.backtest.engine import BacktestEngine, Trade
+from swing_copilot.backtest.engine import BacktestEngine, BacktestResult, Trade
 from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
     ENTRY_BLOCK_INSUFFICIENT_CASH,
@@ -993,3 +993,99 @@ class TestEntryInstrumentation:
         assert result.avg_invested_pct is None
         assert result.max_concurrent_reached == 0
         assert dict(result.entry_block_counts)[ENTRY_BLOCK_REGIME] == 0
+
+
+class TestExitAtrPeriod:
+    """Issue #194: `backtest.exit_atr_period` really drives the trailing stop.
+
+    The bars ramp with a true range of exactly 2.0 every session, so the ATR
+    is exactly 2.0 for *any* period until volatility collapses on session 20.
+    From there the shorter period reacts faster, ratchets the stop higher, and
+    closes a position that the 14-period stop keeps holding.
+    """
+
+    _SHORT_PERIOD = 5
+
+    def _bars(self, days: list[date]) -> list[dict[str, object]]:
+        rows = [*_spy_bars(days)]
+        # Sessions 0..19: close +0.5/day with high/low +/-1.0 -> TR == 2.0.
+        rows += [
+            bar_row(
+                "AAA",
+                day,
+                (
+                    100.0 + 0.5 * index,
+                    101.0 + 0.5 * index,
+                    99.0 + 0.5 * index,
+                    100.0 + 0.5 * index,
+                ),
+            )
+            for index, day in enumerate(days[:20])
+        ]
+        # Session 20: volatility collapses to TR == 0.4 at an unchanged close.
+        rows.append(bar_row("AAA", days[20], (109.5, 109.7, 109.3, 109.5)))
+        # Session 21: gaps down to 105.20, between the two candidate stops.
+        rows.append(bar_row("AAA", days[21], (105.2, 105.5, 105.0, 105.1)))
+        rows.append(bar_row("AAA", days[22], (105.1, 105.3, 105.0, 105.1)))
+        return rows
+
+    def _run(self, settings: Settings, period: int) -> BacktestResult:
+        days = TRADING_DAYS[:23]
+        engine = BacktestEngine(
+            settings.model_copy(
+                update={
+                    "backtest": settings.backtest.model_copy(
+                        update={"exit_atr_period": period}
+                    )
+                }
+            )
+        )
+        candidates_by_day = {days[15]: [_candidate("AAA", as_of=days[15])]}
+        return engine.run(
+            days,
+            bars_frame(self._bars(days)),
+            lambda d: candidates_by_day.get(d, []),
+            INITIAL_CASH,
+        )
+
+    def test_shorter_period_ratchets_the_stop_higher_and_closes_the_position(
+        self, settings
+    ):
+        # ATR(5) on session 20 = 2 + (0.4 - 2) / 5 = 1.68 -> stop
+        # 109.50 - 4.20 = 105.30, which session 21's open (105.20) gaps
+        # straight through, so the fill is the open and not the stop.
+        result = self._run(settings, self._SHORT_PERIOD)
+
+        slippage = settings.backtest.slippage_pct
+        commission = settings.backtest.commission_pct
+        entry_price = 108.0 * (1 + slippage)
+        shares = _sized(settings, INITIAL_CASH, price=108.0)
+        cash = INITIAL_CASH - shares * entry_price * (1 + commission)
+        exit_price = 105.2 * (1 - slippage)
+
+        assert [trade.exit_reason for trade in result.trades] == ["stop"]
+        assert result.trades[0].exit_price == pytest.approx(exit_price)
+        assert result.final_equity == pytest.approx(
+            cash + shares * exit_price * (1 - commission)
+        )
+
+    def test_default_period_keeps_holding_and_liquidates_at_the_end(self, settings):
+        # ATR(14) on session 20 = 2 + (0.4 - 2) / 14 = 1.8857... -> stop
+        # 104.7857..., below session 21's low (105.00): exactly the
+        # pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline.
+        assert settings.backtest.exit_atr_period == 14
+
+        result = self._run(settings, settings.backtest.exit_atr_period)
+
+        slippage = settings.backtest.slippage_pct
+        commission = settings.backtest.commission_pct
+        entry_price = 108.0 * (1 + slippage)
+        shares = _sized(settings, INITIAL_CASH, price=108.0)
+        cash = INITIAL_CASH - shares * entry_price * (1 + commission)
+        exit_price = 105.1 * (1 - slippage)
+
+        assert [trade.exit_reason for trade in result.trades] == ["end_of_backtest"]
+        assert result.trades[0].exit_price == pytest.approx(exit_price)
+        assert result.final_equity == pytest.approx(
+            cash + shares * exit_price * (1 - commission)
+        )

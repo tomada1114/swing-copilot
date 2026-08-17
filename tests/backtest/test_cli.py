@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
@@ -17,6 +18,7 @@ from swing_copilot.backtest.cli import (
     DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
+    UniverseSample,
     _atomic_write,
     _compose_dependencies,
     _grid_output_path,
@@ -59,6 +61,9 @@ from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 from tests.backtest.conftest import bars_frame, flat_bars
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _D0 = date(2027, 1, 1)
 _D1 = date(2027, 1, 2)
@@ -232,22 +237,111 @@ class TestValidateArgs:
 
 
 class TestSelectSymbols:
-    def _universe(self) -> tuple[UniverseMember, ...]:
-        return tuple(
+    """Issue #194: `--limit` samples the universe instead of truncating it."""
+
+    def _members(self, symbols: Sequence[str], sector: str) -> list[UniverseMember]:
+        return [
             UniverseMember(
                 symbol=symbol,
                 company_name=symbol,
-                gics_sector="Information Technology",
+                gics_sector=sector,
                 source_symbol=symbol,
             )
-            for symbol in ("AAA", "BBB", "CCC")
+            for symbol in symbols
+        ]
+
+    def _universe(self) -> tuple[UniverseMember, ...]:
+        return tuple(self._members(("AAA", "BBB", "CCC"), "Information Technology"))
+
+    def _sectored_universe(self, sizes: dict[str, int]) -> tuple[UniverseMember, ...]:
+        """One member per slot, named so alphabetical order is fully predictable."""
+        members: list[UniverseMember] = []
+        for sector, size in sorted(sizes.items()):
+            offset = len(members)
+            members += self._members(
+                [f"S{offset + index:03d}" for index in range(size)], sector
+            )
+        return tuple(members)
+
+    def test_no_limit_returns_the_whole_universe(self):
+        sample = _select_symbols(self._universe(), None)
+
+        assert sample.symbols == ("AAA", "BBB", "CCC")
+        assert sample.is_stratified_sample is False
+        assert sample.universe_size == 3
+        assert sample.sector_counts == (("Information Technology", 3),)
+
+    def test_limit_at_or_above_the_universe_size_returns_the_whole_universe(self):
+        assert _select_symbols(self._universe(), 3).symbols == ("AAA", "BBB", "CCC")
+        assert _select_symbols(self._universe(), 99).symbols == ("AAA", "BBB", "CCC")
+
+    def test_limit_is_not_the_alphabetically_first_n_symbols(self):
+        # The regression: `symbols[:limit]` returned exactly S000..S019.
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        sample = _select_symbols(universe, 20)
+
+        alphabetical_head = tuple(f"S{index:03d}" for index in range(20))
+        assert len(sample.symbols) == 20
+        assert sample.symbols != alphabetical_head
+        # Spread across the whole alphabet, not clustered at its start.
+        assert max(sample.symbols) > "S150"
+
+    def test_same_universe_and_limit_always_select_the_same_symbols(self):
+        universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
+        shuffled = tuple(reversed(universe))
+
+        first = _select_symbols(universe, 25)
+        again = _select_symbols(universe, 25)
+        from_shuffled_input = _select_symbols(shuffled, 25)
+
+        assert first.symbols == again.symbols == from_shuffled_input.symbols
+
+    def test_sector_shares_are_proportional_to_the_universe(self):
+        universe = self._sectored_universe(
+            {"Energy": 100, "Financials": 60, "Health Care": 30, "Utilities": 10}
         )
 
-    def test_no_limit_returns_all(self):
-        assert _select_symbols(self._universe(), None) == ["AAA", "BBB", "CCC"]
+        sample = _select_symbols(universe, 20)
 
-    def test_limit_truncates(self):
-        assert _select_symbols(self._universe(), 2) == ["AAA", "BBB"]
+        assert sample.is_stratified_sample is True
+        assert sample.universe_size == 200
+        assert sample.sector_counts == (
+            ("Energy", 10),
+            ("Financials", 6),
+            ("Health Care", 3),
+            ("Utilities", 1),
+        )
+
+    def test_leftover_seats_go_to_the_largest_remainder_ties_broken_by_name(self):
+        # 4 seats over three equal sectors: every sector floors to 1 and the
+        # single leftover goes to the alphabetically first of the tied three.
+        universe = self._sectored_universe({"Aaa": 3, "Bbb": 3, "Ccc": 3})
+
+        sample = _select_symbols(universe, 4)
+
+        assert sample.sector_counts == (("Aaa", 2), ("Bbb", 1), ("Ccc", 1))
+
+    def test_a_limit_smaller_than_the_sector_count_still_fills_every_seat(self):
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        sample = _select_symbols(universe, 1)
+
+        assert len(sample.symbols) == 1
+
+    def test_summary_lines_state_the_method_and_the_sector_composition(self):
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        method, composition = _select_symbols(universe, 20).summary_lines()
+
+        assert "20/200" in method
+        assert "blake2b" in method
+        assert composition == "セクター構成: Energy 10, Utilities 10"
+
+    def test_full_universe_summary_says_so(self):
+        method, _composition = _select_symbols(self._universe(), None).summary_lines()
+
+        assert "全 3 銘柄" in method
 
 
 class TestOutputPath:
@@ -358,9 +452,7 @@ class TestRenderTerminal:
             initial_stop_price=90.0,
         )
         result = _result(trades=(trade,), warnings=("予備的（trade_count=5）",))
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
-        )
+        meta = _meta(missing_data_symbols=["ZZZ"])
 
         text = render_terminal(result, meta)
 
@@ -373,9 +465,7 @@ class TestRenderTerminal:
 
     def test_no_trades_shows_placeholder(self):
         result = _result()
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_terminal(result, meta)
 
@@ -383,9 +473,7 @@ class TestRenderTerminal:
 
     def test_empty_equity_curve_shows_no_trading_days(self):
         result = dataclasses.replace(_result(), equity_curve=())
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_terminal(result, meta)
 
@@ -405,9 +493,7 @@ class TestRenderMarkdown:
             initial_stop_price=90.0,
         )
         result = _result(trades=(trade,), warnings=("統計的に不十分",))
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
-        )
+        meta = _meta(missing_data_symbols=["ZZZ"])
 
         text = render_markdown(result, meta)
 
@@ -423,9 +509,7 @@ class TestRenderMarkdown:
 
     def test_no_trades_shows_placeholder(self):
         result = _result()
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_markdown(result, meta)
 
@@ -440,9 +524,7 @@ class TestRenderComparison:
         pessimistic = dataclasses.replace(
             _result(warnings=("pessimistic warning",)), final_equity=90_000.0
         )
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
-        )
+        meta = _meta(missing_data_symbols=["ZZZ"])
 
         text = render_terminal_comparison(normal, pessimistic, meta)
 
@@ -456,9 +538,7 @@ class TestRenderComparison:
     def test_terminal_comparison_with_no_missing_data_omits_the_skip_line(self):
         normal = _result()
         pessimistic = _result()
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_terminal_comparison(normal, pessimistic, meta)
 
@@ -469,9 +549,7 @@ class TestRenderComparison:
         pessimistic = dataclasses.replace(
             _result(warnings=("pessimistic warning",)), final_equity=90_000.0
         )
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_markdown_comparison(normal, pessimistic, meta)
 
@@ -485,9 +563,7 @@ class TestRenderComparison:
     def test_no_warnings_omits_warnings_section(self):
         normal = _result()
         pessimistic = _result()
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_markdown_comparison(normal, pessimistic, meta)
 
@@ -526,9 +602,7 @@ class TestRenderGrid:
             trade_count=5,
         )
         grid = _grid_result(cell_overrides={(50, 40): gray_cell})
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_grid_terminal(grid, meta, gray_threshold=30)
 
@@ -539,9 +613,7 @@ class TestRenderGrid:
 
     def test_markdown_shows_matrix_as_a_table_with_verdict(self):
         grid = _grid_result(verdict=PLATEAU)
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=["ZZZ"]
-        )
+        meta = _meta(missing_data_symbols=["ZZZ"])
 
         text = render_grid_markdown(grid, meta, gray_threshold=30)
 
@@ -551,13 +623,46 @@ class TestRenderGrid:
 
     def test_markdown_with_no_missing_data_omits_data_quality_section(self):
         grid = _grid_result(verdict=PLATEAU)
-        meta = ReportMeta(
-            strategy="default", start=_D0, end=_D1, missing_data_symbols=[]
-        )
+        meta = _meta()
 
         text = render_grid_markdown(grid, meta, gray_threshold=30)
 
         assert "## Data quality" not in text
+
+
+class TestUniverseSamplingIsRendered:
+    """Issue #194: no report may present a `--limit` sample as a full run."""
+
+    def _sampled_meta(self) -> ReportMeta:
+        return _meta(
+            universe_sample=_sample(
+                ("AAA", "BBB"), universe_size=10, is_stratified_sample=True
+            )
+        )
+
+    def _rendered(self) -> list[str]:
+        meta = self._sampled_meta()
+        return [
+            render_terminal(_result(), meta),
+            render_markdown(_result(), meta),
+            render_terminal_comparison(_result(), _result(), meta),
+            render_markdown_comparison(_result(), _result(), meta),
+            render_policy_comparison_terminal([("none", _result())], meta),
+            render_policy_comparison_markdown([("none", _result())], meta),
+            render_grid_terminal(_grid_result(), meta, gray_threshold=30),
+            render_grid_markdown(_grid_result(), meta, gray_threshold=30),
+        ]
+
+    def test_every_report_states_the_method_and_the_composition(self):
+        for text in self._rendered():
+            assert "2/10 銘柄の決定論的サンプル" in text
+            assert "セクター構成: Information Technology 2" in text
+
+    def test_a_full_universe_run_says_so_instead(self):
+        text = render_markdown(_result(), _meta())
+
+        assert "全 1 銘柄（--limit 指定なし）" in text
+        assert "決定論的サンプル" not in text
 
 
 @pytest.fixture
@@ -654,10 +759,10 @@ class TestPointInTimeUniverseComposition:
                 str(db_path),
             ]
         )
-        deps, symbols, _missing = _compose_dependencies(args, settings, strategies)
+        deps, sample, _missing = _compose_dependencies(args, settings, strategies)
 
         assert [member.symbol for member in deps.universe] == ["PIT"]
-        assert symbols == ["PIT"]
+        assert sample.symbols == ("PIT",)
 
 
 @pytest.mark.usefixtures("two_symbol_universe")
@@ -854,8 +959,32 @@ def _settings_copy(tmp_path: Path, *, initial_cash_usd: int) -> Path:
     return override
 
 
-def _meta() -> ReportMeta:
-    return ReportMeta(strategy="default", start=_D0, end=_D1, missing_data_symbols=[])
+def _sample(
+    symbols: tuple[str, ...] = ("AAA",),
+    *,
+    universe_size: int | None = None,
+    is_stratified_sample: bool = False,
+) -> UniverseSample:
+    return UniverseSample(
+        symbols=symbols,
+        universe_size=universe_size if universe_size is not None else len(symbols),
+        is_stratified_sample=is_stratified_sample,
+        sector_counts=(("Information Technology", len(symbols)),),
+    )
+
+
+def _meta(
+    *,
+    missing_data_symbols: Sequence[str] = (),
+    universe_sample: UniverseSample | None = None,
+) -> ReportMeta:
+    return ReportMeta(
+        strategy="default",
+        start=_D0,
+        end=_D1,
+        missing_data_symbols=list(missing_data_symbols),
+        universe_sample=universe_sample or _sample(),
+    )
 
 
 def _exit_trade(reason: str, days_held: int) -> Trade:
@@ -1392,9 +1521,7 @@ class TestPolicyArgument:
 
 
 class TestRenderPolicyComparison:
-    _META = ReportMeta(
-        strategy="default", start=_D0, end=_D1, missing_data_symbols=["BBB"]
-    )
+    _META = _meta(missing_data_symbols=["BBB"])
 
     @staticmethod
     def _arms() -> list[tuple[str, BacktestResult]]:
@@ -1421,16 +1548,12 @@ class TestRenderPolicyComparison:
         assert "データ不足のためスキップ: BBB" in text
 
     def test_terminal_omits_the_data_quality_note_when_nothing_was_skipped(self):
-        text = render_policy_comparison_terminal(
-            [("none", _result())], ReportMeta("default", _D0, _D1, [])
-        )
+        text = render_policy_comparison_terminal([("none", _result())], _meta())
 
         assert "データ不足のためスキップ" not in text
 
     def test_markdown_omits_the_warning_section_when_no_arm_warns(self):
-        text = render_policy_comparison_markdown(
-            [("none", _result())], ReportMeta("default", _D0, _D1, [])
-        )
+        text = render_policy_comparison_markdown([("none", _result())], _meta())
 
         assert "## Warnings" not in text
         assert "## Data quality" not in text

@@ -6,8 +6,16 @@ calls the *same* functions instead of a second, drifting copy. These are pure:
 no clock, no I/O, and every point-in-time cutoff arrives as an explicit
 `as_of`.
 
-The ATR period is fixed at 14 here, matching the engine's previous hardcoded
-value (`settings.backtest.exit_atr_period` is not wired up).
+The ATR smoothing period arrives as an explicit `period` argument (Issue #194):
+production callers pass `settings.backtest.exit_atr_period`, so changing that
+setting really does change the trailing stop instead of being a dead key. There
+is deliberately no default here — a silent 14 is exactly how the setting came
+to be unwired in the first place.
+
+`screening/pipeline.py`'s `_ATR_WINDOW = 14` is a *different* quantity (the
+ranking metric `atr14`, which also fixes the entry-side stop distance in
+`risk/checks.py`) and is intentionally not unified with this one: the exit
+period may be swept without moving the ranking or the position sizing.
 """
 
 from __future__ import annotations
@@ -22,8 +30,6 @@ if TYPE_CHECKING:
     from datetime import date
 
     import pandas as pd
-
-ATR_PERIOD = 14
 
 ExitReason = Literal["stop", "max_hold"]
 
@@ -100,51 +106,58 @@ def evaluate_exit(  # noqa: PLR0913
     return None
 
 
-def atr14_as_of(bars: pd.DataFrame, symbol: str, as_of: date) -> float | None:
-    """Return the latest Wilder ATR(14) for `symbol` at an inclusive cutoff.
+def atr_as_of(
+    bars: pd.DataFrame, symbol: str, as_of: date, period: int
+) -> float | None:
+    """Return the latest Wilder ATR for `symbol` at an inclusive cutoff.
 
     Args:
         bars: Tidy OHLCV bars (`symbol, date, open, high, low, close, ...`).
         symbol: Ticker to select.
         as_of: Point-in-time cutoff (inclusive); later bars are never read.
+        period: Wilder smoothing period, i.e.
+            `settings.backtest.exit_atr_period` for production callers
+            (validated `>= 1` there).
 
     Returns:
-        The ATR, or `None` when there are fewer than `ATR_PERIOD` bars up to
+        The ATR, or `None` when there are fewer than `period` bars up to
         the cutoff or the smoothed value is not a number.
     """
     series = symbol_bars(bars, symbol, as_of)
-    if series is None or len(series) < ATR_PERIOD:
+    if series is None or len(series) < period:
         return None
-    atr = wilder_atr(series["high"], series["low"], series["close"], ATR_PERIOD).iloc[
-        -1
-    ]
+    atr = wilder_atr(series["high"], series["low"], series["close"], period).iloc[-1]
     return None if math.isnan(atr) else float(atr)
 
 
-def atr14_by_date(bars: pd.DataFrame, symbol: str, as_of: date) -> dict[date, float]:
-    """Return every session's Wilder ATR(14) up to `as_of`, in one smoothing pass.
+def atr_by_date(
+    bars: pd.DataFrame, symbol: str, as_of: date, period: int
+) -> dict[date, float]:
+    """Return every session's Wilder ATR up to `as_of`, in one smoothing pass.
 
-    `atr14_as_of` re-smooths the whole history to answer for a single day, so a
+    `atr_as_of` re-smooths the whole history to answer for a single day, so a
     caller that walks a position forward day by day pays a quadratic cost for
     values one pass already produces. Wilder smoothing is causal
     (`adjust=False`), so the value this returns for day *d* is exactly what
-    `atr14_as_of(bars, symbol, d)` returns; it lives here, beside that
+    `atr_as_of(bars, symbol, d, period)` returns; it lives here, beside that
     function, so the two cannot drift apart.
 
     Args:
         bars: Tidy OHLCV bars (`symbol, date, open, high, low, close, ...`).
         symbol: Ticker to select.
         as_of: Point-in-time cutoff (inclusive); later bars are never read.
+        period: Wilder smoothing period; must match the one `atr_as_of`
+            would be called with, or the ledger and the simulator diverge.
 
     Returns:
         Session date to ATR. Days whose smoothed value is not yet a number
-        (fewer than `ATR_PERIOD` observations) are absent, so a plain `.get()`
-        reproduces `atr14_as_of`'s `None`.
+        (fewer than `period` observations) are absent, so a plain `.get()`
+        reproduces `atr_as_of`'s `None`.
     """
     series = symbol_bars(bars, symbol, as_of)
-    if series is None or len(series) < ATR_PERIOD:
+    if series is None or len(series) < period:
         return {}
-    atr = wilder_atr(series["high"], series["low"], series["close"], ATR_PERIOD)
+    atr = wilder_atr(series["high"], series["low"], series["close"], period)
     return {
         session_date: float(value)
         for session_date, value in zip(series["date"], atr, strict=True)

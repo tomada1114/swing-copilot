@@ -62,5 +62,16 @@
         ]
       }
     ]
+  },
+  "extraKnownMarketplaces": {
+    "tomada-claude-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "tomada1114/tomada-claude-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "tomada-kit@tomada-claude-plugins": true
   }
 }

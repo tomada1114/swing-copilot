@@ -93,7 +93,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    （2 値は後段で result に逐語転記する。不一致は run ごと hard fail）
 3. 読む順序: `aggregates`（verdict_mix → separation → proceed 重大外し率 → skip 的中率
    → news_supply）→
-   `signal_performance` → `human_alignment` → `source_contribution` → `surprises` →
+   `signal_performance` → `human_alignment` → `source_contribution` → `basis_contribution` → `surprises` →
    `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
    proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、
    `verdict_mix` は成熟を待たず窓内の verdicts から算出されるため沈黙しない
@@ -146,6 +146,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 | サプライズ敗因分析 | `surprises.items[]` の 1 銘柄ずつ。当時の verdict・reasons・`input_filing_coverage`・`news_supply`・引用 facts と、`freshness`（run 以降に公開されたニュース・開示）を突き合わせる | 銘柄ごとの `failure_class` 1 値 + 叙述 + `evidence_refs` |
 | シグナル×verdict 突合 | `signal_performance` と `aggregates` を並べ、「シグナルが外した」のか「読みが外した」のかを切り分ける | 指標の取捨選択観点の観察 |
 | ソース貢献レビュー | `source_contribution` の引用回数と HIT/MISS 引用比率、`information_absent` の反復 | ニュース源の増減観点の観察 |
+| 根拠タイプ貢献レビュー | `basis_contribution` の根拠タイプ別 verdict 件数と `hit_citation_ratio`。「決算根拠の proceed」と「テクニカルのみ根拠の proceed」のどちらが当たっているかを比較する。`untagged` の割合が高い窓では、他の行の比較を根拠に使わず「タグ付与率が低く比較不能」と書く | 根拠タイプの偏り観点の観察 |
 
 各エージェントへの指示に必ず含めるもの:
 

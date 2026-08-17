@@ -31,7 +31,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.news_supply import (
+    DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS,
+)
 from swing_copilot.retro.evaluate import (
     HIT,
     HORIZON_DAYS,
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
         VerdictCitationRow,
         VerdictDecisionRow,
         VerdictOutcomeRecord,
+        VerdictReasonBasisRow,
         VerdictRow,
     )
 
@@ -64,6 +67,12 @@ PROCEED_SEVERE_MISS_WATCH_RATE = 0.15
 #: measured zero -- collapsing the two would let unmeasured history argue for
 #: or against the threshold it never saw.
 UNRECORDED_NEWS_SUPPLY_LEVEL = "unrecorded"
+
+#: Issue #191: the bucket a verdict reason falls into when its author left
+#: `basis` unset (or the row predates the field). Reported rather than
+#: dropped, for the same reason the level above is: the share of the window
+#: that is untagged is what says whether the tagged rows mean anything.
+UNTAGGED_VERDICT_BASIS = "untagged"
 
 _SEPARATION = "separation"
 _PROCEED_SEVERE_MISS_RATE = "proceed_severe_miss_rate"
@@ -186,6 +195,26 @@ class AlignmentCell:
     mean_forward_return_pct: float
     hit_count: int
     severe_miss_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class BasisContributionRow:
+    """One evidence kind's tally across the verdicts that rested on it.
+
+    The `basis` counterpart of `SourceContributionRow` (Issue #191). Source
+    contribution can only ever separate *providers* -- finnhub against edgar
+    -- which cannot answer whether verdicts justified by an earnings surprise
+    outperform verdicts justified by the technical score alone, since both
+    kinds of reasoning may cite the same provider or none at all.
+    """
+
+    basis_id: str
+    basis: str
+    verdict_count: int
+    hit_count: int
+    miss_count: int
+    neutral_count: int
+    hit_citation_ratio: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +457,7 @@ def compute_verdict_mix(verdicts: Sequence[VerdictRow]) -> VerdictMixSummary:
 
 def compute_news_supply_mix(
     verdicts: Sequence[VerdictRow],
+    sufficient_mention_items: int = DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS,
 ) -> NewsSupplySummary:
     """Cross the archived news-supply level against what the verdict said.
 
@@ -439,6 +469,10 @@ def compute_news_supply_mix(
 
     Args:
         verdicts: Every verdict in the window, unfiltered by maturity.
+        sufficient_mention_items: The `sufficient` floor the run was graded
+            under, from `settings.analysis.sufficient_news_mention_items`. It
+            is reported back in the summary so a dossier read later says which
+            boundary produced its cells.
 
     Returns:
         One cell per `(level, recommendation)` actually seen, ordered by that
@@ -457,7 +491,7 @@ def compute_news_supply_mix(
     unrecorded = sum(1 for row in verdicts if row.news_supply is None)
     return NewsSupplySummary(
         metric_id=f"{_METRIC_PREFIX}:{_NEWS_SUPPLY}",
-        sufficient_threshold=SUFFICIENT_SYMBOL_MENTION_ITEMS,
+        sufficient_threshold=sufficient_mention_items,
         verdict_count=len(verdicts),
         recorded_verdict_count=len(verdicts) - unrecorded,
         unrecorded_verdict_count=unrecorded,
@@ -614,6 +648,71 @@ def compute_human_alignment(
             ),
         )
         for (decision, recommendation, horizon_days), cell in sorted(grouped.items())
+    )
+
+
+def compute_basis_contribution(
+    bases: Sequence[VerdictReasonBasisRow],
+    outcomes: Sequence[VerdictOutcomeRecord],
+) -> tuple[BasisContributionRow, ...]:
+    """Tally how each kind of evidence-backed reasoning actually turned out.
+
+    Scored exactly like `compute_source_contribution`: every basis a verdict
+    rested on is credited with every horizon of that `(run, symbol)` which
+    matured, so a verdict that hit at 5 days and missed severely at 20 lands
+    in both buckets for each of its bases.
+
+    Reasons the writer left untagged are reported under
+    `UNTAGGED_VERDICT_BASIS` rather than dropped: how much of the window is
+    untagged is what tells a reader whether the other rows can be trusted at
+    all, and silently omitting them would make a thin sample look complete.
+
+    Args:
+        bases: One row per `(run, symbol, basis)` for verdicts matured in the
+            window.
+        outcomes: The same window's classified rows.
+
+    Returns:
+        One row per basis, ordered by basis, untagged last. A basis whose
+        verdicts have no matured outcome keeps a `None` ratio -- "used but
+        never measurable" is itself worth seeing.
+    """
+    by_symbol: dict[tuple[str, str], list[VerdictOutcomeRecord]] = defaultdict(list)
+    for outcome in outcomes:
+        by_symbol[(str(outcome.run_id), outcome.symbol)].append(outcome)
+
+    grouped: dict[str, list[list[VerdictOutcomeRecord]]] = defaultdict(list)
+    for row in bases:
+        grouped[row.basis or UNTAGGED_VERDICT_BASIS].append(
+            by_symbol.get((str(row.run_id), row.symbol), [])
+        )
+
+    return tuple(
+        _basis_row(basis, cited)
+        for basis, cited in sorted(
+            grouped.items(),
+            key=lambda item: (item[0] == UNTAGGED_VERDICT_BASIS, item[0]),
+        )
+    )
+
+
+def _basis_row(
+    basis: str, cited: Sequence[Sequence[VerdictOutcomeRecord]]
+) -> BasisContributionRow:
+    """Fold one basis's per-verdict outcome lists into a single tally."""
+    linked = [outcome for verdict_outcomes in cited for outcome in verdict_outcomes]
+    hits = sum(1 for outcome in linked if outcome.classification == HIT)
+    neutrals = sum(1 for outcome in linked if outcome.classification == NEUTRAL)
+    misses = len(linked) - hits - neutrals
+    decided = hits + misses
+    return BasisContributionRow(
+        basis_id=f"{_METRIC_PREFIX}:basis_contribution:{basis}",
+        basis=basis,
+        verdict_count=len(cited),
+        hit_count=hits,
+        miss_count=misses,
+        neutral_count=neutrals,
+        hit_citation_ratio=hits / decided if decided > 0 else None,
     )
 
 

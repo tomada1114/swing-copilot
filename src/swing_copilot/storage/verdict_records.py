@@ -18,8 +18,9 @@ succeeded rolls the whole write back and leaves the previous state intact.
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from swing_copilot.storage.json_guard import dumps_safe
@@ -65,10 +66,17 @@ class VerdictReasonRecord:
     `source_ids` may be empty: a reason resting only on deterministic inputs
     the pipeline itself computed has no news/filing source to cite (mirrors
     `analysis.schemas.VerdictReason`).
+
+    `basis` is that schema's closed evidence-kind vocabulary, or `None` for a
+    reason written before Issue #191 introduced the tag (or left untagged).
+    It lives inside `reasons_json` rather than in a column of its own because
+    a reason is already only addressable through that document; no DDL
+    changes for it.
     """
 
     text: str
     source_ids: tuple[str, ...]
+    basis: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +156,50 @@ class VerdictOutcomeRecord:
     recommendation: str
     forward_return_pct: float
     classification: str
+
+
+@dataclass(frozen=True, slots=True)
+class PriorVerdictOutcome:
+    """How one horizon of an earlier verdict on the same symbol turned out."""
+
+    horizon_days: int
+    classification: str
+    forward_return_pct: float
+
+
+@dataclass(frozen=True, slots=True)
+class PriorVerdictRecord:
+    """One earlier verdict on a symbol, with whatever has since matured.
+
+    Fed back into the next `analysis_input.json` for the same symbol (Issue
+    #191) so the analysis can see which of its own reasons keep preceding a
+    miss. `outcomes` is empty while the horizons are still open, which is the
+    normal state for a verdict only a few sessions old -- not an error, and
+    not a neutral result.
+    """
+
+    run_id: UUID
+    as_of: date
+    symbol: str
+    strategy_key: str
+    recommendation: str
+    reasons: tuple[VerdictReasonRecord, ...]
+    outcomes: tuple[PriorVerdictOutcome, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictReasonBasisRow:
+    """One `(run, symbol, basis)` the window's matured verdicts rested on.
+
+    Deduplicated per verdict: a symbol whose analysis wrote three separate
+    `filing_fundamental` reasons counts that basis once, so the tally measures
+    "how often this kind of evidence decided a verdict", not how verbose the
+    writer was about it. `basis` is `None` for an untagged reason.
+    """
+
+    run_id: UUID
+    symbol: str
+    basis: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +344,7 @@ def replace_run_verdicts(
                                 {
                                     "text": reason.text,
                                     "source_ids": list(reason.source_ids),
+                                    "basis": reason.basis,
                                 }
                                 for reason in verdict.reasons
                             ]
@@ -583,16 +636,151 @@ def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, .
     )
 
 
+def get_prior_verdicts(
+    database: Database,
+    symbol: str,
+    strategy_key: str,
+    before_date: date,
+    limit: int,
+) -> tuple[PriorVerdictRecord, ...]:
+    """Return a symbol's most recent earlier verdicts, newest first (Issue #191).
+
+    Deliberately a separate read from `paper_records.get_decision_history()`
+    even though both answer "what happened last time". That one reports the
+    *human* journal, which only has a row when the operator recorded one; this
+    one reports the analysis layer's own past judgement, which exists for every
+    symbol a past run analyzed. Joining the two would have made the feedback
+    visible only for journaled symbols -- the case the issue is least about.
+
+    Point-in-time: `as_of < before_date` strictly, matching the decision-history
+    cutoff, so today's own verdict can never be fed back into today's input.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        symbol: The candidate's ticker.
+        strategy_key: Only verdicts produced by the same strategy are
+            comparable feedback.
+        before_date: Exclusive upper bound on the verdict's `as_of`.
+        limit: Maximum number of verdicts, newest first. `<= 0` returns empty.
+
+    Returns:
+        Newest-first records, each carrying every horizon that has matured for
+        it, ordered by horizon.
+    """
+    if limit <= 0:
+        return ()
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            WITH recent AS (
+                SELECT run_id, as_of, symbol, strategy_key, recommendation,
+                       reasons_json
+                FROM verdicts
+                WHERE symbol = ? AND strategy_key = ? AND as_of < ?
+                ORDER BY as_of DESC, run_id DESC
+                LIMIT ?
+            )
+            SELECT r.run_id, r.as_of, r.symbol, r.strategy_key, r.recommendation,
+                   r.reasons_json, o.horizon_days, o.classification,
+                   o.forward_return_pct
+            FROM recent AS r
+            LEFT JOIN verdict_outcomes AS o
+              ON o.run_id = r.run_id AND o.symbol = r.symbol
+            ORDER BY r.as_of DESC, r.run_id DESC, o.horizon_days
+            """,
+            [symbol, strategy_key, before_date, limit],
+        ).fetchall()
+
+    outcomes: dict[str, list[PriorVerdictOutcome]] = defaultdict(list)
+    heads: dict[str, tuple[object, ...]] = {}
+    for row in rows:
+        run_key = str(row[0])
+        if run_key not in heads:
+            heads[run_key] = tuple(row[1:6])
+        if row[6] is not None:
+            outcomes[run_key].append(
+                PriorVerdictOutcome(
+                    horizon_days=row[6],
+                    classification=row[7],
+                    forward_return_pct=row[8],
+                )
+            )
+    return tuple(
+        PriorVerdictRecord(
+            run_id=UUID(run_key),
+            as_of=cast("date", head[0]),
+            symbol=str(head[1]),
+            strategy_key=str(head[2]),
+            recommendation=str(head[3]),
+            reasons=_reasons_from_json(str(head[4])),
+            outcomes=tuple(outcomes[run_key]),
+        )
+        for run_key, head in heads.items()
+    )
+
+
+def get_verdict_reason_bases_in_window(
+    database: Database, window_start: date, as_of: date
+) -> tuple[VerdictReasonBasisRow, ...]:
+    """Return the distinct bases cited by verdicts that matured in the window.
+
+    The `basis` counterpart of `get_verdict_citations_in_window`: one row per
+    `(run, symbol, basis)`, so a hit rate can be computed per evidence kind
+    the same way it already is per source provider (Issue #191).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        window_start: Inclusive earliest maturity date.
+        as_of: Inclusive latest maturity date.
+
+    Returns:
+        Rows ordered by `(run_id, symbol, basis)`, untagged reasons last.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT v.run_id, v.symbol, v.reasons_json
+            FROM verdicts AS v
+            JOIN (
+                SELECT DISTINCT run_id, symbol
+                FROM verdict_outcomes
+                WHERE as_of >= ? AND as_of <= ?
+            ) AS m ON m.run_id = v.run_id AND m.symbol = v.symbol
+            ORDER BY v.run_id, v.symbol
+            """,
+            [window_start, as_of],
+        ).fetchall()
+    return tuple(
+        VerdictReasonBasisRow(run_id=UUID(str(row[0])), symbol=row[1], basis=basis)
+        for row in rows
+        for basis in sorted(
+            {reason.basis for reason in _reasons_from_json(str(row[2]))},
+            key=lambda value: (value is None, value or ""),
+        )
+    )
+
+
 def _reasons_from_json(raw: str) -> tuple[VerdictReasonRecord, ...]:
-    """Rebuild the reason list `replace_run_verdicts` serialized."""
+    """Rebuild the reason list `replace_run_verdicts` serialized.
+
+    `basis` is read with `.get()`: rows archived before Issue #191 carry no
+    such key, and an untagged reason must come back as `None` rather than
+    fail the whole run's read.
+    """
     reasons: list[dict[str, object]] = json.loads(str(raw))
     return tuple(
         VerdictReasonRecord(
             text=str(reason["text"]),
             source_ids=tuple(str(value) for value in list(reason["source_ids"])),  # type: ignore[call-overload]
+            basis=_optional_str(reason.get("basis")),
         )
         for reason in reasons
     )
+
+
+def _optional_str(value: object) -> str | None:
+    """Return `value` as text, preserving a missing/null tag as `None`."""
+    return None if value is None else str(value)
 
 
 def get_verdict_citations_in_window(

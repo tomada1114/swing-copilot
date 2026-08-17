@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -19,7 +19,7 @@ from swing_copilot.analysis.export import (
     write_analysis_input,
     write_json_atomically,
 )
-from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
@@ -29,6 +29,11 @@ from swing_copilot.regime.exposure import ExposureDecision, ExposureVerdict
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import Candidate
+from swing_copilot.storage.verdict_records import (
+    PriorVerdictOutcome,
+    PriorVerdictRecord,
+    VerdictReasonRecord,
+)
 from swing_copilot.text.base import FilingSection, TextItem
 from swing_copilot.text.calendar_fred import (
     FRED_RELEASE_DATES_URL,
@@ -174,6 +179,7 @@ def _request(
     *text_items: TextItem,
     calendar_events: tuple[TextItem, ...] = (),
     limits: TextExportLimits = LIMITS,
+    prior_verdicts: tuple[PriorVerdictRecord, ...] = (),
 ) -> ExportRequest:
     candidate = ExportCandidate(
         candidate=Candidate(
@@ -199,6 +205,7 @@ def _request(
             binding_constraint="trade_risk",
         ),
         text_items=text_items,
+        prior_verdicts=prior_verdicts,
     )
     return ExportRequest(
         as_of=AS_OF,
@@ -361,7 +368,7 @@ class TestBuildAnalysisInput:
             _request(
                 *(
                     _news(f"finnhub:{index}", 28, body="AAPL lifted guidance.")
-                    for index in range(SUFFICIENT_SYMBOL_MENTION_ITEMS - 1)
+                    for index in range(DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS - 1)
                 ),
                 _news("finnhub:peer", 27, body="Dell Q2 earnings beat estimates."),
                 limits=_SUPPLY_LIMITS,
@@ -370,7 +377,9 @@ class TestBuildAnalysisInput:
 
         supply = payload.candidates[0].news_supply
         assert supply is not None
-        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        assert (
+            supply.symbol_mention_items == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        )
         assert supply.level == "sparse"
 
     def test_a_feed_naming_the_symbol_at_the_floor_reports_sufficient_supply(self):
@@ -378,7 +387,7 @@ class TestBuildAnalysisInput:
             _request(
                 *(
                     _news(f"finnhub:{index}", 28, body="AAPL lifted guidance.")
-                    for index in range(SUFFICIENT_SYMBOL_MENTION_ITEMS)
+                    for index in range(DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS)
                 ),
                 limits=_SUPPLY_LIMITS,
             )
@@ -386,7 +395,7 @@ class TestBuildAnalysisInput:
 
         supply = payload.candidates[0].news_supply
         assert supply is not None
-        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert supply.symbol_mention_items == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
         assert supply.level == "sufficient"
 
     def test_news_without_related_tickers_is_ranked_on_target_but_not_counted(self):
@@ -596,3 +605,69 @@ class TestAtomicWrite:
         write_json_atomically(destination, {"generation": 2})
 
         assert json.loads(destination.read_text(encoding="utf-8")) == {"generation": 2}
+
+
+class TestPriorVerdictsExport:
+    """Issue #191: the analysis layer's own past judgement reaches the skill."""
+
+    @staticmethod
+    def _prior(basis: str | None = "news_catalyst") -> PriorVerdictRecord:
+        return PriorVerdictRecord(
+            run_id=uuid4(),
+            as_of=date(2027, 2, 20),
+            symbol="AAPL",
+            strategy_key="default",
+            recommendation="proceed",
+            reasons=(
+                VerdictReasonRecord(
+                    text="受注が伸びている", source_ids=("news-1",), basis=basis
+                ),
+            ),
+            outcomes=(
+                PriorVerdictOutcome(
+                    horizon_days=5,
+                    classification="MISS_SEVERE",
+                    forward_return_pct=-6.0,
+                ),
+            ),
+        )
+
+    def test_a_repeat_candidates_prior_verdict_and_outcome_reach_the_input(self):
+        """The issue's DoD: a second-time candidate sees what it said before."""
+        payload = build_analysis_input(_request(prior_verdicts=(self._prior(),)))
+
+        block = payload.candidates[0].prior_verdicts
+
+        assert block is not None
+        assert "[news_catalyst] 受注が伸びている" in block
+        assert "5日: MISS_SEVERE (-6.00%)" in block
+
+    def test_a_first_time_candidate_carries_no_block_rather_than_a_placeholder(self):
+        payload = build_analysis_input(_request())
+
+        assert payload.candidates[0].prior_verdicts is None
+
+    def test_the_block_is_covered_by_the_documents_own_digest(self):
+        """A field outside the digest could be edited after the fact."""
+        with_prior = build_analysis_input(_request(prior_verdicts=(self._prior(),)))
+        without = build_analysis_input(_request())
+
+        assert with_prior.input_digest != without.input_digest
+
+
+class TestNewsSupplyThresholdIsConfigured:
+    """Issue #191 made Issue #130's `sufficient` floor an operator setting."""
+
+    def test_the_configured_floor_decides_the_level_not_the_module_default(self):
+        items = tuple(
+            _news(f"news-{index}", index + 1, body="AAPL rose") for index in range(3)
+        )
+        lowered = replace(_SUPPLY_LIMITS, sufficient_news_mention_items=3)
+
+        payload = build_analysis_input(_request(*items, limits=lowered))
+
+        supply = payload.candidates[0].news_supply
+        assert supply is not None
+        assert supply.symbol_mention_items == 3
+        # Three mentions is `sparse` under the shipped default of 5.
+        assert supply.level == "sufficient"

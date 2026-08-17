@@ -40,6 +40,7 @@ from swing_copilot.pipeline.postmortem import compute_signal_performance
 from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
+    compute_basis_contribution,
     compute_human_alignment,
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
@@ -55,6 +56,7 @@ from swing_copilot.retro.schemas import (
     AggregateMetrics,
     AlignmentEntry,
     ArchivedFilingCoverage,
+    BasisContributionEntry,
     ConfigSnapshot,
     EvaluationSettings,
     FreshnessEntry,
@@ -266,6 +268,7 @@ def build_retro_input(
     )
     coverages = store.get_analysis_source_coverages_in_window(window_start, as_of)
     citations = store.get_verdict_citations_in_window(window_start, as_of)
+    reason_bases = store.get_verdict_reason_bases_in_window(window_start, as_of)
     alignment = store.get_verdict_decision_alignment(window_start, as_of)
     signals = compute_signal_performance(
         get_signal_outcomes(store.database, window_start, as_of), thresholds
@@ -298,6 +301,10 @@ def build_retro_input(
         "source_contribution": [
             SourceContributionEntry(**asdict(row)).model_dump(mode="json")
             for row in compute_source_contribution(citations, outcomes)
+        ],
+        "basis_contribution": [
+            BasisContributionEntry(**asdict(row)).model_dump(mode="json")
+            for row in compute_basis_contribution(reason_bases, outcomes)
         ],
         "input_coverage": _input_coverage_summary(outcomes, coverages).model_dump(
             mode="json"
@@ -381,13 +388,22 @@ def _aggregates(
             for row in compute_skip_hit_rate(outcomes, thresholds)
         ],
         verdict_mix=VerdictMixEntry(**asdict(compute_verdict_mix(verdicts))),
-        news_supply=_news_supply_entry(verdicts),
+        news_supply=_news_supply_entry(
+            verdicts, settings.analysis.sufficient_news_mention_items
+        ),
     )
 
 
-def _news_supply_entry(verdicts: Sequence[VerdictRow]) -> NewsSupplySummaryEntry:
-    """Carry the supply cross-tab across, cell by cell (Issue #154)."""
-    summary = compute_news_supply_mix(verdicts)
+def _news_supply_entry(
+    verdicts: Sequence[VerdictRow], sufficient_mention_items: int
+) -> NewsSupplySummaryEntry:
+    """Carry the supply cross-tab across, cell by cell (Issue #154).
+
+    The threshold is the operator's configured one (Issue #191), so a dossier
+    re-read later is graded against the value the run actually used rather
+    than whatever the code's default has since become.
+    """
+    summary = compute_news_supply_mix(verdicts, sufficient_mention_items)
     return NewsSupplySummaryEntry(
         metric_id=summary.metric_id,
         sufficient_threshold=summary.sufficient_threshold,

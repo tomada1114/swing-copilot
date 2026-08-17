@@ -232,7 +232,11 @@ class TestCollectHappyPath:
 
         rows = _rows(state_store, "SELECT reasons_json FROM verdicts")
         assert json.loads(str(rows[0][0])) == [
-            {"text": "No contradicting disclosure.", "source_ids": [FILING_ID]}
+            {
+                "text": "No contradicting disclosure.",
+                "source_ids": [FILING_ID],
+                "basis": None,
+            }
         ]
 
     def test_persists_the_run_level_no_trade_flag(

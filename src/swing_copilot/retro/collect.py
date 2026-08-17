@@ -325,7 +325,9 @@ def _write_run(
                 recommendation=analysis.verdict.recommendation,
                 reasons=tuple(
                     VerdictReasonRecord(
-                        text=reason.text, source_ids=tuple(reason.source_ids)
+                        text=reason.text,
+                        source_ids=tuple(reason.source_ids),
+                        basis=reason.basis,
                     )
                     for reason in analysis.verdict.reasons
                 ),

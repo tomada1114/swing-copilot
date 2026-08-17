@@ -104,6 +104,10 @@ analysis:
   # Run-wide macro/economic-calendar events surfaced in context.calendar_events.
   max_calendar_events: 20
   max_calendar_chars_per_item: 2000
+  # How many exported articles must name the candidate before its news feed is
+  # graded `sufficient` (Issue #130's measurement). 要検証: the shipped value is
+  # one run's calibration under max_news_items_per_symbol: 20.
+  sufficient_news_mention_items: 5
 
 schedule:
   timeout_minutes: 35 # >= 1

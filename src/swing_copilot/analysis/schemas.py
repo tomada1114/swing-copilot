@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -301,17 +301,23 @@ class NewsSupply(_StrictModel):
 class CandidateInput(_StrictModel):
     """One screened candidate's deterministic context plus its untrusted text.
 
-    `score_breakdown`/`risk_constraints`/`decision_history` are pre-rendered
-    text blocks produced by `analysis/context.py` from values the code already
-    computed. They exist so the skill's narrative can be checked against the
-    code's own quantitative determination, never so the skill can restate or
-    override it.
+    `score_breakdown`/`risk_constraints`/`decision_history`/`prior_verdicts`
+    are pre-rendered text blocks produced by `analysis/context.py` from values
+    the code already computed. They exist so the skill's narrative can be
+    checked against the code's own quantitative determination, never so the
+    skill can restate or override it.
     """
 
     symbol: str
     score_breakdown: str
     risk_constraints: str
     decision_history: str | None
+    #: This symbol's own earlier verdicts and how they turned out (Issue
+    #: #191), distinct from `decision_history`, which is the *human*
+    #: journal. Optional so `analysis-input-v3` documents archived before it
+    #: existed keep parsing; `None` means "no prior verdict was archived",
+    #: which for a first-time candidate is the normal state.
+    prior_verdicts: str | None = None
     news: list[NewsInput]
     # Optional by design, unlike `FilingInput.coverage`: requiring it under
     # `analysis-input-v3` would make every v3 document archived before Issue
@@ -467,16 +473,49 @@ class ScreeningAssessment(_StrictModel):
     concerns: list[str] = []
 
 
+#: The closed set of evidence kinds a verdict reason may be tagged with
+#: (Issue #191). Kept flat and small on purpose: every additional value
+#: splits the same fixed number of matured verdicts into thinner buckets, so
+#: a hit rate per basis stops being readable. `market_regime` and
+#: `risk_sizing` cover the two code-owned context blocks; the remaining four
+#: cover the evidence a skill actually reads.
+VerdictBasis = Literal[
+    "technical_score",
+    "news_catalyst",
+    "filing_fundamental",
+    "risk_sizing",
+    "market_regime",
+    "peer_relative",
+]
+#: The same values as a runtime-iterable tuple, derived from the type rather
+#: than restated, so aggregation and the instruction-drift test can never
+#: disagree with what the schema actually accepts.
+VERDICT_BASES: Final[tuple[str, ...]] = get_args(VerdictBasis)
+
+
 class VerdictReason(_StrictModel):
     """One reason behind a verdict.
 
     `source_ids` may be empty, unlike `SourcedFact`: a reason resting only on
     deterministic inputs the code itself computed (score, sizing constraint)
     has no news/filing source to cite.
+
+    `basis` tags *which kind* of evidence the reason rests on. It is a closed
+    vocabulary for the same reason `retro.evaluate`'s failure classes are one:
+    free text cannot be aggregated, so "decisions justified by an earnings
+    surprise" could never be compared against "decisions justified by the
+    technical score alone" (Issue #191). Nothing in `validate.py` can check a
+    `basis` against the input -- only the writer knows which evidence it
+    actually leaned on -- so it is deliberately outside the provenance
+    contract: a wrong tag skews an aggregate, it never admits an uncited
+    claim. It stays optional so `analysis-result-v3` documents archived
+    before this existed keep parsing; absent means "not tagged", never
+    "tagged as technical".
     """
 
     text: NonBlankText
     source_ids: list[SourceId] = []
+    basis: VerdictBasis | None = None
 
 
 class Verdict(_StrictModel):

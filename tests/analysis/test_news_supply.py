@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from swing_copilot.analysis.news_supply import (
-    SUFFICIENT_SYMBOL_MENTION_ITEMS,
+    DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS,
     measure_news_supply,
 )
 from swing_copilot.analysis.schemas import NewsInput
@@ -50,24 +50,28 @@ def _collected(count: int, source_type: str = "news") -> list[TextItem]:
 
 class TestSupplyLevel:
     def test_at_the_threshold_the_supply_is_sufficient(self):
-        bodies = ["JBHT reported something."] * SUFFICIENT_SYMBOL_MENTION_ITEMS
+        bodies = ["JBHT reported something."] * DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 
         supply = measure_news_supply(
             "JBHT", _collected(len(bodies)), _exported(*bodies)
         )
 
-        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert supply.symbol_mention_items == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
         assert supply.level == "sufficient"
 
     def test_one_below_the_threshold_the_supply_is_sparse(self):
-        bodies = ["JBHT reported something."] * (SUFFICIENT_SYMBOL_MENTION_ITEMS - 1)
+        bodies = ["JBHT reported something."] * (
+            DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        )
         padding = ["Schneider Q2 earnings beat estimates."] * 16
 
         supply = measure_news_supply(
             "JBHT", _collected(len(bodies) + len(padding)), _exported(*bodies, *padding)
         )
 
-        assert supply.symbol_mention_items == SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        assert (
+            supply.symbol_mention_items == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS - 1
+        )
         assert supply.level == "sparse"
 
     def test_a_full_feed_that_never_names_the_symbol_reports_none(self):
@@ -145,3 +149,36 @@ class TestCollectedCount:
         )
 
         assert (supply.collected_items, supply.exported_items) == (40, 1)
+
+
+class TestConfiguredThreshold:
+    """Issue #191: the `sufficient` floor is an operator setting, not a constant."""
+
+    def test_a_lowered_floor_grades_the_same_feed_as_sufficient(self):
+        exported = _exported(*(["JBHT reported something."] * 3))
+
+        supply = measure_news_supply("JBHT", _collected(3), exported, 3)
+
+        assert supply.level == "sufficient"
+
+    def test_a_raised_floor_grades_the_same_feed_as_sparse(self):
+        exported = _exported(*(["JBHT reported something."] * 6))
+
+        supply = measure_news_supply("JBHT", _collected(6), exported, 10)
+
+        assert supply.level == "sparse"
+
+    def test_a_zero_mention_feed_stays_none_whatever_the_floor(self):
+        """`none` is a measured absence, not a position relative to the floor."""
+        supply = measure_news_supply("JBHT", _collected(1), _exported("Nothing."), 1)
+
+        assert supply.level == "none"
+
+    def test_the_default_is_the_shipped_calibration(self):
+        exported = _exported(
+            *(["JBHT reported something."] * DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS)
+        )
+
+        supply = measure_news_supply("JBHT", _collected(5), exported)
+
+        assert supply.level == "sufficient"

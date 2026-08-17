@@ -13,10 +13,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.config import PostmortemConfig
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
+    UNTAGGED_VERDICT_BASIS,
+    compute_basis_contribution,
     compute_human_alignment,
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
@@ -30,6 +32,7 @@ from swing_copilot.storage.verdict_records import (
     VerdictCitationRow,
     VerdictDecisionRow,
     VerdictOutcomeRecord,
+    VerdictReasonBasisRow,
     VerdictRow,
 )
 
@@ -547,7 +550,7 @@ class TestNewsSupplyMix:
         # the value it is changing, instead of the reader guessing it.
         summary = compute_news_supply_mix(())
 
-        assert summary.sufficient_threshold == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert summary.sufficient_threshold == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
         assert summary.metric_id == "metric:news_supply"
 
     def test_empty_window_reports_no_cells(self) -> None:
@@ -629,3 +632,79 @@ class TestNewsSupplyMix:
         )
 
         assert compute_news_supply_mix(verdicts).cells[0].verdict_count == 2
+
+
+class TestBasisContribution:
+    """Issue #191: hit rate per evidence kind, not merely per provider."""
+
+    def _basis(
+        self, basis: str | None, *, symbol: str = "AAA"
+    ) -> VerdictReasonBasisRow:
+        return VerdictReasonBasisRow(run_id=RUN_A, symbol=symbol, basis=basis)
+
+    def test_it_separates_reasoning_kinds_a_provider_tally_cannot(self) -> None:
+        """Both bases may cite the same provider, so provider cannot split them."""
+        bases = (
+            self._basis("filing_fundamental"),
+            self._basis("technical_score", symbol="BBB"),
+        )
+        outcomes = (
+            _outcome("AAA", "proceed", -6.0, "MISS_SEVERE"),
+            _outcome("BBB", "proceed", 2.0, "HIT"),
+        )
+
+        rows = compute_basis_contribution(bases, outcomes)
+
+        assert [(row.basis, row.hit_citation_ratio) for row in rows] == [
+            ("filing_fundamental", 0.0),
+            ("technical_score", 1.0),
+        ]
+        assert rows[0].basis_id == "metric:basis_contribution:filing_fundamental"
+
+    def test_splits_each_basis_across_the_horizons_that_matured(self) -> None:
+        bases = (self._basis("news_catalyst"),)
+        outcomes = (
+            _outcome("AAA", "proceed", 2.0, "HIT"),
+            _outcome("AAA", "proceed", -3.0, "MISS_SEVERE", horizon_days=20),
+        )
+
+        rows = compute_basis_contribution(bases, outcomes)
+
+        assert (rows[0].hit_count, rows[0].miss_count) == (1, 1)
+        assert rows[0].hit_citation_ratio == pytest.approx(0.5)
+
+    def test_excludes_neutral_outcomes_from_the_ratio(self) -> None:
+        bases = (self._basis("market_regime"),)
+        outcomes = (
+            _outcome("AAA", "skip", 0.1, "NEUTRAL"),
+            _outcome("AAA", "skip", -1.0, "HIT", horizon_days=20),
+        )
+
+        rows = compute_basis_contribution(bases, outcomes)
+
+        assert rows[0].neutral_count == 1
+        assert rows[0].hit_citation_ratio == pytest.approx(1.0)
+
+    def test_keeps_a_basis_whose_verdict_has_no_matured_outcome(self) -> None:
+        """A basis used but never measurable is itself worth seeing."""
+        rows = compute_basis_contribution(
+            (self._basis("risk_sizing", symbol="ZZZ"),), ()
+        )
+
+        assert (rows[0].verdict_count, rows[0].hit_citation_ratio) == (1, None)
+
+    def test_untagged_reasons_are_bucketed_rather_than_dropped(self) -> None:
+        """How much of the window is untagged is what qualifies the other rows."""
+        bases = (self._basis(None), self._basis("peer_relative", symbol="BBB"))
+        outcomes = (
+            _outcome("AAA", "proceed", 2.0, "HIT"),
+            _outcome("BBB", "proceed", 2.0, "HIT"),
+        )
+
+        rows = compute_basis_contribution(bases, outcomes)
+
+        assert [row.basis for row in rows] == ["peer_relative", UNTAGGED_VERDICT_BASIS]
+        assert rows[1].verdict_count == 1
+
+    def test_an_empty_window_yields_no_rows_rather_than_zero_filled_ones(self) -> None:
+        assert compute_basis_contribution((), ()) == ()

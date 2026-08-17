@@ -13,9 +13,14 @@ from pydantic import ValidationError
 from swing_copilot.analysis.filing_selection import (
     _allocate_section_chars,
     _shape_exhibit,
+    select_filing_inputs,
     select_filing_text,
 )
-from swing_copilot.analysis.schemas import FilingSectionCoverage, canonical_json_digest
+from swing_copilot.analysis.schemas import (
+    FilingInput,
+    FilingSectionCoverage,
+    canonical_json_digest,
+)
 from swing_copilot.analysis.validate import load_analysis_input
 from swing_copilot.storage.verdict_records import AnalysisSourceCoverageRecord
 from swing_copilot.text.base import (
@@ -75,6 +80,14 @@ _ABOUT_SECTION = (
     "Example Corp is a leading provider of example services worldwide."
 )
 _CONTACTS = "Investor Contact: Jane Doe.\nMedia Contact: John Roe."
+#: An 8-K that is not about the quarter: no `EX-99*` exhibit, and an item
+#: other than 2.02 in the primary document.
+_NON_EARNINGS_EIGHT_K = (
+    "Item 5.02 Departure of Directors or Certain Officers.\n"
+    "On February 25, 2027 the registrant appointed a new principal officer.\n\n"
+    "[EXHIBIT EX-10.1 agreement.htm]\n"
+    "The employment agreement is filed herewith as an exhibit."
+)
 
 
 def _paragraphs(count: int, label: str) -> str:
@@ -126,6 +139,21 @@ def _item(text: str, sections: tuple[FilingSection, ...] = ()) -> TextItem:
         content_text=text,
         fetched_at=stamp,
         filing_sections=sections,
+    )
+
+
+def _filing(source_id: str, title: str, day: int, content: str) -> TextItem:
+    """One collected filing of `title`'s form, published on 2027-02-`day`."""
+    return TextItem(
+        source_id=source_id,
+        symbol="AAPL",
+        source_type="filing",
+        published_at=datetime(2027, 2, day, tzinfo=UTC),
+        title=title,
+        source_url=f"https://example.test/{source_id}",
+        content_text=content,
+        fetched_at=datetime(2027, 3, 1, tzinfo=UTC),
+        filing_sections=(),
     )
 
 
@@ -942,6 +970,146 @@ def test_an_archived_missing_section_status_still_parses(tmp_path: Path) -> None
     assert coverage is not None
     section = coverage.sections[0]
     assert section.status == "missing"
+
+
+class TestPerSymbolBudgetAllocationOrder:
+    """Issue #191: the earnings press release must not be the one starved.
+
+    `per_symbol_chars` is consumed in allocation order, so whatever is served
+    last exports as `omitted_symbol_budget`. Serving every 10-Q first put the
+    earnings 8-K -- the quarter's press release, with the revenue, EPS, and
+    guidance figures -- at the back of the queue. Each test below pins the
+    symbol budget to exactly the winner's collected length, so the loser's
+    budget is exactly zero.
+    """
+
+    def test_an_earnings_eight_k_is_served_before_a_newer_ten_q(self) -> None:
+        eight_k = _eight_k([("EX-99.1", "release.htm", _press_release_body())])
+        items = [
+            _filing("edgar:8k", "8-K - Apple", 20, eight_k),
+            _filing("edgar:10q", "10-Q - Apple", 25, "X" * 50_000),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=100_000, per_symbol_chars=len(eight_k)
+        )
+
+        release = _input_of(inputs, "edgar:8k")
+        quarterly = _input_of(inputs, "edgar:10q")
+        assert release.text == eight_k
+        assert _selection_mode(release) == "full"
+        assert quarterly.text == ""
+        assert _selection_mode(quarterly) == "omitted_symbol_budget"
+
+    def test_an_item_2_02_eight_k_without_an_ex_99_exhibit_is_served_first(
+        self,
+    ) -> None:
+        # The exhibits were never collected (Issue #163's count cap), so the
+        # only signal left is the item the primary document reports under.
+        eight_k = _PRIMARY_TEXT + "[EXHIBIT EX-10.1 agreement.htm]\nAn agreement."
+        items = [
+            _filing("edgar:8k", "8-K - Apple", 20, eight_k),
+            _filing("edgar:10q", "10-Q - Apple", 25, "X" * 50_000),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=100_000, per_symbol_chars=len(eight_k)
+        )
+
+        assert _selection_mode(_input_of(inputs, "edgar:8k")) == "full"
+        assert (
+            _selection_mode(_input_of(inputs, "edgar:10q")) == "omitted_symbol_budget"
+        )
+
+    def test_a_non_earnings_eight_k_is_still_served_after_the_ten_q(self) -> None:
+        # Newer than the 10-Q, and carrying neither signal, so the demotion is
+        # what decides it -- an officer change must not cost the quarter.
+        quarterly = "Condensed consolidated financial statements. " * 20
+        items = [
+            _filing("edgar:8k", "8-K - Apple", 25, _NON_EARNINGS_EIGHT_K),
+            _filing("edgar:10q", "10-Q - Apple", 20, quarterly),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=100_000, per_symbol_chars=len(quarterly)
+        )
+
+        assert _selection_mode(_input_of(inputs, "edgar:10q")) == "full"
+        assert _selection_mode(_input_of(inputs, "edgar:8k")) == "omitted_symbol_budget"
+
+    def test_two_ten_qs_are_still_served_newest_first(self) -> None:
+        newest = "Newest quarter. " * 10
+        items = [
+            _filing("edgar:old", "10-Q - Apple", 20, "Older quarter. " * 10),
+            _filing("edgar:new", "10-Q - Apple", 25, newest),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=100_000, per_symbol_chars=len(newest)
+        )
+
+        assert _selection_mode(_input_of(inputs, "edgar:new")) == "full"
+        assert (
+            _selection_mode(_input_of(inputs, "edgar:old")) == "omitted_symbol_budget"
+        )
+
+    def test_forms_outside_both_priority_tiers_are_served_newest_first(self) -> None:
+        # A non-earnings 8-K and a 10-K share the trailing tier, where the
+        # historic newest-first order is all that orders them.
+        items = [
+            _filing("edgar:8k", "8-K - Apple", 25, _NON_EARNINGS_EIGHT_K),
+            _filing("edgar:10k", "10-K - Apple", 20, "Annual report text. " * 20),
+        ]
+
+        inputs = select_filing_inputs(
+            items,
+            per_filing_chars=100_000,
+            per_symbol_chars=len(_NON_EARNINGS_EIGHT_K),
+        )
+
+        assert _selection_mode(_input_of(inputs, "edgar:8k")) == "full"
+        assert (
+            _selection_mode(_input_of(inputs, "edgar:10k")) == "omitted_symbol_budget"
+        )
+
+    def test_the_returned_list_stays_newest_first_whatever_the_allocation_order(
+        self,
+    ) -> None:
+        """Allocation order is 8-K, 10-Q, 10-K; document order is by date."""
+        items = [
+            _filing("edgar:10q", "10-Q - Apple", 20, "Quarterly report text."),
+            _filing(
+                "edgar:8k",
+                "8-K - Apple",
+                22,
+                _eight_k([("EX-99.1", "release.htm", "Press release text.")]),
+            ),
+            _filing("edgar:10k", "10-K - Apple", 26, "Annual report text."),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=1_000, per_symbol_chars=10_000
+        )
+
+        assert [entry.source_id for entry in inputs] == [
+            "edgar:10k",
+            "edgar:8k",
+            "edgar:10q",
+        ]
+        assert [entry.filed_at for entry in inputs] == sorted(
+            (entry.filed_at for entry in inputs), reverse=True
+        )
+        # Budget for everything, so ordering is the only thing under test.
+        assert {_selection_mode(entry) for entry in inputs} == {"full"}
+
+
+def _input_of(inputs: list[FilingInput], source_id: str) -> FilingInput:
+    return next(entry for entry in inputs if entry.source_id == source_id)
+
+
+def _selection_mode(filing: FilingInput) -> str:
+    assert filing.coverage is not None
+    return filing.coverage.selection_mode
 
 
 def _coverage_of(

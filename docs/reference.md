@@ -109,7 +109,7 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 
 `analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
 （`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・P1-06実現損益
-サマリ・市場レジーム・過去判断）と、ステップ5で収集済みの未信頼テキストを
+サマリ・市場レジーム・過去判断・過去verdict）と、ステップ5で収集済みの未信頼テキストを
 `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
@@ -132,7 +132,17 @@ Exhibitが取得段の上限（1開示500,000字の安全弁／最大3件）で�
 候補ごとの`news_supply`は、載せたニュースのうち`headline`／`summary`にティッカーが
 現れる件数を数えて`sufficient`／`sparse`／`none`を申告する（Issue #130）。同業の決算記事や
 セクター横断記事で枠が埋まった入力を、下流が「悪材料が無い」と読み違えないための
-コード所有の観測値であり、記事の除外にも並び順にも使わない。
+コード所有の観測値であり、記事の除外にも並び順にも使わない。`sufficient`の下限は
+`settings.analysis.sufficient_news_mention_items`（既定5、要検証）であり、
+初出の較正値がそのまま定数として固まらないようconfig化してある（Issue #191）。
+候補ごとの`prior_verdicts`は、同一銘柄・戦略に対する過去のverdictとその後の当否
+（`HIT`／`MISS_*`と`forward_return_pct`）を対にした不活性ブロックで、
+「同じ種類の根拠で繰り返し外していないか」をスキル自身が見られるようにする
+（Issue #191）。人間の記帳である`decision_history`とは別読みで、
+過去runの`source_id`は持ち帰らない。`score_breakdown`の末尾には加重前の生値
+（`close`／`rsi14`／`sma50`／`sma200`／`avg_volume`と導出値`atr14_pct`）が
+「参考情報」として付き、正規化で潰れた大きさを分析側が読めるようにする。
+これらはいずれもコードの計算結果であり、分析側が再計算・上書きできない。
 ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`は
 どの候補にも等しく必要だからである。symbolを持たないマクロ／経済カレンダーの
 `TextItem`（`source_type="calendar"`）はどの候補にも属さないため、run単位の
@@ -266,7 +276,7 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 原子的に書き出す。含まれるのはseparation（proceed群−skip群の平均リターン）・
 proceed重大外し率（候補全体ベースライン併記、ウォッチ水準0.15超または
 ベースライン超でフラグ）・skip的中率（ベースライン比）・人間整合クロス集計
-（`trades_journal`×verdict×当否）・ソース貢献表・news_supply水準×verdictの
+（`trades_journal`×verdict×当否）・ソース貢献表・根拠タイプ貢献表（`verdict.reasons[].basis`の閉集合別のverdict件数とHIT比率。タグの無い理由は`untagged`として計上し、タグ付与率そのものを可視化する。Issue #191）・news_supply水準×verdictの
 クロス集計（自社材料の供給量しきい値を実績で検証するための観測）・既存`signal_outcomes`の
 シグナル成績・サプライズ銘柄の証拠一式（当時のverdictとreasons、実現パス、
 run以降の鮮度データ）・提案対象になりうる設定のスナップショットと

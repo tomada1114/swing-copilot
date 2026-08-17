@@ -34,15 +34,22 @@ if TYPE_CHECKING:
     from swing_copilot.analysis.schemas import NewsInput, NewsSupplyLevel
     from swing_copilot.text.base import TextItem
 
-#: At or above this many symbol-naming articles, the exported feed is treated
-#: as carrying enough company-specific material for an absence of bad news to
-#: mean something. Calibrated against the 2026-08-11 run under the default
+#: Default for `settings.analysis.sufficient_news_mention_items`: at or above
+#: this many symbol-naming articles, the exported feed is treated as carrying
+#: enough company-specific material for an absence of bad news to mean
+#: something. Calibrated against the 2026-08-11 run under the default
 #: `max_news_items_per_symbol: 20`: the eight healthy candidates supplied 6-15
-#: such articles, while the J.B. Hunt feed this issue reports supplied 4. The
+#: such articles, while the J.B. Hunt feed Issue #130 reports supplied 4. The
 #: floor is absolute, not a share of the budget -- four company-specific
 #: articles are too thin to conclude anything from, however small the budget
 #: that produced them.
-SUFFICIENT_SYMBOL_MENTION_ITEMS = 5
+#:
+#: It is a *default*, not a constant, since Issue #191: the calibration above
+#: is a single point estimate on one run, so the operator has to be able to
+#: retune it from `settings.yaml` without a code change (the repo's "閾値は要
+#: 検証・config 化" principle). Code that grades a feed must take the effective
+#: value as an argument rather than importing this.
+DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS = 5
 
 
 def _mention_pattern(symbol: str) -> re.Pattern[str]:
@@ -58,7 +65,10 @@ def _mention_pattern(symbol: str) -> re.Pattern[str]:
 
 
 def measure_news_supply(
-    symbol: str, collected: Sequence[TextItem], exported: Sequence[NewsInput]
+    symbol: str,
+    collected: Sequence[TextItem],
+    exported: Sequence[NewsInput],
+    sufficient_mention_items: int = DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS,
 ) -> NewsSupply:
     """Count how many exported articles name `symbol`, and grade the supply.
 
@@ -67,11 +77,13 @@ def measure_news_supply(
         collected: Every text item collected for the candidate; non-news items
             are ignored, so callers can pass the candidate's whole set.
         exported: The news items actually written into `analysis_input.json`.
+        sufficient_mention_items: The `sufficient` floor, from
+            `settings.analysis.sufficient_news_mention_items`.
 
     Returns:
         The candidate-level supply block, graded `none` when no exported
-        article names the symbol, `sparse` below
-        `SUFFICIENT_SYMBOL_MENTION_ITEMS`, and `sufficient` at or above it.
+        article names the symbol, `sparse` below `sufficient_mention_items`,
+        and `sufficient` at or above it.
     """
     pattern = _mention_pattern(symbol)
     mentions = sum(
@@ -83,14 +95,14 @@ def measure_news_supply(
         collected_items=sum(1 for item in collected if item.source_type == "news"),
         exported_items=len(exported),
         symbol_mention_items=mentions,
-        level=_level(mentions),
+        level=_level(mentions, sufficient_mention_items),
     )
 
 
-def _level(mentions: int) -> NewsSupplyLevel:
+def _level(mentions: int, sufficient_mention_items: int) -> NewsSupplyLevel:
     """Grade a symbol-mention count into the declared supply level."""
     if mentions == 0:
         return "none"
-    if mentions < SUFFICIENT_SYMBOL_MENTION_ITEMS:
+    if mentions < sufficient_mention_items:
         return "sparse"
     return "sufficient"

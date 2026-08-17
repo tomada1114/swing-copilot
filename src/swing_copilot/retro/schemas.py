@@ -210,6 +210,23 @@ class AlignmentEntry(_StrictModel):
     severe_miss_count: int = Field(ge=0)
 
 
+class BasisContributionEntry(_StrictModel):
+    """One evidence kind's verdict tally and hit share (Issue #191).
+
+    `basis` is `analysis.schemas.VerdictBasis`'s closed vocabulary plus the
+    `untagged` bucket, so the values a dossier can carry stay enumerable even
+    though the tag itself is optional upstream.
+    """
+
+    basis_id: NonBlankText
+    basis: NonBlankText
+    verdict_count: int = Field(ge=0)
+    hit_count: int = Field(ge=0)
+    miss_count: int = Field(ge=0)
+    neutral_count: int = Field(ge=0)
+    hit_citation_ratio: float | None
+
+
 class SourceContributionEntry(_StrictModel):
     """One `(source_type, provider)` group's citation tally and hit share."""
 
@@ -365,6 +382,10 @@ class RetroInput(_StrictModel):
     signal_performance: list[SignalPerformanceEntry]
     human_alignment: list[AlignmentEntry]
     source_contribution: list[SourceContributionEntry]
+    #: Hit rate per evidence kind (Issue #191). Defaults to empty so
+    #: `retro_input.json` documents archived before it existed keep parsing;
+    #: empty there means "not computed", not "no verdict cited anything".
+    basis_contribution: list[BasisContributionEntry] = []
     input_coverage: InputCoverageSummary | None = None
     surprises: SurpriseBundle
     config_snapshot: ConfigSnapshot
@@ -406,6 +427,7 @@ def _drop_legacy_defaults(value: object) -> object:
                 (key == "input_coverage" and child is None)
                 or (key == "input_filing_coverage" and child == [])
                 or (key == "news_supply" and child is None)
+                or (key == "basis_contribution" and child == [])
             )
         }
     if isinstance(value, list):

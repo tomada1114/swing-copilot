@@ -277,7 +277,7 @@ class TestRoundTrip:
         with pytest.raises(CandidateStreamError, match="cache_key"):
             load_candidate_stream(path)
 
-    def test_load_of_a_row_with_unparseable_json_raises(self, tmp_path):
+    def test_load_of_a_row_with_unparsable_json_raises(self, tmp_path):
         path = tmp_path / "candidates.parquet"
         save_candidate_stream(
             CandidateStream(cache_key="k", candidates_by_day={}), path

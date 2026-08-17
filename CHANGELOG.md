@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `vcp_breakout` が VCP を「履歴全域の一本のパターン」と定義しており、
+  `pattern_days` がほぼ履歴全長になって 6.5 年で 1 トレードしか生成しない
+  構造欠陥を修正した（Issue #186）。`extract_pattern` は直近
+  `max_contractions` 個（`technical_signals.vcp.max_contractions`、既定 4）
+  の収縮だけを 1 パターンとして採用し、シグナルは評価前に入力を自身の
+  `required_bars` へ切り詰めるため、判定は呼び出し側の履歴供給長に依存
+  しない。各 Signal は必要バー数を `required_bars` として宣言し、日次
+  パイプラインとバックテストは `ScreeningPipeline.required_bars` から
+  導いた同一のルックバック（`default` 400 暦日 / `vcp_breakout` 770 暦日）
+  を読むため、本番 400 日 / バックテスト 730 日のハードコード乖離も解消
+  した。同一条件の再バックテストは 70 トレード
+  （`reports/backtests/2026-08-17-vcp-redefinition.md`）
 - `record_risk_assessments` が銘柄ごとに独立コミットしており、途中失敗で
   1 run 分のリスク評価が部分的に残り得た（「1 論理書き込み = 1 トランザク
   ション」不変条件の違反）。明示トランザクションで包み、失敗時は全行

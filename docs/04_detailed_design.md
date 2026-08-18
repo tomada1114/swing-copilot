@@ -1629,7 +1629,7 @@ src/swing_copilot/retro/
 
 この相違が効くのは冪等性である。観測日を記録すると、同じ`(run, horizon)`でも実行日によって行の内容が変わる。満期日を記録すれば、いつ振り返りを回しても同じ行が再現され、実行間隔が空いても評価漏れ・二重評価が構造的に起きない。
 
-取引日カレンダーは`pipeline/forward_returns.py`の純関数を3.21aのpostmortemと共有する（逆算`find_target_trading_day`／順算`find_maturity_trading_day`、いずれもベンチマーク銘柄のバー実在日を代替カレンダーとする）。すべて`date <= as_of`の価格のみ使用（look-ahead禁止）。bar欠損は当該`(run, symbol, horizon)`をスキップしてnoteに残すfail-soft、未満期のスライスはnoteに出さず`pending_slice_count`に数える（バッチでは大半が正当に未満期なので、1件ずつnoteに出すと本当のデータ品質シグナルが埋もれる）。
+取引日カレンダーは`pipeline/forward_returns.py`の純関数を3.21aのpostmortemと共有する（逆算`find_target_trading_day`／順算`find_maturity_trading_day`、いずれもベンチマーク銘柄のバー実在日を代替カレンダーとする）。すべて`date <= as_of`の価格のみ使用（look-ahead禁止）。bar欠損は当該`(run, symbol, horizon)`をスキップしてnoteに残すfail-soft、**バーは存在するが終値が非有限（`NaN`/`±inf`）の場合も`compute_forward_return`が`None`を返して同じスキップ扱いにする**（Issue #206。`verdict_outcomes.forward_return_pct`は`DOUBLE NOT NULL`だがDuckDBの`NaN`は`NULL`ではないため、素通しすると「勝ちでも負けでもない行」として永続化され集計を黙って歪める。現状NaN終値を落としているのは`YFinanceProvider`だけで、正規化は各providerの責務という前提上ストア直書き・将来のproviderはこのガードを通らない。回帰テストは`tests/pipeline/test_forward_returns.py::TestComputeForwardReturn::test_returns_none_when_either_close_is_not_finite`）、未満期のスライスはnoteに出さず`pending_slice_count`に数える（バッチでは大半が正当に未満期なので、1件ずつnoteに出すと本当のデータ品質シグナルが埋もれる）。
 
 走査窓は`settings.postmortem.lookback_window_days` + 30日で、集約窓（`export`、`lookback_window_days`ちょうど）より広い。報告窓の端にあるrunでも20営業日ホライズンが走査範囲に入るようにするためで、design §5.2の`[as_of − lookback_window_days − 30, as_of]`をそのまま実装している。
 

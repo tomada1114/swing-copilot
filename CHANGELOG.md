@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `compute_forward_return()` が**非有限の終値を素通し**していた問題を修正した
+  （Issue #206 A）。バーの行が存在して `close` が `NaN`（あるいは `±inf`）の
+  場合、行の不在しか見ていない既存ガードは通過し、`run_close == 0` も
+  `NaN` との比較なので `False` になり、データ品質スキップの契約である
+  `None` ではなく `NaN` という float が返っていた。`verdict_outcomes.
+  forward_return_pct` は `DOUBLE NOT NULL` だが DuckDB の `NaN` は `NULL`
+  ではないため制約も通過し、以後 `v_verdict_outcomes` 経由の勝率・平均
+  forward return・retro の score-lift 系すべてに「勝ちでも負けでもない行」
+  として伝播する——落ちないことが厄介な壊れ方だった。現状 NaN 終値を弾いて
+  いるのは `YFinanceProvider` だけで、正規化は各 provider の責務という設計上、
+  将来の provider やストア直書き経路はそのガードを通らない。値が意味を持つ
+  地点である `compute_forward_return()` 自身に有限値ガードを置き、`run_date`
+  側・`as_of` 側のどちらが非有限でも `None` を返す（#190 / PR #204 が
+  `benchmark_return_pct` に入れたガードと同じ形）
 - `copilot-backtest --db` が指す DuckDB の隣に `bars/` が無いとき、取引ゼロの
   レポートを書いて `exit 0` していた問題を修正した（Issue #217）。`--db` は
   価格 Parquet の根を `<db>/../bars` に暗黙で決めるが、その存在は誰も検証して

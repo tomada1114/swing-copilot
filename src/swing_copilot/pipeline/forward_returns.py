@@ -22,6 +22,7 @@ They are inverses on the same calendar, and the round-trip tests in
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -131,8 +132,20 @@ def compute_forward_return(
     `read_bars`' own `as_of` clamp already guarantees no bar dated after
     `as_of` is ever considered (REQ-006, look-ahead prevention) -- this is
     not re-checked here, it is structurally impossible via this call.
-    `None` covers a missing close on either date, a genuine data-quality
-    skip rather than an error.
+    `None` covers a missing close on either date, a close that is not a
+    usable finite number, and a zero `run_date` close -- all genuine
+    data-quality skips rather than errors.
+
+    A row that *exists* with a non-finite `close` is the case the row-presence
+    checks alone miss (Issue #206). `float(NaN)` is `NaN`, every comparison
+    against `NaN` is `False`, and the result would be a `NaN` float rather
+    than `None`. `verdict_outcomes.forward_return_pct` is `DOUBLE NOT NULL`
+    but DuckDB's `NaN` is not `NULL`, so such a value persists and then
+    poisons every aggregate built on it -- silently, as a row that is neither
+    a win nor a loss. Today only `YFinanceProvider` drops NaN closes, and it
+    does so as a per-provider normalization (`data/base.py`), so the guard
+    belongs here too, where the value acquires meaning. `inf` takes the same
+    path: it yields `NaN`/`inf` ratios that are just as unusable.
     """
     bars = market_store.read_bars([symbol], run_date, as_of, as_of)
     if bars.empty:
@@ -143,6 +156,8 @@ def compute_forward_return(
         return None
     run_close = float(run_rows.iloc[0]["close"])
     as_of_close = float(as_of_rows.iloc[0]["close"])
+    if not math.isfinite(run_close) or not math.isfinite(as_of_close):
+        return None
     if run_close == 0:
         return None
     return (as_of_close - run_close) / run_close * 100

@@ -55,6 +55,7 @@ from swing_copilot.backtest.sensitivity import (
     is_gray_cell,
     judge_grid,
 )
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
@@ -89,6 +90,8 @@ _CONSOLE_WIDTH = 200
 #: `--policy` default: the pre-Issue-#184 behaviour, so an existing command
 #: line keeps measuring what it used to measure.
 _DEFAULT_POLICY = EntryPolicyArm.NONE.value
+#: An unusable settings/strategies file: one line on stderr, exit 1.
+_CONFIG_EXIT = ExitPolicy(errors=(ConfigError,), code=1)
 
 
 class BacktestCliError(SwingCopilotError):
@@ -1170,6 +1173,11 @@ def _run_backtest_command(
                 for arm, policy in zip(arms, policies, strict=True)
             ]
     except (BacktestCliError, CandidateStreamError, EntryPolicyError) as exc:
+        # Stays an inline `try` rather than a `run_cli()` call (Issue #193):
+        # the block produces several locals the rest of the function reads,
+        # and moving the conversion out to `main()` would widen the catch over
+        # the rendering that follows. Same convention as everywhere else --
+        # the message is the exit status.
         raise SystemExit(str(exc)) from exc
 
     meta = ReportMeta(
@@ -1223,6 +1231,10 @@ def _run_grid_command(
         frame = load_market_frame(request, deps)
         stream = _resolve_candidate_stream(request, deps, frame, args.candidate_cache)
     except (BacktestCliError, CandidateStreamError) as exc:
+        # Inline for the same reason as `_run_backtest_command` above: the
+        # prepared frame/stream feed the grid loop, and the stream is consumed
+        # lazily there, so a wider catch would convert failures that reach the
+        # operator as a traceback today.
         raise SystemExit(str(exc)) from exc
 
     cells: list[GridCell] = []
@@ -1268,12 +1280,8 @@ def _run_grid_command(
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse args, run the backtest or grid, print + write the report."""
     args = _parse_args(argv)
-    try:
-        settings = load_settings(args.settings)
-        strategies = load_strategies(args.strategies)
-    except ConfigError as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
+    settings = run_cli(lambda: load_settings(args.settings), _CONFIG_EXIT)
+    strategies = run_cli(lambda: load_strategies(args.strategies), _CONFIG_EXIT)
 
     if args.command == "grid":
         _run_grid_command(args, settings, strategies)

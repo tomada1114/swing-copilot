@@ -34,6 +34,7 @@ from swing_copilot.analysis.validate import (
     validate_analysis,
     validate_artifact_identity,
 )
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.report.daily_brief import DailyBrief, build_analysis_brief
 from swing_copilot.report.markdown_report import write_markdown_report
 from swing_copilot.report.terminal_report import TerminalPaths, render_terminal
@@ -46,6 +47,15 @@ _LOG_LEVELS = {
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
 }
+
+#: This command reports through logging (its stderr already carries the log
+#: stream), so the failure message is logged rather than written directly.
+_EXIT_POLICY = ExitPolicy(
+    errors=(AnalysisIngestError, OSError),
+    code=1,
+    format_message=lambda exc: f"analysis ingest failed: {exc}",
+    report=logger.error,
+)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -172,9 +182,7 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     analysis_input_path, result_path, context_path = _resolve_paths(args)
-    try:
-        ingest(analysis_input_path, result_path, context_path)
-    except (AnalysisIngestError, OSError) as exc:
-        logger.error("analysis ingest failed: %s", exc)  # noqa: TRY400 - user-facing
-        raise SystemExit(1) from exc
+    run_cli(
+        lambda: ingest(analysis_input_path, result_path, context_path), _EXIT_POLICY
+    )
     raise SystemExit(0)

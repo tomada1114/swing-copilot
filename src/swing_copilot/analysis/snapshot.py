@@ -23,7 +23,6 @@ from pydantic import (
     model_validator,
 )
 
-from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.analysis.schemas import (
     NonBlankText,
     Sha256Digest,
@@ -31,6 +30,7 @@ from swing_copilot.analysis.schemas import (
 )
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.documents import read_json_document
+from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import DailyBrief
 

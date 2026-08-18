@@ -381,6 +381,13 @@ class TestPriorVerdicts:
 
         assert "[basis未指定] 根拠なし" in block
 
+    def test_a_verdict_that_recorded_no_reason_says_so(self):
+        """An empty list would read as a rendering bug, not as a real state."""
+        block = format_prior_verdicts((_prior(),))
+
+        assert "前回の判断理由:" in block
+        assert "(理由の記録なし)" in block
+
     def test_a_past_reason_is_escaped_and_framed_as_data(self):
         """A past reason is skill-authored prose; re-entry must not let it act."""
         block = format_prior_verdicts(

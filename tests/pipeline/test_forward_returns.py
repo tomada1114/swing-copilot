@@ -21,6 +21,7 @@ from swing_copilot.pipeline.forward_returns import (
 )
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
+from tests.conftest import plant_non_finite_bars
 
 BENCHMARK = "SPY"
 
@@ -314,10 +315,14 @@ class TestComputeForwardReturn:
         The row-presence checks pass here, so without the finite guard the
         function returns a `NaN`/`inf` float that `verdict_outcomes`'
         `DOUBLE NOT NULL` column happily stores (Issue #206).
+
+        The row is planted past `write_bars`' own finite guard (Issue #227):
+        since that guard exists, storage can only hold such a row as history
+        written before it, which is precisely what this reader defends.
         """
         run_date, end = date(2026, 7, 1), date(2026, 7, 10)
         prices = {run_date: 100.0, end: 101.5}
         prices[run_date if bad_endpoint == "run_date" else end] = bad_close
-        market_store.write_bars(_bars("BROKEN", prices))
+        plant_non_finite_bars(market_store, _bars("BROKEN", prices))
 
         assert compute_forward_return(market_store, "BROKEN", run_date, end) is None

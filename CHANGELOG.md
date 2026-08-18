@@ -34,6 +34,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 非有限 OHLCV の store 側防御層を追加した（Issue #227）。`MarketStore.write_bars()`
+  は `open` / `high` / `low` / `close` / `volume` に NaN・±inf（および数値化できない値）
+  を含む DataFrame を `NonFiniteBarsError` で拒否する。**該当行だけ落とす fail-soft
+  ではなくバッチ全体の fail-fast** を選んだ: 行を黙って捨てる実装は「NaN が保存された」
+  という沈黙を「バーが消えた」という沈黙へ移すだけであり、同じ値に対するもう一方の
+  書き込み境界 `storage/json_guard.dumps_safe` も丸めずに例外を投げる契約である
+  （fail-soft な「記録して続行」は、既に保存された値をどう読むかを決める読み出し側
+  ——相関の `data_quality` 警告、決算日の `unknown` 降格、`compute_forward_return`
+  の `None`——の作法）。検証は最初のパーティションに触れる前に走るので、複数年に
+  またがるバッチでも旧 destination はバイト単位で保持され、一時ファイルも残らない。
+  正規化は従来どおり各 provider（`data/base.py`）の責務で、これはその下に敷く層である。
+  あわせて `replace_verdict_outcomes()` が非有限の `forward_return_pct` /
+  `benchmark_return_pct` をトランザクション開始前に拒否する
+  （`DOUBLE NOT NULL` は「測定された有限値」を表現できず、DuckDB の NaN は
+  NULL を通過するため。Issue #206 の記録）
+
 - 振り返りの敗因分類と、`config_hash` が指していた設定値を DB へ蓄積するように
   した（Issue #189 の設計案 1・2 のみ。効果測定 CLI・実験定義・台帳 status CLI は
   サンプル数ゲート待ちで本 PR のスコープ外）。どちらも「いま記録しなければ後から

@@ -32,6 +32,7 @@ from swing_copilot.retro.evaluate import (
     evaluate_verdicts,
 )
 from swing_copilot.storage.verdict_records import VerdictRecord
+from tests.conftest import plant_non_finite_bars
 from tests.retro.conftest import bars
 
 if TYPE_CHECKING:
@@ -248,8 +249,11 @@ class TestEvaluateBenchmarkReturn:
         # exists; what is missing here is the *run day's* close, which is what
         # a return needs. NULL must not be read later as "the market was flat".
         run_id = uuid4()
-        market_store.write_bars(
-            bars(BENCHMARK, dict.fromkeys(CALENDAR, 100.0) | {RUN_DATE: float("nan")})
+        # Planted past `write_bars`' finite guard (Issue #227): a non-finite
+        # close can only reach storage as history written before that guard.
+        plant_non_finite_bars(
+            market_store,
+            bars(BENCHMARK, dict.fromkeys(CALENDAR, 100.0) | {RUN_DATE: float("nan")}),
         )
         _seed_verdict(state_store, run_id)
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))

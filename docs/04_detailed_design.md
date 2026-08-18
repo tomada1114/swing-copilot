@@ -385,6 +385,10 @@ class MarketStore:
 
 複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。ParquetとCSVはdestinationと同じdirectoryへ一意なtemp fileを書き、成功時だけ原子的に置換する。書き込み/replace失敗時は従来destinationを保持し、tempをcleanupする。
 
+**非有限OHLCVのstore側防御（Issue #227）**: `write_bars()`は`open`/`high`/`low`/`close`/`volume`のいずれかにNaN/±inf（および数値化できない値）を含むDataFrameを`NonFiniteBarsError`で拒否する。**fail-soft（該当行だけ落として書く）ではなくバッチ全体のfail-fast**を選ぶ。理由は2つある。(1) 同じ値に対するこのパッケージのもう一方の**書き込み**境界である`storage/json_guard.dumps_safe`が、丸めずに例外を投げる契約になっている——行を黙って捨てる実装は「NaNが保存された」という沈黙を「バーが消えた」という沈黙へ移すだけである。fail-softな「記録して続行」（`risk/checks.check_correlation`の`data_quality`警告、`risk/earnings`の`unknown`降格、`pipeline/forward_returns.compute_forward_return`の`None`）は、**既に保存されている**データをどう扱うかを決める**読み出し側**の作法であり、書き込み側の作法ではない。(2) 検証は最初のパーティションに触れる**前**に走るので、複数年にまたがるバッチで後年の1行が不正でも前年が中途半端に書かれることがなく、拒否されたwriteは旧destinationをバイト単位で保持しtemp fileも作らない（3.7の置換契約と同じ性質を、書き込みを始めないことで満たす）。正規化は従来どおり各provider（`data/base.py`）の責務であり、これはその**下**に敷く防御層である——P4でEODHDを足すときに同じフィルタを再実装し忘れても、素通しにはならない。回帰テストは`tests/storage/test_market_store.py::TestWriteBarsRejectsNonFiniteValues`。ガード導入後にstoreへ非有限バーが入る唯一の経路はガード以前に書かれた履歴なので、読み出し側ガードのテストは`tests/conftest.py::plant_non_finite_bars`で`write_bars`を迂回して当時と同じ形の行を置く。
+
+`verdict_outcomes`側も同じ意図で補強した: `replace_verdict_outcomes`は`forward_return_pct`（および測定済みの`benchmark_return_pct`）が有限でないレコードを、トランザクションを開く前に`ValueError`で拒否する。`DOUBLE NOT NULL`は「測定された有限値」を表現できず、DuckDBのNaNはNULLではないため、素通しすると勝ちでも負けでもない行として集計を黙って歪めるからである（Issue #206の記録、防御層はIssue #227）。
+
 ### 3.8 `storage/state_store.py`
 
 ```python

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `analysis_input.json` の `<prior_verdicts>` が直近 2 営業日分を含んで
+  いなかった問題を修正した（Issue #207）。`verdicts` 表へ書く唯一の経路で
+  ある `retro_collect` ステップが、その表を読むステップ 6 の**後**に走って
+  いたため、D 日のエクスポートに載る過去 verdict は D-2 日までだった。
+  同一銘柄が数日おきに再候補化するスイングでは、直近 2 営業日こそ最も
+  参照したい区間であり、そこだけが黙って空白になっていた。
+  `retro_collect` をステップ 6 の直前へ移し、エクスポートの時間予算判定は
+  収集の開始**前**に確定させる（エクスポートはスキルへの唯一の受け渡し口
+  なので、後段の帳簿作業がそのスキップ理由になってはならない）。
+  `as_of < run_date` の厳密不等号と同日 run の採用規則（`_adopted_runs`）は
+  従来どおり
+
 ### Added
 
 - verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように
@@ -142,6 +156,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `copilot-daily --limit N` が `universe[:limit]`、つまり「A で始まる N 銘柄」
+  を選んでいた（Issue #205）。#194（PR #202）で `copilot-backtest` 側だけを
+  直したため取り残されていた片側である。`--limit` は検証・スモーク用フラグで
+  本番の定時実行は付けないので本番レポートは歪んでいなかったが、Minervini の
+  RS パーセンタイル（条件7）は*渡された集合内の相対順位*なので、スモーク実行は
+  本番と別の条件を検証していた。fundamentals の NULL 率のようなカバレッジ
+  スポットチェックも常に同じアルファベット先頭群を測っていた。サンプラを
+  `swing_copilot/universe_sampling.py`（`select_universe_sample`）へ抽出し、
+  両 CLI が同じ関数・同じ salt を共有する。同じユニバースと同じ `N` なら
+  スモーク実行とバックテストが同じ銘柄集合を見る。`--limit 0`（保有銘柄のみ）・
+  負数の usage error・保有銘柄の常時 union という既存の不変条件は変わらない
 - `vcp_breakout` が VCP を「履歴全域の一本のパターン」と定義しており、
   `pattern_days` がほぼ履歴全長になって 6.5 年で 1 トレードしか生成しない
   構造欠陥を修正した（Issue #186）。`extract_pattern` は直近

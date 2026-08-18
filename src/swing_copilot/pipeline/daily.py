@@ -101,6 +101,7 @@ from swing_copilot.text.edgar_filings import (
     fetch_recent_filings_text,
 )
 from swing_copilot.tracking.update import update_tracking
+from swing_copilot.universe_sampling import select_universe_sample
 
 logger = logging.getLogger(__name__)
 
@@ -452,10 +453,35 @@ def _paths_for_mode(mode: RunMode) -> tuple[Path, str]:
 def _select_symbols(
     universe: tuple[UniverseMember, ...], held_symbols: set[str], limit: int | None
 ) -> list[str]:
+    """Symbols this run screens: the universe (or a `--limit` sample) plus holdings.
+
+    `--limit` is a smoke/validation flag, but `universe[:limit]` made it mean
+    "the N tickers starting with A" (the universe is `ORDER BY symbol`). That
+    is not a subset of the S&P 500 in any useful sense: its sector mix is
+    arbitrary, and Minervini's RS percentile (condition 7) ranks candidates
+    *within the set it is given*, so a smoke run was evaluating a different
+    check than production does. The backtest CLI already samples instead of
+    truncating (Issue #194); this path shares that sampler (Issue #205).
+
+    Args:
+        universe: Resolved universe membership for the run's `as_of`.
+        held_symbols: Open holdings, always screened regardless of `--limit`.
+        limit: `--limit`, or `None` for the whole universe. `0` selects no
+            universe candidate at all and leaves only `held_symbols`.
+
+    Returns:
+        The symbols to fetch and screen. Alphabetical whenever `--limit`
+        applies, so a truncated run's ordering stays reproducible.
+    """
     if limit is None:
         return [member.symbol for member in universe]
-    limited = [member.symbol for member in universe[:limit]]
-    return sorted({*limited, *held_symbols})
+    sample = select_universe_sample(universe, limit)
+    if sample.is_stratified_sample:
+        logger.info(
+            "universe sampled by --limit: %s / %s",
+            *sample.summary_lines(),
+        )
+    return sorted({*sample.symbols, *held_symbols})
 
 
 def _text_target_symbols(
@@ -1192,11 +1218,13 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
     manually. The scan is offline and idempotent (run-scoped
     DELETE-then-INSERT), so a daily repetition changes nothing but recency.
 
-    The current run's own directory already holds `analysis_input.json` at
-    this point, but its `analysis_result.json` is only written later by the
-    skill's ingest, so today's run — like any run whose skill answer was never
-    ingested — simply becomes a note, which is the collector's normal
-    fail-soft outcome and not a degradation.
+    The step runs ahead of step 6 so that the previous run's verdicts are in
+    the database before the export builds `<prior_verdicts>` (Issue #207); at
+    that point the current run's own directory does not exist yet, and its
+    `analysis_result.json` would in any case only be written later by the
+    skill's ingest. Today's run is therefore simply not scanned, and any run
+    whose skill answer was never ingested becomes a note -- the collector's
+    normal fail-soft outcome, not a degradation.
     """
     try:
         summary = collect_verdicts(deps.state_store, Path(deps.output_dir))

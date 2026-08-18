@@ -657,20 +657,32 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 
 ## `--limit` の銘柄サンプリング
 
-`copilot-backtest --limit N`は**ユニバースのサンプル**を測る。以前の
-`symbols[:limit]`は`ORDER BY symbol`の先頭N件、つまり「Aで始まるN銘柄」を
-返していた。セクター構成がS&P500と別物になるうえ、Minerviniの
-RSパーセンタイル（条件7）のように*渡された集合内の相対順位*で決まるチェックは
-条件の意味自体が変わってしまう。
+`copilot-backtest --limit N`と`copilot-daily --limit N`は**ユニバースのサンプル**を
+測る。以前の`symbols[:limit]`は`ORDER BY symbol`の先頭N件、つまり
+「Aで始まるN銘柄」を返していた。セクター構成がS&P500と別物になるうえ、
+Minerviniの RSパーセンタイル（条件7）のように*渡された集合内の相対順位*で
+決まるチェックは条件の意味自体が変わってしまう。
 
-現在は`gics_sector`ごとに比例配分（最大剰余法、端数は剰余の大きい順・同率は
+現在は`swing_copilot.universe_sampling.select_universe_sample()`が
+`gics_sector`ごとに比例配分（最大剰余法、端数は剰余の大きい順・同率は
 セクター名順）し、各セクター内はsalt付きblake2bのハッシュ順で選ぶ。
 アルファベット順とは無関係で、同じユニバースと同じ`N`なら実行環境や実行日を
 問わず必ず同じ銘柄集合になる（saltは固定。変えると過去レポートとの比較可能性が
 失われる）。`N`がユニバース規模以上なら全銘柄と同義である。
 
-採用した方式・実銘柄数・セクター構成は、terminal出力とmarkdownレポートの冒頭に
-必ず出る（`run`・`--pessimistic`比較・`--policy`比較・`grid`の全レポート共通）。
+**両CLIは同じサンプラと同じsaltを共有する**（Issue #205）。同じユニバースと
+同じ`N`なら`copilot-daily --dry-run --limit 20`のスモーク実行と
+`copilot-backtest --limit 20`は同じ銘柄集合を見るので、両者の結果を突き合わせ
+られる。差分は`--limit`の下限だけである。`copilot-backtest`は0以下をfail-fastで
+拒否し、`copilot-daily`は`0`を「ユニバース由来の新規候補を選ばず、開いている
+保有銘柄だけを残す」意味の有効値として受け付ける（負数はどちらも拒否）。
+`copilot-daily`は`--limit`の値に関わらず保有銘柄を常に対象集合へ足す。
+
+採用した方式・実銘柄数・セクター構成は、`copilot-backtest`のterminal出力と
+markdownレポートの冒頭に必ず出る（`run`・`--pessimistic`比較・`--policy`比較・
+`grid`の全レポート共通）。`copilot-daily`は日次レポートの体裁を変えず、同じ
+2行をINFOログに出す（`--limit`は検証・スモーク用フラグで、本番の定時実行は
+`--limit`を付けないため）。
 
 ```text
 ユニバース: 60/503 銘柄の決定論的サンプル（gics_sector 比例配分 + blake2b ハッシュ順、シード固定・再現可能）

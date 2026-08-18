@@ -996,7 +996,7 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 **レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・判断履歴は候補ごとの`news`/`filings`/`decision_history`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
 
-**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、決算関連8-K（`EX-99*`添付を持つ、または主文書がItem 2.02を名指しするもの）→ 10-Q/10-Q-A → その他様式の順に割り当てる（Issue #191。予算枯渇で決算プレスリリースだけが`omitted_symbol_budget`になる事象の解消。割り当て順のみを変え、返却順は従来どおり新しい順）。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴と過去verdictはdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。過去verdictの読み出しは`as_of < run_date`の**厳密な**不等号なので、当日の verdict が当日の入力へ還流することはない。なお`verdicts`表へ書くのは`retro_collect`ステップであり、これはステップ6のエクスポートより後に走るため、過去verdictの還流には1run分の遅延がある。
+**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、決算関連8-K（`EX-99*`添付を持つ、または主文書がItem 2.02を名指しするもの）→ 10-Q/10-Q-A → その他様式の順に割り当てる（Issue #191。予算枯渇で決算プレスリリースだけが`omitted_symbol_budget`になる事象の解消。割り当て順のみを変え、返却順は従来どおり新しい順）。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴と過去verdictはdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。過去verdictの読み出しは`as_of < run_date`の**厳密な**不等号なので、当日の verdict が当日の入力へ還流することはない。なお`verdicts`表へ書くのは`retro_collect`ステップであり、これは**ステップ6のエクスポートより前**に走る（Issue #207。当初は後段にあり、D日のエクスポートがD-2日までのverdictしか見られず直近2営業日が黙って空白になっていた）。したがってD日のエクスポートには、`copilot-ingest-analysis`済みであるD-1日のrunのverdictまでが載る。エクスポートの時間予算判定は`retro_collect`の開始**前**に確定させる——エクスポートはスキルへの唯一の受け渡し口なので、後段の帳簿作業が長引いたことがエクスポートをスキップする理由になってはならない。
 
 10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
@@ -1244,7 +1244,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
     [--candidate-cache PATH] [--policy none|regime|regime+risk[,...]]
 ```
 
-`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。**`copilot-daily --limit`の`universe[:limit]`規約とは異なり**、`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。サンプラは`universe_sampling.select_universe_sample()`にあり、`copilot-daily --limit`も同じ関数・同じsaltを使う（Issue #205。同じユニバースと同じ`N`なら両CLIが同じ銘柄集合を測る）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
 
 **バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
 
@@ -1482,7 +1482,7 @@ def run_daily(
     skip_textはP1段階での動作確認用フラグ。
     戻り値: DailyRunResult.exit_code（0=成功/成果物を残した縮退成功、非ゼロ=ステップ1-4、ブリーフ、またはrun固有Markdownの失敗）。
     CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--limit N] [--strategy KEY]`
-    （`--limit N`: 非負整数。ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ。0は保有銘柄だけを維持し、負数はusage error）
+    （`--limit N`: 非負整数。ユニバースのN銘柄サンプル+保有銘柄に制限する検証・スモーク用フラグ。サンプルは`copilot-backtest --limit`と同じ`universe_sampling.select_universe_sample()`（gics_sector比例配分+salt付きblake2bハッシュ順、Issue #205）。0は保有銘柄だけを維持し、負数はusage error）
     （`--strategy`の既定は`default`。`strategies.yaml`にないキーは外部I/O前に利用可能なキー一覧を含む設定エラーでfail-fastする。）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
@@ -1565,7 +1565,7 @@ run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（
 
 ### 3.23 `retro/` と `copilot-retro`（P8-30〜P8-33、roadmap §5 P8）
 
-定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。このうちオフラインで冪等な`collect`と`evaluate`だけは、日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）の`postmortem`に続くfail-softステップ（`retro_collect`／`retro_evaluate`）として毎日走る。未評価のrunが評価窓から抜け落ちるのを防ぎ、DuckDBに入らない唯一の原本である`reports/<date>/<run_id>/analysis_result.json`を恒久化するためで、いずれも冪等なので日次の反復で結果は変わらない。外部APIを叩く`export`と`swing-retro`スキル、そして`ingest`は従来どおり独立したループとして人間が数日おきに手動起動する（`prepare`は3つの直列呼び出しのままで、日次ステップと重複して走っても害はない）。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
+定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。このうちオフラインで冪等な`collect`と`evaluate`だけは、日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）のfail-softステップ（`retro_collect`／`retro_evaluate`）として毎日走る。`retro_collect`はステップ6のエクスポート**直前**（`_run_retro_collect_soft_step`）、`retro_evaluate`は`postmortem`の直後（`_run_retro_soft_steps`）で、前者だけ位置が違うのはエクスポートの`<prior_verdicts>`が`verdicts`表を読むからである（Issue #207、3.16節）。未評価のrunが評価窓から抜け落ちるのを防ぎ、DuckDBに入らない唯一の原本である`reports/<date>/<run_id>/analysis_result.json`を恒久化するためで、いずれも冪等なので日次の反復で結果は変わらない。外部APIを叩く`export`と`swing-retro`スキル、そして`ingest`は従来どおり独立したループとして人間が数日おきに手動起動する（`prepare`は3つの直列呼び出しのままで、日次ステップと重複して走っても害はない）。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
 
 `analysis/`に同居させず新パッケージにした理由は、`analysis/`が「ネットワークもDBも触らない検証専用境界」という憲章を持つのに対し、retroはDuckDBを読み書きし（`collect`/`evaluate`/`export`）、鮮度データ取得で外部APIも叩くため（決定D8）。`copilot-ingest-analysis`がDBに触れない不変条件はそのまま維持される。エントリポイントは`copilot-retro = "swing_copilot.retro.cli:main"`の1行追加。CLIの操作面は`docs/reference.md`が正本。
 
@@ -2270,7 +2270,7 @@ notification:
 
 `settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
 
-`copilot-daily --limit N`の`N`は非負整数である。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
+`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 

@@ -24,6 +24,7 @@ from swing_copilot.backtest.cli import (
     _missing_data_symbols,
     _output_path,
     _parse_args,
+    _resolve_parquet_root,
     _validate_args,
     main,
     render_grid_markdown,
@@ -54,8 +55,8 @@ from swing_copilot.backtest.sensitivity import (
     SensitivityGridResult,
 )
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
-from swing_copilot.storage.database import Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
+from swing_copilot.storage.market_store import DEFAULT_PARQUET_ROOT, MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 from swing_copilot.universe_sampling import UniverseSample
@@ -654,6 +655,108 @@ class TestPointInTimeUniverseComposition:
 
         assert [member.symbol for member in deps.universe] == ["PIT"]
         assert sample.symbols == ("PIT",)
+
+
+class TestResolveParquetRoot:
+    """How `--db` resolves the bars root, and what happens when it is absent (#217)."""
+
+    def test_default_db_path_pairs_with_the_default_parquet_root(self) -> None:
+        # `--db` 未指定の既定経路が指す先は、この対応規約そのものである。
+        assert DEFAULT_DB_PATH.parent / "bars" == DEFAULT_PARQUET_ROOT
+
+    def test_existing_sibling_directory_is_returned(self, tmp_path: Path) -> None:
+        (tmp_path / "bars").mkdir()
+
+        assert _resolve_parquet_root(tmp_path / "copilot.duckdb") == tmp_path / "bars"
+
+    def test_missing_sibling_directory_raises_naming_the_resolved_path(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(
+            BacktestCliError, match=r"Parquetディレクトリが見つかりません"
+        ):
+            _resolve_parquet_root(tmp_path / "copilot.duckdb")
+
+    def test_sibling_bars_file_is_not_accepted_as_a_root(self, tmp_path: Path) -> None:
+        (tmp_path / "bars").write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(
+            BacktestCliError, match=r"Parquetディレクトリが見つかりません"
+        ):
+            _resolve_parquet_root(tmp_path / "copilot.duckdb")
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestMissingBarsRootFailsFast:
+    """A run pointed at a copied DuckDB with no sibling `bars/` (Issue #217).
+
+    以前は全銘柄が「データ不足」で落ち、取引ゼロのレポートを数秒で書いて
+    `exit 0` していた——操作ミスが正常終了に見える形の失敗である。
+    """
+
+    @staticmethod
+    def _argv(db_path: Path, days: list[date], output_path: Path) -> list[str]:
+        return [
+            "--strategy",
+            "default",
+            "--start",
+            days[0].isoformat(),
+            "--end",
+            days[-1].isoformat(),
+            "--db",
+            str(db_path),
+            "--output",
+            str(output_path),
+        ]
+
+    def test_run_exits_nonzero_without_writing_a_report(
+        self, seeded_db, tmp_path, capsys
+    ):
+        _db_path, days = seeded_db
+        detached_dir = tmp_path / "copied"
+        detached_dir.mkdir()
+        detached_db = detached_dir / "copilot.duckdb"
+        output_path = tmp_path / "out" / "report.md"
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(self._argv(detached_db, days, output_path))
+
+        message = str(excinfo.value)
+        assert str(detached_dir / "bars") in message
+        assert not output_path.exists()
+        # 何も作らずに落ちること: DuckDBファイルを開く前段で止める。
+        assert not detached_db.exists()
+        assert "データ不足のためスキップ" not in capsys.readouterr().out
+
+    def test_grid_exits_nonzero_without_writing_a_report(self, seeded_db, tmp_path):
+        _db_path, days = seeded_db
+        detached_dir = tmp_path / "copied"
+        detached_dir.mkdir()
+        output_path = tmp_path / "out" / "grid.md"
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "grid",
+                    *self._argv(detached_dir / "copilot.duckdb", days, output_path),
+                ]
+            )
+
+        assert str(detached_dir / "bars") in str(excinfo.value)
+        assert not output_path.exists()
+
+    def test_per_symbol_gaps_under_a_present_root_stay_fail_soft(
+        self, seeded_db, tmp_path, capsys
+    ):
+        # 「数銘柄だけバーが無い」（BBBは未シード）は正当なfail-softのまま:
+        # 潰すのは「根ごと無い」ケースだけである。
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "report.md"
+
+        main(self._argv(db_path, days, output_path))
+
+        assert "データ不足のためスキップ: BBB" in capsys.readouterr().out
+        assert output_path.exists()
 
 
 @pytest.mark.usefixtures("two_symbol_universe")

@@ -647,6 +647,21 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
   --settings /tmp/variant/settings.yaml --strategies /tmp/variant/strategies.yaml
 ```
 
+`--db`を渡すと**価格バーの置き場所も一緒に決まる**。根は常に`<db>/../bars`で、
+`data/copilot.duckdb` + `data/bars`という既定の対応規約をそのまま`--db`に適用
+したものである。バリアントごとにDuckDBをコピーして`--db`で指す運用では、
+**`bars/`を並置し忘れやすい**。
+
+!!! warning "`bars/`が無い`--db`は実行前にエラーで止まる（Issue #217）"
+
+    解決した`<db>/../bars`がディレクトリとして存在しなければ、
+    `copilot-backtest`はレポートを書く前に終了コード1で落ちる。以前は全銘柄が
+    「データ不足」となり、**取引ゼロのレポートを数秒で書いて正常終了**して
+    いた——40〜56分かかるはずの処理が3秒で終わり、体裁の整ったレポートだけが
+    残るため、操作ミスだと気づけなかった。`bars/`をコピー先へ並置するか、
+    `--db`を元の場所へ向けること。「数銘柄だけバーが無い」は従来どおり警告
+    のみで完走する（fail-soft）。
+
 `run`のレポート（`--pessimistic`の通常vs悲観比較を含む）には`Exit breakdown`
 セクションが出る。決済理由の内訳（`stop` /
 `max_hold` / `end_of_backtest`、発火0件の理由も0として必ず表示）、

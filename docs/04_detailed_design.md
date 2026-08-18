@@ -1244,7 +1244,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
     [--candidate-cache PATH] [--policy none|regime|regime+risk[,...]]
 ```
 
-`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。**`copilot-daily --limit`の`universe[:limit]`規約とは異なり**、`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。サンプラは`universe_sampling.select_universe_sample()`にあり、`copilot-daily --limit`も同じ関数・同じsaltを使う（Issue #205。同じユニバースと同じ`N`なら両CLIが同じ銘柄集合を測る）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
 
 **バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
 
@@ -1482,7 +1482,7 @@ def run_daily(
     skip_textはP1段階での動作確認用フラグ。
     戻り値: DailyRunResult.exit_code（0=成功/成果物を残した縮退成功、非ゼロ=ステップ1-4、ブリーフ、またはrun固有Markdownの失敗）。
     CLIエントリポイント: `uv run copilot-daily [--as-of YYYY-MM-DD] [--dry-run] [--skip-text] [--limit N] [--strategy KEY]`
-    （`--limit N`: 非負整数。ユニバースを先頭N銘柄+保有銘柄に制限する検証・スモーク用フラグ。0は保有銘柄だけを維持し、負数はusage error）
+    （`--limit N`: 非負整数。ユニバースのN銘柄サンプル+保有銘柄に制限する検証・スモーク用フラグ。サンプルは`copilot-backtest --limit`と同じ`universe_sampling.select_universe_sample()`（gics_sector比例配分+salt付きblake2bハッシュ順、Issue #205）。0は保有銘柄だけを維持し、負数はusage error）
     （`--strategy`の既定は`default`。`strategies.yaml`にないキーは外部I/O前に利用可能なキー一覧を含む設定エラーでfail-fastする。）
     （pyproject.toml の [project.scripts] で copilot-daily = "swing_copilot.pipeline.daily:main" として登録）。
     """
@@ -2270,7 +2270,7 @@ notification:
 
 `settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
 
-`copilot-daily --limit N`の`N`は非負整数である。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
+`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 

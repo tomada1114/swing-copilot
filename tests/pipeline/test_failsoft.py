@@ -964,22 +964,24 @@ class TestVirtualLedgerPositionsCountAsHeld:
     def test_a_virtual_position_survives_the_universe_limit_like_a_holding(
         self, base_deps, state_store
     ):
-        _seed_virtual_position(state_store, "MSFT")
+        _seed_virtual_position(state_store, "AAPL")
 
         result = run_daily(DailyRunOptions(is_dry_run=True, limit=1), deps=base_deps)
 
         assert result.status == RunStatus.SUCCESS
-        # `limit=1` truncates the universe to AAPL; MSFT is only screened
-        # because the ledger says it is held.
+        # `limit=1` samples this universe down to MSFT (Issue #205); AAPL is
+        # only screened because the ledger says it is held.
         assert {"AAPL", "MSFT"} <= _candidate_symbols(state_store, result.run_id)
 
-    def test_without_the_ledger_the_universe_limit_still_truncates(
+    def test_without_the_ledger_the_universe_limit_still_narrows_the_universe(
         self, base_deps, state_store
     ):
         result = run_daily(DailyRunOptions(is_dry_run=True, limit=1), deps=base_deps)
 
         assert result.status == RunStatus.SUCCESS
-        assert _candidate_symbols(state_store, result.run_id) == {"AAPL"}
+        # The sampled symbol, not the alphabetical head the old `[:limit]`
+        # would have returned (Issue #205).
+        assert _candidate_symbols(state_store, result.run_id) == {"MSFT"}
 
     def test_a_virtual_position_never_reaches_the_risk_step_portfolio(
         self, base_deps, state_store, monkeypatch

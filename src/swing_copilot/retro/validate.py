@@ -226,6 +226,18 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
     # its ID out of the space made that argument unwritable -- the skill is
     # told to read the metric first and could not then cite it.
     ids.add(aggregates.verdict_mix.metric_id)
+    # Issue #189: the L2 gate rows and the per-configuration split are the two
+    # newest citable populations. An L2 proposal argues from the gate row, and
+    # a "the change helped/hurt" claim argues from one configuration's own
+    # separation -- both would be uncitable, and therefore unwritable, if their
+    # identifiers stayed outside the space.
+    if (history := retro_input.failure_class_history) is not None:
+        ids.update(row.count_id for row in history.counts)
+    ids.update(
+        entry.metric_id
+        for group in retro_input.aggregates_by_config
+        for entry in group.separation
+    )
     ids.update(cell.cell_id for cell in retro_input.human_alignment)
     ids.update(row.contribution_id for row in retro_input.source_contribution)
     ids.update(row.basis_id for row in retro_input.basis_contribution)

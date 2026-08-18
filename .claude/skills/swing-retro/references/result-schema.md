@@ -71,6 +71,8 @@ CON-03 機械検査の対象なので、断定的売買指示・命令形はこ�
 | ソース貢献 | `metric:source_contribution:<source_type>:<provider>` | `metric:source_contribution:news:finnhub` |
 | 根拠タイプ貢献 | `metric:basis_contribution:<basis>` | `metric:basis_contribution:filing_fundamental`、`metric:basis_contribution:untagged` |
 | news_supply（全体 / セル） | `metric:news_supply` / `metric:news_supply:<level>:<recommendation>` | `metric:news_supply:sparse:proceed` |
+| 敗因分類ゲート（Issue #189） | `failure_class_<分類>` | `failure_class_history.counts[].count_id` をそのまま。`failure_class_information_absent` |
+| 設定別 separation（Issue #189） | `metric:separation:<N>d@<config_hash>` | `aggregates_by_config[].separation[].metric_id` をそのまま。窓全体の `metric:separation:5d` とは母集団が違う |
 | サプライズ銘柄 | `surprise:<run_id>:<SYMBOL>` | `surprises.items[].surprise_id` をそのまま |
 | 引用ソース | `source_id` | `surprises.items[]` の `cited_source_ids` / `reasons[].source_ids` / `freshness.news[].source_id` / `freshness.filings[].source_id` |
 

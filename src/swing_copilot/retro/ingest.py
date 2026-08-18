@@ -13,8 +13,15 @@ What this module deliberately cannot do:
   a report and a ledger entry.
 * move a proposal past `proposed`. Every later status is recorded by whoever
   applies, rejects, or defers it (D10).
-* touch the database or the network. The whole step is two files in and two
-  files out.
+* touch the network. Two files in, two files out, plus one local write.
+
+Issue #189 added that last write: the verified narrations are also recorded in
+DuckDB (`retro_sessions` / `retro_narrations`). Before it, a `failure_class`
+lived only in the gitignored report, so design §8.1's L2 qualitative gate
+("the same class five times across the last three retrospectives") had nothing
+to count -- and the missing history could never be recovered afterwards. The
+database side stays optional in this module so the verification core remains
+two files in and two files out, but the CLI always supplies it.
 """
 
 from __future__ import annotations
@@ -24,13 +31,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from swing_copilot.io_atomic import write_text_atomically
-from swing_copilot.retro.export import RETRO_INPUT_FILENAME
+from swing_copilot.retro.export import RETRO_INPUT_FILENAME, evaluated_row_count
 from swing_copilot.retro.ledger import read_ledger, record_proposals
 from swing_copilot.retro.validate import (
     load_retro_input,
     load_retro_result,
     validate_retro_identity,
     validate_retro_result,
+)
+from swing_copilot.storage.retro_records import (
+    RetroNarrationRecord,
+    RetroSessionRecord,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +56,7 @@ if TYPE_CHECKING:
         SurpriseNarration,
     )
     from swing_copilot.retro.validate import ValidatedRetro, WithheldItem
+    from swing_copilot.storage.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +74,12 @@ class RetroIngestRequest:
     #: rendered report.
     retro_dir: Path
     ledger_path: Path
+    #: Issue #189: where the verified narrations are accumulated. Optional so
+    #: the two-files-in-two-files-out core stays testable without a database;
+    #: the CLI always supplies one, because a `failure_class` that reaches
+    #: only `reports/retro/` (gitignored) is a `failure_class` the L2 gate can
+    #: never count.
+    state_store: StateStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +91,8 @@ class IngestSummary:
     recorded: tuple[RecordedProposal, ...]
     withheld: tuple[WithheldItem, ...]
     narration_count: int
+    #: Whether the narrations reached the database as well as the report.
+    are_narrations_persisted: bool
 
 
 def ingest_retro_result(request: RetroIngestRequest) -> IngestSummary:
@@ -104,6 +124,8 @@ def ingest_retro_result(request: RetroIngestRequest) -> IngestSummary:
     write_text_atomically(
         destination, render_retro_report(retro_input, validated, recorded)
     )
+    if request.state_store is not None:
+        _persist_narrations(request.state_store, retro_input, validated, len(recorded))
     logger.info(
         "retro ingest: %d proposal(s) recorded, %d item(s) withheld",
         len(recorded),
@@ -115,6 +137,50 @@ def ingest_retro_result(request: RetroIngestRequest) -> IngestSummary:
         recorded=recorded,
         withheld=validated.withheld,
         narration_count=len(validated.narrations),
+        are_narrations_persisted=request.state_store is not None,
+    )
+
+
+def _persist_narrations(
+    state_store: StateStore,
+    retro_input: RetroInput,
+    validated: ValidatedRetro,
+    proposal_count: int,
+) -> None:
+    """Accumulate this retrospective's verified narrations in DuckDB (#189).
+
+    Runs last, after the report and the ledger, because those two are the
+    human-facing product of an ingest while this is the accumulation behind
+    it. `run_id`/`symbol` come from the *dossier*, never from the skill's
+    answer: a verified narration names an exported surprise (an unknown one
+    was already withheld), so the lookup below cannot miss, and code-owned
+    metadata is never echoed back from an untrusted document.
+
+    The write replaces the whole `retro_as_of`, so a corrected re-ingest that
+    drops a symbol drops its old reading with it.
+    """
+    surprises = {item.surprise_id: item for item in retro_input.surprises.items}
+    state_store.replace_retro_session(
+        RetroSessionRecord(
+            retro_as_of=retro_input.as_of,
+            window_start=retro_input.window_start,
+            input_digest=retro_input.input_digest,
+            generated_at=retro_input.generated_at,
+            outcome_count=evaluated_row_count(retro_input),
+            proposal_count=proposal_count,
+        ),
+        [
+            RetroNarrationRecord(
+                retro_as_of=retro_input.as_of,
+                surprise_id=narration.surprise_id,
+                run_id=surprises[narration.surprise_id].run_id,
+                symbol=surprises[narration.surprise_id].symbol,
+                failure_class=narration.failure_class,
+                narrative=narration.narrative,
+                evidence_refs=tuple(narration.evidence_refs),
+            )
+            for narration in validated.narrations
+        ],
     )
 
 

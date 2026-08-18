@@ -33,8 +33,8 @@ from swing_copilot.analysis.schemas import (
     FilingSelectionMode,
     NewsSupply,
     NewsSupplyLevel,
-    canonical_json_digest,
 )
+from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.pipeline.postmortem import compute_signal_performance
 from swing_copilot.retro.adoption import keep_adopted_rows
@@ -61,8 +61,11 @@ from swing_copilot.retro.schemas import (
     ArchivedFilingCoverage,
     BasisContributionEntry,
     ConfigSnapshot,
+    ConfigVersionAggregateEntry,
     EvaluationSettings,
     ExitReasonCountEntry,
+    FailureClassCountEntry,
+    FailureClassHistoryEntry,
     FreshnessEntry,
     InputCoverageSummary,
     MetricEntry,
@@ -95,10 +98,12 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.clock import Clock
-    from swing_copilot.config import Settings
+    from swing_copilot.config import PostmortemConfig, Settings
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.retro.aggregate import TrackedPerformance
+    from swing_copilot.retro.schemas import FailureClass
     from swing_copilot.retro.surprises import SurpriseCandidate
+    from swing_copilot.storage.config_records import ConfigVersionRecord
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.storage.tracking_records import (
@@ -121,20 +126,13 @@ RETRO_INPUT_FILENAME = "retro_input.json"
 RETRO_OUTPUT_SUBDIR = "retro"
 DEFAULT_LEDGER_PATH = "docs/retro/proposals.md"
 
-#: Settings a retrospective proposal could plausibly target. Delivery and
-#: scheduling plumbing (`notification`, `schedule`) and the universe source
-#: are excluded: they are not analysis parameters, and a snapshot that
-#: includes everything makes `config_hash` churn for unrelated edits.
-_SNAPSHOT_SECTIONS = (
-    "risk",
-    "fundamental_filters",
-    "technical_signals",
-    "backtest",
-    "analysis",
-    "postmortem",
-    "regime",
-    "retro",
-)
+#: Design §8.1's L2 qualitative gate: "the same `failure_class` five times
+#: across the last three retrospectives". Constants rather than settings on
+#: purpose -- the gate is a proposal rule (`references/proposal-rules.md`),
+#: and letting the configuration move it would let a proposal lower the bar
+#: it has to clear.
+L2_GATE_SESSION_WINDOW = 3
+L2_GATE_MIN_COUNT = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,11 +170,13 @@ class ExportSummary:
     notes: tuple[str, ...]
 
 
-def _evaluated_row_count(document: RetroInput) -> int:
+def evaluated_row_count(document: RetroInput) -> int:
     """Rows behind the window, read off separation's weight-composed entry.
 
     That entry counts every classification in the window (both horizons,
     both recommendations), which is exactly what the CLI reports as "評価".
+    Shared with `retro/ingest.py`, which records the same number on the
+    session row so a later reader knows how much evidence a retrospective had.
     """
     return next(
         (
@@ -217,7 +217,7 @@ def export_retro_input(
     return ExportSummary(
         path=destination,
         digest=document.input_digest,
-        outcome_count=_evaluated_row_count(document),
+        outcome_count=evaluated_row_count(document),
         surprise_count=len(document.surprises.items),
         dropped_surprise_count=document.surprises.dropped_count,
         notes=tuple(document.notes),
@@ -321,6 +321,10 @@ def build_retro_input(
         ],
         "input_coverage": _input_coverage_summary(outcomes, coverages).model_dump(
             mode="json"
+        ),
+        "failure_class_history": _failure_class_history(store, as_of),
+        "aggregates_by_config": _aggregates_by_config(
+            _config_ledger_window(store, as_of), outcomes, thresholds
         ),
         "surprises": SurpriseBundle(
             max_surprises=deps.settings.retro.max_surprises,
@@ -464,6 +468,116 @@ def _aggregates(
         news_supply=_news_supply_entry(
             verdicts, settings.analysis.sufficient_news_mention_items
         ),
+    )
+
+
+def _failure_class_history(store: StateStore, as_of: date) -> dict[str, object] | None:
+    """Cross-tab the trailing retrospectives' failure classes (Issue #189).
+
+    Returns:
+        The gate block, or `None` when no retrospective has been ingested at
+        or before `as_of` -- which is also the shape every dossier written
+        before `retro_sessions` existed carries, so its digest is unchanged.
+    """
+    history = store.get_failure_class_history(as_of, L2_GATE_SESSION_WINDOW)
+    if not history.sessions:
+        return None
+    return FailureClassHistoryEntry(
+        gate_window_sessions=L2_GATE_SESSION_WINDOW,
+        gate_min_count=L2_GATE_MIN_COUNT,
+        sessions=list(history.sessions),
+        counts=[
+            FailureClassCountEntry(
+                count_id=f"failure_class_{row.failure_class}",
+                failure_class=cast("FailureClass", row.failure_class),
+                count=row.count,
+                session_count=row.session_count,
+                meets_l2_gate=row.count >= L2_GATE_MIN_COUNT,
+            )
+            for row in history.counts
+        ],
+    ).model_dump(mode="json")
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigLedgerWindow:
+    """Which configuration each evaluated run executed under (Issue #189).
+
+    Keyed by `run_id` rather than filtered by `run_date`: an outcome matures
+    5 or 20 sessions *after* the run it judges, so the runs behind one
+    retrospective window almost never fall inside that window's own dates.
+    """
+
+    run_configs: Mapping[UUID, str]
+    versions: Mapping[str, ConfigVersionRecord]
+
+
+def _config_ledger_window(store: StateStore, as_of: date) -> ConfigLedgerWindow:
+    """Read the config ledger and the run-to-config map, as of the cutoff."""
+    return ConfigLedgerWindow(
+        run_configs=store.get_run_config_hashes(as_of),
+        versions={row.config_hash: row for row in store.get_config_versions()},
+    )
+
+
+def _aggregates_by_config(
+    ledger: ConfigLedgerWindow,
+    outcomes: Sequence[VerdictOutcomeRecord],
+    thresholds: PostmortemConfig,
+) -> list[dict[str, object]]:
+    """Split the window's separation by the configuration each run used.
+
+    A run whose `config_hash` is unknown (its `runs` row was pruned) is
+    dropped rather than pooled into an "unknown" bucket: pooling would put
+    outcomes produced under different settings into one number, which is the
+    exact confusion this block exists to remove.
+
+    Args:
+        ledger: The run-to-config map and the ledger rows behind it.
+        outcomes: The window's classified outcomes.
+        thresholds: The postmortem thresholds separation is computed under.
+
+    Returns:
+        One entry per configuration, ordered by `config_hash` so the dossier
+        is byte-reproducible.
+    """
+    grouped: dict[str, list[VerdictOutcomeRecord]] = {}
+    for outcome in outcomes:
+        config_hash = ledger.run_configs.get(outcome.run_id)
+        if config_hash is not None:
+            grouped.setdefault(config_hash, []).append(outcome)
+    return [
+        _config_aggregate_entry(
+            config_hash, ledger.versions.get(config_hash), rows, thresholds
+        ).model_dump(mode="json")
+        for config_hash, rows in sorted(grouped.items())
+    ]
+
+
+def _config_aggregate_entry(
+    config_hash: str,
+    version: ConfigVersionRecord | None,
+    rows: Sequence[VerdictOutcomeRecord],
+    thresholds: PostmortemConfig,
+) -> ConfigVersionAggregateEntry:
+    """Build one configuration's slice, with `@`-suffixed metric IDs.
+
+    The suffix keeps the per-config entries citable without colliding with
+    the window-wide `aggregates.separation` IDs, which name a different
+    population.
+    """
+    return ConfigVersionAggregateEntry(
+        config_hash=config_hash,
+        snapshot_hash=None if version is None else version.snapshot_hash,
+        first_seen_run_date=None if version is None else version.first_seen_run_date,
+        run_count=len({row.run_id for row in rows}),
+        outcome_count=len(rows),
+        separation=[
+            MetricEntry(
+                **{**asdict(row), "metric_id": f"{row.metric_id}@{config_hash}"}
+            )
+            for row in compute_separation(rows, thresholds)
+        ],
     )
 
 
@@ -729,13 +843,14 @@ def _max_adverse_return(
 
 
 def _config_snapshot(settings: Settings) -> ConfigSnapshot:
-    """Snapshot the proposal-relevant settings and hash them."""
-    dumped = settings.model_dump(mode="json")
-    sections = {name: dumped[name] for name in _SNAPSHOT_SECTIONS}
-    return ConfigSnapshot(
-        sections=sections,
-        config_hash=canonical_json_digest(sections, excluded_field="config_hash"),
-    )
+    """Snapshot the proposal-relevant settings and hash them.
+
+    Both halves come from `config.py` (Issue #189) so this dossier's snapshot
+    and the `config_versions` row `pipeline/daily_runner.py` writes are
+    provably the same eight sections hashed the same way.
+    """
+    sections = config_snapshot_sections(settings)
+    return ConfigSnapshot(sections=sections, config_hash=config_snapshot_hash(sections))
 
 
 def read_proposals_ledger(path: Path) -> ProposalsLedger:

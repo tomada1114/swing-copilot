@@ -17,12 +17,14 @@ from uuid import uuid4
 from swing_copilot.models import Position, RunStatus, StepStatus
 from swing_copilot.storage import (
     audit_records,
+    config_records,
     earnings_records,
     exposure_records,
     ftd_records,
     history_queries,
     paper_records,
     regime_records,
+    retro_records,
     text_records,
     tracking_records,
     verdict_records,
@@ -57,8 +59,14 @@ if TYPE_CHECKING:
         SignalOutcomeRecord,
         UniverseForwardReturnRecord,
     )
+    from swing_copilot.storage.config_records import ConfigVersionRecord
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
+    from swing_copilot.storage.retro_records import (
+        FailureClassHistory,
+        RetroNarrationRecord,
+        RetroSessionRecord,
+    )
     from swing_copilot.storage.tracking_records import (
         TrackableVerdict,
         VerdictPosition,
@@ -994,6 +1002,59 @@ class StateStore:
     def get_verdict_reasons_json(self, run_id: UUID, symbol: str) -> str | None:
         """Return the raw `verdicts.reasons_json` behind a tracked position."""
         return tracking_records.get_verdict_reasons_json(self._database, run_id, symbol)
+
+    def replace_retro_session(
+        self,
+        session: RetroSessionRecord,
+        narrations: Sequence[RetroNarrationRecord],
+    ) -> None:
+        """Record one ingested retrospective and its verified narrations (#189).
+
+        Args:
+            session: The session row, correction-upserted by `retro_as_of`.
+            narrations: That session's complete narration set; a re-ingest
+                replaces the date's previous set rather than merging into it.
+        """
+        retro_records.replace_retro_session(self._database, session, narrations)
+
+    def get_failure_class_history(
+        self, as_of: date, session_limit: int
+    ) -> FailureClassHistory:
+        """Cross-tab the trailing retrospectives' `failure_class` counts (#189).
+
+        Args:
+            as_of: Point-in-time cutoff; only sessions ingested at or before
+                it are counted.
+            session_limit: How many trailing sessions to count.
+
+        Returns:
+            The counted sessions and one row per observed class.
+        """
+        return retro_records.get_failure_class_history(
+            self._database, as_of, session_limit
+        )
+
+    def get_retro_narrations(
+        self, retro_as_of: date
+    ) -> tuple[RetroNarrationRecord, ...]:
+        """Return one retrospective's persisted narrations (#189)."""
+        return retro_records.get_retro_narrations(self._database, retro_as_of)
+
+    def upsert_config_version(self, record: ConfigVersionRecord) -> None:
+        """Record what a run's `config_hash` stood for (#189).
+
+        Args:
+            record: The observed configuration, keyed by `runs.config_hash`.
+        """
+        config_records.upsert_config_version(self._database, record)
+
+    def get_config_versions(self) -> tuple[ConfigVersionRecord, ...]:
+        """Return the whole configuration ledger, oldest first (#189)."""
+        return config_records.get_config_versions(self._database)
+
+    def get_run_config_hashes(self, as_of: date) -> dict[UUID, str]:
+        """Map every run visible at `as_of` to its `config_hash` (#189)."""
+        return config_records.get_run_config_hashes(self._database, as_of)
 
     def record_text_items(self, items: Sequence[TextItem]) -> None:
         """Persist collected text items, upserted by `source_id`.

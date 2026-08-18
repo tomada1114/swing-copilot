@@ -94,8 +94,8 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 3. 読む順序: `aggregates`（verdict_mix → separation 3 版 → tracked_performance →
    proceed 重大外し率 → skip 的中率 → news_supply）→
    `signal_performance` → `human_alignment` → `source_contribution` →
-   `basis_contribution` → `surprises` →
-   `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
+   `basis_contribution` → `failure_class_history` → `aggregates_by_config` →
+   `surprises` → `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
    proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、
    `verdict_mix` は成熟を待たず窓内の verdicts から算出されるため沈黙しない
    （`verdict_count >= 20` かつ `proceed_count == 0` で `is_flagged: true`）
@@ -178,8 +178,12 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
 
 サブエージェントに丸投げしない。
 
-1. **敗因分類の集計**: `failure_class` の分布を出し、過去の振り返り（台帳の提案全文）と
-   合わせて「同一 failure_class が直近 3 回で累計何件か」を数える
+1. **敗因分類の集計**: 今回の `failure_class` の分布を出し、`retro_input.json` の
+   `failure_class_history` を**読む**（Issue #189 以降、過去分は数えない）。そこには
+   直近 3 回の取り込み済み振り返りの件数・出現セッション数と、決定論コードが計算した
+   `meets_l2_gate` が入っている。件数は**下限**である——今回のあなたの読みはまだ
+   ingest されていないので含まれない。`failure_class_history` が `null` なら、
+   取り込み済みの振り返りがまだ 1 回も無いということ（L2 定性ゲートは未成立）
 2. **証拠ゲート判定**: 提案案ごとに
    [references/proposal-rules.md](references/proposal-rules.md) の床を満たすか判定する。
    ゲートは**上限ではなく床**であり、満たしても書く義務はなく、満たさない提案は書けない
@@ -206,7 +210,10 @@ uv run copilot-retro ingest <RETRODIR>
 
 `ingest` は strict スキーマ検証・`as_of`/`input_digest` 同一性・evidence 参照検証・
 CON-03 機械検査・再提案ガードを行い、通過した提案だけを台帳へ status=proposed で
-追記し `retro_report.md` を描画する。
+追記し `retro_report.md` を描画する。あわせて検証済み narration を
+`data/copilot.duckdb`（`--db` で変更可）の `retro_narrations` へ蓄積する
+（Issue #189）。次回以降の `retro_input.json` の `failure_class_history` は
+ここから作られるので、**ingest を飛ばすと L2 定性ゲートの材料が失われる**。
 
 **非表示（withheld）が出た場合:**
 

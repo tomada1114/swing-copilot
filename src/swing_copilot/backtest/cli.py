@@ -31,6 +31,10 @@ from swing_copilot.backtest.candidate_stream import (
     load_market_frame,
     save_candidate_stream,
 )
+from swing_copilot.backtest.earnings_history import (
+    EARNINGS_FILING_FORMS,
+    load_derived_earnings_calendar,
+)
 from swing_copilot.backtest.policy import (
     EntryPolicyArm,
     EntryPolicyError,
@@ -64,12 +68,13 @@ from swing_copilot.universe import (
 from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
     from swing_copilot.backtest.engine import BacktestResult
     from swing_copilot.backtest.sensitivity import SensitivityGridResult
     from swing_copilot.config import Settings, StrategiesConfig
+    from swing_copilot.risk.checks import EarningsGuardInput
     from swing_copilot.universe_sampling import UniverseSample
 
 _DEFAULT_OUTPUT_DIR = Path("reports/backtests")
@@ -314,24 +319,27 @@ def _exit_breakdown_rows(result: BacktestResult) -> list[tuple[str, str]]:
 
 
 def _exit_breakdown_comparison_rows(
-    normal: BacktestResult, pessimistic: BacktestResult
-) -> list[tuple[str, str, str]]:
-    """`_exit_breakdown_rows` for both scenarios, aligned on a shared label set.
+    results: Sequence[BacktestResult],
+) -> list[tuple[str, list[str]]]:
+    """`_exit_breakdown_rows` for every column, aligned on a shared label set.
 
-    A higher slippage assumption moves trades between exit reasons (a stop
-    that used to miss now fires), so the two results can carry different
-    reason labels. Missing labels render as `0` rather than being dropped,
-    keeping the comparison's rows one-to-one.
+    Both comparisons this serves (normal-vs-pessimistic and the policy A/B)
+    move trades between exit reasons — a higher slippage assumption fires a
+    stop that used to miss, a regime gate never opens the position at all —
+    so the columns can carry different reason labels. Missing labels render as
+    `0` rather than being dropped, keeping the comparison's rows one-to-one.
+
+    Args:
+        results: One result per column, in column order.
+
+    Returns:
+        `(label, [value per column])` rows, in first-seen label order.
     """
-    normal_rows = dict(_exit_breakdown_rows(normal))
-    pessimistic_rows = dict(_exit_breakdown_rows(pessimistic))
-    labels = list(normal_rows) + [
-        label for label in pessimistic_rows if label not in normal_rows
-    ]
-    return [
-        (label, normal_rows.get(label, "0"), pessimistic_rows.get(label, "0"))
-        for label in labels
-    ]
+    per_column = [dict(_exit_breakdown_rows(result)) for result in results]
+    labels: list[str] = []
+    for rows in per_column:
+        labels += [label for label in rows if label not in labels]
+    return [(label, [rows.get(label, "0") for rows in per_column]) for label in labels]
 
 
 def _entry_block_rows(result: BacktestResult) -> list[tuple[str, str]]:
@@ -349,18 +357,70 @@ def _entry_block_rows(result: BacktestResult) -> list[tuple[str, str]]:
     ]
 
 
+#: Row order of the multi-arm equity curve table, and the order
+#: `_equity_curve_points` returns. `last` is deliberately absent from the
+#: table: `final_equity` already carries it in `## Metrics`, and the window's
+#: end date is in the report title.
+_EQUITY_CURVE_POINTS: tuple[str, ...] = ("first", "peak", "trough")
+
+
+def _equity_curve_points(result: BacktestResult) -> list[tuple[str, str]]:
+    """First/peak/trough of the equity curve as `<date>=<equity>` cells.
+
+    The single-arm prose block and the multi-arm table share this one
+    definition of "peak" and "trough": the A/B exists to be compared against a
+    single-arm run, so the two must not be able to drift apart.
+
+    Args:
+        result: One arm's result.
+
+    Returns:
+        `(point label, cell text)` rows in `_EQUITY_CURVE_POINTS` order; every
+        cell is `N/A` when the arm has no trading days.
+    """
+    if not result.equity_curve:
+        return [(label, "N/A") for label in _EQUITY_CURVE_POINTS]
+    points = (
+        result.equity_curve[0],
+        max(result.equity_curve, key=lambda point: point[1]),
+        min(result.equity_curve, key=lambda point: point[1]),
+    )
+    return [
+        (label, f"{point_date.isoformat()}={equity:,.2f}")
+        for label, (point_date, equity) in zip(
+            _EQUITY_CURVE_POINTS, points, strict=True
+        )
+    ]
+
+
 def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
     if not result.equity_curve:
         return ["Equity curve: (no trading days)"]
-    first_date, first_equity = result.equity_curve[0]
+    first_cell, peak_cell, trough_cell = (
+        cell for _, cell in _equity_curve_points(result)
+    )
     last_date, last_equity = result.equity_curve[-1]
-    peak_date, peak_equity = max(result.equity_curve, key=lambda point: point[1])
-    trough_date, trough_equity = min(result.equity_curve, key=lambda point: point[1])
     return [
-        f"Equity curve: {first_date.isoformat()}={first_equity:,.2f} -> "
-        f"{last_date.isoformat()}={last_equity:,.2f}",
-        f"  Peak: {peak_date.isoformat()}={peak_equity:,.2f}",
-        f"  Trough: {trough_date.isoformat()}={trough_equity:,.2f}",
+        f"Equity curve: {first_cell} -> {last_date.isoformat()}={last_equity:,.2f}",
+        f"  Peak: {peak_cell}",
+        f"  Trough: {trough_cell}",
+    ]
+
+
+def _equity_curve_comparison_rows(
+    results: Sequence[BacktestResult],
+) -> list[tuple[str, list[str]]]:
+    """`_equity_curve_points` for every column, one row per point.
+
+    Args:
+        results: One result per column, in column order.
+
+    Returns:
+        `(point label, [cell per column])` rows.
+    """
+    per_column = [dict(_equity_curve_points(result)) for result in results]
+    return [
+        (label, [rows[label] for rows in per_column]) for label in _EQUITY_CURVE_POINTS
     ]
 
 
@@ -547,10 +607,8 @@ def render_terminal_comparison(
     exit_table.add_column("Exit")
     exit_table.add_column("Normal (x1.0)", justify="right")
     exit_table.add_column("Pessimistic", justify="right")
-    for label, normal_value, pessimistic_value in _exit_breakdown_comparison_rows(
-        normal, pessimistic
-    ):
-        exit_table.add_row(label, normal_value, pessimistic_value)
+    for label, values in _exit_breakdown_comparison_rows((normal, pessimistic)):
+        exit_table.add_row(label, *values)
     console.print(exit_table)
 
     if meta.missing_data_symbols:
@@ -595,10 +653,8 @@ def render_markdown_comparison(
         "|---|---:|---:|",
     ]
     lines += [
-        f"| {label} | {normal_value} | {pessimistic_value} |"
-        for label, normal_value, pessimistic_value in _exit_breakdown_comparison_rows(
-            normal, pessimistic
-        )
+        f"| {label} | " + " | ".join(values) + " |"
+        for label, values in _exit_breakdown_comparison_rows((normal, pessimistic))
     ]
     lines.append("")
 
@@ -631,6 +687,7 @@ def render_policy_comparison_terminal(
     buffer = StringIO()
     console = Console(file=buffer, width=_CONSOLE_WIDTH)
     labels = [label for label, _ in arms]
+    results = [result for _, result in arms]
     console.print(
         f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
         f"{meta.start.isoformat()}..{meta.end.isoformat()} "
@@ -645,9 +702,17 @@ def render_policy_comparison_terminal(
         metrics_table.add_column(label, justify="right")
     for label, field in _METRIC_ROWS:
         metrics_table.add_row(
-            label, *[_metric_value(result, field) for _, result in arms]
+            label, *[_metric_value(result, field) for result in results]
         )
     console.print(metrics_table)
+
+    exit_table = Table(title="Exit breakdown by policy", header_style="bold")
+    exit_table.add_column("Exit")
+    for label in labels:
+        exit_table.add_column(label, justify="right")
+    for reason, values in _exit_breakdown_comparison_rows(results):
+        exit_table.add_row(reason, *values)
+    console.print(exit_table)
 
     block_table = Table(
         title="Entry blocks by policy: candidates (sessions)", header_style="bold"
@@ -658,6 +723,14 @@ def render_policy_comparison_terminal(
     for reason, values in _entry_block_comparison_rows(arms):
         block_table.add_row(reason, *values)
     console.print(block_table)
+
+    equity_table = Table(title="Equity curve summary by policy", header_style="bold")
+    equity_table.add_column("Point")
+    for label in labels:
+        equity_table.add_column(label, justify="right")
+    for point, values in _equity_curve_comparison_rows(results):
+        equity_table.add_row(point, *values)
+    console.print(equity_table)
 
     if meta.missing_data_symbols:
         console.print(
@@ -677,6 +750,7 @@ def render_policy_comparison_markdown(
 ) -> str:
     """Render the policy A/B as a markdown diff table (Issue #184)."""
     labels = [label for label, _ in arms]
+    results = [result for _, result in arms]
     header = "| Metric | " + " | ".join(labels) + " |"
     separator = "|---|" + "---:|" * len(labels)
     lines = [
@@ -693,9 +767,21 @@ def render_policy_comparison_markdown(
     ]
     lines += [
         f"| {label} | "
-        + " | ".join(_metric_value(result, field) for _, result in arms)
+        + " | ".join(_metric_value(result, field) for result in results)
         + " |"
         for label, field in _METRIC_ROWS
+    ]
+    lines.append("")
+
+    lines += [
+        "## Exit breakdown",
+        "",
+        "| Exit | " + " | ".join(labels) + " |",
+        separator,
+    ]
+    lines += [
+        f"| {reason} | " + " | ".join(values) + " |"
+        for reason, values in _exit_breakdown_comparison_rows(results)
     ]
     lines.append("")
 
@@ -710,6 +796,18 @@ def render_policy_comparison_markdown(
     lines += [
         f"| {reason} | " + " | ".join(values) + " |"
         for reason, values in _entry_block_comparison_rows(arms)
+    ]
+    lines.append("")
+
+    lines += [
+        "## Equity curve summary",
+        "",
+        "| Point | " + " | ".join(labels) + " |",
+        separator,
+    ]
+    lines += [
+        f"| {point} | " + " | ".join(values) + " |"
+        for point, values in _equity_curve_comparison_rows(results)
     ]
     lines.append("")
 
@@ -963,6 +1061,47 @@ def _resolve_candidate_stream(
     return stream
 
 
+def _earnings_guard_fn(
+    deps: BacktestDependencies,
+    sample: UniverseSample,
+    arms: Sequence[EntryPolicyArm],
+    *,
+    as_of: date,
+) -> Callable[[date, tuple[str, ...]], EarningsGuardInput] | None:
+    """Build the point-in-time earnings lookup, when an arm can use one (#201).
+
+    Only `regime+risk` consults the earnings guard, so the filing history is
+    read only for that arm — a `none`/`regime` run must not pay for a query
+    whose answer it would discard, nor print a coverage line about a gate it
+    never applies.
+
+    Args:
+        deps: Real collaborators; supplies the store and `risk.*` settings.
+        sample: The symbols this run backtests.
+        arms: The `--policy` arms about to run.
+        as_of: The backtest window's end; the calendar re-applies the cutoff
+            per simulated day.
+
+    Returns:
+        The lookup, or `None` when no arm applies the earnings gate.
+    """
+    if EntryPolicyArm.REGIME_RISK not in arms:
+        return None
+    calendar = load_derived_earnings_calendar(
+        deps.market_store,
+        sample.symbols,
+        as_of=as_of,
+        lookahead_days=deps.settings.risk.earnings_lookahead_days,
+    )
+    projectable = len(calendar.projectable_symbols)
+    sys.stdout.write(
+        f"決算ゲート: 提出履歴（{'/'.join(EARNINGS_FILING_FORMS)}）から"
+        f"{projectable}/{len(sample.symbols)} 銘柄の決算日を推定します"
+        "（提出日は発表日より遅れる。docs/reference.md 参照）\n"
+    )
+    return calendar.lookup
+
+
 def _run_backtest_command(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
 ) -> None:
@@ -986,8 +1125,16 @@ def _run_backtest_command(
         # One stream, one frame, N arms: the whole point of the A/B is that
         # nothing but the gates differs between the columns (Issue #184).
         arms = _policy_arms(args)
+        earnings_guard_fn = _earnings_guard_fn(deps, sample, arms, as_of=args.end)
         policies = [
-            build_entry_policy(arm, settings, deps.universe, frame.bars) for arm in arms
+            build_entry_policy(
+                arm,
+                settings,
+                deps.universe,
+                frame.bars,
+                earnings_guard_fn=earnings_guard_fn,
+            )
+            for arm in arms
         ]
         if args.pessimistic:
             normal_result = run_backtest(

@@ -787,7 +787,13 @@ verdict追跡台帳`verdict_positions`の`status='open'`かつ`recommendation='p
 この和集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
 だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。
 `_select_symbols()`は`--limit`の有無にかかわらずこの保有集合を必ず合流させる
-（Issue #212。3.21節の実装時追記）。仮想建玉を
+（Issue #212。3.21節の実装時追記）。
+
+NFR-03の予算で打ち切られうる収集ステップは、**打ち切られる側が常に候補のみの銘柄で
+あるように保有銘柄を先頭に並べる**。テキスト側の`_text_target_symbols()`（30銘柄の
+上限で切り落とす）と、ステップ2のfundamentals取得
+（`pipeline/daily.py::_fundamentals_fetch_order()`が時間予算での`break`に先立って
+並べ替える。Issue #219。3.21節の実装時追記）の両方に同じ原則を適用する。仮想建玉を
 サイジング・集中度・相関へ混ぜてはならない（3.24.1節の棲み分け）。台帳の読み取り失敗は
 fail-softで、警告ログを残して仮想側を空として続行する。
 
@@ -1246,7 +1252,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
     [--candidate-cache PATH] [--policy none|regime|regime+risk[,...]]
 ```
 
-`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。サンプラは`universe_sampling.select_universe_sample()`にあり、`copilot-daily --limit`も同じ関数・同じsaltを使う（Issue #205。同じユニバースと同じ`N`なら両CLIが同じ銘柄集合を測る）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
+`--strategy`/`--start`/`--end`は必須。`--start > --end`または未登録の`--strategy`はバックテスト実行前にfail-fastする（利用可能な戦略名一覧をエラーに含める）。`--limit`はユニバース対象銘柄数の上限。`gics_sector`で比例配分（最大剰余法）したうえで各セクター内をsalt付きblake2bハッシュ順に選ぶ決定論的サンプルである（Issue #194）。サンプラは`universe_sampling.select_universe_sample()`にあり、`copilot-daily --limit`（Issue #205）と`copilot-backfill --limit`（Issue #206）も同じ関数・同じsaltを使う（同じユニバースと同じ`N`なら3つのCLIが同じ銘柄集合を測る／暖機する）。アルファベット順先頭N銘柄はセクター構成がS&P500と別物になり、MinerviniのRSパーセンタイル（条件7）のように「渡された集合内の相対順位」で決まるチェックの意味自体を変えてしまうため。0以下はfail-fastで拒否し、ユニバース規模以上の指定は全銘柄と同義になる。採用したサンプリング方式・実銘柄数・セクター構成はterminal/markdown双方のレポート冒頭に機械的に出力する。`--output`省略時は`reports/backtests/<end>-<strategy>.md`。`--db`はDuckDBパス（テスト用、既定`data/copilot.duckdb`）で、対応するParquet bar格納先は同ディレクトリの`bars/`（`DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT`の"data/copilot.duckdb"+"data/bars"というペアリング規約を`--db`にも適用）。`BacktestRequest`に`strategy_key: str = "default"`を追加し、`ScreeningPipeline`へ委譲する。データ不足銘柄（要求したがバー0件）はスキップしつつterminal/markdownへ警告として表示し、バックテスト自体はfail-softで完走する。markdown出力は既存の一時ファイル+`os.replace`原子的置換パターンに従う。`--pessimistic`（悲観シナリオ）の実際の挙動はP2-09で実装した（次項）。
 
 **Issue #217実装時追記**: `--db`から解決した`bars/`が**ディレクトリとして存在しない**場合、`_compose_dependencies`は`_resolve_parquet_root()`経由で`BacktestCliError`を送出し、`Database`を開くよりも前・レポートを書くよりも前に落ちる（終了コード1、解決したパスと期待するレイアウトをメッセージに含める）。従来は`MarketStore`が根の存在を検証せず、`has_bars()`相当の判定も「根ごと無い」と「その銘柄のバーが0件」を区別しなかったため、DuckDBだけをコピーして`bars/`を並置し忘れた実行が**全銘柄データ不足→取引ゼロのレポート→`exit 0`**を数秒で返していた（#200／PR #215のA/B実走で実際に踏んだ。正常終了・短時間・体裁の整ったレポートの3点が揃うため気づけない）。検証は根の存否だけを見る: 「数銘柄だけバー0件」（新規上場など）は上記のとおりfail-softのままで、根が存在して空の場合も従来どおりfail-softである——潰したのは2つのケースが区別できないことだけである。検証を`MarketStore.__init__`ではなくCLI側に置いたのは、日次パイプラインなど`bars/`を初回書き込み時に`mkdir(parents=True, exist_ok=True)`で作る経路（`market_store.py`の`_write_partition`）を壊さないため。
 
@@ -1281,6 +1287,19 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 **`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`＝`regime` / `circuit_breaker` / `portfolio_heat` / `earnings` / `sector` / `not_calculable` / `max_concurrent` / `already_held` / `missing_data` / `invalid_stop` / `zero_shares` / `insufficient_cash`を0件でも必ず全件報告する。複数ゲートが同時に成立した候補はこの順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
 
 **CLI**: `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
+
+**Issue #201実装時追記（決算ゲートのpoint-in-timeカレンダー供給とCLI配線）**: 上の「決算ブロックの限界」は`earnings_guard_fn`が未配線であることの説明であり、本issueでその注入口を実データで埋めた。`copilot-backtest --policy regime+risk`は決算ゲートの実カウントを報告する。
+
+- **データソース＝収集済みの提出履歴（`fundamentals`テーブル）**。外部の決算カレンダーAdapterは追加しない。本番の`earnings_calendar`は`symbol`主キーの現在値しか持たない（履歴が無い）ので、過去を再生する用途には原理的に使えず、使えば丸ごとlook-aheadになる。一方`fundamentals`は`accession_no`主キーで1提出＝1行、`form`と`filed_at`（SECの受理時刻）を持つ——`filed_at <= as_of`はAGENTS.mdが提出物に課す可視性規律そのものである。読み出しは`storage/market_store.py::read_filing_dates(symbols, forms, as_of)`が担い、カットオフはこのクエリ自身で切る（呼び出し側では切らない）。同一`fiscal_period_end`の訂正再提出は**最も早い提出日**へ畳み、同日提出の複数期も1日として扱う（「提出行」ではなく「決算イベント」を返す）。
+- **次回決算日は推定である**。`backtest/earnings_history.py::DerivedEarningsCalendar`が、`as_of`時点で可視な提出日の**連続差の中央値**を最新提出日へ加えて次回を射影する。`EarningsLookup`の3状態は本番の外部clientと同じ意味で使い分ける: 射影が`[as_of, as_of + risk.earnings_lookahead_days]`に入れば`found`、窓より先なら`none_in_window`、**可視提出が2件未満/妥当な周期が無い/射影日を`as_of`が既に追い越した**場合は`fetch_failed`（＝「分からない」。警告のみでブロックしない）。射影日を追い越した状態を`found`のまま据え置くと、ズレが続く限りその銘柄を無期限にブロックし続けるため、あえて「不明」へ落とす。周期の妥当帯は45〜200暦日（四半期≒91日、年次報告が履歴に無いときのQ3→翌Q1≒182日を覆う）で、帯の外の差分は中央値から除外する。
+- **前提と限界**（`docs/reference.md`にも運用者向けに再掲）: (1) `filed_at`は**提出日**であって発表日ではない。発表（8-K Item 2.02）は10-Qの受理より数日早いのが通例なので、提出日ベースの射影はブロック窓ごと**系統的に後ろへずれる**。周期も射影も提出日で測るため内部整合はしているが、真の決算カレンダーと同じ窓ではない。(2) 被覆率は`pipeline/daily.py`のfundamentals収集が触れた銘柄・期間に等しく、過去全期間のパネルではない。(3) `fundamentals`が正規化する`10-K`/`10-Q`だけが決算イベントである（`EARNINGS_FILING_FORMS`は完全一致なので`10-Q/A`は入らない）。Q4の発表は10-K提出の数週間前に起きるので、観測ではなく射影でしか覆われない。
+- **正直に縮退する**: 提出履歴が無い銘柄は`fetch_failed`を返し、日付を作らない。0カウントの意味を運用者が読み違えないよう、CLIは実行時に「提出履歴（10-K/10-Q）から N/M 銘柄の決算日を推定します」の1行を標準出力へ出す（Nは`DerivedEarningsCalendar.projectable_symbols`＝提出2件以上で周期を測れる銘柄数。日ごとの可視件数はこれ以下なので上限値である）。この行と`fundamentals`の読み出しは`regime+risk`を含むrunにだけ発生する（`none`/`regime`は決算ゲートを適用しないので、答えを捨てるクエリを走らせない）。
+
+**Issue #216実装時追記（多アームレポートのセクション構成）**: `render_policy_comparison_terminal`/`render_policy_comparison_markdown`は`## Metrics` → `## Exit breakdown` → `## Entry blocks` → `## Equity curve summary` → `## Data quality` → `## Warnings` → `## Survivorship bias`の順に出力する。従来はexit内訳とequity curve要約が単一アームのレンダラにしか無く、A/Bレポートからは「どのアームがどう手仕舞ったか」も「ドローダウンがいつ起きたか」も読めなかった（値はすべて`BacktestResult`に載っており、埋めるには同一設定の単一アームを1本走らせ直す＝実測40〜56分しかなかった。#200 / PR #215で実際に踏んだ）。両セクションとも向きは`## Metrics`に揃える——**行=指標、列=アーム**であって、アームごとのブロックを縦に並べない（アーム間の差はそもそも横並びでしか読めない）。
+
+- `## Exit breakdown`の行は単一アームと同一で、exit理由の件数（`exit_reason_counts`）＋`max_hold binding rate`＋`holding days (median)`＋`holding days (p25 / p75)`。アームによって出現する理由が違う（ゲートがそもそも建玉させない）ため、行集合は全アームの和（初出順）を取り、そのアームに無い理由は欠落ではなく明示的な`0`にする。この整列は`_exit_breakdown_comparison_rows(results)`がN列版として担い、`--pessimistic`の2列比較も同じ関数を通る（分岐を2つ持たない）。
+- `## Equity curve summary`の行は`first` / `peak` / `trough`の3点で、セルは`<date>=<equity>`。`last`は出さない（`final_equity`が`## Metrics`に、終端日が見出しにすでにある）。取引日が0日のアームは3行とも`N/A`。単一アームの散文3行（`_equity_curve_summary_lines`）は**そのまま**であり、テーブル化は多アーム側だけの変更である。
+- 単一アームおよび`--pessimistic`のレポートは1文字も変わらない。`reports/backtests/*.md`は後から読まれる記録（`2026-08-17-policy-ab-equity-basis.md`が#200の正本）なので、`tests/backtest/test_cli.py::TestSingleArmMarkdownIsPinned`がレポート全文を文字単位で固定する。
 
 **永続化**: `--candidate-cache PATH`でストリームをParquetへ保存し、CLI実行をまたいで再利用する。列は`as_of`/`symbol`/`rank`/`signal_names_json`/`metrics_json`/`execution_state`/`execution_distance`で、行は`(as_of, rank)`昇順、`cache_key`はpyarrowのschema metadataへ格納する。JSON列は`storage/json_guard.dumps_safe`を通すのでNaN/Infは書き込み前に拒否され、`float`はJSONの往復でビット一致する。書き込みは同一ディレクトリの一時ファイル＋`os.replace`（REQ-008、`market_store._write_partition`と同型）で、失敗時は旧キャッシュを保持し一時ファイルを消す。読めないキャッシュは`CandidateStreamError`だが、CLIはこれをミス扱いにして再生成する（キャッシュ破損でバックテストを落とさない）。保存→読込→注入した結果が素通しの`run_backtest`と`BacktestResult`レベルで完全一致することをテストで保証している。
 
@@ -1400,7 +1419,9 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 
 **P0-212実装時追記（Issue #212）**: `_select_symbols(universe, held_symbols, limit)`はそのrunが価格取得・スクリーニングする銘柄集合を決める唯一の入口であり（`daily_runner.py`が`price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})`として`get_daily_bars()`とステップ1へ渡す。日次経路の価格取得はこの1本だけで、`pipeline/backfill.py`は運用者が手で叩く別コマンド）、**`--limit`の有無にかかわらず3.14節の保有集合を和集合として合流させる**。`limit is None`分岐だけが合流していなかったため、S&P 500スナップショットから外れた保有銘柄はその日のbarを1本も取得されず、トレーリングストップ・max-hold・レポートのポジション文脈が古い価格の上で走っていた——`--limit`はスモーク用フラグで本番の18:30 routineは渡さないため、欠陥は本番経路だけに出る。指数からの除外直後こそ手仕舞い判定が最も要るタイミングであり、他レイヤに代替の取得経路もガードも無かった。
 
-これは**取得対象集合**への追加であって、ユニバースのas-of解決（`snapshot_date <= as_of`）を迂回するものではない。`_run_step_screening()`は`ScreeningInput.universe`を`deps.universe`との積集合に絞り続けるため、スナップショット外の保有銘柄が新規エントリー候補として再浮上することはない（P1-02の落選分類が未取得銘柄を誤分類しないための既存の絞り込みが、そのまま入口側の防波堤にもなる）。戻り値は両分岐とも`sorted()`で辞書順に揃える。`get_latest_universe_membership()`が`ORDER BY symbol`で読むため本番の並びは実質不変で、変わるのは`universe.manual_include`で末尾に足された銘柄とスナップショット外の保有銘柄の位置だけである。この順序を下流はデータとして読まない——screening側は`set`で受け取り、ユニバース順は`deps.universe`から再導出する（RSパーセンタイル・流動性パーセンタイルはいずれも`percentile_ranks()`が`(値, symbol)`でソートするため入力順に依存しない）。順序が観測できるのはステップ2のfundamentals取得順（NFR-03の時間予算で打ち切られた際にどこまで進んだか）だけである。価格取得の失敗は従来どおりfail-softで、`result.failures`がステップのdetailに載る。
+これは**取得対象集合**への追加であって、ユニバースのas-of解決（`snapshot_date <= as_of`）を迂回するものではない。`_run_step_screening()`は`ScreeningInput.universe`を`deps.universe`との積集合に絞り続けるため、スナップショット外の保有銘柄が新規エントリー候補として再浮上することはない（P1-02の落選分類が未取得銘柄を誤分類しないための既存の絞り込みが、そのまま入口側の防波堤にもなる）。戻り値は両分岐とも`sorted()`で辞書順に揃える。`get_latest_universe_membership()`が`ORDER BY symbol`で読むため本番の並びは実質不変で、変わるのは`universe.manual_include`で末尾に足された銘柄とスナップショット外の保有銘柄の位置だけである。この順序を下流はデータとして読まない——screening側は`set`で受け取り、ユニバース順は`deps.universe`から再導出する（RSパーセンタイル・流動性パーセンタイルはいずれも`percentile_ranks()`が`(値, symbol)`でソートするため入力順に依存しない）。順序が観測できるのはステップ2のfundamentals取得順（NFR-03の時間予算で打ち切られた際にどこまで進んだか）だけであり、そのステップは受け取った並びを自分の内側で保有優先へ並べ替える（Issue #219。直後の実装時追記）。価格取得の失敗は従来どおりfail-softで、`result.failures`がステップのdetailに載る。
+
+**P2-219実装時追記（Issue #219）**: ステップ2の`_run_step_fundamentals()`は`deps.monotonic() >= deadline`で走査を打ち切るため、**その並びの末尾にいる銘柄が今日のファンダメンタルズ更新を失う**。`_select_symbols()`の戻り値は辞書順なので、打ち切りの被害者はアルファベット順という無関係な理由で決まっており、候補より後ろに並ぶ保有銘柄は、単に先頭に近いだけの通常候補へ予算を使い切られていた。3.14節の held-first 原則がテキスト側（`_text_target_symbols()`）にしか実装されていなかった取りこぼしであり、意図的な差ではない。`held_symbols`を`daily_runner.py`の呼び出し側から引数で受け取り、`_fundamentals_fetch_order(symbols, held_symbols)`が保有ブロック→残りの順に並べ替えてから走査する。両ブロックとも入力の辞書順を保つので再現性は変わらない。変更するのは**取得順だけ**で、取得した内容に掛かる`filed_at <= as_of`のカットオフ、予算切れの fail-soft 境界（`success` + 部分完了detail）、同日再取得スキップ（`fetched_at`の日付 == `deps.clock.today()`。P6-25）はいずれも不変である。`_select_symbols()`自身の戻り値の順序契約（両分岐とも辞書順）も変えていない——並べ替えはステップ2の内側に閉じている。共有ヘルパへの一本化は見送った（`_text_target_symbols()`は`list[Candidate]`と30銘柄上限を扱い、こちらは`list[str]`と時間予算を扱う）。回帰は`tests/pipeline/test_daily_core.py::TestFundamentalsHeldFirstOrder`が押さえる——ユニバース外・辞書順で最後の保有銘柄を置き、予算が1銘柄分しかない run でその1回が保有銘柄に使われることを確認する。
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
@@ -1629,7 +1650,7 @@ src/swing_copilot/retro/
 
 この相違が効くのは冪等性である。観測日を記録すると、同じ`(run, horizon)`でも実行日によって行の内容が変わる。満期日を記録すれば、いつ振り返りを回しても同じ行が再現され、実行間隔が空いても評価漏れ・二重評価が構造的に起きない。
 
-取引日カレンダーは`pipeline/forward_returns.py`の純関数を3.21aのpostmortemと共有する（逆算`find_target_trading_day`／順算`find_maturity_trading_day`、いずれもベンチマーク銘柄のバー実在日を代替カレンダーとする）。すべて`date <= as_of`の価格のみ使用（look-ahead禁止）。bar欠損は当該`(run, symbol, horizon)`をスキップしてnoteに残すfail-soft、未満期のスライスはnoteに出さず`pending_slice_count`に数える（バッチでは大半が正当に未満期なので、1件ずつnoteに出すと本当のデータ品質シグナルが埋もれる）。
+取引日カレンダーは`pipeline/forward_returns.py`の純関数を3.21aのpostmortemと共有する（逆算`find_target_trading_day`／順算`find_maturity_trading_day`、いずれもベンチマーク銘柄のバー実在日を代替カレンダーとする）。すべて`date <= as_of`の価格のみ使用（look-ahead禁止）。bar欠損は当該`(run, symbol, horizon)`をスキップしてnoteに残すfail-soft、**バーは存在するが終値が非有限（`NaN`/`±inf`）の場合も`compute_forward_return`が`None`を返して同じスキップ扱いにする**（Issue #206。`verdict_outcomes.forward_return_pct`は`DOUBLE NOT NULL`だがDuckDBの`NaN`は`NULL`ではないため、素通しすると「勝ちでも負けでもない行」として永続化され集計を黙って歪める。現状NaN終値を落としているのは`YFinanceProvider`だけで、正規化は各providerの責務という前提上ストア直書き・将来のproviderはこのガードを通らない。回帰テストは`tests/pipeline/test_forward_returns.py::TestComputeForwardReturn::test_returns_none_when_either_close_is_not_finite`）、未満期のスライスはnoteに出さず`pending_slice_count`に数える（バッチでは大半が正当に未満期なので、1件ずつnoteに出すと本当のデータ品質シグナルが埋もれる）。
 
 走査窓は`settings.postmortem.lookback_window_days` + 30日で、集約窓（`export`、`lookback_window_days`ちょうど）より広い。報告窓の端にあるrunでも20営業日ホライズンが走査範囲に入るようにするためで、design §5.2の`[as_of − lookback_window_days − 30, as_of]`をそのまま実装している。
 
@@ -1818,6 +1839,8 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 
 チャンク分割（50銘柄）とチャンク間スリープ（2秒）はyfinance側にレート制限が無いことへの配慮で、`write_bars`の呼び出しを最後の1回に集約するのは年パーティション全書き直しのコストを銘柄数に比例させないためである。レジューム条件は「既存バーの最古日が`--start`以前」であり、後年上場の銘柄は毎回再取得される（銘柄単位の「取得済みだが空」台帳を持たない割り切り）。操作面は`docs/reference.md`が正本。
 
+`--limit N`は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない（Issue #206）。`copilot-backtest`（#194）・`copilot-daily`（#205）と**同じ関数・同じsalt**を共有するので、同じユニバースと同じ`N`なら3つのCLIが同じ銘柄集合を覆う——暖機したキャッシュがそのままスモーク実行・バックテストの対象と一致する。`copilot-backfill`は測定値を出さないため辞書順バイアスの害は「Aで始まる銘柄しか温まらない」に留まるが、その偏りは後続の実行が「キャッシュ済みで速い銘柄」に引かれる形で間接的に効く。`--limit <= 0`はCLI側の`BackfillError`（「`--limit`は1以上の整数で指定してください。」）で従来どおりfail-fastする——サンプラ自身は`0`を空サンプル、負値を`ValueError`とする別契約なので、CLIの下限とメッセージはCLIが持ち続ける。
+
 このフェーズの是正対象は、スクリーニング候補が構造的に低ボラ銘柄へ偏る2つの機構である。
 
 1. `pullback_rsi`の帯`|close − SMA50| / SMA50 ≤ 0.03`が事実上のローボラフィルタとして働く（ATR% < 2.5%の通過率44.0%に対し、ATR% > 5%は9.7%）
@@ -1833,7 +1856,7 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 
 決済側の計器として`Trade.days_held`と`BacktestResult`の3フィールド（決済理由内訳・`max_hold`バインド率・保有日数の中央値/四分位）を追加し、感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(40, 70, 100, 140, 200)%`へ広げた。ATR軸が±50%を探索するのに時間軸だけ±20%では、「そのパラメータが効かない」のか「一度も発火していない」のかを区別できないためである。
 
-なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない。
+なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない（**この最後の一文はIssue #184で前半が、Issue #201で後半が解消された**——バックテストは`backtest/policy.py`経由で`RiskChecker`を通るようになり、決算日は`earnings_calendar`ではなく`fundamentals`の提出履歴から`filed_at <= as_of`で推定する。3.19の該当追記を参照）。
 
 ---
 

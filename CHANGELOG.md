@@ -35,9 +35,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 順位落ちにも tracking（2.5×ATR／25 セッション）を後から適用できるよう、
     `StateStore.get_untracked_truncations()` を**拡張ポイントとしてのみ**用意
     した（日次ループはまだ呼ばない）
+- `copilot-backtest --policy regime+risk` の決算ゲートに point-in-time な決算日を
+  供給し、実カウントを報告するようにした（Issue #201、#184 の follow-up）。#184 が
+  用意した注入口 `build_entry_policy(..., earnings_guard_fn=...)` は、シミュレータに
+  過去の決算カレンダーが無いため CLI から未配線のままで、ゲートは日付を捏造せず
+  0 を報告していた。本番の `earnings_calendar` は `symbol` 主キーの現在値だけで
+  履歴を持たないため過去再生には使えず（使えば丸ごと look-ahead になる）、外部の
+  決算カレンダー API を足すのもバックテストのためだけには重い。代わりに、唯一の
+  point-in-time な提出履歴である `fundamentals`（`accession_no` 主キー、`form` と
+  SEC 受理時刻 `filed_at` を持つ）から導出する。新規
+  `storage/market_store.py::read_filing_dates()` が `filed_at <= as_of` を自身の
+  クエリで切って `10-K`/`10-Q` の提出日を返し（同一 `fiscal_period_end` の訂正
+  再提出は最初の提出日へ畳む）、新規 `backtest/earnings_history.py::
+  DerivedEarningsCalendar` が可視提出日の連続差の中央値から次回決算日を**射影**
+  する。射影が `risk.earnings_lookahead_days` の窓に入れば `found`、窓より先なら
+  `none_in_window`、可視提出が2件未満・妥当な周期が無い・`as_of` が射影日を既に
+  追い越した場合は `fetch_failed`（警告のみでブロックしない）——推定できない
+  ときに日付を作らない点は従来どおりである。0 カウントの意味を読み違えないよう、
+  CLI は「提出履歴（10-K/10-Q）から N/M 銘柄の決算日を推定します」の1行を出す。
+  **提出日は発表日（8-K Item 2.02）より遅いため、この推定に基づくブロック窓は
+  真の決算日より系統的に後ろへずれる**。この前提と、被覆率が収集履歴に等しい
+  こと・Q4 は射影でしか覆えないことは `docs/reference.md` と
+  `docs/04_detailed_design.md` 3.19 に記載した
 
 ### Fixed
 
+- fundamentals 取得（ステップ2）が NFR-03 の時間予算で打ち切られる際に、保有銘柄が
+  取りこぼされうる問題を修正した（Issue #219）。走査順が `_select_symbols()` の
+  素の辞書順だったため、打ち切りの被害者はアルファベット順という無関係な理由で
+  決まっており、候補より後ろに並ぶ保有銘柄は、単に先頭に近いだけの通常候補へ
+  予算を使い切られていた——結果としてその日の分析入力とレポートのポジション文脈だけが
+  古いファンダメンタルズの上で組まれる。テキスト取得側の `_text_target_symbols()` は
+  同じ「予算による打ち切り」に対して明示的に held-first を実装しており、同一の
+  不変条件が片方のステップにだけ実装されていた取りこぼしだった。`held_symbols` を
+  呼び出し側から受け取り、保有ブロック→残りの順（各ブロックは辞書順のまま）に
+  並べ替えてから走査する。変更したのは取得順だけで、`filed_at <= as_of` のカット
+  オフ、予算切れの fail-soft 境界（`success` + 部分完了 detail）、同日再取得スキップ
+  （P6-25）、`_select_symbols()` 自身の順序契約はいずれも不変である
+- `compute_forward_return()` が**非有限の終値を素通し**していた問題を修正した
+  （Issue #206 A）。バーの行が存在して `close` が `NaN`（あるいは `±inf`）の
+  場合、行の不在しか見ていない既存ガードは通過し、`run_close == 0` も
+  `NaN` との比較なので `False` になり、データ品質スキップの契約である
+  `None` ではなく `NaN` という float が返っていた。`verdict_outcomes.
+  forward_return_pct` は `DOUBLE NOT NULL` だが DuckDB の `NaN` は `NULL`
+  ではないため制約も通過し、以後 `v_verdict_outcomes` 経由の勝率・平均
+  forward return・retro の score-lift 系すべてに「勝ちでも負けでもない行」
+  として伝播する——落ちないことが厄介な壊れ方だった。現状 NaN 終値を弾いて
+  いるのは `YFinanceProvider` だけで、正規化は各 provider の責務という設計上、
+  将来の provider やストア直書き経路はそのガードを通らない。値が意味を持つ
+  地点である `compute_forward_return()` 自身に有限値ガードを置き、`run_date`
+  側・`as_of` 側のどちらが非有限でも `None` を返す（#190 / PR #204 が
+  `benchmark_return_pct` に入れたガードと同じ形）
+- `copilot-backfill --limit N` が辞書順の先頭 N 銘柄を取っていた問題を修正した
+  （Issue #206 B、旧 #213）。ユニバースは `ORDER BY symbol` で返るため
+  `--limit 20` は「A で始まる20銘柄」を意味し、#194（backtest）・#205
+  （copilot-daily）で潰したのと同一の欠陥クラスの3つ目だけが残っていた。
+  `copilot-backfill` は測定値を出さない暖機コマンドなので害は「A 銘柄の
+  キャッシュしか温まらない」に留まるが、その偏りは後続のスモーク実行や
+  バックテストが「キャッシュ済みで速い銘柄」に引かれる形で効く。#205 が
+  切り出した共有サンプラ `universe_sampling.select_universe_sample()` を
+  そのまま呼ぶようにしたので、3つの `--limit` が同じ salt・同じ
+  アルゴリズムになり、同じ `N` なら同じ銘柄集合を覆う。`--limit <= 0` の
+  `BackfillError`（「`--limit` は1以上の整数で指定してください。」）は
+  従来どおり CLI 側で fail-fast する
 - `copilot-backtest --db` が指す DuckDB の隣に `bars/` が無いとき、取引ゼロの
   レポートを書いて `exit 0` していた問題を修正した（Issue #217）。`--db` は
   価格 Parquet の根を `<db>/../bars` に暗黙で決めるが、その存在は誰も検証して
@@ -103,6 +163,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-backtest --policy a,b,c` の多アーム A/B レポートに `## Exit
+  breakdown` と `## Equity curve summary` が出るようになった（Issue #216）。
+  単一アームのレポートは stop / max_hold / end_of_backtest の内訳・max_hold
+  binding rate・保有日数分位・equity curve の first/peak/trough を出して
+  いたのに、A/B のレンダラだけがこれらを落としており、「どのアームがどう
+  手仕舞ったか」も「ドローダウンがいつ起きたか」も読めなかった。値は
+  すべて既に `BacktestResult` に載っていたので純粋なレンダリングの
+  取りこぼしで、埋めるには同一設定の単一アームを1本（実測40〜56分）
+  走らせ直すしかなかった（#200 / PR #215 で実際に踏んだ）。並びは
+  `## Metrics` と同じ「行=指標、列=アーム」で、あるアームにだけ現れた
+  exit 理由は欠落ではなく明示的な `0` として行を占める。取引日が1日も
+  無いアームの equity 行は `N/A` になる。terminal 側にも同じ2表を出す。
+  単一アーム・`--pessimistic` の出力は1文字も変わらない（回帰テストで
+  レポート全文を固定した）
 - verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように
   なった（Issue #190、2026-08 アーキテクチャレビューの R7）。「verdict
   レイヤに価値があるか」は本質的に「proceed だけ買った場合 vs screening

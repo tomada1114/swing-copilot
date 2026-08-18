@@ -141,6 +141,28 @@ def _healthy_fundamentals(symbol: str) -> list[FundamentalsRecord]:
     ]
 
 
+# Issue #219 fixtures: a holding that sorts *after* every universe member and
+# is outside the universe, so lexicographic order and held-first order
+# disagree about which symbol the NFR-03 budget should reach first.
+_HELD_SYMBOL = "ZHELD"
+
+
+class _RecordingEdgarClient:
+    """EDGAR fake that records the order `_run_step_fundamentals` fetches in."""
+
+    def __init__(self):
+        self.fetched: list[str] = []
+
+    def fetch_fundamentals(self, symbol, as_of):
+        del as_of
+        self.fetched.append(symbol)
+        return _healthy_fundamentals(symbol)
+
+    def fetch_filing_texts(self, symbol, form_types, *, as_of, since=None, limit=None):
+        del symbol, form_types, as_of, since, limit
+        return []
+
+
 def _member(symbol: str) -> UniverseMember:
     return UniverseMember(
         symbol=symbol,
@@ -1051,6 +1073,140 @@ class TestFundamentalsSameDaySkip:
         assert first.status == RunStatus.SUCCESS
         assert second.status == RunStatus.SUCCESS
         assert edgar_client.calls == 1
+
+
+class TestFundamentalsHeldFirstOrder:
+    """Issue #219: the NFR-03 budget must truncate candidates, not holdings.
+
+    `_select_symbols()` returns lexicographic order, so a holding whose ticker
+    sorts after every candidate used to lose its fundamentals refresh to
+    alphabetically-earlier candidates whenever the budget ran out mid-step --
+    the exact outcome `_text_target_symbols()` already prevents on the text
+    side. `_HELD_SYMBOL` is deliberately last alphabetically and outside the
+    universe, so lexicographic order and held-first order disagree.
+    """
+
+    @pytest.fixture
+    def make_deps(self, settings, market_store, state_store, tmp_path):
+        """Factory for a live run holding `_HELD_SYMBOL` outside the universe."""
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol=_HELD_SYMBOL,
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+                stop_price=95.0,
+            )
+        )
+
+        def _make(edgar_client, monotonic):
+            return DailyDependencies(
+                data_provider=FakeDataProvider(
+                    _bars_for(["AAPL", "MSFT", _HELD_SYMBOL], AS_OF)
+                ),
+                market_store=market_store,
+                state_store=state_store,
+                settings=settings,
+                universe=(_member("AAPL"), _member("MSFT")),
+                strategies_config=STRATEGIES_CONFIG,
+                clock=FakeClock(),
+                edgar_client=edgar_client,
+                monotonic=monotonic,
+                output_dir=str(tmp_path / "reports"),
+            )
+
+        return _make
+
+    @staticmethod
+    def _fundamentals_step_row(state_store, run_id):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            return conn.execute(
+                "SELECT status, detail FROM run_steps "
+                "WHERE run_id = ? AND step = '2_fundamentals'",
+                [str(run_id)],
+            ).fetchone()
+
+    def test_budget_cutoff_spends_the_last_fetch_on_the_holding(
+        self, settings, market_store, make_deps
+    ):
+        object.__setattr__(settings.schedule, "timeout_minutes", 1)  # 60s budget
+        edgar_client = _RecordingEdgarClient()
+        # run_started_at=0.0 -> deadline=60.0; the first symbol's check (10.0)
+        # passes and it is fetched, the second (70.0) breaches and stops the
+        # step. Exactly one of three symbols wins the budget, and the holding
+        # must be the one -- not "AAPL", which merely sorts first.
+        deps_with_holding = make_deps(edgar_client, FakeMonotonic(0.0, 10.0, 70.0))
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps_with_holding)
+
+        assert edgar_client.fetched == [_HELD_SYMBOL]
+        # What was collected before the cut is still upserted, and it is the
+        # holding's filings that landed -- point-in-time filtering unchanged.
+        persisted = market_store.read_fundamentals(AS_OF)
+        assert set(persisted["symbol"]) == {_HELD_SYMBOL}
+        assert result.exit_code == 0
+
+    def test_budget_cutoff_stays_non_fatal_with_a_partial_completion_detail(
+        self, settings, state_store, make_deps
+    ):
+        object.__setattr__(settings.schedule, "timeout_minutes", 1)  # 60s budget
+        deps_with_holding = make_deps(
+            _RecordingEdgarClient(), FakeMonotonic(0.0, 10.0, 70.0)
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps_with_holding)
+
+        # Fail-soft boundary unchanged: reordering must not turn a budget cut
+        # into a failed step or a failed run.
+        assert self._fundamentals_step_row(state_store, result.run_id) == (
+            "success",
+            "time budget exceeded after 1/3 symbols",
+        )
+        assert result.status == RunStatus.DEGRADED
+        assert result.exit_code == 0
+
+    def test_without_a_cutoff_every_symbol_is_still_fetched_exactly_once(
+        self, state_store, make_deps
+    ):
+        edgar_client = _RecordingEdgarClient()
+        deps_with_holding = make_deps(edgar_client, FakeMonotonic(0.0))
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps_with_holding)
+
+        assert result.status == RunStatus.SUCCESS
+        # Same set as before, reordered held-first and deterministically:
+        # each block keeps `_select_symbols()`'s lexicographic order.
+        assert edgar_client.fetched == [_HELD_SYMBOL, "AAPL", "MSFT"]
+        assert self._fundamentals_step_row(state_store, result.run_id) == (
+            "success",
+            None,
+        )
+
+    def test_same_day_skip_still_covers_the_reordered_held_symbol(
+        self, market_store, make_deps
+    ):
+        # P6-25 semantics unchanged: `fetched_at`'s date == the injected
+        # `Clock`'s wall-clock today, not `as_of`. Promoting the holding to
+        # the front of the queue must not make it refetch over the network.
+        market_store.upsert_fundamentals(
+            [
+                replace(
+                    record,
+                    fetched_at=datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC),
+                )
+                for record in _healthy_fundamentals(_HELD_SYMBOL)
+            ]
+        )
+        edgar_client = _RecordingEdgarClient()
+        deps_with_holding = make_deps(edgar_client, FakeMonotonic(0.0))
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps_with_holding)
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.fetched == ["AAPL", "MSFT"]
 
 
 class TestUnexpectedStepException:

@@ -541,3 +541,146 @@ class TestEarliestBarDates:
         market_store.write_bars(_bars([("AAPL", "2019-01-02", 1.0, 1.0, 1.0, 1.0, 1)]))
 
         assert market_store.earliest_bar_dates([]) == {}
+
+
+def _filing(
+    symbol: str,
+    form: str,
+    period_end: date,
+    filed_on: date,
+    *,
+    accession_no: str | None = None,
+) -> FundamentalsRecord:
+    return FundamentalsRecord(
+        accession_no=accession_no or f"acc-{symbol}-{form}-{filed_on.isoformat()}",
+        symbol=symbol,
+        form=form,
+        fiscal_period_end=period_end,
+        filed_at=datetime.combine(filed_on, datetime.min.time(), tzinfo=UTC),
+        revenue=1.0,
+        net_income=1.0,
+        fcf=1.0,
+        equity=1.0,
+        assets=2.0,
+        shares=1.0,
+        source_url="https://www.sec.gov/example",
+        fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+
+
+class TestReadFilingDates:
+    """The point-in-time filing history the backtest earnings gate reads (#201)."""
+
+    _FORMS = ("10-K", "10-Q")
+
+    def test_returns_distinct_ascending_dates_per_symbol(self, market_store):
+        market_store.upsert_fundamentals(
+            [
+                _filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 5, 1)),
+                _filing("AAPL", "10-Q", date(2025, 12, 31), date(2026, 2, 2)),
+                _filing("MSFT", "10-K", date(2026, 6, 30), date(2026, 8, 3)),
+            ]
+        )
+
+        assert market_store.read_filing_dates(
+            ["AAPL", "MSFT"], self._FORMS, date(2026, 12, 31)
+        ) == {
+            "AAPL": (date(2026, 2, 2), date(2026, 5, 1)),
+            "MSFT": (date(2026, 8, 3),),
+        }
+
+    def test_filing_accepted_the_day_before_the_cutoff_is_visible(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert market_store.read_filing_dates(
+            ["AAPL"], self._FORMS, date(2026, 5, 2)
+        ) == {"AAPL": (date(2026, 5, 1),)}
+
+    def test_filing_accepted_exactly_on_the_cutoff_is_visible(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert market_store.read_filing_dates(
+            ["AAPL"], self._FORMS, date(2026, 5, 1)
+        ) == {"AAPL": (date(2026, 5, 1),)}
+
+    def test_filing_accepted_the_day_after_the_cutoff_is_invisible(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert (
+            market_store.read_filing_dates(["AAPL"], self._FORMS, date(2026, 4, 30))
+            == {}
+        )
+
+    def test_one_period_filed_twice_counts_as_its_earliest_filing_only(
+        self, market_store
+    ):
+        # A corrected re-filing of the same quarter is one reporting event,
+        # not two -- counting it twice would halve the estimated cadence.
+        market_store.upsert_fundamentals(
+            [
+                _filing(
+                    "AAPL",
+                    "10-Q",
+                    date(2026, 3, 31),
+                    date(2026, 5, 1),
+                    accession_no="acc-original",
+                ),
+                _filing(
+                    "AAPL",
+                    "10-Q",
+                    date(2026, 3, 31),
+                    date(2026, 5, 20),
+                    accession_no="acc-corrected",
+                ),
+            ]
+        )
+
+        assert market_store.read_filing_dates(
+            ["AAPL"], self._FORMS, date(2026, 12, 31)
+        ) == {"AAPL": (date(2026, 5, 1),)}
+
+    def test_two_periods_filed_the_same_day_are_one_date(self, market_store):
+        market_store.upsert_fundamentals(
+            [
+                _filing("AAPL", "10-K", date(2025, 12, 31), date(2026, 2, 2)),
+                _filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 2, 2)),
+            ]
+        )
+
+        assert market_store.read_filing_dates(
+            ["AAPL"], self._FORMS, date(2026, 12, 31)
+        ) == {"AAPL": (date(2026, 2, 2),)}
+
+    def test_forms_outside_the_requested_set_are_ignored(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("AAPL", "10-Q/A", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert (
+            market_store.read_filing_dates(["AAPL"], self._FORMS, date(2026, 12, 31))
+            == {}
+        )
+
+    def test_unrequested_symbols_are_never_returned(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("MSFT", "10-Q", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert (
+            market_store.read_filing_dates(["AAPL"], self._FORMS, date(2026, 12, 31))
+            == {}
+        )
+
+    def test_empty_inputs_short_circuit_without_a_query(self, market_store):
+        market_store.upsert_fundamentals(
+            [_filing("AAPL", "10-Q", date(2026, 3, 31), date(2026, 5, 1))]
+        )
+
+        assert market_store.read_filing_dates([], self._FORMS, date(2026, 12, 31)) == {}
+        assert market_store.read_filing_dates(["AAPL"], (), date(2026, 12, 31)) == {}

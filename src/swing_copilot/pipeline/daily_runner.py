@@ -272,7 +272,13 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         ("1_prices", _step_prices),
         (
             "2_fundamentals",
-            lambda: _run_step_fundamentals(deps, symbols, run_date, deadline),
+            lambda: _run_step_fundamentals(
+                deps,
+                symbols,
+                run_date,
+                deadline,
+                held_symbols=frozenset(held_symbols),
+            ),
         ),
         ("3_screening", _step_screening),
         ("4_risk", _step_risk),

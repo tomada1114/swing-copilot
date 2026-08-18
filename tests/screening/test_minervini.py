@@ -54,9 +54,7 @@ def test_seven_conditions_are_recorded_and_strength_is_fraction_of_seven(setting
 def test_boundaries_and_configured_minimum_are_inclusive(settings, monkeypatch):
     data = _input(("AAPL", [100.0 + index for index in range(253)]))
     signal = MinerviniStage2Signal(settings)
-    monkeypatch.setattr(
-        signal, "_rs_percentiles", lambda _data, _symbols: {"AAPL": 70.0}
-    )
+    monkeypatch.setattr(signal, "_rs_percentiles", lambda _windows: {"AAPL": 70.0})
 
     hits = signal.evaluate(data, {"AAPL"})
 

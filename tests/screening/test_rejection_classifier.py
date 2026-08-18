@@ -405,7 +405,7 @@ class TestSignalReasons:
         # pullback_rsi (rsi14 pinned above threshold).
         hit_for_trend = [SignalHit("ABC", "trend_sma", "long", 1.0, {})]
         monkeypatch.setattr(
-            "swing_copilot.screening.rejection_classifier.wilder_rsi",
+            "swing_copilot.screening.indicators.wilder_rsi",
             lambda series, _period: pd.Series([52.0] * len(series), index=series.index),
         )
         data = _input((_member("ABC"),), rows, bars)
@@ -430,7 +430,7 @@ class TestSignalReasons:
         bars = _liquid_bars("ABC")
         hit_for_trend = [SignalHit("ABC", "trend_sma", "long", 1.0, {})]
         monkeypatch.setattr(
-            "swing_copilot.screening.rejection_classifier.wilder_rsi",
+            "swing_copilot.screening.indicators.wilder_rsi",
             lambda series, _period: pd.Series([12.0] * len(series), index=series.index),
         )
         pullback = settings.technical_signals.pullback.model_copy(
@@ -456,7 +456,7 @@ class TestSignalReasons:
         bars = _liquid_bars("ABC")
         hit_for_trend = [SignalHit("ABC", "trend_sma", "long", 1.0, {})]
         monkeypatch.setattr(
-            "swing_copilot.screening.rejection_classifier.wilder_rsi",
+            "swing_copilot.screening.indicators.wilder_rsi",
             lambda series, _period: pd.Series([12.0] * len(series), index=series.index),
         )
         pullback = settings.technical_signals.pullback.model_copy(

@@ -28,6 +28,7 @@ a data gap apart from a genuine threshold miss for *every* configured check.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from typing import TYPE_CHECKING
@@ -39,24 +40,22 @@ from swing_copilot.screening.base import (
     RejectionRecord,
     RejectionStage,
 )
-from swing_copilot.screening.indicators import (
-    sma,
-    symbol_bars,
-    symbol_window,
-    wilder_atr,
-    wilder_rsi,
-)
+from swing_copilot.screening.indicators import symbol_bars, symbol_window
 from swing_copilot.screening.technical_signals import minervini_template
 from swing_copilot.screening.vcp import VcpThresholds, evaluate_vcp
 
 if TYPE_CHECKING:
     from swing_copilot.config import Settings
     from swing_copilot.screening.base import ScreeningInput, SignalHit
+    from swing_copilot.screening.indicators import SymbolWindow
 
 # PullbackRSISignal's own SMA window (technical_signals.py::_PULLBACK_SMA_WINDOW)
 # is not settings-driven; duplicated here rather than imported across the
 # module boundary, matching this module's "mirror, don't reuse" contract.
 _PULLBACK_SMA_WINDOW = 50
+#: The same mirror for the pullback band's ATR period
+#: (technical_signals.py::_PULLBACK_BAND_ATR_PERIOD).
+_PULLBACK_BAND_ATR_PERIOD = 14
 _RANKING_SMA_LONG_WINDOW = 200
 #: `MinerviniStage2Signal`'s own 52-week data-quality floor, mirrored here
 #: under this module's "mirror, don't import private state" contract.
@@ -139,8 +138,8 @@ def _classify_symbol(
         if symbol not in hits:
             return classify_signal_rejection(symbol, data, settings, signal_name)
 
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    available = len(series) if series is not None else 0
+    window = symbol_window(data.bars, symbol, data.as_of)
+    available = window.bar_count if window is not None else 0
     return RejectionRecord(
         symbol,
         RejectionStage.DATA_QUALITY,
@@ -301,9 +300,9 @@ def _classify_liquidity(
 ) -> RejectionRecord | None:
     """Mirror `MinAverageVolumeFilter.apply()`'s branch order."""
     config = settings.technical_signals.volume
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    if series is None or len(series) < config.avg_volume_days:
-        available_bars = 0 if series is None else len(series)
+    window = symbol_window(data.bars, symbol, data.as_of)
+    if window is None or window.bar_count < config.avg_volume_days:
+        available_bars = 0 if window is None else window.bar_count
         return RejectionRecord(
             symbol,
             RejectionStage.DATA_QUALITY,
@@ -311,7 +310,7 @@ def _classify_liquidity(
             {"available_bars": available_bars, "required_bars": config.avg_volume_days},
         )
 
-    avg_volume = float(series["volume"].tail(config.avg_volume_days).mean())
+    avg_volume = window.mean_volume(config.avg_volume_days)
     if avg_volume <= config.min_avg_volume:
         return RejectionRecord(
             symbol,
@@ -347,8 +346,8 @@ def classify_signal_rejection(
         NotImplementedError: `signal_name` has no mirrored logic here.
     """
     if signal_name == "trend_sma":
-        series = symbol_bars(data.bars, symbol, data.as_of)
-        if series is None:
+        window = symbol_window(data.bars, symbol, data.as_of)
+        if window is None:
             return _insufficient_history(
                 symbol,
                 0,
@@ -357,10 +356,10 @@ def classify_signal_rejection(
                     settings.technical_signals.trend.sma_long,
                 ),
             )
-        return _classify_trend_sma(symbol, series, settings)
+        return _classify_trend_sma(symbol, window, settings)
     if signal_name == "pullback_rsi":
-        series = symbol_bars(data.bars, symbol, data.as_of)
-        if series is None:
+        window = symbol_window(data.bars, symbol, data.as_of)
+        if window is None:
             return _insufficient_history(
                 symbol,
                 0,
@@ -369,7 +368,7 @@ def classify_signal_rejection(
                     _PULLBACK_SMA_WINDOW,
                 ),
             )
-        return _classify_pullback_rsi(symbol, series, settings)
+        return _classify_pullback_rsi(symbol, window, settings)
     if signal_name == "minervini_stage2":
         return _classify_minervini_stage2(symbol, data, settings)
     if signal_name == "vcp_breakout":
@@ -381,29 +380,26 @@ def classify_signal_rejection(
 
 
 def _classify_trend_sma(
-    symbol: str, series: pd.DataFrame, settings: Settings
+    symbol: str, window: SymbolWindow, settings: Settings
 ) -> RejectionRecord:
     """Mirror `TrendSMASignal.evaluate()`'s condition."""
     config = settings.technical_signals.trend
     required_bars = max(config.sma_short, config.sma_long)
-    sma_short = sma(series["close"], config.sma_short)
-    sma_long = sma(series["close"], config.sma_long)
-    if pd.isna(sma_short.iloc[-1]) or pd.isna(sma_long.iloc[-1]):
-        return _insufficient_history(symbol, len(series), required_bars)
+    sma_short = window.sma(config.sma_short)
+    sma_long = window.sma(config.sma_long)
+    if math.isnan(sma_short) or math.isnan(sma_long):
+        return _insufficient_history(symbol, window.bar_count, required_bars)
 
     return RejectionRecord(
         symbol,
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-        {
-            "close": float(series["close"].iloc[-1]),
-            "sma_long": float(sma_long.iloc[-1]),
-        },
+        {"close": window.close, "sma_long": sma_long},
     )
 
 
 def _classify_pullback_rsi(
-    symbol: str, series: pd.DataFrame, settings: Settings
+    symbol: str, window: SymbolWindow, settings: Settings
 ) -> RejectionRecord:
     """Mirror `PullbackRSISignal.evaluate()`'s two conditions.
 
@@ -417,27 +413,27 @@ def _classify_pullback_rsi(
     """
     config = settings.technical_signals.pullback
     required_bars = max(config.rsi_period, _PULLBACK_SMA_WINDOW)
-    rsi = wilder_rsi(series["close"], config.rsi_period)
-    sma50 = sma(series["close"], _PULLBACK_SMA_WINDOW)
-    if pd.isna(rsi.iloc[-1]) or pd.isna(sma50.iloc[-1]):
-        return _insufficient_history(symbol, len(series), required_bars)
+    rsi = window.rsi(config.rsi_period)
+    sma50 = window.sma(_PULLBACK_SMA_WINDOW)
+    if math.isnan(rsi) or math.isnan(sma50):
+        return _insufficient_history(symbol, window.bar_count, required_bars)
 
-    if rsi.iloc[-1] < config.rsi_threshold:
-        return _pullback_band_rejection(symbol, series, settings, float(sma50.iloc[-1]))
+    if rsi < config.rsi_threshold:
+        return _pullback_band_rejection(symbol, window, settings, sma50)
     return RejectionRecord(
         symbol,
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_RSI_NOT_MET,
-        {"rsi14": float(rsi.iloc[-1]), "threshold": config.rsi_threshold},
+        {"rsi14": rsi, "threshold": config.rsi_threshold},
     )
 
 
 def _pullback_band_rejection(
-    symbol: str, series: pd.DataFrame, settings: Settings, last_sma50: float
+    symbol: str, window: SymbolWindow, settings: Settings, last_sma50: float
 ) -> RejectionRecord:
     """Mirror `PullbackRSISignal._within_band()`'s two exclusive modes."""
     config = settings.technical_signals.pullback
-    distance = abs(float(series["close"].iloc[-1]) - last_sma50)
+    distance = abs(window.close - last_sma50)
     detail: dict[str, float | int | str | None] = {
         "signal": "pullback_rsi",
         "reason": "sma_band",
@@ -448,10 +444,10 @@ def _pullback_band_rejection(
         detail["band_pct"] = distance / last_sma50
         detail["sma_band_pct"] = config.sma_band_pct
     else:
-        atr14 = wilder_atr(series["high"], series["low"], series["close"]).iloc[-1]
+        atr14 = window.atr(_PULLBACK_BAND_ATR_PERIOD)
         # Mirrors the signal's fail-closed branch: an undefined ATR leaves the
         # normalized distance undefined, so the band closes.
-        detail["atr14"] = None if pd.isna(atr14) else float(atr14)
+        detail["atr14"] = None if math.isnan(atr14) else atr14
         detail["band_atr_multiple"] = config.band_atr_multiple
     return RejectionRecord(
         symbol,

@@ -91,6 +91,45 @@ class TestNoLookahead:
         assert equity_by_day[days[1]] == pytest.approx(INITIAL_CASH)
         assert equity_by_day[days[2]] != pytest.approx(INITIAL_CASH)
 
+    def test_bars_past_the_final_session_do_not_move_a_single_number(self, engine):
+        # Issue #224 reads the trailing stop's ATR from a column computed over
+        # the whole frame rather than re-smoothing the `as_of` prefix on every
+        # simulated day. That is only admissible because the read is causal, so
+        # appending sessions *after* the simulated window must leave the trade
+        # log, both equity curves, and the final equity bit-identical -- not
+        # merely approximate. The appended sessions are deliberately flat and
+        # numerous: a leaked ATR would decay from 4.0 to ~0.015, ratchet the
+        # 2.5x trailing stop from 10 below the close to a few cents below it,
+        # and turn the end-of-backtest liquidation below into a stop exit.
+        days = LONG_TRADING_DAYS[:25]
+        later = LONG_TRADING_DAYS[25:]
+        rows = [
+            *_spy_bars(days),
+            *(
+                bar_row("AAA", day, (100 + index, 102 + index, 98 + index, 101 + index))
+                for index, day in enumerate(days)
+            ),
+        ]
+        future_rows = [
+            *_spy_bars(later),
+            *(bar_row("AAA", day, (125.0, 125.0, 125.0, 125.0)) for day in later),
+        ]
+        candidates_by_day = {days[1]: [_candidate("AAA", as_of=days[1])]}
+
+        def candidates_fn(day):
+            return candidates_by_day.get(day, [])
+
+        contained = engine.run(days, bars_frame(rows), candidates_fn, INITIAL_CASH)
+        unsliced = engine.run(
+            days, bars_frame([*rows, *future_rows]), candidates_fn, INITIAL_CASH
+        )
+
+        assert [trade.exit_reason for trade in contained.trades] == ["end_of_backtest"]
+        assert unsliced.trades == contained.trades
+        assert unsliced.equity_curve == contained.equity_curve
+        assert unsliced.benchmark_curve == contained.benchmark_curve
+        assert unsliced.final_equity == contained.final_equity
+
 
 class TestEntryFill:
     def test_fills_at_next_open_with_slippage_and_commission(self, settings, engine):

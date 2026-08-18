@@ -546,6 +546,45 @@ class TestCacheKeyContract:
         assert self._key(request_, deps) == expected_key
 
 
+class TestNoLookAheadFromPrecomputedIndicators:
+    """Issue #214 moved the daily loop onto full-history indicator columns.
+
+    Those columns are built from a frame that extends past every simulated
+    day, so the whole optimization rests on each day reading only its own
+    row. Regenerating the stream day by day from frames that were *truncated*
+    before any indicator was computed removes that possibility entirely, and
+    the two streams must agree candidate for candidate -- including the
+    metrics the report and the ledger persist.
+    """
+
+    def test_the_stream_matches_one_screened_from_per_day_truncated_frames(
+        self, request_, deps
+    ):
+        frame = load_market_frame(request_, deps)
+
+        stream = generate_candidate_stream(request_, deps, frame)
+
+        pipeline = ScreeningPipeline(
+            deps.strategies_config, deps.market_store, deps.settings, "trend"
+        )
+        for day in frame.trading_days:
+            # A fresh truncated frame per day: a different object, so its
+            # indicator columns are computed from data at or before `day`.
+            truncated = frame.bars[frame.bars["date"] <= day].copy()
+            expected = pipeline.run(
+                ScreeningInput(
+                    as_of=day,
+                    universe=deps.universe,
+                    fundamentals=frame.fundamentals,
+                    bars=truncated,
+                )
+            )
+
+            assert list(stream.candidates_by_day.get(day, ())) == expected, day
+        assert stream.candidates_by_day  # the comparison was not vacuous
+        assert frame.bars["date"].max() > frame.trading_days[0]
+
+
 def test_screening_ignores_backtest_settings(request_, deps):
     """The exclusion in `compute_cache_key` rests on this equivalence."""
     frame = load_market_frame(request_, deps)

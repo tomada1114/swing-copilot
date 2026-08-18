@@ -7,10 +7,9 @@ new strategy module needs only a one-line addition to `strategies.yaml`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
-
-import pandas as pd
 
 from swing_copilot.config import StrategiesConfig
 from swing_copilot.screening import (
@@ -28,10 +27,7 @@ from swing_copilot.screening.base import (
 )
 from swing_copilot.screening.indicators import (
     percentile_ranks,
-    sma,
-    symbol_bars,
-    wilder_atr,
-    wilder_rsi,
+    symbol_window,
 )
 from swing_copilot.screening.rejection_classifier import (
     RejectionPlan,
@@ -454,39 +450,25 @@ def ranking_metrics(data: ScreeningInput, symbol: str) -> dict[str, float] | Non
     Returns:
         The ranking metrics, or `None` when the symbol cannot be ranked.
     """
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    if series is None or len(series) < max(
+    window = symbol_window(data.bars, symbol, data.as_of)
+    if window is None or window.bar_count < max(
         _RSI_WINDOW, _ATR_WINDOW, _AVG_VOLUME_WINDOW
     ):
         return None
 
-    rsi14 = wilder_rsi(series["close"], _RSI_WINDOW).iloc[-1]
-    atr14 = wilder_atr(
-        series["high"], series["low"], series["close"], _ATR_WINDOW
-    ).iloc[-1]
-    avg_volume = series["volume"].tail(_AVG_VOLUME_WINDOW).mean()
-    close = series["close"].iloc[-1]
-    sma50 = sma(series["close"], _SMA_SHORT_WINDOW).iloc[-1]
-    sma200 = sma(series["close"], _SMA_LONG_WINDOW).iloc[-1]
-    if (
-        pd.isna(rsi14)
-        or pd.isna(atr14)
-        or pd.isna(avg_volume)
-        or pd.isna(close)
-        or pd.isna(sma50)
-        or pd.isna(sma200)
-    ):
-        return None
-    if close <= 0:
-        return None
-    return {
-        "rsi14": float(rsi14),
-        "atr14": float(atr14),
-        "avg_volume": float(avg_volume),
-        "close": float(close),
-        "sma50": float(sma50),
-        "sma200": float(sma200),
+    metrics = {
+        "rsi14": window.rsi(_RSI_WINDOW),
+        "atr14": window.atr(_ATR_WINDOW),
+        "avg_volume": window.mean_volume(_AVG_VOLUME_WINDOW),
+        "close": window.close,
+        "sma50": window.sma(_SMA_SHORT_WINDOW),
+        "sma200": window.sma(_SMA_LONG_WINDOW),
     }
+    if any(math.isnan(value) for value in metrics.values()):
+        return None
+    if metrics["close"] <= 0:
+        return None
+    return metrics
 
 
 def _execution_distance(metrics: dict[str, float]) -> float | None:

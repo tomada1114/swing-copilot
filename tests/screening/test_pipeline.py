@@ -26,6 +26,7 @@ from swing_copilot.screening.base import (
     SignalHit,
     register_signal,
 )
+from swing_copilot.screening.indicators import SymbolWindow
 from swing_copilot.screening.pipeline import (
     PRICE_HISTORY_LOOKBACK_DAYS,
     ScreeningPipeline,
@@ -332,12 +333,10 @@ class TestCandidateAggregationAndRanking:
         # guaranteeing non-NaN rsi14/atr14/avg_volume), a data gap could
         # still produce a NaN metric — such a symbol must not become a
         # candidate rather than sorting with a NaN key.
-        monkeypatch.setattr(
-            "swing_copilot.screening.pipeline.wilder_rsi",
-            lambda series, _period: pd.Series(
-                [float("nan")] * len(series), index=series.index
-            ),
-        )
+        # `trend_sma` reads no RSI, so pinning it to NaN isolates the
+        # `ranking_metrics` guard the way patching `wilder_rsi` used to
+        # before the indicator moved behind `SymbolWindow` (#214).
+        monkeypatch.setattr(SymbolWindow, "rsi", lambda _self, _period: float("nan"))
         bars = _uptrend_bars("AAPL")
         universe = (_member("AAPL"),)
         data = ScreeningInput(

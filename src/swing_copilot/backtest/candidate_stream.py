@@ -299,13 +299,15 @@ def generate_candidate_stream(
             universe=deps.universe,
             fundamentals=point_in_time_fundamentals,
             # Bars are handed over whole, not pre-sliced to `day`. Screening
-            # reads price history only through `indicators.symbol_bars`, which
-            # always applies the `as_of` cutoff itself, so this cannot leak
-            # look-ahead -- `tests/backtest/test_runner.py` pins that
-            # equivalence. Reusing one frame lets `symbol_bars` cache its
-            # per-symbol index across the whole run; re-slicing per day would
-            # rebuild it on every simulated day and was the dominant cost of a
-            # multi-year backtest.
+            # reads price history only through `indicators.symbol_window` /
+            # `symbol_bars`, which always apply the `as_of` cutoff themselves,
+            # so this cannot leak look-ahead --
+            # `TestNoLookAheadFromPrecomputedIndicators` below pins that
+            # equivalence day by day. Reusing one frame also lets those
+            # functions cache the per-symbol index *and* the full-history
+            # indicator columns across the whole run; re-slicing per day would
+            # rebuild both on every simulated day and was the dominant cost of
+            # a multi-year backtest (Issues #185, #214).
             bars=frame.bars,
         )
         candidates = pipeline.run(data)

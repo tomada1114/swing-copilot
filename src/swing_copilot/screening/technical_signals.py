@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
-import pandas as pd
+import numpy as np
 
 from swing_copilot.screening.base import (
     ScreeningInput,
@@ -13,11 +14,11 @@ from swing_copilot.screening.base import (
     register_signal,
 )
 from swing_copilot.screening.indicators import (
+    SymbolWindow,
     percentile_ranks,
-    sma,
     symbol_bars,
+    symbol_window,
     wilder_atr,
-    wilder_rsi,
 )
 from swing_copilot.screening.vcp import (
     VcpThresholds,
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
 
 _PULLBACK_SMA_WINDOW = 50
+#: ATR period of `pullback.band_atr_multiple`'s band. Was `wilder_atr`'s
+#: default before the band read its ATR from a precomputed column (#214);
+#: named here so the column key is explicit rather than implied by a default.
+_PULLBACK_BAND_ATR_PERIOD = 14
 _MINERVINI_SMA50_WINDOW = 50
 _MINERVINI_SMA150_WINDOW = 150
 _MINERVINI_SMA200_WINDOW = 200
@@ -130,10 +135,10 @@ class MinerviniStage2Signal:
         rs_percentiles = self._rs_percentiles(data, symbols)
         hits: list[SignalHit] = []
         for symbol in sorted(symbols):
-            series = symbol_bars(data.bars, symbol, data.as_of)
-            if series is None:
+            window = symbol_window(data.bars, symbol, data.as_of)
+            if window is None:
                 continue
-            metrics = self._metrics(series, rs_percentiles.get(symbol))
+            metrics = self._metrics(window, rs_percentiles.get(symbol))
             criteria_met = int(metrics["minervini_criteria_met"])
             if criteria_met >= self._min_criteria:
                 hits.append(
@@ -194,21 +199,19 @@ class MinerviniStage2Signal:
         }
 
     def _metrics(
-        self, series: pd.DataFrame, rs_percentile: float | None
+        self, window: SymbolWindow, rs_percentile: float | None
     ) -> dict[str, float]:
-        close_series = series["close"]
-        sma50 = sma(close_series, _MINERVINI_SMA50_WINDOW)
-        sma150 = sma(close_series, _MINERVINI_SMA150_WINDOW)
-        sma200 = sma(close_series, _MINERVINI_SMA200_WINDOW)
-        latest_close = float(close_series.iloc[-1])
-        latest_sma50 = sma50.iloc[-1]
-        latest_sma150 = sma150.iloc[-1]
-        latest_sma200 = sma200.iloc[-1]
+        latest_close = window.close
+        latest_sma50 = window.sma(_MINERVINI_SMA50_WINDOW)
+        latest_sma150 = window.sma(_MINERVINI_SMA150_WINDOW)
+        latest_sma200 = window.sma(_MINERVINI_SMA200_WINDOW)
         has_moving_averages = not any(
-            pd.isna(value) for value in (latest_sma50, latest_sma150, latest_sma200)
+            math.isnan(value) for value in (latest_sma50, latest_sma150, latest_sma200)
         )
-        rising_days = _consecutive_rising_days(sma200)
-        price_window = close_series.tail(_MINERVINI_52_WEEK_WINDOW)
+        rising_days = _consecutive_rising_days(
+            window.sma_history(_MINERVINI_SMA200_WINDOW)
+        )
+        price_window = window.bars["close"].tail(_MINERVINI_52_WEEK_WINDOW)
         has_52_week_window = len(price_window) >= _MINERVINI_MIN_52_WEEK_BARS
         low_52w = float(price_window.min()) if has_52_week_window else float("nan")
         high_52w = float(price_window.max()) if has_52_week_window else float("nan")
@@ -239,13 +242,17 @@ class MinerviniStage2Signal:
         # Candidate metrics are persisted as strict JSON. An unavailable RS
         # value (or unavailable moving average/high-low) is an unmet
         # condition, not a NaN value to serialize.
-        for name, value in (
-            ("sma50", latest_sma50),
-            ("sma150", latest_sma150),
-            ("sma200", latest_sma200),
-        ):
-            if not pd.isna(value):
-                metrics[name] = float(value)
+        metrics.update(
+            {
+                name: value
+                for name, value in (
+                    ("sma50", latest_sma50),
+                    ("sma150", latest_sma150),
+                    ("sma200", latest_sma200),
+                )
+                if not math.isnan(value)
+            }
+        )
         if has_52_week_window:
             metrics["minervini_52_week_low"] = low_52w
             metrics["minervini_52_week_high"] = high_52w
@@ -254,12 +261,12 @@ class MinerviniStage2Signal:
         return metrics
 
 
-def _consecutive_rising_days(values: pd.Series) -> int:
+def _consecutive_rising_days(values: np.ndarray) -> int:
     """Count latest consecutive strictly-rising day-over-day values."""
     count = 0
-    clean = values.dropna()
+    clean = values[~np.isnan(values)]
     for index in range(len(clean) - 1, 0, -1):
-        if clean.iloc[index] <= clean.iloc[index - 1]:
+        if clean[index] <= clean[index - 1]:
             break
         count += 1
     return count
@@ -292,18 +299,14 @@ class TrendSMASignal:
         """
         hits = []
         for symbol in sorted(symbols):
-            series = symbol_bars(data.bars, symbol, data.as_of)
-            if series is None:
+            window = symbol_window(data.bars, symbol, data.as_of)
+            if window is None:
                 continue
-            sma_short = sma(series["close"], self._config.sma_short)
-            sma_long = sma(series["close"], self._config.sma_long)
-            if pd.isna(sma_short.iloc[-1]) or pd.isna(sma_long.iloc[-1]):
+            sma_short = window.sma(self._config.sma_short)
+            sma_long = window.sma(self._config.sma_long)
+            if math.isnan(sma_short) or math.isnan(sma_long):
                 continue
-            last_close = series["close"].iloc[-1]
-            if (
-                last_close > sma_long.iloc[-1]
-                and sma_short.iloc[-1] > sma_long.iloc[-1]
-            ):
+            if window.close > sma_long and sma_short > sma_long:
                 hits.append(
                     SignalHit(
                         symbol=symbol,
@@ -311,8 +314,8 @@ class TrendSMASignal:
                         direction="long",
                         strength=1.0,
                         metrics={
-                            "sma_short": float(sma_short.iloc[-1]),
-                            "sma_long": float(sma_long.iloc[-1]),
+                            "sma_short": sma_short,
+                            "sma_long": sma_long,
                         },
                     )
                 )
@@ -346,30 +349,28 @@ class PullbackRSISignal:
         """
         hits = []
         for symbol in sorted(symbols):
-            series = symbol_bars(data.bars, symbol, data.as_of)
-            if series is None:
+            window = symbol_window(data.bars, symbol, data.as_of)
+            if window is None:
                 continue
-            rsi = wilder_rsi(series["close"], self._config.rsi_period)
-            sma50 = sma(series["close"], _PULLBACK_SMA_WINDOW)
-            if pd.isna(rsi.iloc[-1]) or pd.isna(sma50.iloc[-1]):
+            rsi = window.rsi(self._config.rsi_period)
+            last_sma50 = window.sma(_PULLBACK_SMA_WINDOW)
+            if math.isnan(rsi) or math.isnan(last_sma50):
                 continue
-            last_close = series["close"].iloc[-1]
-            last_sma50 = float(sma50.iloc[-1])
-            within_band = self._within_band(series, last_close, last_sma50)
-            if rsi.iloc[-1] < self._config.rsi_threshold and within_band:
+            within_band = self._within_band(window, window.close, last_sma50)
+            if rsi < self._config.rsi_threshold and within_band:
                 hits.append(
                     SignalHit(
                         symbol=symbol,
                         signal_name=self.name,
                         direction="long",
                         strength=1.0,
-                        metrics={"rsi14": float(rsi.iloc[-1]), "sma50": last_sma50},
+                        metrics={"rsi14": rsi, "sma50": last_sma50},
                     )
                 )
         return hits
 
     def _within_band(
-        self, series: pd.DataFrame, last_close: float, last_sma50: float
+        self, window: SymbolWindow, last_close: float, last_sma50: float
     ) -> bool:
         """Whether the close sits inside the pullback band around SMA50.
 
@@ -385,10 +386,10 @@ class PullbackRSISignal:
         if multiple is None:
             return distance / last_sma50 <= self._config.sma_band_pct
 
-        atr14 = wilder_atr(series["high"], series["low"], series["close"]).iloc[-1]
-        if pd.isna(atr14) or atr14 <= 0:
+        atr14 = window.atr(_PULLBACK_BAND_ATR_PERIOD)
+        if math.isnan(atr14) or atr14 <= 0:
             return False
-        return distance / float(atr14) <= multiple
+        return distance / atr14 <= multiple
 
 
 @register_filter("volume_min")
@@ -415,11 +416,11 @@ class MinAverageVolumeFilter:
             Qualifying symbols.
         """
         passing: set[str] = set()
+        days = self._config.avg_volume_days
         for member in data.universe:
-            series = symbol_bars(data.bars, member.symbol, data.as_of)
-            if series is None or len(series) < self._config.avg_volume_days:
+            window = symbol_window(data.bars, member.symbol, data.as_of)
+            if window is None or window.bar_count < days:
                 continue
-            avg_volume = series["volume"].tail(self._config.avg_volume_days).mean()
-            if avg_volume > self._config.min_avg_volume:
+            if window.mean_volume(days) > self._config.min_avg_volume:
                 passing.add(member.symbol)
         return passing

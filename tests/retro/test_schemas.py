@@ -9,6 +9,7 @@ string, and the input's digest binds it to its own contents.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -201,6 +202,71 @@ class TestRetroInput:
             RetroInput.model_validate(
                 {**payload, "input_digest": retro_input_digest(payload)}
             )
+
+    def test_a_dossier_written_before_issue_190_keeps_its_digest(self) -> None:
+        # The DoD's regression: re-hashing an archived dossier through the
+        # widened schema must reproduce the digest it was written with, or
+        # every stored `retro_result.json` stops verifying the day the
+        # dispersion fields land.
+        payload = _unsigned_payload()
+        archived_digest = canonical_json_digest(payload, excluded_field="input_digest")
+
+        rehydrated = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        ).model_dump(mode="json")
+
+        assert rehydrated["aggregates"]["separation"][0]["stderr"] is None
+        assert rehydrated["aggregates"]["tracked_performance"] is None
+        assert retro_input_digest(rehydrated) == archived_digest
+
+    def test_a_measured_dispersion_does_change_a_fresh_documents_digest(self) -> None:
+        # The other half of the contract: only the *absent* form is ignored.
+        # A window that actually produced an interval must hash differently
+        # from one that did not, or the digest would stop identifying inputs.
+        payload = _unsigned_payload()
+        with_spread = deepcopy(payload)
+        with_spread["aggregates"]["separation"][0]["stderr"] = 0.4
+
+        assert retro_input_digest(with_spread) != retro_input_digest(payload)
+
+    def test_a_dossier_carrying_the_new_aggregates_verifies_its_digest(self) -> None:
+        payload = _unsigned_payload()
+        payload["aggregates"]["separation_paired"] = [
+            {
+                "metric_id": "metric:separation_paired:5d",
+                "horizon_days": 5,
+                "value": 1.5,
+                "sample_size": 4,
+                "is_preliminary": True,
+                "stderr": 0.5,
+                "ci_low": 0.52,
+                "ci_high": 2.48,
+                "excluded_day_count": 1,
+            }
+        ]
+        payload["aggregates"]["tracked_performance"] = [
+            {
+                "metric_id": "metric:tracked_performance:proceed",
+                "recommendation": "proceed",
+                "closed_count": 2,
+                "open_count": 1,
+                "win_rate": 0.5,
+                "profit_factor": 2.0,
+                "expectancy_pct": 2.5,
+                "avg_r_multiple": 1.0,
+                "avg_holding_days": 4.0,
+                "exit_reason_counts": [{"reason": "stop", "count": 2}],
+            }
+        ]
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": retro_input_digest(payload)}
+        )
+
+        assert document.aggregates.separation_paired is not None
+        assert document.aggregates.separation_paired[0].excluded_day_count == 1
+        assert document.aggregates.tracked_performance is not None
+        assert document.aggregates.tracked_performance[0].recommendation == "proceed"
 
     def test_accepts_an_empty_window_with_no_metrics_or_surprises(self) -> None:
         payload = _unsigned_payload()

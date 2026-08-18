@@ -3,6 +3,14 @@
 Pure functions over an already-produced trade log and equity curve, kept
 separate from `engine.py`'s simulation loop so each metric is independently
 unit-testable against hand-calculated fixtures.
+
+The trade-level metrics (win rate, profit factor, expectancy, R-multiple,
+holding period, exit-reason mix) are typed against the `ClosedTrade` Protocol
+rather than against `engine.Trade` (Issue #190). Three ledgers close round
+trips in this codebase -- the simulator's `Trade`, the paper journal's
+`Position`, and the verdict tracker's `VerdictPosition` -- and each used to
+carry its own copy of "what counts as a win". One definition, three callers:
+a change to the convention now has exactly one place to happen.
 """
 
 from __future__ import annotations
@@ -10,14 +18,77 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import date
 
-    from swing_copilot.backtest.engine import Trade
     from swing_copilot.config import BacktestConfig
+
+
+class ClosedTrade(Protocol):
+    """The shape a closed round trip must expose to be measured here.
+
+    `pnl` and `days_held` are part of the protocol rather than derived from
+    the price/share fields: only the originating ledger knows its own cost
+    model (the simulator charges round-trip commission, the paper journal and
+    the shadow tracker do not) and its own session count (the simulator counts
+    survived sessions, a ledger without a trading calendar counts calendar
+    days). Deriving them here would silently strip commission out of every
+    backtest metric.
+
+    `initial_stop_price` is the stop *at entry*, before any trailing update:
+    an R-multiple measures the risk actually taken when the position was put
+    on. `None` means it was never recorded, which excludes the trade from the
+    R-multiple average rather than counting it as zero risk.
+    """
+
+    @property
+    def entry_date(self) -> date:
+        """Session the position was filled on."""
+        ...  # pragma: no cover
+
+    @property
+    def entry_price(self) -> float:
+        """Entry fill price, slippage included where the ledger models it."""
+        ...  # pragma: no cover
+
+    @property
+    def exit_date(self) -> date:
+        """Session the position was closed on."""
+        ...  # pragma: no cover
+
+    @property
+    def exit_price(self) -> float:
+        """Exit fill price, slippage included where the ledger models it."""
+        ...  # pragma: no cover
+
+    @property
+    def shares(self) -> float:
+        """Position size the P&L is expressed over."""
+        ...  # pragma: no cover
+
+    @property
+    def initial_stop_price(self) -> float | None:
+        """Stop in force at entry, or `None` when it was never recorded."""
+        ...  # pragma: no cover
+
+    @property
+    def exit_reason(self) -> str:
+        """Which rule closed the position."""
+        ...  # pragma: no cover
+
+    @property
+    def pnl(self) -> float:
+        """Realized profit/loss, net of whatever costs the ledger charges."""
+        ...  # pragma: no cover
+
+    @property
+    def days_held(self) -> int:
+        """Holding period, in whatever unit the originating ledger counts."""
+        ...  # pragma: no cover
+
 
 _TRADING_DAYS_PER_YEAR = 252
 # roadmap §5 P2-07: "日次リターンが1件以下ならNone" -- need at least 2 daily
@@ -103,11 +174,14 @@ def compute_max_drawdown_pct(equity_curve: tuple[tuple[date, float], ...]) -> fl
     return max_drawdown
 
 
-def compute_win_rate(trades: tuple[Trade, ...]) -> float | None:
+def compute_win_rate(trades: Sequence[ClosedTrade]) -> float | None:
     """Fraction of trades with pnl > 0; None when there are no trades.
 
-    Matches `paper.journal.PaperJournal._win_rate`'s convention: pnl == 0 is
-    neutral (counted in the denominator, excluded from the win numerator).
+    The single win/loss convention for the whole codebase (Issue #190): pnl
+    > 0 is a win, pnl == 0 is neutral (counted in the denominator, excluded
+    from the win numerator), pnl < 0 is a loss. The backtest, the paper
+    journal, and the verdict tracker all rate their closed trades here, so
+    "win rate" means the same thing in every report.
     """
     if not trades:
         return None
@@ -115,7 +189,7 @@ def compute_win_rate(trades: tuple[Trade, ...]) -> float | None:
     return wins / len(trades)
 
 
-def compute_profit_factor(trades: tuple[Trade, ...]) -> float | None:
+def compute_profit_factor(trades: Sequence[ClosedTrade]) -> float | None:
     """Gross gains / abs(gross losses); None when there are no losing trades."""
     gains = sum(trade.pnl for trade in trades if trade.pnl > 0)
     losses = sum(-trade.pnl for trade in trades if trade.pnl < 0)
@@ -124,14 +198,27 @@ def compute_profit_factor(trades: tuple[Trade, ...]) -> float | None:
     return gains / losses
 
 
-def compute_expectancy_per_trade(trades: tuple[Trade, ...]) -> float | None:
+def compute_expectancy_per_trade(trades: Sequence[ClosedTrade]) -> float | None:
     """Mean pnl per trade; None when there are no trades."""
     if not trades:
         return None
     return sum(trade.pnl for trade in trades) / len(trades)
 
 
-def _trade_r_multiple(trade: Trade) -> float | None:
+def trade_r_multiple(trade: ClosedTrade) -> float | None:
+    """Return one trade's R-multiple, or `None` when it is not computable.
+
+    Args:
+        trade: A closed round trip.
+
+    Returns:
+        `pnl / (risk_per_share * shares)`, or `None` when the initial stop
+        was never recorded or sits at/above the entry (a data anomaly, not a
+        legitimately zero risk). Public so callers that must *report* how many
+        trades were omitted -- `paper/journal.py`'s
+        `r_multiple_omitted_count` -- can count them without re-deriving the
+        rule.
+    """
     if trade.initial_stop_price is None:
         return None
     risk_per_share = trade.entry_price - trade.initial_stop_price
@@ -140,13 +227,13 @@ def _trade_r_multiple(trade: Trade) -> float | None:
     return trade.pnl / (risk_per_share * trade.shares)
 
 
-def compute_avg_r_multiple(trades: tuple[Trade, ...]) -> float | None:
+def compute_avg_r_multiple(trades: Sequence[ClosedTrade]) -> float | None:
     """Mean R-multiple over trades with a recorded, valid initial stop.
 
     Trades whose initial stop wasn't recorded (or is at/above entry, a data
     anomaly) are silently excluded from the average, not treated as zero.
     """
-    values = [r for trade in trades if (r := _trade_r_multiple(trade)) is not None]
+    values = [r for trade in trades if (r := trade_r_multiple(trade)) is not None]
     return sum(values) / len(values) if values else None
 
 
@@ -189,28 +276,34 @@ class HoldingDaysStats:
     p75: float
 
 
-def exit_reason_breakdown(trades: tuple[Trade, ...]) -> dict[str, int]:
-    """Count exits per reason, always reporting every reason the engine can emit.
+def exit_reason_breakdown(
+    trades: Sequence[ClosedTrade], known_reasons: Sequence[str] = EXIT_REASONS
+) -> dict[str, int]:
+    """Count exits per reason, always reporting every reason the ledger can emit.
 
     Absent reasons are reported as `0` rather than omitted: "no position ever
     reached max-hold" is the interesting reading, and a missing key would
     force every caller to re-state the default. A reason outside
-    `EXIT_REASONS` (a newly added exit rule) gets its own key rather than
+    `known_reasons` (a newly added exit rule) gets its own key rather than
     being dropped, so the counts always sum to `len(trades)`.
 
     Args:
         trades: Closed trades to tally.
+        known_reasons: The vocabulary to zero-fill. Defaults to the
+            simulator's `EXIT_REASONS`; the verdict tracker passes its own
+            (Issue #190), since zero-filling `end_of_backtest` into a ledger
+            that can never emit it would report a rule that does not exist.
 
     Returns:
-        `{reason: count}`, covering `EXIT_REASONS` plus any reason observed.
+        `{reason: count}`, covering `known_reasons` plus any reason observed.
     """
-    counts = dict.fromkeys(EXIT_REASONS, 0)
+    counts = dict.fromkeys(known_reasons, 0)
     for trade in trades:
         counts[trade.exit_reason] = counts.get(trade.exit_reason, 0) + 1
     return counts
 
 
-def max_hold_binding_rate(trades: tuple[Trade, ...]) -> float | None:
+def max_hold_binding_rate(trades: Sequence[ClosedTrade]) -> float | None:
     """Share of exits that fired because max-hold elapsed, not because of a stop.
 
     A near-zero rate means the configured `max_hold_days` is not binding, so
@@ -229,7 +322,7 @@ def max_hold_binding_rate(trades: tuple[Trade, ...]) -> float | None:
     return binding / len(trades)
 
 
-def holding_days_stats(trades: tuple[Trade, ...]) -> HoldingDaysStats | None:
+def holding_days_stats(trades: Sequence[ClosedTrade]) -> HoldingDaysStats | None:
     """Median and quartiles of realized holding periods.
 
     Args:

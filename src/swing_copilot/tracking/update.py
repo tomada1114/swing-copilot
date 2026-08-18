@@ -1,7 +1,7 @@
 """Replay every tracked verdict forward one trading day at a time.
 
-A `proceed` verdict is treated as a purchase at that run's closing price, and
-from then on the position is carried with **the backtest's own exit rules**:
+A verdict is treated as a purchase at that run's closing price, and from then
+on the position is carried with **the backtest's own exit rules**:
 `backtest/exits.py`'s `next_trailing_stop` and `evaluate_exit`, imported rather
 than reimplemented, so the ledger the human reads every morning cannot drift
 away from what the simulator would have done.
@@ -11,6 +11,12 @@ session classification of whether the verdict was right) and deliberately not
 `paper/positions` (what a human actually decided to hold, the FR-11/CON-04
 gate). It answers a third question: if this verdict had been followed
 mechanically, where would the position stand today, and what would close it.
+
+Both verdict sides are replayed (Issue #190). A `skip` position is a shadow:
+nobody was ever told to buy it, and it exists only so the ledger can state
+what the rejected candidates would have done under exactly the rules the
+accepted ones were carried under. Identical rules are the whole point --
+a counterfactual measured any other way is not one.
 
 Everything here takes an explicit `as_of` and reads only stored bars: no
 clock, no network. Bars are whatever `copilot-daily`'s price step already
@@ -139,11 +145,19 @@ def update_tracking(
     notes: list[str] = []
     for run_id, symbol in state_store.delete_orphaned_verdict_positions():
         notes.append(
-            f"{symbol} ({run_id}): proceed verdict が取り消されたため"
-            "追跡ポジションを削除した"
+            f"{symbol} ({run_id}): verdict 行が消えたため追跡ポジションを削除した"
+        )
+    for (
+        run_id,
+        symbol,
+        recommendation,
+    ) in state_store.sync_verdict_position_recommendations():
+        notes.append(
+            f"{symbol} ({run_id}): verdict が {recommendation} に訂正されたため"
+            "追跡ポジションの区分を追随させた"
         )
 
-    candidates = state_store.get_untracked_proceed_verdicts(as_of)
+    candidates = state_store.get_untracked_verdicts(as_of)
     open_positions = state_store.get_verdict_positions(OPEN)
     if not candidates and not open_positions:
         return TrackingUpdateResult(0, 0, 0, tuple(notes))
@@ -345,6 +359,7 @@ def _seed_position(
         run_id=candidate.run_id,
         symbol=candidate.symbol,
         strategy_key=candidate.strategy_key,
+        recommendation=candidate.recommendation,
         no_trade=candidate.no_trade,
         entry_date=candidate.as_of,
         entry_price=entry_price,

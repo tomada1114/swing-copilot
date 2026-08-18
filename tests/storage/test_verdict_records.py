@@ -468,6 +468,30 @@ class TestReplaceVerdictOutcomes:
             "forward_return_pct, classification FROM verdict_outcomes",
         ) == [("AAPL", 5, AS_OF, "proceed", 1.5, "HIT")]
 
+    def test_round_trips_the_benchmark_return_of_the_same_span(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        outcome = replace(_outcome(run_id, "AAPL"), benchmark_return_pct=2.25)
+
+        state_store.replace_verdict_outcomes(run_id, 5, [outcome])
+
+        stored = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
+        assert [row.benchmark_return_pct for row in stored] == [2.25]
+
+    def test_an_unmeasured_benchmark_round_trips_as_none_not_zero(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #190: NULL means "not measured" (a row classified before the
+        # column existed, or one whose benchmark bars were missing) and must
+        # never come back as a flat market.
+        run_id = uuid4()
+
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+
+        stored = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
+        assert [row.benchmark_return_pct for row in stored] == [None]
+
     def test_rerun_with_corrected_prices_updates_rather_than_duplicates(
         self, state_store: StateStore
     ) -> None:

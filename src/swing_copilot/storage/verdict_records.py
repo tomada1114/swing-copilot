@@ -53,8 +53,8 @@ _INSERT_ANALYSIS_COVERAGE = """
 _INSERT_VERDICT_OUTCOME = """
     INSERT INTO verdict_outcomes (
         run_id, symbol, horizon_days, as_of, recommendation,
-        forward_return_pct, classification
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        forward_return_pct, benchmark_return_pct, classification
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -148,6 +148,12 @@ class VerdictOutcomeRecord:
     recommendation: str
     forward_return_pct: float
     classification: str
+    #: The benchmark's return over the identical span (Issue #190), so
+    #: separation can be restated in excess terms instead of being read off a
+    #: number the market's own move is baked into. `None` means "not
+    #: measured" -- a row classified before the column existed, or one whose
+    #: benchmark bars were missing -- and must never be read as a flat market.
+    benchmark_return_pct: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +456,7 @@ def replace_verdict_outcomes(
                         outcome.as_of,
                         outcome.recommendation,
                         outcome.forward_return_pct,
+                        outcome.benchmark_return_pct,
                         outcome.classification,
                     ],
                 )
@@ -524,7 +531,7 @@ def get_verdict_outcomes_in_window(
         rows = conn.execute(
             """
             SELECT run_id, symbol, horizon_days, as_of, recommendation,
-                   forward_return_pct, classification
+                   forward_return_pct, classification, benchmark_return_pct
             FROM verdict_outcomes
             WHERE as_of >= ? AND as_of <= ?
             ORDER BY as_of, run_id, symbol, horizon_days
@@ -540,6 +547,7 @@ def get_verdict_outcomes_in_window(
             recommendation=row[4],
             forward_return_pct=row[5],
             classification=row[6],
+            benchmark_return_pct=row[7],
         )
         for row in rows
     )

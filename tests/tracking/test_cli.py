@@ -1,9 +1,10 @@
-"""`copilot-track` CLI surface: update / list / show / close / note."""
+"""`copilot-track` CLI surface: update / list / show / stats / close / note."""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 
@@ -130,6 +131,7 @@ class TestListCommand:
                     run_id=RUN_ID,
                     symbol=symbol,
                     strategy_key="default",
+                    recommendation="proceed",
                     no_trade=False,
                     entry_date=ENTRY_DATE,
                     entry_price=100.0,
@@ -392,6 +394,133 @@ class TestNoteCommand:
                     str(db_path),
                 ]
             )
+
+
+class TestRecommendationDisplayFilter:
+    """Issue #190: skip shadows are tracked, but never in the default view."""
+
+    @pytest.fixture
+    def both_sides_db(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Path:
+        path = tmp_path / "both.duckdb"
+        state_store = StateStore(Database(path))
+        state_store.init_schema()
+        # Distinct runs: `replace_run_verdicts` replaces a run wholesale, so
+        # seeding both symbols under one run_id would keep only the second.
+        skip_run_id = uuid4()
+        seed_verdict(state_store, symbol="PRO")
+        seed_risk(state_store, symbol="PRO")
+        seed_verdict(
+            state_store, run_id=skip_run_id, symbol="SKP", recommendation="skip"
+        )
+        seed_risk(state_store, run_id=skip_run_id, symbol="SKP")
+        market_store = MarketStore(Database(path), parquet_root=path.parent / "bars")
+        write_bars(market_store, flat_prelude(symbol="PRO"))
+        write_bars(market_store, flat_prelude(symbol="SKP"))
+        main(["update", "--as-of", ENTRY_DATE.isoformat(), "--db", str(path)])
+        capsys.readouterr()
+        return path
+
+    def test_list_shows_only_the_proceed_side_by_default(
+        self, both_sides_db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["list", "--db", str(both_sides_db)])
+
+        out = capsys.readouterr().out
+        assert "PRO" in out
+        assert "SKP" not in out
+
+    def test_list_shows_the_skip_side_only_when_asked(
+        self, both_sides_db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["list", "--recommendation", "all", "--db", str(both_sides_db)])
+
+        out = capsys.readouterr().out
+        assert "PRO" in out
+        assert "SKP" in out
+
+    def test_show_hides_a_skip_position_by_default(
+        self, both_sides_db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["show", "--symbol", "SKP", "--db", str(both_sides_db)])
+
+        assert "追跡ポジションはない" in capsys.readouterr().out
+
+    def test_show_prints_a_skip_position_when_asked(
+        self, both_sides_db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(
+            [
+                "show",
+                "--symbol",
+                "SKP",
+                "--recommendation",
+                "skip",
+                "--db",
+                str(both_sides_db),
+            ]
+        )
+
+        assert "SKP" in capsys.readouterr().out
+
+
+class TestStatsCommand:
+    def test_it_reports_every_stratum_by_default(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
+        capsys.readouterr()
+
+        main(["stats", "--db", str(db_path)])
+
+        out = capsys.readouterr().out
+        assert "proceed" in out
+        assert "skip" in out
+        assert "all" in out
+        # The one tracked position is still open, so nothing is rated yet.
+        assert "勝率" in out
+
+    def test_it_reports_the_realized_record_of_a_closed_position(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
+        main(
+            [
+                "close",
+                "--run-id",
+                str(RUN_ID),
+                "--symbol",
+                SYMBOL,
+                "--as-of",
+                DAY_1.isoformat(),
+                "--db",
+                str(db_path),
+            ]
+        )
+        capsys.readouterr()
+
+        main(["stats", "--recommendation", "proceed", "--db", str(db_path)])
+
+        out = capsys.readouterr().out
+        # Entry 100.00 -> manual close at the 102.00 mark: one win, +2.00%.
+        assert "+100.00%" in out
+        assert "+2.00%" in out
+        assert "manual=1" in out
+
+    def test_a_single_stratum_can_be_selected(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["stats", "--recommendation", "skip", "--db", str(db_path)])
+
+        out = capsys.readouterr().out
+        assert "skip" in out
+        assert "proceed" not in out
+
+    def test_it_labels_the_skip_side_as_a_counterfactual_not_a_suggestion(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["stats", "--db", str(db_path)])
+
+        assert "実際に提案された建玉ではない" in capsys.readouterr().out
 
 
 def test_the_console_script_entry_point_is_this_module_main() -> None:

@@ -779,13 +779,16 @@ class TestHeldSymbolGetsTextCoverage:
         assert {"AAPL", "MSFT"} <= symbols_covered
 
 
-def _seed_virtual_position(state_store: StateStore, symbol: str) -> None:
+def _seed_virtual_position(
+    state_store: StateStore, symbol: str, recommendation: str = "proceed"
+) -> None:
     """Open one `status='open'` virtual position in the verdict ledger."""
     state_store.upsert_verdict_position(
         VerdictPosition(
             run_id=uuid4(),
             symbol=symbol,
             strategy_key="default",
+            recommendation=recommendation,
             no_trade=False,
             entry_date=AS_OF - timedelta(days=5),
             entry_price=100.0,
@@ -832,6 +835,21 @@ class TestVirtualLedgerPositionsCountAsHeld:
         assert result.status == RunStatus.SUCCESS
         # NVDA is in neither `universe` nor `positions`: only the ledger.
         assert "NVDA" in _news_covered_symbols(state_store)
+
+    def test_a_skip_shadow_position_is_not_treated_as_held(
+        self, base_deps, state_store
+    ):
+        # Issue #190: the ledger shadow-tracks `skip` under the same exit
+        # rules, but nothing is notionally held there. Counting it as held
+        # would redirect the held-first text budget onto every symbol the
+        # qualitative layer turned down.
+        _seed_virtual_position(state_store, "NVDA", recommendation="skip")
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "NVDA" not in _news_covered_symbols(state_store)
 
     def test_real_and_virtual_positions_are_unioned_not_replaced(
         self, base_deps, state_store

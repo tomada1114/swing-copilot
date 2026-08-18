@@ -12,10 +12,8 @@ and classifies it as spike/plateau/inconclusive.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import sys
 import tempfile
-from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
@@ -63,6 +61,7 @@ from swing_copilot.universe import (
     get_sp500_universe,
     select_persisted_universe,
 )
+from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -71,7 +70,7 @@ if TYPE_CHECKING:
     from swing_copilot.backtest.engine import BacktestResult
     from swing_copilot.backtest.sensitivity import SensitivityGridResult
     from swing_copilot.config import Settings, StrategiesConfig
-    from swing_copilot.universe import UniverseMember
+    from swing_copilot.universe_sampling import UniverseSample
 
 _DEFAULT_OUTPUT_DIR = Path("reports/backtests")
 # Overridable so a configuration variant can be compared against the baseline
@@ -82,10 +81,6 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # weighting variant needs its own override alongside --settings.
 DEFAULT_STRATEGIES_PATH = "config/strategies.yaml"
 _CONSOLE_WIDTH = 200
-#: Salt of the `--limit` sample's shuffle order (Issue #194). Fixed forever:
-#: changing it re-draws every sample and silently breaks comparability with
-#: previously published reports.
-_SAMPLING_SALT = b"swing-copilot/backtest/limit/v1"
 #: `--policy` default: the pre-Issue-#184 behaviour, so an existing command
 #: line keeps measuring what it used to measure.
 _DEFAULT_POLICY = EntryPolicyArm.NONE.value
@@ -93,37 +88,6 @@ _DEFAULT_POLICY = EntryPolicyArm.NONE.value
 
 class BacktestCliError(SwingCopilotError):
     """Raised for fail-fast argument/strategy errors, before any backtest runs."""
-
-
-@dataclass(frozen=True, slots=True)
-class UniverseSample:
-    """Which symbols the run actually backtested, and how they were chosen.
-
-    Carried into every report because a `--limit` run measures a *sample*:
-    without the method and the sector composition beside the metrics, a
-    truncated run reads exactly like a full-universe one (Issue #194).
-    """
-
-    symbols: tuple[str, ...]
-    universe_size: int
-    is_stratified_sample: bool
-    sector_counts: tuple[tuple[str, int], ...]
-
-    def summary_lines(self) -> tuple[str, ...]:
-        """The two lines every report prepends: method, then composition."""
-        if not self.is_stratified_sample:
-            method = f"ユニバース: 全 {self.universe_size} 銘柄（--limit 指定なし）"
-        else:
-            method = (
-                f"ユニバース: {len(self.symbols)}/{self.universe_size} 銘柄の"
-                "決定論的サンプル（gics_sector 比例配分 + blake2b ハッシュ順、"
-                "シード固定・再現可能）"
-            )
-        composition = "セクター構成: " + (
-            ", ".join(f"{sector} {count}" for sector, count in self.sector_counts)
-            or "(なし)"
-        )
-        return (method, composition)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,88 +205,6 @@ def _reject_grid_policy(args: argparse.Namespace) -> None:
             f"（--policy {_DEFAULT_POLICY} のみ）。"
         )
         raise BacktestCliError(msg)
-
-
-def _hash_rank(symbol: str) -> bytes:
-    """Deterministic, universe-independent shuffle key for one symbol."""
-    return hashlib.blake2b(
-        _SAMPLING_SALT + symbol.encode("utf-8"), digest_size=8
-    ).digest()
-
-
-def _sector_counts(members: Sequence[UniverseMember]) -> tuple[tuple[str, int], ...]:
-    counts = Counter(member.gics_sector for member in members)
-    return tuple(sorted(counts.items()))
-
-
-def _sector_quotas(sizes: dict[str, int], limit: int) -> dict[str, int]:
-    """Split `limit` across sectors proportionally, by largest remainder.
-
-    Every sector keeps its floor share; the seats left over go to the largest
-    fractional remainders, ties broken by sector name so the allocation is a
-    pure function of the universe and the limit.
-    """
-    total = sum(sizes.values())
-    exact = {sector: size * limit / total for sector, size in sizes.items()}
-    quotas = {sector: int(value) for sector, value in exact.items()}
-    # Each remainder is < 1 and they sum to an integer, so only sectors with a
-    # non-zero remainder can be topped up and no quota can exceed its sector.
-    leftover = limit - sum(quotas.values())
-    by_remainder = sorted(exact, key=lambda sector: (-(exact[sector] % 1), sector))
-    for sector in by_remainder[:leftover]:
-        quotas[sector] += 1
-    return quotas
-
-
-def _select_symbols(
-    universe: Sequence[UniverseMember], limit: int | None
-) -> UniverseSample:
-    """Pick the symbols to backtest, without the alphabetical bias of `[:limit]`.
-
-    Truncating a `symbol`-sorted universe made `--limit 60` mean "the 60
-    tickers starting with A", which is not an S&P 500 sample: its sector mix
-    is arbitrary, and Minervini's RS percentile (condition 7) ranks candidates
-    *within the set it is given*, so the check itself changes meaning
-    (Issue #194). Instead each sector keeps its proportional share, and which
-    of its members are taken is decided by a salted blake2b order — unrelated
-    to the alphabet, identical on every machine, and identical on every rerun.
-
-    Args:
-        universe: Resolved universe membership for the run's `as_of`.
-        limit: `--limit`, or `None` for the whole universe.
-
-    Returns:
-        The selected symbols (alphabetical) plus the provenance every report
-        prints beside its metrics.
-    """
-    members = sorted(universe, key=lambda member: member.symbol)
-    if limit is None or limit >= len(members):
-        return UniverseSample(
-            symbols=tuple(member.symbol for member in members),
-            universe_size=len(members),
-            is_stratified_sample=False,
-            sector_counts=_sector_counts(members),
-        )
-
-    by_sector: dict[str, list[UniverseMember]] = defaultdict(list)
-    for member in members:
-        by_sector[member.gics_sector].append(member)
-    quotas = _sector_quotas(
-        {sector: len(group) for sector, group in by_sector.items()}, limit
-    )
-    picked = [
-        member
-        for sector, group in sorted(by_sector.items())
-        for member in sorted(group, key=lambda member: _hash_rank(member.symbol))[
-            : quotas[sector]
-        ]
-    ]
-    return UniverseSample(
-        symbols=tuple(sorted(member.symbol for member in picked)),
-        universe_size=len(members),
-        is_stratified_sample=True,
-        sector_counts=_sector_counts(picked),
-    )
 
 
 def _output_path(args: argparse.Namespace) -> Path:
@@ -986,7 +868,7 @@ def _compose_dependencies(
             )
         )
     )
-    sample = _select_symbols(universe, args.limit)
+    sample = select_universe_sample(universe, args.limit)
     missing_data_symbols = _missing_data_symbols(
         market_store, sample.symbols, args.start, args.end
     )

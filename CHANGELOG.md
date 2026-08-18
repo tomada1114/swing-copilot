@@ -142,6 +142,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `copilot-daily --limit N` が `universe[:limit]`、つまり「A で始まる N 銘柄」
+  を選んでいた（Issue #205）。#194（PR #202）で `copilot-backtest` 側だけを
+  直したため取り残されていた片側である。`--limit` は検証・スモーク用フラグで
+  本番の定時実行は付けないので本番レポートは歪んでいなかったが、Minervini の
+  RS パーセンタイル（条件7）は*渡された集合内の相対順位*なので、スモーク実行は
+  本番と別の条件を検証していた。fundamentals の NULL 率のようなカバレッジ
+  スポットチェックも常に同じアルファベット先頭群を測っていた。サンプラを
+  `swing_copilot/universe_sampling.py`（`select_universe_sample`）へ抽出し、
+  両 CLI が同じ関数・同じ salt を共有する。同じユニバースと同じ `N` なら
+  スモーク実行とバックテストが同じ銘柄集合を見る。`--limit 0`（保有銘柄のみ）・
+  負数の usage error・保有銘柄の常時 union という既存の不変条件は変わらない
 - `vcp_breakout` が VCP を「履歴全域の一本のパターン」と定義しており、
   `pattern_days` がほぼ履歴全長になって 6.5 年で 1 トレードしか生成しない
   構造欠陥を修正した（Issue #186）。`extract_pattern` は直近

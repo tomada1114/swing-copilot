@@ -18,14 +18,12 @@ from swing_copilot.backtest.cli import (
     DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
-    UniverseSample,
     _atomic_write,
     _compose_dependencies,
     _grid_output_path,
     _missing_data_symbols,
     _output_path,
     _parse_args,
-    _select_symbols,
     _validate_args,
     main,
     render_grid_markdown,
@@ -60,6 +58,7 @@ from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
+from swing_copilot.universe_sampling import UniverseSample
 from tests.backtest.conftest import bars_frame, flat_bars
 
 if TYPE_CHECKING:
@@ -234,114 +233,6 @@ class TestValidateArgs:
 
         with pytest.raises(BacktestCliError, match="1以上"):
             _validate_args(args, self._strategies())
-
-
-class TestSelectSymbols:
-    """Issue #194: `--limit` samples the universe instead of truncating it."""
-
-    def _members(self, symbols: Sequence[str], sector: str) -> list[UniverseMember]:
-        return [
-            UniverseMember(
-                symbol=symbol,
-                company_name=symbol,
-                gics_sector=sector,
-                source_symbol=symbol,
-            )
-            for symbol in symbols
-        ]
-
-    def _universe(self) -> tuple[UniverseMember, ...]:
-        return tuple(self._members(("AAA", "BBB", "CCC"), "Information Technology"))
-
-    def _sectored_universe(self, sizes: dict[str, int]) -> tuple[UniverseMember, ...]:
-        """One member per slot, named so alphabetical order is fully predictable."""
-        members: list[UniverseMember] = []
-        for sector, size in sorted(sizes.items()):
-            offset = len(members)
-            members += self._members(
-                [f"S{offset + index:03d}" for index in range(size)], sector
-            )
-        return tuple(members)
-
-    def test_no_limit_returns_the_whole_universe(self):
-        sample = _select_symbols(self._universe(), None)
-
-        assert sample.symbols == ("AAA", "BBB", "CCC")
-        assert sample.is_stratified_sample is False
-        assert sample.universe_size == 3
-        assert sample.sector_counts == (("Information Technology", 3),)
-
-    def test_limit_at_or_above_the_universe_size_returns_the_whole_universe(self):
-        assert _select_symbols(self._universe(), 3).symbols == ("AAA", "BBB", "CCC")
-        assert _select_symbols(self._universe(), 99).symbols == ("AAA", "BBB", "CCC")
-
-    def test_limit_is_not_the_alphabetically_first_n_symbols(self):
-        # The regression: `symbols[:limit]` returned exactly S000..S019.
-        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
-
-        sample = _select_symbols(universe, 20)
-
-        alphabetical_head = tuple(f"S{index:03d}" for index in range(20))
-        assert len(sample.symbols) == 20
-        assert sample.symbols != alphabetical_head
-        # Spread across the whole alphabet, not clustered at its start.
-        assert max(sample.symbols) > "S150"
-
-    def test_same_universe_and_limit_always_select_the_same_symbols(self):
-        universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
-        shuffled = tuple(reversed(universe))
-
-        first = _select_symbols(universe, 25)
-        again = _select_symbols(universe, 25)
-        from_shuffled_input = _select_symbols(shuffled, 25)
-
-        assert first.symbols == again.symbols == from_shuffled_input.symbols
-
-    def test_sector_shares_are_proportional_to_the_universe(self):
-        universe = self._sectored_universe(
-            {"Energy": 100, "Financials": 60, "Health Care": 30, "Utilities": 10}
-        )
-
-        sample = _select_symbols(universe, 20)
-
-        assert sample.is_stratified_sample is True
-        assert sample.universe_size == 200
-        assert sample.sector_counts == (
-            ("Energy", 10),
-            ("Financials", 6),
-            ("Health Care", 3),
-            ("Utilities", 1),
-        )
-
-    def test_leftover_seats_go_to_the_largest_remainder_ties_broken_by_name(self):
-        # 4 seats over three equal sectors: every sector floors to 1 and the
-        # single leftover goes to the alphabetically first of the tied three.
-        universe = self._sectored_universe({"Aaa": 3, "Bbb": 3, "Ccc": 3})
-
-        sample = _select_symbols(universe, 4)
-
-        assert sample.sector_counts == (("Aaa", 2), ("Bbb", 1), ("Ccc", 1))
-
-    def test_a_limit_smaller_than_the_sector_count_still_fills_every_seat(self):
-        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
-
-        sample = _select_symbols(universe, 1)
-
-        assert len(sample.symbols) == 1
-
-    def test_summary_lines_state_the_method_and_the_sector_composition(self):
-        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
-
-        method, composition = _select_symbols(universe, 20).summary_lines()
-
-        assert "20/200" in method
-        assert "blake2b" in method
-        assert composition == "セクター構成: Energy 10, Utilities 10"
-
-    def test_full_universe_summary_says_so(self):
-        method, _composition = _select_symbols(self._universe(), None).summary_lines()
-
-        assert "全 3 銘柄" in method
 
 
 class TestOutputPath:

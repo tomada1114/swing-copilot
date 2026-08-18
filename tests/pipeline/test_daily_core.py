@@ -20,6 +20,7 @@ from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
     _config_hash,
+    _select_symbols,
     run_daily,
 )
 from swing_copilot.screening import (
@@ -463,17 +464,82 @@ class TestAsOfDefaulting:
 
 
 class TestSymbolLimit:
-    def test_limit_restricts_universe_to_first_n_symbols(self, deps):
+    def _sectored_universe(self, sizes: dict[str, int]) -> tuple[UniverseMember, ...]:
+        """One member per slot, named so alphabetical order is fully predictable."""
+        members: list[UniverseMember] = []
+        for sector, size in sorted(sizes.items()):
+            offset = len(members)
+            members += [
+                UniverseMember(
+                    symbol=f"S{offset + index:03d}",
+                    company_name=f"S{offset + index:03d}",
+                    gics_sector=sector,
+                    source_symbol=f"S{offset + index:03d}",
+                )
+                for index in range(size)
+            ]
+        return tuple(members)
+
+    def test_limit_restricts_the_universe_to_a_sample(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=1), deps)
         assert result.status == RunStatus.SUCCESS
+
+    def test_limit_is_not_the_alphabetically_first_n_symbols(self):
+        # Issue #205: `universe[:limit]` over a `ORDER BY symbol` universe made
+        # `--limit 20` mean "the 20 tickers starting with A", which changes what
+        # the universe-relative RS percentile (condition 7) measures.
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        symbols = _select_symbols(universe, set(), 20)
+
+        assert symbols != [f"S{index:03d}" for index in range(20)]
+        assert len(symbols) == 20
+        assert max(symbols) > "S150"
+
+    def test_limit_selects_the_same_symbols_on_every_run(self):
+        universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
+
+        first = _select_symbols(universe, set(), 25)
+        again = _select_symbols(tuple(reversed(universe)), set(), 25)
+
+        # Deterministic, and pinned so a reordered universe or another machine
+        # cannot silently redraw the sample.
+        assert first == again
+        assert first[:3] == ["S003", "S011", "S013"]
+
+    def test_held_symbols_are_screened_regardless_of_the_limit(self):
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        symbols = _select_symbols(universe, {"HELD"}, 20)
+
+        assert "HELD" in symbols
+        assert symbols == sorted(symbols)
+
+    def test_zero_limit_selects_only_held_symbols(self):
+        universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
+
+        assert _select_symbols(universe, {"HELD"}, 0) == ["HELD"]
+        assert _select_symbols(universe, set(), 0) == []
+
+    def test_limit_at_or_above_the_universe_size_keeps_every_symbol(self):
+        universe = self._sectored_universe({"Energy": 3})
+
+        assert _select_symbols(universe, set(), 5) == ["S000", "S001", "S002"]
+
+    def test_no_limit_selects_the_whole_universe(self):
+        universe = self._sectored_universe({"Energy": 3, "Utilities": 2})
+
+        symbols = _select_symbols(universe, set(), None)
+
+        assert symbols == [member.symbol for member in universe]
 
     def test_limit_excludes_never_fetched_symbols_from_screening_rejections(
         self, deps, state_store
     ):
         # P1-02 regression: `deps.universe` has AAPL+MSFT, but `limit=1`
-        # narrows this run's actual fetch scope to AAPL only. MSFT must not
-        # appear in `screening_rejections` -- it was never fetched this run,
-        # so classifying it at all would be a spurious rejection, not a
+        # narrows this run's actual fetch scope to one of them. The other must
+        # not appear in `screening_rejections` -- it was never fetched this
+        # run, so classifying it at all would be a spurious rejection, not a
         # genuine screening outcome.
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=1), deps)
 

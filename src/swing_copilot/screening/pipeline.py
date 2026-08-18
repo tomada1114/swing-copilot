@@ -288,6 +288,10 @@ class ScreeningPipeline:
             candidates=outcome.candidates,
             rejections=rejections,
             truncated=outcome.truncated,
+            # Issue #192: flattened here rather than at the storage boundary,
+            # so the hits persisted for a run are exactly the ones the
+            # rejection classifier was shown.
+            signal_hits=[hit for hits in outcome.hits_by_signal for hit in hits],
         )
 
     def _build_candidates(self, data: ScreeningInput) -> _BuildOutcome:

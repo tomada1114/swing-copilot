@@ -34,6 +34,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- JSON 列に埋没していた値を実列へ昇格し、`signals` を `run_id` キーへ載せ替えた
+  （Issue #192）。読み出し側はビューで抽出できていたが、書き込み側のスキーマ負債は
+  残っており、消費者（#187 の score-lift 等）が `json_extract` ベースで実装されると
+  後で書き直しになる。
+  - `candidates` に `score` / `score_*` 4 成分 / `execution_state` /
+    `execution_distance` を追加。とくに execution 系は**どこにも永続化されて
+    いなかった**ランキングキーで、当時の設定を再現しない限り復元できなかった
+  - `regime_snapshots` に `dd15_*` / `dd5_*` / `spy_close` / `spy_ema` /
+    `vix_close`、`exposure_decisions` に `gate_verdict` / `dd_level` /
+    `is_conservatively_downgraded` / `reduce_only_risk_multiplier` を追加
+  - 新テーブル `signal_hits`（`run_id` キー）。旧 `signals` は `run_date` キーで
+    同日の dry_run と live が衝突し、他テーブルと JOIN できない死蔵データだった。
+    DuckDB は主キーを変更できないため別テーブルとし、旧表は読み取り専用で残す。
+    書き込みは `record_screening_results()` の**同一トランザクション**（候補 /
+    落選 / 順位落ちと合わせて 4 テーブル）で、当該 run/strategy の全置換
+  - 新テーブル `verdict_reasons` / `verdict_reason_sources`:
+    `verdicts.reasons_json` の正規化投影を `replace_run_verdicts` の同一
+    トランザクションで書く。「ソースを一つも引かなかった理由だけで proceed した
+    銘柄の成績」が SQL 1 本で出る（Issue #191 の `basis` タグの受け皿も兼ねる）
+  - **既存 DB の移行**: JSON に既にある値は「既知の事実の言い直し」としてバック
+    フィルする（`WHERE ... IS NULL` ガードで冪等）。一度も永続化されたことのない
+    `execution_state` / `execution_distance` だけはバックフィルしない一方向の切断で、
+    その NULL は「未記録」であって `UNKNOWN` ではない。`v_candidates` はスコア側に
+    `COALESCE(実列, JSON 抽出)` のフォールバックを残す。`tests/storage/
+    test_schema_migration.py` が #192 以前の DDL で作った実データ入り DB に対して
+    `init_schema()` を走らせて固定する
+  - 分析ビュー `v_signal_hits` / `v_verdict_reasons` と、`research.signal_hits()` /
+    `research.verdict_reasons()`。`v_universe_forward_returns` に
+    `execution_state` が乗ったので、実行状態別の forward return 集計が 1 行で書ける
+  - `StateStore.start_run` の `json.dumps` を `dumps_safe` へ統一（`storage/` の
+    JSON 書き込みはすべて NaN/Inf ガードを通る、という P1-04 の規約に揃えた）
+
 - 対照群を永続化し、スクリーニングの**偽陰性**を測れるようにした（Issue #188）。
   これまで forward return と当否分類が付くのは候補になった銘柄だけで、測れて
   いたのは偽陽性率だけだった——「切り捨てた側がその後どうなったか」を語る行が

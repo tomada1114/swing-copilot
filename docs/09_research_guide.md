@@ -48,7 +48,9 @@ bars = research.bars(["AAPL", "MSFT"])
 | `candidates()` | 候補とスコア内訳（JSON から型付き列へ展開済み） | `v_candidates` |
 | `tracked_positions()` | verdict 追跡台帳の仮想ポジション + recommendation（Issue #190 以降は `skip` のシャドウ建玉も含む） | `v_tracked_positions` |
 | `truncated_candidates()` | `candidate_limit` で順位落ちした near-miss とスコア内訳（列は `candidates()` と揃えてある） | `v_truncated_candidates` |
-| `universe_forward_returns()` | 候補 ∪ 順位落ち ∪ 落選の forward return（`outcome_class` / `reason_code` 付き） | `v_universe_forward_returns` |
+| `universe_forward_returns()` | 候補 ∪ 順位落ち ∪ 落選の forward return（`outcome_class` / `reason_code` / `execution_state` 付き） | `v_universe_forward_returns` |
+| `signal_hits()` | その run のシグナル発火（候補にならなかった銘柄の分も含む） | `v_signal_hits` |
+| `verdict_reasons()` | verdict の理由 1 件 1 行（`basis` / `source_id_count` 付き） | `v_verdict_reasons` |
 | `runs()` / `verdicts()` / `verdict_outcomes()` / `screening_rejections()` / `regime_snapshots()` | 各テーブルそのまま | 実テーブル |
 | `bars(symbols)` | 日足 OHLCV（in-memory DuckDB で Parquet を直読） | `data/parquet/` |
 | `query(sql, params)` | 任意 SQL の結果 | — |
@@ -66,6 +68,8 @@ bars = research.bars(["AAPL", "MSFT"])
 | `news_supply_level` | verdict 時のニュース供給量（sufficient/sparse/none） | 計測導入(#130)前の行。none ではない |
 | `horizon_days` / `forward_return_pct` / `classification` | 5/20 営業日の当否（HIT/MISS_*） | まだ成熟していない |
 | `rank` / `score` / `score_*` / `rsi14` / `atr14` / `close` / `avg_volume` | スクリーニングのランキング内訳と生値 | 該当 run の candidates に無い、または成分導入前の行 |
+| `execution_state` / `execution_distance` | ランキング時の実行状態と SMA50 からの ATR 距離（Issue #192） | 未記録（列の導入前の行）。`UNKNOWN` とは別 |
+| `dd15_spy` / `dd5_spy` / `vix_close` | 短い窓の distribution 件数と VIX（Issue #192） | レジーム snapshot が無い run、またはゲート評価不能 |
 | `risk_status` / `binding_constraint` | リスク評価と、株数を決めた制約 | リスク評価が無い |
 | `gate_verdict` / `dd_level` / `dd_count_*` | 市場レジームゲートの状態 | レジーム snapshot が無い run |
 | `position_status` / `exit_reason` / `realized_return_pct` / `days_held` | 追跡台帳（2.5×ATR トレーリング / 25 セッション）の結果 | まだ追跡が始まっていない（Issue #190 以降、`skip` も同じルールで追跡されるので「skip だから NULL」ではなくなった） |
@@ -115,6 +119,37 @@ df[df.outcome_class.isin(["candidate", "truncated"])].groupby("rank")[
 しか保存していないので、順位帯の平均は保存範囲までしか語れない。もう一つ、
 これらは `signal_outcomes` / `verdict_outcomes` のような当否分類を持たない**生の
 リターン**であり、ここから「勝率」を作るときは分類の閾値を自分で決めることになる。
+
+## Issue #192 で実列になった値
+
+JSON の中にしか無かった値が実列になった。`json_extract` を書く必要はもう無い。
+
+| 列 | 意味 | NULL の意味 |
+|---|---|---|
+| `candidates.score` / `score_*` | 複合スコアとその 4 成分 | 既存行は `metrics_json` からバックフィル済み。それでも NULL なら成分導入前の run |
+| `candidates.execution_state` / `execution_distance` | ランキングの実行状態（`READY` / `EXTENDED` など）と SMA50 からの ATR 距離 | **未記録**。どこにも永続化されていなかったので過去行は復元不能。`UNKNOWN`（距離が計算不能という測定結果）と読み替えないこと |
+| `regime_snapshots.dd15_*` / `dd5_*` / `spy_close` / `spy_ema` / `vix_close` | 短い窓の distribution 件数とゲート入力（`dd_count_*` は従来どおり 25 セッション） | ゲート入力はバー欠損で評価不能だった run。バックフィル済みなので「列が無かった」ではない |
+| `exposure_decisions.gate_verdict` / `dd_level` / `is_conservatively_downgraded` / `reduce_only_risk_multiplier` | 露出上限の判断根拠 | バックフィル済み |
+| `verdict_reasons` / `verdict_reason_sources` | `verdicts.reasons_json` の正規化投影（`reasons_json` は引き続き記録の正） | バックフィル済み。`basis` の NULL は Issue #191 のタグが付く前に書かれた理由 |
+
+```python
+# 実行状態別に、その後のリターンはどう違ったか（DoD の 1 行集計）
+research.universe_forward_returns().groupby("execution_state")[
+    "forward_return_pct"
+].mean()
+
+# ソースを一つも引かなかった理由だけで proceed した銘柄
+reasons = research.verdict_reasons()
+uncited = reasons.groupby(["run_id", "symbol"])["source_id_count"].max() == 0
+
+# 候補にはならなかったが、そのシグナルには当たっていた銘柄
+research.signal_hits().groupby("signal_name")["symbol"].nunique()
+```
+
+`signal_hits()` は `run_id` キーの `signal_hits` テーブルを読む。旧 `signals`
+テーブル（`run_date` キー）は同日の `dry_run` と `live` が衝突するため読まない。
+2026-08 以前の run には `signal_hits` の行が無い（一方向の切断であり、
+`signals` に残っている行も run に紐付けられない）。
 
 ## 安全上の規約
 

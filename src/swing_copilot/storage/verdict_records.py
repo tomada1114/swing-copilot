@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import date
 
+    import duckdb
+
     from swing_copilot.storage.database import Database
 
 _INSERT_VERDICT = """
@@ -41,6 +43,20 @@ _INSERT_VERDICT = """
 
 _INSERT_VERDICT_SOURCE = """
     INSERT INTO verdict_sources (run_id, symbol, source_id, source_type)
+    VALUES (?, ?, ?, ?)
+"""
+
+# Issue #192: `reasons_json` normalized into rows. Written in the same
+# transaction as the verdict it belongs to, so the projection can never
+# describe a verdict the run did not commit.
+_INSERT_VERDICT_REASON = """
+    INSERT INTO verdict_reasons (
+        run_id, symbol, reason_index, text, basis, source_id_count
+    ) VALUES (?, ?, ?, ?, ?, ?)
+"""
+
+_INSERT_VERDICT_REASON_SOURCE = """
+    INSERT INTO verdict_reason_sources (run_id, symbol, reason_index, source_id)
     VALUES (?, ?, ?, ?)
 """
 
@@ -381,6 +397,14 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
         try:
             conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
             conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
+            # Issue #192: the normalized projection is replaced with the
+            # document it projects. Deleting it here rather than per symbol is
+            # what keeps a re-ingest that dropped a symbol from leaving that
+            # symbol's reasons behind as orphans.
+            conn.execute("DELETE FROM verdict_reasons WHERE run_id = ?", [str(run_id)])
+            conn.execute(
+                "DELETE FROM verdict_reason_sources WHERE run_id = ?", [str(run_id)]
+            )
             conn.execute(
                 "DELETE FROM analysis_source_coverage WHERE run_id = ?",
                 [str(run_id)],
@@ -415,6 +439,9 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
                         verdict.no_trade,
                         *_news_supply_columns(verdict.news_supply),
                     ],
+                )
+                _insert_reason_rows(
+                    conn, str(verdict.run_id), verdict.symbol, verdict.reasons
                 )
             for source in sources:
                 conn.execute(
@@ -451,6 +478,83 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
             raise
         else:
             conn.execute("COMMIT")
+
+
+def _insert_reason_rows(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: str,
+    symbol: str,
+    reasons: Sequence[VerdictReasonRecord],
+) -> None:
+    """Write one verdict's normalized reason rows inside the caller's transaction.
+
+    `reason_index` is the reason's position in `reasons_json`, so a row here
+    can always be traced back to the exact element of the document it
+    projects (Issue #192).
+    """
+    for index, reason in enumerate(reasons):
+        conn.execute(
+            _INSERT_VERDICT_REASON,
+            [run_id, symbol, index, reason.text, reason.basis, len(reason.source_ids)],
+        )
+        for source_id in dict.fromkeys(reason.source_ids):
+            conn.execute(
+                _INSERT_VERDICT_REASON_SOURCE, [run_id, symbol, index, source_id]
+            )
+
+
+def backfill_verdict_reasons(conn: duckdb.DuckDBPyConnection) -> int:
+    """Normalize `reasons_json` for verdicts that have no reason rows yet.
+
+    Issue #192's migration for a database with accumulated history. The rows
+    are a derived projection of `reasons_json`, which every existing verdict
+    already carries, so this restates a recorded fact rather than inventing
+    one — the same reasoning as `schema.py`'s column backfills, done in
+    Python because it re-uses `_reasons_from_json` instead of duplicating
+    that parsing as nested JSON SQL.
+
+    Idempotent: a verdict that already has rows is skipped, so re-running it
+    on every `init_schema()` is a no-op. A verdict whose `reasons_json` is
+    empty legitimately produces no rows and is simply re-examined next time.
+
+    The whole backfill is one transaction. Without it a failure partway
+    through would leave some verdict half-projected — and because the skip
+    guard is "does this verdict have any rows", that half would then be
+    skipped forever instead of being completed on the next start.
+
+    Args:
+        conn: The caller's connection, so the migration runs against the same
+            database handle `init_schema()` is already holding.
+
+    Returns:
+        How many reasons were written, for tests and logging.
+    """
+    rows = conn.execute(
+        """
+        SELECT v.run_id, v.symbol, v.reasons_json
+        FROM verdicts v
+        WHERE NOT EXISTS (
+            SELECT 1 FROM verdict_reasons r
+            WHERE r.run_id = v.run_id AND r.symbol = v.symbol
+        )
+        ORDER BY v.run_id, v.symbol
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+    written = 0
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for run_id, symbol, reasons_json in rows:
+            reasons = _reasons_from_json(str(reasons_json))
+            _insert_reason_rows(conn, str(run_id), str(symbol), reasons)
+            written += len(reasons)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+    return written
 
 
 def get_verdict_collection_digests(database: Database) -> dict[UUID, str]:

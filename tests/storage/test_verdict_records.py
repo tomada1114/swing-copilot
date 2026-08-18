@@ -519,6 +519,124 @@ class TestReplaceRunVerdictsAtomicity:
         assert _rows(state_store, "SELECT symbol FROM verdicts") == [("AAPL",)]
 
 
+class TestNormalizedVerdictReasons:
+    """Issue #192: `reasons_json` projected into queryable rows."""
+
+    def test_writes_one_row_per_reason_with_its_index_and_citation_count(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        reasons = (
+            VerdictReasonRecord("guidance raised", ("news-1", "news-2"), "filing"),
+            VerdictReasonRecord("momentum intact", (), None),
+        )
+
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL", reasons=reasons)], []
+        )
+
+        assert _rows(
+            state_store,
+            "SELECT symbol, reason_index, text, basis, source_id_count "
+            "FROM verdict_reasons ORDER BY reason_index",
+        ) == [
+            ("AAPL", 0, "guidance raised", "filing", 2),
+            ("AAPL", 1, "momentum intact", None, 0),
+        ]
+        assert _rows(
+            state_store,
+            "SELECT reason_index, source_id FROM verdict_reason_sources "
+            "ORDER BY reason_index, source_id",
+        ) == [(0, "news-1"), (0, "news-2")]
+
+    def test_reasons_json_stays_the_record_of_truth(
+        self, state_store: StateStore
+    ) -> None:
+        """The rows are a projection; the document itself is still written."""
+        run_id = uuid4()
+        reasons = (VerdictReasonRecord("guidance raised", ("news-1",), "filing"),)
+
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL", reasons=reasons)], []
+        )
+
+        assert state_store.get_run_verdicts(run_id)[0].reasons == reasons
+
+    def test_a_reinsertion_drops_reasons_of_a_symbol_no_longer_analyzed(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [
+                _verdict(
+                    run_id, "AAPL", reasons=(VerdictReasonRecord("kept", ("n-1",)),)
+                ),
+                _verdict(
+                    run_id, "MSFT", reasons=(VerdictReasonRecord("dropped", ("n-2",)),)
+                ),
+            ],
+            [],
+        )
+
+        state_store.replace_run_verdicts(
+            run_id,
+            [_verdict(run_id, "AAPL", reasons=(VerdictReasonRecord("rewritten", ()),))],
+            [],
+        )
+
+        assert _rows(state_store, "SELECT symbol, text FROM verdict_reasons") == [
+            ("AAPL", "rewritten")
+        ]
+        assert _rows(state_store, "SELECT count(*) FROM verdict_reason_sources") == [
+            (0,)
+        ]
+
+    def test_a_failure_after_an_earlier_reason_rolls_the_whole_write_back(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_id = uuid4()
+        _inject_failure(state_store, monkeypatch, "verdict_reasons", fail_on_call=2)
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.replace_run_verdicts(
+                run_id,
+                [
+                    _verdict(
+                        run_id,
+                        "AAPL",
+                        reasons=(
+                            VerdictReasonRecord("first", ()),
+                            VerdictReasonRecord("second", ()),
+                        ),
+                    )
+                ],
+                [],
+            )
+
+        monkeypatch.undo()
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+        assert _rows(state_store, "SELECT count(*) FROM verdict_reasons") == [(0,)]
+
+    def test_a_duplicate_source_id_in_one_reason_is_recorded_once(
+        self, state_store: StateStore
+    ) -> None:
+        """`source_id_count` counts the citation list; the rows are a set."""
+        run_id = uuid4()
+        reasons = (VerdictReasonRecord("cited twice", ("news-1", "news-1")),)
+
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL", reasons=reasons)], []
+        )
+
+        assert _rows(state_store, "SELECT source_id FROM verdict_reason_sources") == [
+            ("news-1",)
+        ]
+        assert _rows(state_store, "SELECT source_id_count FROM verdict_reasons") == [
+            (2,)
+        ]
+
+
 class TestReplaceVerdictOutcomes:
     def test_persists_one_row_per_symbol_and_horizon(
         self, state_store: StateStore

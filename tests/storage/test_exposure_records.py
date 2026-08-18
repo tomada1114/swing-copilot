@@ -36,3 +36,61 @@ def test_exposure_decision_upserts_corrections(state_store: StateStore) -> None:
             [str(run_id)],
         ).fetchall()
     assert rows == [("REDUCE_ONLY", "OK")]
+
+
+class TestPromotedExposureColumns:
+    """Issue #192: the decision's inputs as columns, not `detail_json`."""
+
+    def test_records_gate_dd_level_downgrade_flag_and_multiplier(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+
+        state_store.record_exposure_decision(
+            run_id,
+            ExposureDecision(
+                ExposureVerdict.REDUCE_ONLY,
+                GateVerdict.BEAR,
+                DistributionLevel.CAUTION,
+                DataQuality.OK,
+                is_conservatively_downgraded=True,
+                reduce_only_risk_multiplier=0.25,
+            ),
+        )
+
+        with state_store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT gate_verdict, dd_level, is_conservatively_downgraded, "
+                "reduce_only_risk_multiplier FROM exposure_decisions WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+
+        assert row == ("BEAR", "CAUTION", True, 0.25)
+
+    def test_a_correction_rewrites_the_promoted_columns(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.record_exposure_decision(
+            run_id, _decision(ExposureVerdict.NEW_ENTRY_ALLOWED)
+        )
+
+        state_store.record_exposure_decision(
+            run_id,
+            ExposureDecision(
+                ExposureVerdict.CASH_PRIORITY,
+                GateVerdict.UNKNOWN,
+                DistributionLevel.UNKNOWN,
+                DataQuality.INSUFFICIENT,
+                is_conservatively_downgraded=True,
+            ),
+        )
+
+        with state_store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT gate_verdict, dd_level, is_conservatively_downgraded "
+                "FROM exposure_decisions WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+
+        assert row == ("UNKNOWN", "UNKNOWN", True)

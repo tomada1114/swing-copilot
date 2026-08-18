@@ -901,6 +901,34 @@ class TestRunWithRejections:
 
         assert result.candidates == via_run
 
+    def test_signal_hits_carry_every_hit_the_run_produced(self, settings):
+        """Issue #192: the hits the storage boundary persists against `run_id`.
+
+        `LOW_VOLUME` is cut by the liquidity Filter before signals run, so it
+        cannot appear; `PASSES` hit the one configured signal and must.
+        """
+        bars = pd.concat(
+            [
+                _uptrend_bars("PASSES", volume=2_000_000),
+                _uptrend_bars("LOW_VOLUME", volume=100),
+            ]
+        )
+        data = ScreeningInput(
+            as_of=AS_OF,
+            universe=(_member("PASSES"), _member("LOW_VOLUME")),
+            fundamentals=_healthy_fundamentals_df(["PASSES", "LOW_VOLUME"]),
+            bars=bars,
+        )
+        pipeline = ScreeningPipeline(
+            STRATEGIES_CONFIG, market_store=None, settings=settings
+        )
+
+        result = pipeline.run_with_rejections(data)
+
+        assert [(hit.symbol, hit.signal_name) for hit in result.signal_hits] == [
+            ("PASSES", "trend_sma")
+        ]
+
     def test_rejects_liquidity_failure_with_the_divergence_reason_code(self, settings):
         # STRATEGIES_CONFIG: filters_all=["volume_min"], signals_all=["trend_sma"].
         # Fundamentals are healthy for both symbols so the rejection

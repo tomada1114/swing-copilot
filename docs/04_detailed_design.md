@@ -403,8 +403,13 @@ class StateStore:
     def record_run_step(self, run_id: UUID, step: str, status: StepStatus, detail: str | None, duration_s: float) -> None:
         """(run_id, step)をupsertする。"""
 
-    def record_signals(self, signals: list["SignalHit"], run_date: "date") -> None:
-        """signalsへ記録する。(date, symbol, signal_name)の重複はUNIQUE制約によりスキップ（冪等）。"""
+    def record_signals(self, signals: list["SignalHit"], run_date: "date", strategy_key: str) -> None:
+        """レガシー（Issue #192）。run_dateキーの旧signalsへ記録する。日次パイプラインは
+        record_screening_results()経由でrun_idキーのsignal_hitsへ書く。"""
+
+    def record_screening_results(self, result: "ScreeningResult", meta: "ScreeningRunMeta") -> None:
+        """1回のスクリーニングの4つの結果（候補・落選・順位落ち・シグナルヒット）を
+        単一トランザクションで記録する。"""
 
     def get_open_positions(self, is_paper: bool = True) -> list["Position"]:
         """現在オープン中のポジション一覧を返す（通常run専用、時点履歴ではない）。"""
@@ -1941,6 +1946,9 @@ CREATE TABLE IF NOT EXISTS run_steps (
     PRIMARY KEY (run_id, step)
 );
 
+-- レガシー（Issue #192）。run_date キーのため同日の dry_run と live が衝突し、
+-- run_id キーの他テーブルと JOIN できない。既存行の保存のためだけに残し、
+-- 書き込みは下の signal_hits へ移した。
 CREATE TABLE IF NOT EXISTS signals (
     run_date      DATE NOT NULL,
     symbol        VARCHAR NOT NULL,
@@ -1951,6 +1959,16 @@ CREATE TABLE IF NOT EXISTS signals (
     PRIMARY KEY (run_date, symbol, strategy_key, signal_name)
 );
 
+CREATE TABLE IF NOT EXISTS signal_hits (
+    run_id        UUID NOT NULL,
+    symbol        VARCHAR NOT NULL,
+    strategy_key  VARCHAR NOT NULL,
+    signal_name   VARCHAR NOT NULL,
+    strength      DOUBLE NOT NULL,
+    metrics_json  JSON NOT NULL,
+    PRIMARY KEY (run_id, symbol, strategy_key, signal_name)
+);
+
 CREATE TABLE IF NOT EXISTS candidates (
     run_id         UUID NOT NULL,
     symbol         VARCHAR NOT NULL,
@@ -1958,6 +1976,15 @@ CREATE TABLE IF NOT EXISTS candidates (
     rank            INTEGER NOT NULL,
     signal_names    VARCHAR[] NOT NULL,
     metrics_json    JSON NOT NULL,
+    -- Issue #192: ランキングキーの実列昇格。score_* は metrics_json にも残る
+    -- 生指標の一部だが、execution_* はどこにも永続化されていなかった。
+    score               DOUBLE,
+    score_rsi_pullback  DOUBLE,
+    score_trend_quality DOUBLE,
+    score_liquidity     DOUBLE,
+    score_atr_pct       DOUBLE,
+    execution_state     VARCHAR,
+    execution_distance  DOUBLE,
     PRIMARY KEY (run_id, symbol, strategy_key),
     UNIQUE (run_id, strategy_key, rank)
 );
@@ -2022,18 +2049,52 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
     run_id          UUID PRIMARY KEY,
     as_of           DATE NOT NULL,
     gate_verdict    VARCHAR NOT NULL,
-    dd_count_spy    DOUBLE NOT NULL,
+    dd_count_spy    DOUBLE NOT NULL,  -- 25セッション（意味は不変）
     dd_count_qqq    DOUBLE NOT NULL,
     dd_level        VARCHAR NOT NULL,
     data_quality    VARCHAR NOT NULL,
-    detail_json     JSON NOT NULL
+    detail_json     JSON NOT NULL,
+    -- Issue #192: 閾値レビューが読む値の実列昇格。gate 入力は評価不能時に
+    -- NULL（ALTERの制約ではなく設計上のNULL）。
+    dd15_spy        DOUBLE,
+    dd5_spy         DOUBLE,
+    dd15_qqq        DOUBLE,
+    dd5_qqq         DOUBLE,
+    spy_close       DOUBLE,
+    spy_ema         DOUBLE,
+    vix_close       DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS exposure_decisions (
     run_id       UUID PRIMARY KEY,
     verdict      VARCHAR NOT NULL,
     data_quality VARCHAR NOT NULL,
-    detail_json  JSON NOT NULL
+    detail_json  JSON NOT NULL,
+    -- Issue #192
+    gate_verdict VARCHAR,
+    dd_level     VARCHAR,
+    is_conservatively_downgraded BOOLEAN,
+    reduce_only_risk_multiplier  DOUBLE
+);
+
+-- Issue #192: verdicts.reasons_json の正規化投影。reasons_json は引き続き
+-- 記録の正であり、これらの行はその派生（＝既存DBはバックフィル可能）。
+CREATE TABLE IF NOT EXISTS verdict_reasons (
+    run_id          UUID NOT NULL,
+    symbol          VARCHAR NOT NULL,
+    reason_index    INTEGER NOT NULL,
+    text            VARCHAR NOT NULL,
+    basis           VARCHAR,          -- Issue #191 の evidence-kind タグ
+    source_id_count INTEGER NOT NULL,
+    PRIMARY KEY (run_id, symbol, reason_index)
+);
+
+CREATE TABLE IF NOT EXISTS verdict_reason_sources (
+    run_id       UUID NOT NULL,
+    symbol       VARCHAR NOT NULL,
+    reason_index INTEGER NOT NULL,
+    source_id    VARCHAR NOT NULL,
+    PRIMARY KEY (run_id, symbol, reason_index, source_id)
 );
 
 CREATE TABLE IF NOT EXISTS risk_assessments (
@@ -2061,6 +2122,12 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
 `config_hash`は短縮値ではなく、検証済みSettings・選択StrategySpec・strategy keyのcanonical JSONから得る完全SHA-256である。`metadata_json`は`run-metadata-v1`として、provider名、data tier、実効ユニバースのsnapshot日とidentity、アプリ版を保存する。既存DuckDBは`ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata_json JSON`で加算移行し、旧rowのNULLを歴史的な欠損として許容する。新規runは常にcanonical JSON objectを書く。
 
 P1-03より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かない（既存テーブル形状に対してno-op）ため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS ...`で追加列を後付けする。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK/NOT NULL制約付与を未サポートのため、この経路で追加された列はアプリケーション側でのみ整合性が保証される（既存DBをALTER経由でアップグレードした場合、`CREATE TABLE`側のCHECK制約はDB層では効かない）。
+
+**Issue #192実装時追記（実列昇格とマイグレーション方針）**: JSON列の中にしか無かった値を実列へ昇格する場合、上の「過去行はバックフィルせずNULLのまま」（`text_items.related_symbols`等）とは扱いを変え、**バックフィルする**。既存行がその値を既に保持しており、形が違うだけだからである——`positions.exit_reason`のバックフィルと同じ「既知の事実の言い直し」であって推測ではない。対象は`candidates.score`/`score_*`（`metrics_json`から）、`regime_snapshots`の`dd15_*`/`dd5_*`/gate入力（`detail_json`から）、`exposure_decisions`の4列（同）、`verdict_reasons`/`verdict_reason_sources`（`verdicts.reasons_json`から）。各バックフィルは「書き込み側が必ず埋める列」に対する`WHERE ... IS NULL`でガードするので冪等であり、2回目以降は空振りスキャンで終わる。
+
+これに対し`candidates.execution_state` / `execution_distance`は**バックフィルしない一方向の切断**である。この2つはどの列にもJSONにも永続化されたことがなく、復元するには当時のexecution設定と当時のbarsで再計算するしかない。したがって既存行のNULLは「未記録」を意味し、**`UNKNOWN`（距離が計算不能という測定結果）と読み替えてはならない**。分析ビュー`v_candidates`はスコア側だけ`COALESCE(実列, metrics_json抽出)`のフォールバックを持ち、execution側は素の列を返す（JSONにも無いのでフォールバック先が存在しない）。
+
+`verdict_reasons`のバックフィルだけはSQL文字列ではなく`verdict_records.backfill_verdict_reasons()`（Python）で行う。`reasons_json`の解釈を入れ子JSONのSQLとして二重実装せず、同モジュールの`_reasons_from_json`をそのまま再利用するためである。`init_schema()`がビュー作成の後に呼び、既に行を持つverdictはスキップする。移行の回帰は`tests/storage/test_schema_migration.py`が、**Issue #192より前のDDLで作った実データ入りDB**に対して`init_schema()`を走らせる形で固定している。
 
 ```sql
 CREATE TABLE IF NOT EXISTS positions (
@@ -2220,6 +2287,17 @@ CREATE TABLE IF NOT EXISTS text_items (
 near-missとして残らないようにするためである。スコア内訳をJSONではなく型付き列へ展開するのは、
 この行の存在理由が集計そのもの（GROUP BY）であり、`candidates.metrics_json`のようにレポートや
 分析exportへ渡る値ではないからである。
+
+**Issue #192実装時追記（signal_hitsの同居）**: 上の単一トランザクションは`signal_hits`を
+含む4テーブルになった。`signals`（`run_date`キー）は読み出す関数がゼロで、同日の`dry_run`と
+`live`が互いを上書きし、`run_id`キーの他テーブルとJOINできない書き込み専用の死蔵データだった。
+DuckDBは主キーを変更できないため、`signal_hits(run_id, symbol, strategy_key, signal_name,
+strength, metrics_json)`を新設し、旧`signals`は既存行の保存のためだけに読み取り専用で残す。
+書き込みは`record_screening_results()`が`candidates`と同一トランザクションで行い（あるrunの
+ヒットとそこから作られたランキングは1つの論理書き込みである）、`screening_truncations`と同じく
+当該run/strategyの**全削除→再挿入**とする——訂正barsでの再実行で発火しなくなったシグナルが
+残ってはならないためである。書かれるのは候補になった銘柄のヒットだけではなく、その run の全
+シグナルの全ヒットである（あるシグナルにだけ当たって候補にならなかった銘柄を含む）。
 
 `universe_forward_returns`（Issue #188）は、forward returnと当否分類が候補にしか付かない
 ——つまり測れているのは偽陽性率だけ——という構造的な盲点を閉じる。`(run_id, symbol,

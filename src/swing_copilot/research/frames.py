@@ -10,8 +10,8 @@ would block the unattended daily run. Never keep a raw connection open in a
 notebook; call these functions instead.
 
 The joined views these functions read (`v_verdict_scorecard`, `v_candidates`,
-`v_truncated_candidates`, `v_universe_forward_returns`,
-`v_tracked_positions`, `v_symbol_sector_asof`) are defined in
+`v_truncated_candidates`, `v_universe_forward_returns`, `v_signal_hits`,
+`v_verdict_reasons`, `v_tracked_positions`, `v_symbol_sector_asof`) are defined in
 `storage/schema.py` and created by `StateStore.init_schema()` — i.e. by any
 daily run. On a database from before the views existed, call
 `ensure_views()` once (it opens read-write briefly).
@@ -186,6 +186,42 @@ def universe_forward_returns(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFr
         """
         SELECT * FROM v_universe_forward_returns
         ORDER BY run_date, horizon_days, outcome_class, symbol
+        """,
+        db_path=db_path,
+    )
+
+
+def signal_hits(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """Every signal hit a run produced, keyed by `run_id` (Issue #192).
+
+    Reads `v_signal_hits`, i.e. the `run_id`-keyed `signal_hits` table — not
+    the legacy `signals` table, whose `run_date` key let a same-day `dry_run`
+    and `live` run overwrite each other and which cannot be joined to any
+    other table. Includes hits on symbols that fired one signal but not all
+    of them, so "which signal was the bottleneck" is answerable.
+    """
+    return query(
+        """
+        SELECT * FROM v_signal_hits
+        ORDER BY run_date, strategy_key, symbol, signal_name
+        """,
+        db_path=db_path,
+    )
+
+
+def verdict_reasons(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """One row per individual verdict reason, with its citation count.
+
+    Reads `v_verdict_reasons`, the normalized projection of
+    `verdicts.reasons_json` (Issue #192), so questions about the reasoning
+    itself are plain filters: `df[df.source_id_count == 0]` is every reason
+    that rested on no news or filing at all, and `basis` carries Issue #191's
+    evidence-kind tag where the reason was written with one.
+    """
+    return query(
+        """
+        SELECT * FROM v_verdict_reasons
+        ORDER BY run_date, symbol, reason_index
         """,
         db_path=db_path,
     )

@@ -1,8 +1,9 @@
 """Contract tests for the read-only research surface (`swing_copilot.research`).
 
 The views under test (`v_verdict_scorecard`, `v_candidates`,
-`v_truncated_candidates`, `v_universe_forward_returns`,
-`v_tracked_positions`, `v_symbol_sector_asof`) live in `storage/schema.py`;
+`v_truncated_candidates`, `v_universe_forward_returns`, `v_signal_hits`,
+`v_verdict_reasons`, `v_tracked_positions`, `v_symbol_sector_asof`) live in
+`storage/schema.py`;
 these tests exercise them through the public DataFrame accessors, including
 the as-of sector boundary, the immature-verdict row, read-only enforcement,
 and the `ensure_views` recovery path for a pre-view database.
@@ -46,7 +47,12 @@ def _insert_universe(store, snapshot_date, sector="Information Technology"):
 def _insert_candidate(store, run_id, metrics_json):
     with store._database.connect() as conn:  # noqa: SLF001
         conn.execute(
-            "INSERT INTO candidates VALUES (?, 'AAPL', 'default', 1, ['trend_sma'], ?)",
+            # Deliberately only `metrics_json`, leaving Issue #192's promoted
+            # columns NULL: this is the pre-migration row shape `v_candidates`
+            # has to keep reading through its COALESCE fallback.
+            "INSERT INTO candidates (run_id, symbol, strategy_key, rank, "
+            "signal_names, metrics_json) "
+            "VALUES (?, 'AAPL', 'default', 1, ['trend_sma'], ?)",
             [str(run_id), metrics_json],
         )
 
@@ -81,8 +87,9 @@ class TestScorecard:
                 [str(run_id)],
             )
             conn.execute(
-                "INSERT INTO regime_snapshots VALUES (?, ?, 'NORMAL', 1.0, "
-                "2.0, 'calm', 'OK', '{}')",
+                "INSERT INTO regime_snapshots (run_id, as_of, gate_verdict, "
+                "dd_count_spy, dd_count_qqq, dd_level, data_quality, detail_json) "
+                "VALUES (?, ?, 'NORMAL', 1.0, 2.0, 'calm', 'OK', '{}')",
                 [str(run_id), RUN_DATE],
             )
 
@@ -201,8 +208,9 @@ class TestTableAccessors:
                 [str(run_id), RUN_DATE],
             )
             conn.execute(
-                "INSERT INTO regime_snapshots VALUES (?, ?, 'CAUTION', 4.0, "
-                "5.0, 'elevated', 'OK', '{}')",
+                "INSERT INTO regime_snapshots (run_id, as_of, gate_verdict, "
+                "dd_count_spy, dd_count_qqq, dd_level, data_quality, detail_json) "
+                "VALUES (?, ?, 'CAUTION', 4.0, 5.0, 'elevated', 'OK', '{}')",
                 [str(run_id), RUN_DATE],
             )
 
@@ -320,6 +328,91 @@ class TestControlGroupAccessors:
 
         assert len(df) == 1
         assert df.iloc[0]["rank"] == 6
+
+
+def _insert_promoted_candidate(store, run_id, symbol, execution_state, rank=1):
+    with store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO candidates (run_id, symbol, strategy_key, rank, "
+            "signal_names, metrics_json, score, execution_state, "
+            "execution_distance) VALUES (?, ?, 'default', ?, ['trend_sma'], "
+            "'{}', 0.8, ?, 0.4)",
+            [str(run_id), symbol, rank, execution_state],
+        )
+
+
+class TestPromotedColumnAccessors:
+    """Issue #192: what the promoted columns make answerable in one line."""
+
+    def test_forward_returns_can_be_aggregated_by_execution_state(
+        self, state_store, tmp_path
+    ):
+        """The issue's DoD: no join, no `json_extract`, one `groupby`."""
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_promoted_candidate(state_store, run_id, "AAPL", "READY")
+        _insert_promoted_candidate(state_store, run_id, "MSFT", "EXTENDED", rank=2)
+        _insert_universe_return(state_store, run_id, "AAPL", "candidate")
+        _insert_universe_return(state_store, run_id, "MSFT", "candidate")
+        _insert_truncation(state_store, run_id)
+        _insert_universe_return(state_store, run_id, "NEAR", "truncated")
+
+        df = research.universe_forward_returns(db_path=tmp_path / "copilot.duckdb")
+        by_state = df.groupby("execution_state")["forward_return_pct"].mean()
+
+        assert set(by_state.index) == {"READY", "EXTENDED"}
+        assert by_state["READY"] == pytest.approx(-3.5)
+
+    def test_candidates_expose_the_execution_state_without_a_json_fallback(
+        self, state_store, tmp_path
+    ):
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_promoted_candidate(state_store, run_id, "AAPL", "READY")
+
+        df = research.candidates(db_path=tmp_path / "copilot.duckdb")
+
+        assert df.iloc[0]["execution_state"] == "READY"
+        assert df.iloc[0]["execution_distance"] == pytest.approx(0.4)
+
+    def test_signal_hits_are_attributed_to_the_run_that_produced_them(
+        self, state_store, tmp_path
+    ):
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO signal_hits VALUES (?, 'AAPL', 'default', "
+                "'trend_sma', 1.0, '{}')",
+                [str(run_id)],
+            )
+
+        df = research.signal_hits(db_path=tmp_path / "copilot.duckdb")
+
+        assert len(df) == 1
+        assert df.iloc[0]["signal_name"] == "trend_sma"
+        assert df.iloc[0]["run_date"] == pd.Timestamp(RUN_DATE)
+
+    def test_verdict_reasons_expose_uncited_reasons_as_a_filter(
+        self, state_store, tmp_path
+    ):
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_verdict(state_store, run_id)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO verdict_reasons VALUES "
+                "(?, 'AAPL', 0, 'cited', 'filing', 2), "
+                "(?, 'AAPL', 1, 'uncited', NULL, 0)",
+                [str(run_id), str(run_id)],
+            )
+
+        df = research.verdict_reasons(db_path=tmp_path / "copilot.duckdb")
+        uncited = df[df["source_id_count"] == 0]
+
+        assert len(df) == 2
+        assert list(uncited["text"]) == ["uncited"]
+        assert set(df["recommendation"]) == {"proceed"}
 
 
 class TestQuery:

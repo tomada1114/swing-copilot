@@ -14,6 +14,7 @@ from swing_copilot.screening.base import (
     RejectionReasonCode,
     RejectionRecord,
     RejectionStage,
+    ScreeningResult,
     TruncatedCandidate,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
@@ -126,16 +127,18 @@ class TestGetRunDetail:
     ) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate()],
-            [
-                RejectionRecord(
-                    symbol="MSFT",
-                    stage=RejectionStage.TECHNICAL_SIGNAL,
-                    reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-                    detail={"rsi14": 70.0},
-                )
-            ],
-            [],
+            ScreeningResult(
+                candidates=[_candidate()],
+                rejections=[
+                    RejectionRecord(
+                        symbol="MSFT",
+                        stage=RejectionStage.TECHNICAL_SIGNAL,
+                        reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                        detail={"rsi14": 70.0},
+                    )
+                ],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
         state_store.record_risk_assessments(
@@ -189,16 +192,18 @@ class TestGetRejections:
 
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [],
-            [
-                RejectionRecord(
-                    symbol="MSFT",
-                    stage=RejectionStage.TECHNICAL_SIGNAL,
-                    reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-                    detail={"rsi14": 70.0, "note": "overbought"},
-                )
-            ],
-            [],
+            ScreeningResult(
+                candidates=[],
+                rejections=[
+                    RejectionRecord(
+                        symbol="MSFT",
+                        stage=RejectionStage.TECHNICAL_SIGNAL,
+                        reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                        detail={"rsi14": 70.0, "note": "overbought"},
+                    )
+                ],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -223,19 +228,21 @@ class TestGetTruncations:
     ) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [],
-            [],
-            [
-                TruncatedCandidate(
-                    symbol=symbol,
-                    rank=rank,
-                    score=score,
-                    score_breakdown={"score_liquidity": 0.5},
-                    execution_state="READY",
-                    execution_distance=None,
-                )
-                for symbol, rank, score in (("FAR", 7, 0.3), ("NEAR", 6, 0.4))
-            ],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[
+                    TruncatedCandidate(
+                        symbol=symbol,
+                        rank=rank,
+                        score=score,
+                        score_breakdown={"score_liquidity": 0.5},
+                        execution_state="READY",
+                        execution_distance=None,
+                    )
+                    for symbol, rank, score in (("FAR", 7, 0.3), ("NEAR", 6, 0.4))
+                ],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 

@@ -19,6 +19,7 @@ from swing_copilot.screening.base import (
     RejectionReasonCode,
     RejectionRecord,
     RejectionStage,
+    ScreeningResult,
     SignalHit,
     TruncatedCandidate,
 )
@@ -1076,9 +1077,11 @@ class TestRecordScreeningResults:
         ]
 
         state_store.record_screening_results(
-            candidates,
-            rejections,
-            [],
+            ScreeningResult(
+                candidates=candidates,
+                rejections=rejections,
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1110,9 +1113,11 @@ class TestRecordScreeningResults:
         )
 
         state_store.record_screening_results(
-            [],
-            [rejection],
-            [],
+            ScreeningResult(
+                candidates=[],
+                rejections=[rejection],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1203,9 +1208,11 @@ class TestRecordScreeningResults:
 
         with pytest.raises(RuntimeError, match="simulated failure"):
             state_store.record_screening_results(
-                candidates,
-                rejections,
-                [],
+                ScreeningResult(
+                    candidates=candidates,
+                    rejections=rejections,
+                    truncated=[],
+                ),
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
@@ -1255,18 +1262,22 @@ class TestRecordScreeningResults:
         )
         with pytest.raises(RuntimeError, match="simulated failure"):
             state_store.record_screening_results(
-                candidates,
-                rejections,
-                [],
+                ScreeningResult(
+                    candidates=candidates,
+                    rejections=rejections,
+                    truncated=[],
+                ),
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
         monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
         retry_run_id = uuid4()
         state_store.record_screening_results(
-            candidates,
-            rejections,
-            [],
+            ScreeningResult(
+                candidates=candidates,
+                rejections=rejections,
+                truncated=[],
+            ),
             ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1294,9 +1305,11 @@ class TestRecordScreeningResults:
         ]
 
         state_store.record_screening_results(
-            candidates,
-            [],
-            [],
+            ScreeningResult(
+                candidates=candidates,
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1361,9 +1374,11 @@ class TestRecordScreeningTruncations:
         run_id = uuid4()
 
         state_store.record_screening_results(
-            [],
-            [],
-            [_truncated("NEAR", rank=6, score=0.42)],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("NEAR", rank=6, score=0.42)],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1398,9 +1413,11 @@ class TestRecordScreeningTruncations:
         truncations = [_truncated(f"T{rank}", rank) for rank in range(9, 2, -1)]
 
         state_store.record_screening_results(
-            [],
-            [],
-            truncations,
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=truncations,
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 2),
         )
 
@@ -1417,9 +1434,11 @@ class TestRecordScreeningTruncations:
         run_id = uuid4()
 
         state_store.record_screening_results(
-            [],
-            [],
-            [_truncated("NEAR", rank=1)],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("NEAR", rank=1)],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 0),
         )
 
@@ -1438,11 +1457,21 @@ class TestRecordScreeningTruncations:
         run_id = uuid4()
         meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
         state_store.record_screening_results(
-            [], [], [_truncated("GONE", 6), _truncated("STAY", 7)], meta
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("GONE", 6), _truncated("STAY", 7)],
+            ),
+            meta,
         )
 
         state_store.record_screening_results(
-            [], [], [_truncated("STAY", rank=6, score=0.9)], meta
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("STAY", rank=6, score=0.9)],
+            ),
+            meta,
         )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1458,16 +1487,20 @@ class TestRecordScreeningTruncations:
         # writing one must not delete the other's tail.
         run_id = uuid4()
         state_store.record_screening_results(
-            [],
-            [],
-            [_truncated("OTHER", 6)],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("OTHER", 6)],
+            ),
             ScreeningRunMeta(run_id, "vcp", date(2026, 7, 20), 5),
         )
 
         state_store.record_screening_results(
-            [],
-            [],
-            [_truncated("NEAR", 6)],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated("NEAR", 6)],
+            ),
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
@@ -1513,9 +1546,11 @@ class TestRecordScreeningTruncations:
 
         with pytest.raises(RuntimeError, match="simulated failure"):
             state_store.record_screening_results(
-                candidates,
-                rejections,
-                truncations,
+                ScreeningResult(
+                    candidates=candidates,
+                    rejections=rejections,
+                    truncated=truncations,
+                ),
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
@@ -1543,10 +1578,24 @@ class TestRecordScreeningTruncations:
             lambda: _FlakyTruncationConnection(real_connect(), fail_on_call=2),
         )
         with pytest.raises(RuntimeError, match="simulated failure"):
-            state_store.record_screening_results([], [], truncations, meta)
+            state_store.record_screening_results(
+                ScreeningResult(
+                    candidates=[],
+                    rejections=[],
+                    truncated=truncations,
+                ),
+                meta,
+            )
 
         monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
-        state_store.record_screening_results([], [], truncations, meta)
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=truncations,
+            ),
+            meta,
+        )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
             count = conn.execute(
@@ -1554,6 +1603,327 @@ class TestRecordScreeningTruncations:
                 [str(run_id)],
             ).fetchone()
         assert count == (2,)
+
+
+def _hit(
+    symbol: str, signal_name: str = "trend_sma", strength: float = 1.0
+) -> SignalHit:
+    return SignalHit(
+        symbol=symbol,
+        signal_name=signal_name,
+        direction="long",
+        strength=strength,
+        metrics={"rsi14": 40.0},
+    )
+
+
+class _FlakySignalHitConnection:
+    """Wraps a real connection; raises on the Nth `INSERT INTO signal_hits`.
+
+    Targets the fourth (last) table of `record_screening_results`' single
+    transaction, so the rollback assertion covers a failure landing after
+    candidate, rejection, truncation, and an earlier signal-hit row have all
+    succeeded.
+    """
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO signal_hits"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later signal hit insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+class TestRecordSignalHits:
+    """Issue #192: `signal_hits`, the `run_id`-keyed successor to `signals`."""
+
+    def test_records_hits_against_the_run_not_the_run_date(self, state_store):
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[],
+                signal_hits=[_hit("AAPL"), _hit("AAPL", "rsi_pullback", 0.5)],
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, strategy_key, signal_name, strength, metrics_json "
+                "FROM signal_hits WHERE run_id = ? ORDER BY signal_name",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [
+            ("AAPL", "default", "rsi_pullback", 0.5, '{"rsi14": 40.0}'),
+            ("AAPL", "default", "trend_sma", 1.0, '{"rsi14": 40.0}'),
+        ]
+
+    def test_same_date_dry_run_and_live_runs_no_longer_collide(self, state_store):
+        """The defect that made the legacy `signals` table unusable."""
+        live = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
+        dry_run = state_store.start_run(date(2026, 7, 20), RunMode.DRY_RUN, "cfg")
+        for run_id, strength in ((live, 1.0), (dry_run, 0.25)):
+            state_store.record_screening_results(
+                ScreeningResult(
+                    candidates=[],
+                    rejections=[],
+                    truncated=[],
+                    signal_hits=[_hit("AAPL", strength=strength)],
+                ),
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+            )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT run_id, strength FROM signal_hits ORDER BY strength"
+            ).fetchall()
+        assert {(str(row[0]), row[1]) for row in rows} == {
+            (str(live), 1.0),
+            (str(dry_run), 0.25),
+        }
+
+    def test_a_rerun_drops_a_hit_the_new_ranking_no_longer_has(self, state_store):
+        # Replacement, not upsert: a signal that stopped firing on corrected
+        # bars must not survive as a phantom hit.
+        run_id = uuid4()
+        meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[],
+                signal_hits=[_hit("AAPL"), _hit("GONE")],
+            ),
+            meta,
+        )
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[],
+                signal_hits=[_hit("AAPL", strength=0.75)],
+            ),
+            meta,
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, strength FROM signal_hits WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("AAPL", 0.75)]
+
+    def test_replacement_is_scoped_to_the_strategy_being_rewritten(self, state_store):
+        run_id = uuid4()
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[], rejections=[], truncated=[], signal_hits=[_hit("OTHER")]
+            ),
+            ScreeningRunMeta(run_id, "vcp", date(2026, 7, 20), 5),
+        )
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[], rejections=[], truncated=[], signal_hits=[_hit("AAPL")]
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT strategy_key, symbol FROM signal_hits WHERE run_id = ? "
+                "ORDER BY strategy_key",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("default", "AAPL"), ("vcp", "OTHER")]
+
+    def test_rolls_back_all_four_tables_when_a_later_hit_insert_fails(
+        self, state_store, monkeypatch
+    ):
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={"score": 0.5},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="R1",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            )
+        ]
+        hits = [_hit(f"H{index}") for index in range(3)]
+
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakySignalHitConnection(real_connect(), fail_on_call=3),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                ScreeningResult(
+                    candidates=candidates,
+                    rejections=rejections,
+                    truncated=[_truncated("NEAR", 6)],
+                    signal_hits=hits,
+                ),
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+            )
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            counts = conn.execute(
+                "SELECT "
+                "(SELECT count(*) FROM candidates WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_rejections WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_truncations WHERE run_id = ?), "
+                "(SELECT count(*) FROM signal_hits WHERE run_id = ?)",
+                [str(run_id)] * 4,
+            ).fetchone()
+        assert counts == (0, 0, 0, 0)
+
+
+class TestPromotedCandidateColumns:
+    """Issue #192: the ranking key as columns, written straight from `Candidate`."""
+
+    def _candidate(
+        self,
+        metrics: dict[str, float] | None = None,
+        execution_state: str = "READY",
+        execution_distance: float | None = 0.35,
+    ) -> Candidate:
+        return Candidate(
+            symbol="AAPL",
+            as_of=date(2026, 7, 20),
+            signal_names=("trend_sma",),
+            metrics=(
+                {
+                    "score": 0.62,
+                    "score_rsi_pullback": 0.30,
+                    "score_trend_quality": 0.20,
+                    "score_liquidity": 0.10,
+                    "score_atr_pct": 0.02,
+                }
+                if metrics is None
+                else metrics
+            ),
+            rank=1,
+            execution_state=execution_state,
+            execution_distance=execution_distance,
+        )
+
+    def _row(self, state_store, run_id):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            return conn.execute(
+                "SELECT score, score_rsi_pullback, score_trend_quality, "
+                "score_liquidity, score_atr_pct, execution_state, "
+                "execution_distance FROM candidates WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+
+    def test_records_score_components_and_execution_state(self, state_store):
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[self._candidate()], rejections=[], truncated=[]
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        assert self._row(state_store, run_id) == (
+            0.62,
+            0.30,
+            0.20,
+            0.10,
+            0.02,
+            "READY",
+            0.35,
+        )
+
+    def test_a_rerun_corrects_the_promoted_columns_too(self, state_store):
+        # Correction upsert: a stale score beside a corrected `metrics_json`
+        # would be the worst of both shapes.
+        run_id = uuid4()
+        meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[self._candidate()], rejections=[], truncated=[]
+            ),
+            meta,
+        )
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[
+                    self._candidate(
+                        metrics={"score": 0.11, "score_rsi_pullback": 0.05},
+                        execution_state="EXTENDED",
+                        execution_distance=2.5,
+                    )
+                ],
+                rejections=[],
+                truncated=[],
+            ),
+            meta,
+        )
+
+        assert self._row(state_store, run_id) == (
+            0.11,
+            0.05,
+            None,
+            None,
+            None,
+            "EXTENDED",
+            2.5,
+        )
+
+    def test_a_candidate_without_score_metrics_records_null_not_zero(self, state_store):
+        """An uncomputed component and a component computed as 0.0 differ."""
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[self._candidate(metrics={})], rejections=[], truncated=[]
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        assert self._row(state_store, run_id) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+            "READY",
+            0.35,
+        )
 
 
 class _FlakyUniverseReturnConnection:

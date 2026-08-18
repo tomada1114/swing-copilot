@@ -14,11 +14,16 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from swing_copilot.analysis.cli import ingest
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.config import load_settings
 from swing_copilot.data.base import BarFetchResult
@@ -41,8 +46,13 @@ from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
+from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
+from tests.analysis.conftest import input_payload, result_payload
 
 AS_OF = date(2027, 3, 1)
+#: A live run (no `--as-of`) dates itself from the newest bar the provider
+#: returned, and `_uptrending_bars` stops one day short of `AS_OF`.
+LIVE_RUN_DATE = AS_OF - timedelta(days=1)
 SYMBOLS = ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"]
 
 STRATEGIES_CONFIG = {
@@ -500,3 +510,77 @@ class TestFiveSymbolEndToEnd:
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
         aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
         assert aapl["decision_history"] is None
+
+
+def _archive_ingested_run(output_dir: str, run_date: date) -> None:
+    """Leave one past run's directory exactly as `copilot-ingest-analysis` does.
+
+    Both documents are present and agree on `run_id`, which is what makes the
+    run collectable; the verdict's `as_of` comes from the directory's date.
+    """
+    directory = Path(output_dir) / run_date.isoformat() / ARCHIVED_RUN_ID
+    directory.mkdir(parents=True, exist_ok=True)
+    archived_input = input_payload(as_of=run_date.isoformat())
+    (directory / ANALYSIS_INPUT_FILENAME).write_text(
+        json.dumps(archived_input), encoding="utf-8"
+    )
+    (directory / ANALYSIS_RESULT_FILENAME).write_text(
+        json.dumps(
+            result_payload(
+                as_of=run_date.isoformat(),
+                input_digest=archived_input["input_digest"],
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestPriorVerdictsReachBackToTheLastRun:
+    """Issue #207: `<prior_verdicts>` must not lag the archive by a whole run.
+
+    `retro_collect` is the only writer of `verdicts`, so while it ran after
+    step 6 the exported block could only ever show verdicts up to D-2 -- the
+    two most recent business days, the ones a repeat candidate is actually
+    about, were silently blank.
+    """
+
+    def test_the_previous_days_verdict_is_exported_by_the_next_run(self, deps):
+        archived_date = LIVE_RUN_DATE - timedelta(days=1)
+        _archive_ingested_run(deps.output_dir, archived_date)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.run_date == LIVE_RUN_DATE
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
+        assert aapl["prior_verdicts"] is not None
+        assert "<prior_verdicts>" in aapl["prior_verdicts"]
+        assert f"日付: {archived_date.isoformat()}" in aapl["prior_verdicts"]
+        assert "前回の判断: proceed" in aapl["prior_verdicts"]
+        assert "No contradicting disclosure." in aapl["prior_verdicts"]
+
+    @pytest.mark.parametrize(
+        "day_offset", [0, 1], ids=["same-day-as-the-run", "after-the-run"]
+    )
+    def test_a_verdict_not_strictly_before_the_run_date_is_withheld(
+        self, deps, day_offset
+    ):
+        # The point-in-time cutoff (`as_of < run_date`) is unchanged by the
+        # reordering: collecting earlier must not let today's -- or a
+        # future-dated -- verdict flow back into today's own input.
+        archived_date = LIVE_RUN_DATE + timedelta(days=day_offset)
+        _archive_ingested_run(deps.output_dir, archived_date)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        with deps.state_store.database.connect() as conn:
+            collected = conn.execute("SELECT as_of FROM verdicts").fetchall()
+        # The archive really was collected before the export ran, so the
+        # exclusion below is the as-of rule and not a missing row.
+        assert [row[0] for row in collected] == [archived_date]
+
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
+        assert aapl["prior_verdicts"] is None

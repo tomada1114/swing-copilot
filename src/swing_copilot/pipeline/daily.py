@@ -1192,11 +1192,13 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
     manually. The scan is offline and idempotent (run-scoped
     DELETE-then-INSERT), so a daily repetition changes nothing but recency.
 
-    The current run's own directory already holds `analysis_input.json` at
-    this point, but its `analysis_result.json` is only written later by the
-    skill's ingest, so today's run — like any run whose skill answer was never
-    ingested — simply becomes a note, which is the collector's normal
-    fail-soft outcome and not a degradation.
+    The step runs ahead of step 6 so that the previous run's verdicts are in
+    the database before the export builds `<prior_verdicts>` (Issue #207); at
+    that point the current run's own directory does not exist yet, and its
+    `analysis_result.json` would in any case only be written later by the
+    skill's ingest. Today's run is therefore simply not scanned, and any run
+    whose skill answer was never ingested becomes a note -- the collector's
+    normal fail-soft outcome, not a degradation.
     """
     try:
         summary = collect_verdicts(deps.state_store, Path(deps.output_dir))

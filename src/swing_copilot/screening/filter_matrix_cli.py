@@ -36,9 +36,10 @@ import duckdb
 from rich.console import Console
 from rich.table import Table
 
-from swing_copilot.analysis.export import write_json_atomically
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
+from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.filter_matrix import (
     FilterMatrixResult,
@@ -68,6 +69,12 @@ _CONSOLE_WIDTH = 200
 
 class FilterMatrixCliError(SwingCopilotError):
     """Raised for argument/strategy/universe errors, before anything is rendered."""
+
+
+#: An unusable settings/strategies file: one line on stderr, exit 1.
+_CONFIG_EXIT = ExitPolicy(errors=(ConfigError,), code=1)
+#: A bad argument: the argparse convention (message as the exit status).
+_ARGUMENT_EXIT = ExitPolicy(errors=(FilterMatrixCliError,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,31 +355,24 @@ def build_payload(
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: compute the matrix, print it, optionally write JSON."""
     args = _parse_args(argv)
-    try:
-        settings = load_settings(args.settings)
-        strategies = load_strategies(args.strategies)
-    except ConfigError as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
-
-    try:
-        strategy = _select_strategy(args, strategies)
-        measured = _screening_input(args, settings)
-    except FilterMatrixCliError as exc:
-        raise SystemExit(str(exc)) from exc
-
-    try:
-        result = evaluate_filter_matrix(measured.data, settings, strategy)
-    except (KeyError, NotImplementedError) as exc:
-        # An unregistered filter/signal key, or one `rejection_classifier` has
-        # no mirror for. Both are `strategies.yaml` mistakes, so they get the
-        # same one-line message an unknown `--strategy` gets rather than a
-        # traceback out of the middle of the evaluation.
-        msg = (
-            f"戦略 '{strategy.key}' のチェック構成を測定できません: {exc}。"
-            "strategies.yaml の filters_all / signals_all を確認してください。"
-        )
-        raise SystemExit(msg) from exc
+    settings = run_cli(lambda: load_settings(args.settings), _CONFIG_EXIT)
+    strategies = run_cli(lambda: load_strategies(args.strategies), _CONFIG_EXIT)
+    strategy = run_cli(lambda: _select_strategy(args, strategies), _ARGUMENT_EXIT)
+    measured = run_cli(lambda: _screening_input(args, settings), _ARGUMENT_EXIT)
+    # An unregistered filter/signal key, or one `rejection_classifier` has no
+    # mirror for. Both are `strategies.yaml` mistakes, so they get the same
+    # one-line message an unknown `--strategy` gets rather than a traceback out
+    # of the middle of the evaluation.
+    result = run_cli(
+        lambda: evaluate_filter_matrix(measured.data, settings, strategy),
+        ExitPolicy(
+            errors=(KeyError, NotImplementedError),
+            format_message=lambda exc: (
+                f"戦略 '{strategy.key}' のチェック構成を測定できません: {exc}。"
+                "strategies.yaml の filters_all / signals_all を確認してください。"
+            ),
+        ),
+    )
 
     sys.stdout.write(render_terminal(result, measured))
 

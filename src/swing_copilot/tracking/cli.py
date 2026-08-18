@@ -38,6 +38,7 @@ from uuid import UUID
 from rich.console import Console
 from rich.table import Table
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import Settings, load_settings
 from swing_copilot.exceptions import ConfigError
@@ -67,6 +68,11 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # UUID or a price because of the invoking terminal's actual size.
 _CONSOLE_WIDTH = 200
 _NOT_AVAILABLE = "—"
+
+#: Every failure this command converts follows the argparse convention: the
+#: message itself is the exit status (printed to stderr, exit 1).
+_CONFIG_EXIT = ExitPolicy(errors=(ConfigError,))
+_TRACKING_EXIT = ExitPolicy(errors=(TrackingError,))
 
 
 def _add_recommendation_argument(parser: argparse.ArgumentParser) -> None:
@@ -151,10 +157,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _load_settings(path: str) -> Settings:
-    try:
-        return load_settings(path)
-    except ConfigError as exc:
-        raise SystemExit(str(exc)) from exc
+    return run_cli(lambda: load_settings(path), _CONFIG_EXIT)
 
 
 def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
@@ -416,17 +419,17 @@ def _verdict_reasons(
 def _run_close(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
-    try:
-        closed = close_manually(
+    closed = run_cli(
+        lambda: close_manually(
             state_store,
             _market_store(state_store, args.db),
             run_id=args.run_id,
             symbol=args.symbol,
             as_of=_resolve_as_of(args.as_of),
             note=args.note,
-        )
-    except TrackingError as exc:
-        raise SystemExit(str(exc)) from exc
+        ),
+        _TRACKING_EXIT,
+    )
     console.print(
         f"{closed.symbol} を {_fmt_date(closed.exit_date)} "
         f"@ {_fmt_price(closed.exit_price)} で手仕舞い "
@@ -438,16 +441,16 @@ def _run_note(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
     note_date = _resolve_as_of(args.note_date)
-    try:
-        record_note(
+    run_cli(
+        lambda: record_note(
             state_store,
             run_id=args.run_id,
             symbol=args.symbol,
             note_date=note_date,
             note=args.text,
-        )
-    except TrackingError as exc:
-        raise SystemExit(str(exc)) from exc
+        ),
+        _TRACKING_EXIT,
+    )
     console.print(f"{args.symbol} に {note_date.isoformat()} 付けのノートを記録した")
 
 

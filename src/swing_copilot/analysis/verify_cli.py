@@ -48,6 +48,7 @@ from swing_copilot.analysis.validate import (
     validate_analysis,
     validate_artifact_identity,
 )
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.report.rejections import REJECTIONS_FILENAME
 
 if TYPE_CHECKING:
@@ -59,6 +60,16 @@ logger = logging.getLogger(__name__)
 #: directory argument skips them rather than failing on them.
 _CODE_OWNED_FILENAMES = frozenset(
     {ANALYSIS_INPUT_FILENAME, REPORT_CONTEXT_FILENAME, REJECTIONS_FILENAME}
+)
+
+#: Exit 2 means "the check could not run at all", distinct from exit 1's "the
+#: check ran and something failed it". Reported through logging, like the log
+#: stream this command already writes to stderr.
+_EXIT_POLICY = ExitPolicy(
+    errors=(AnalysisIngestError,),
+    code=2,
+    format_message=lambda exc: f"verification could not run: {exc}",
+    report=logger.error,
 )
 
 
@@ -312,10 +323,6 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = _parse_args(argv)
-    try:
-        reports = verify_paths(args.paths, args.input)
-    except AnalysisIngestError as exc:
-        logger.error("verification could not run: %s", exc)  # noqa: TRY400 - user-facing
-        raise SystemExit(2) from exc
+    reports = run_cli(lambda: verify_paths(args.paths, args.input), _EXIT_POLICY)
     sys.stdout.write(_render(reports))
     raise SystemExit(0 if all(report.is_ok for report in reports) else 1)

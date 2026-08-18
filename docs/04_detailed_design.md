@@ -432,7 +432,7 @@ def _check_finite(value: object) -> None:
     """
 ```
 
-第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`analysis/export.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
+第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`io_atomic.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
 
 ### 3.9 `screening/base.py`（NFR-07）
 
@@ -992,8 +992,12 @@ class ExportRequest:
 
 def build_analysis_input(request: ExportRequest) -> AnalysisInput: ...
 def write_analysis_input(payload: AnalysisInput, output_dir: str | Path) -> Path: ...
-def write_json_atomically(destination: Path, payload: object) -> None: ...
 def form_type_of(title: str | None) -> str: ...   # validate.py と共有
+
+# io_atomic.py（依存ゼロ。Issue #193 で analysis/export.py から移設し、
+# analysis/export.py は後方互換の re-export を残している）
+def write_json_atomically(destination: Path, payload: object) -> None: ...
+def write_text_atomically(destination: Path, content: str) -> None: ...
 ```
 
 **改修原則4「判断はコード、叙述はスキル」（roadmap §5 P2-12の継承）**: `format_score_breakdown()`（P1-01）・`format_risk_constraints()`（P1-03）・`format_performance_summary()`（P1-06）は、いずれも「これはコードの決定論的計算結果であり分析側が再計算・上書きできない」旨を本文へ明記した純関数である。`format_risk_constraints()`は`not_calculable`や拒否判定でも空にせず常に描画する——「コードが既にREJECTと言っている」という信号自体が、保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採る）の前提情報だからである。逆に`format_score_breakdown()`と`format_performance_summary()`は構成要素が欠けていればプレースホルダを置かず`""`を返し、`export.py`が`None`へ落とす。
@@ -1415,7 +1419,7 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 
 **P8-117実装時追記（Issue #117）**: `daily_composition.py::main()`は`_compose_dependencies()`と`run_daily()`の間に**preflightフェーズ**（`_preflight(deps, options)`）を挟む。`account_equity_usd`（`config/settings.yaml`の`risk.account_equity_usd`）が未設定のとき、`RiskChecker`が全候補を`not_calculable`にする挙動自体は3.13節どおり不変だが、決済済みポジション（`state_store.get_closed_positions(is_paper=True)`）が1件以上あると`evaluate_circuit_breaker`もequity不明のまま損失規律を評価できず`HALTED`を返し、全候補が`CIRCUIT_BREAKER_HALTED`でreject される（サーキットブレーカーのfail-closed自体は正しく、`risk/circuit_breaker.py`は無変更）。この組み合わせではrunを続けても「全候補rejectのレポートとverdict」を生成するだけなので、`exceptions.PreflightAbort`を送出してrun作成前に中止する。`main()`はこれを捕捉し、メッセージをstderrへ書いたうえで**終了コード2**（0=成功、1=失敗とは別の「意図的な中止」）でプロセスを終える——`runs`への行も`reports/`ディレクトリも作られない。決済済みが0件なら`logger.warning`を1回出すだけで続行し、同じ文言を`report/markdown_report.py`の既存`## Warnings`節にも1行載せる（`pipeline/daily.py::ACCOUNT_EQUITY_UNSET_NOTICE`を`daily_composition.py`のログと`daily_runner.py`の`notices`タプルで共有）。明示`--as-of`（ヒストリカル再生）は中止判定をスキップする——3.12節のとおり現在のポジション状態を一切読まないため空ポートフォリオが保証されており、警告のみ出す。`PreflightAbort`と終了コード2の枠組みは#118が同じ箇所へ同日重複起動ガードを追加する土台になる。
 
-**P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`run_date = latest.date()`）ため、同日重複起動の判定は`main()`側のpreflightではなく**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`_preflight()`と`run_daily()`の両方を1つの`try`で包み、どちらから送出されても同じ終了コード2への変換を行う。中止メッセージには既存runの`run_id`とレポートパスを含める——`swing-daily`スキルがこれを再入シグナルとして使う（Step 1）。`failed`/`running`/`degraded`は「成功済み」に数えない（`degraded`も含めて`status='success'`のみを見る、本チケットの確定判断）。`--allow-same-day-rerun`（`DailyRunOptions.allow_same_day_rerun`）を指定した場合のみ判定をスキップする。明示`--as-of`（ヒストリカル再生）にも同じ判定を適用する——`run_date = fetch_cutoff = options.as_of`となり同じコードパスを通るため、特別扱いは不要。`swing-daily/SKILL.md`のStep 0は`<WORKDIR>/analysis_result.json`に加えて`reports/<as_of>/*/analysis_result.json`のglobも確認し、Step 1は終了コード2を受けたら既存verdictを要約して`analysis_result.json`を書かずに正常終了する。
+**P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`run_date = latest.date()`）ため、同日重複起動の判定は`main()`側のpreflightではなく**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`_preflight()`と`run_daily()`の両方を同じ`ExitPolicy`（`cli_support.py::run_cli()`。Issue #193で11本のCLIから定型を集約した）へ通し、どちらから送出されても同じ終了コード2と同じ`PREFLIGHT_ABORT[<reason>]:`行への変換を行う。中止メッセージには既存runの`run_id`とレポートパスを含める——`swing-daily`スキルがこれを再入シグナルとして使う（Step 1）。`failed`/`running`/`degraded`は「成功済み」に数えない（`degraded`も含めて`status='success'`のみを見る、本チケットの確定判断）。`--allow-same-day-rerun`（`DailyRunOptions.allow_same_day_rerun`）を指定した場合のみ判定をスキップする。明示`--as-of`（ヒストリカル再生）にも同じ判定を適用する——`run_date = fetch_cutoff = options.as_of`となり同じコードパスを通るため、特別扱いは不要。`swing-daily/SKILL.md`のStep 0は`<WORKDIR>/analysis_result.json`に加えて`reports/<as_of>/*/analysis_result.json`のglobも確認し、Step 1は終了コード2を受けたら既存verdictを要約して`analysis_result.json`を書かずに正常終了する。
 
 **P0-212実装時追記（Issue #212）**: `_select_symbols(universe, held_symbols, limit)`はそのrunが価格取得・スクリーニングする銘柄集合を決める唯一の入口であり（`daily_runner.py`が`price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})`として`get_daily_bars()`とステップ1へ渡す。日次経路の価格取得はこの1本だけで、`pipeline/backfill.py`は運用者が手で叩く別コマンド）、**`--limit`の有無にかかわらず3.14節の保有集合を和集合として合流させる**。`limit is None`分岐だけが合流していなかったため、S&P 500スナップショットから外れた保有銘柄はその日のbarを1本も取得されず、トレーリングストップ・max-hold・レポートのポジション文脈が古い価格の上で走っていた——`--limit`はスモーク用フラグで本番の18:30 routineは渡さないため、欠陥は本番経路だけに出る。指数からの除外直後こそ手仕舞い判定が最も要るタイミングであり、他レイヤに代替の取得経路もガードも無かった。
 
@@ -1588,7 +1592,7 @@ DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録な
 
 ### 3.22a `report/rejections.py`（run成果物 `rejections.json`）
 
-run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（schema `rejections-v1`）を置く。書き出しはステップ8（`_run_step_output()`）が`report_context.json`のあとに行い、`analysis/export.py::write_json_atomically()`を再利用する（一時ファイル＋`os.replace`）。失敗はfail-soft——run固有Markdownは既に残っているので、`RunStatus.DEGRADED`・終了コード0とする。
+run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（schema `rejections-v1`）を置く。書き出しはステップ8（`_run_step_output()`）が`report_context.json`のあとに行い、`io_atomic.py::write_json_atomically()`を再利用する（一時ファイル＋`os.replace`）。失敗はfail-soft——run固有Markdownは既に残っているので、`RunStatus.DEGRADED`・終了コード0とする。
 
 既存の出力にはギャップが2つあった。ひとつはMarkdown/`report_context.json`の落選サマリが`reason_code`別の**件数**しか持たず、「どの銘柄がなぜ落ちたか」を見るにはDuckDBを引く必要があったこと。もうひとつは、全Filter・全Signalを通過しながら`candidate_limit`で順位落ちした銘柄が候補にも`screening_rejections`にも載らず、**どこにも記録されていなかった**こと（4.2節の`screening_rejections`）。このファイルは両方を1箇所に残す。
 

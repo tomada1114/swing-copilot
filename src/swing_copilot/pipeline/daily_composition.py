@@ -8,10 +8,11 @@ import shutil
 import sys
 import traceback
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rich.console import Console
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
     load_secrets,
@@ -57,6 +58,29 @@ if TYPE_CHECKING:
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _preflight_abort_message(exc: Exception) -> str:
+    """Render the machine-readable first stderr line of a preflight abort.
+
+    The `PREFLIGHT_ABORT[<reason>]:` prefix is a contract with the `swing-daily`
+    skill: both abort causes share exit code 2, and without the tag the skill's
+    "already analyzed today" summary would swallow a configuration problem. The
+    cast is safe because `_PREFLIGHT_EXIT` only converts `PreflightAbort`.
+    """
+    abort = cast("PreflightAbort", exc)
+    return f"PREFLIGHT_ABORT[{abort.reason}]: {abort}"
+
+
+#: The universe cannot be resolved: the argparse convention (message as the
+#: exit status, stderr, exit 1).
+_UNIVERSE_EXIT = ExitPolicy(errors=(UniverseError,))
+#: `_preflight` catches the account-equity trap; `run_daily` itself raises the
+#: same exception for the same-day rerun guard (P8-118), since `run_date` only
+#: resolves after prefetch, deep inside the run.
+_PREFLIGHT_EXIT = ExitPolicy(
+    errors=(PreflightAbort,), code=2, format_message=_preflight_abort_message
+)
 
 
 def _non_negative_int(raw_value: str) -> int:
@@ -282,23 +306,11 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(load_secrets(), level=options.log_level)
     settings = load_settings()
     strategies = load_strategies()
-    try:
-        deps = _compose_dependencies(options, settings, strategies)
-    except UniverseError as exc:
-        raise SystemExit(str(exc)) from exc
-    try:
-        _preflight(deps, options)
-        result = run_daily(options, deps)
-    except PreflightAbort as exc:
-        # `_preflight` catches the account-equity trap; `run_daily` itself
-        # raises the same exception for the same-day rerun guard (P8-118),
-        # since `run_date` only resolves after prefetch, deep inside the run.
-        # The machine-readable prefix is a contract with the swing-daily
-        # skill: both causes share exit code 2, and without the tag the
-        # skill's "already analyzed today" summary would swallow a
-        # configuration problem.
-        sys.stderr.write(f"PREFLIGHT_ABORT[{exc.reason}]: {exc}\n")
-        raise SystemExit(2) from exc
+    deps = run_cli(
+        lambda: _compose_dependencies(options, settings, strategies), _UNIVERSE_EXIT
+    )
+    run_cli(lambda: _preflight(deps, options), _PREFLIGHT_EXIT)
+    result = run_cli(lambda: run_daily(options, deps), _PREFLIGHT_EXIT)
     paths = TerminalPaths(
         report=result.report_path,
         analysis_input=result.analysis_input_path,

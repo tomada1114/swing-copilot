@@ -590,7 +590,10 @@ class TestAtomicWrite:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("swing_copilot.analysis.export.os.replace", _explode)
+        # The writer moved to `swing_copilot.io_atomic` (Issue #193); this
+        # module re-exports it, so the guarantee is asserted through the name
+        # every existing caller imports.
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _explode)
 
         with pytest.raises(OSError, match="disk full"):
             write_json_atomically(destination, {"new": True})

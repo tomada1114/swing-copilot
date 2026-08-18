@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from swing_copilot.analysis.export import write_text_atomically
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.retro.export import RETRO_INPUT_FILENAME
 from swing_copilot.retro.ledger import read_ledger, record_proposals
 from swing_copilot.retro.validate import (

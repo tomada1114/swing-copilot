@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.report.markdown_report import update_markdown_decisions
@@ -18,6 +19,10 @@ from swing_copilot.storage.state_store import StateStore
 
 class DecisionCommandError(SwingCopilotError):
     """Raised when a decision command does not identify one audited candidate."""
+
+
+#: The argparse convention: the message itself is the exit status (stderr, 1).
+_EXIT_POLICY = ExitPolicy(errors=(DecisionCommandError,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,20 +120,17 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     state_store = StateStore(Database(args.db))
     state_store.init_schema()
-    try:
-        record = record_decision_command(
-            state_store,
-            DecisionCommand(
-                run_id=args.run_id,
-                symbol=args.symbol,
-                decision=args.decision,
-                reason=args.reason,
-                fill_price=args.fill_price,
-                strategy_key=args.strategy,
-            ),
-        )
-    except DecisionCommandError as exc:
-        raise SystemExit(str(exc)) from exc
+    command = DecisionCommand(
+        run_id=args.run_id,
+        symbol=args.symbol,
+        decision=args.decision,
+        reason=args.reason,
+        fill_price=args.fill_price,
+        strategy_key=args.strategy,
+    )
+    record = run_cli(
+        lambda: record_decision_command(state_store, command), _EXIT_POLICY
+    )
     sys.stdout.write(
         f"Recorded {record.decision}: {record.symbol} "
         f"({record.strategy_key}, run {record.run_id})\n"

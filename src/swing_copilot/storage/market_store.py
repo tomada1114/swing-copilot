@@ -352,6 +352,59 @@ class MarketStore:
             ).fetchone()
         return row is not None
 
+    def read_filing_dates(
+        self, symbols: Sequence[str], forms: Sequence[str], as_of: date
+    ) -> dict[str, tuple[date, ...]]:
+        """Read each symbol's periodic-report filing dates, visible at `as_of`.
+
+        The `fundamentals` table is the only point-in-time filing history the
+        application keeps (`filed_at` is the SEC acceptance date), so it is
+        also the only honest source for "when did this company last report"
+        in a historical replay (Issue #201). One row per `accession_no` means
+        a corrected re-filing of the same period would otherwise count as a
+        second reporting event, so rows are collapsed to the **earliest**
+        filing date per `(symbol, fiscal_period_end)`.
+
+        Args:
+            symbols: Tickers to read; an empty sequence returns `{}` without
+                touching the database.
+            forms: SEC form types that count as a reporting event (e.g.
+                `("10-K", "10-Q")`). Matched exactly, so amendments are
+                included only when named.
+            as_of: Point-in-time cutoff. A filing accepted *on* `as_of` is
+                visible; one accepted the next day is not.
+
+        Returns:
+            `{symbol: distinct filing dates, ascending}`, omitting symbols
+            with no visible filing. Two periods filed on the same day are one
+            date, so the caller reads reporting *events*, not rows. Never a
+            partially-visible symbol: the cutoff is applied in this query,
+            not by the caller.
+        """
+        if not symbols or not forms:
+            return {}
+        symbol_placeholders = ",".join("?" for _ in symbols)
+        form_placeholders = ",".join("?" for _ in forms)
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT symbol, MIN(CAST(filed_at AS DATE)) AS filed_on
+                FROM fundamentals
+                WHERE symbol IN ({symbol_placeholders})
+                  AND form IN ({form_placeholders})
+                  AND CAST(filed_at AS DATE) <= ?
+                GROUP BY symbol, fiscal_period_end
+                ORDER BY symbol, filed_on
+                """,  # noqa: S608 -- placeholders only; every value is bound
+                [*symbols, *forms, as_of],
+            ).fetchall()
+        dates_by_symbol: dict[str, set[date]] = {}
+        for symbol, filed_on in rows:
+            dates_by_symbol.setdefault(symbol, set()).add(filed_on)
+        return {
+            symbol: tuple(sorted(dates)) for symbol, dates in dates_by_symbol.items()
+        }
+
     def read_fundamentals(self, as_of: date) -> pd.DataFrame:
         """Read every fundamentals row filed on or before `as_of`.
 

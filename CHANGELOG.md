@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   地点である `compute_forward_return()` 自身に有限値ガードを置き、`run_date`
   側・`as_of` 側のどちらが非有限でも `None` を返す（#190 / PR #204 が
   `benchmark_return_pct` に入れたガードと同じ形）
+- `copilot-backfill --limit N` が辞書順の先頭 N 銘柄を取っていた問題を修正した
+  （Issue #206 B、旧 #213）。ユニバースは `ORDER BY symbol` で返るため
+  `--limit 20` は「A で始まる20銘柄」を意味し、#194（backtest）・#205
+  （copilot-daily）で潰したのと同一の欠陥クラスの3つ目だけが残っていた。
+  `copilot-backfill` は測定値を出さない暖機コマンドなので害は「A 銘柄の
+  キャッシュしか温まらない」に留まるが、その偏りは後続のスモーク実行や
+  バックテストが「キャッシュ済みで速い銘柄」に引かれる形で効く。#205 が
+  切り出した共有サンプラ `universe_sampling.select_universe_sample()` を
+  そのまま呼ぶようにしたので、3つの `--limit` が同じ salt・同じ
+  アルゴリズムになり、同じ `N` なら同じ銘柄集合を覆う。`--limit <= 0` の
+  `BackfillError`（「`--limit` は1以上の整数で指定してください。」）は
+  従来どおり CLI 側で fail-fast する
 - `copilot-backtest --db` が指す DuckDB の隣に `bars/` が無いとき、取引ゼロの
   レポートを書いて `exit 0` していた問題を修正した（Issue #217）。`--db` は
   価格 Parquet の根を `<db>/../bars` に暗黙で決めるが、その存在は誰も検証して

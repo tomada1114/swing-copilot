@@ -32,12 +32,13 @@ fact is today's close.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
-from swing_copilot.backtest.exits import atr_as_of, evaluate_exit, next_trailing_stop
+from swing_copilot.backtest.exits import evaluate_exit, next_trailing_stop
 from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
     ENTRY_BLOCK_INSUFFICIENT_CASH,
@@ -50,6 +51,7 @@ from swing_copilot.backtest.metrics import (
 )
 from swing_copilot.backtest.policy import EntryPolicyRequest, as_position
 from swing_copilot.risk.position_sizing import calc_position_size
+from swing_copilot.screening.indicators import symbol_window
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -604,8 +606,17 @@ class BacktestEngine:
     ) -> None:
         for position in state.open_positions.values():
             bar = _bar(bars, position.symbol, day)
-            atr = atr_as_of(bars, position.symbol, day, self._exit_atr_period)
-            if bar is None or atr is None:
+            # Issue #224: `atr_as_of` re-smooths the symbol's whole history on
+            # every simulated day to keep one point, so walking a position
+            # forward costs O(days x rows). The window reads the same Wilder
+            # ATR from a column computed once per symbol and cached on `bars`
+            # (Issue #214), and reads it at the `as_of` row, so the value is
+            # bit-identical to `atr_as_of(bars, symbol, day, period)` -- Wilder
+            # smoothing is causal, so a row's value never depends on a later
+            # one. `tests/backtest/test_exits.py` pins that equivalence.
+            window = symbol_window(bars, position.symbol, day)
+            atr = math.nan if window is None else window.atr(self._exit_atr_period)
+            if bar is None or math.isnan(atr):
                 continue
             position.stop_price = next_trailing_stop(
                 current_stop=position.stop_price,

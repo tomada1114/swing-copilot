@@ -9,6 +9,7 @@ regression tests.
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 
 import pandas as pd
@@ -21,6 +22,7 @@ from swing_copilot.backtest.exits import (
     evaluate_exit,
     next_trailing_stop,
 )
+from swing_copilot.screening.indicators import symbol_window
 
 _START = date(2027, 1, 1)
 #: `settings.backtest.exit_atr_period`'s shipped value; these tests pin the
@@ -432,3 +434,93 @@ def test_atr_by_date_unknown_symbol_returns_empty() -> None:
     days = _days(20)
 
     assert atr_by_date(_frame(_flat_rows(days)), "ZZZ", days[-1], _PERIOD) == {}
+
+
+# --- SymbolWindow.atr, the engine's one-pass replacement for atr_as_of -------
+#
+# Issue #224: `BacktestEngine._update_trailing_stops` reads the trailing stop's
+# ATR from `symbol_window(...).atr(period)` instead of calling `atr_as_of` once
+# per position per simulated day. Nothing about the simulated numbers may move,
+# so the substitution's equivalence is pinned here beside `atr_as_of` itself,
+# the same way `atr_by_date`'s is.
+
+
+def _spike_frame(days: list[date]) -> pd.DataFrame:
+    """Flat TR-2.0 bars with one TR-10.0 spike on the second-to-last session."""
+    rows = _flat_rows(days[:-2])
+    rows.append(
+        {
+            "symbol": "AAA",
+            "date": days[-2],
+            "open": 100.0,
+            "high": 110.0,
+            "low": 100.0,
+            "close": 105.0,
+        }
+    )
+    rows += _flat_rows(days[-1:], close=105.0)
+    return _frame(rows)
+
+
+def test_symbol_window_atr_matches_atr_as_of_for_every_session() -> None:
+    days = _days(22)
+    frame = _spike_frame(days)
+
+    for day in days:
+        window = symbol_window(frame, "AAA", day)
+        windowed = None if window is None else window.atr(_PERIOD)
+        expected = atr_as_of(frame, "AAA", day, _PERIOD)
+        if expected is None:
+            assert windowed is None or math.isnan(windowed)
+        else:
+            # Bit-identical, not merely close: the engine's equity curve is
+            # asserted to the cent against hand-calculated ATRs.
+            assert windowed == expected
+
+
+def test_symbol_window_atr_at_the_as_of_boundary_ignores_later_bars() -> None:
+    # Immediately before / exactly at / immediately after the spike session,
+    # against a frame that always carries the later bars (the engine hands the
+    # whole run's frame to every day's lookup).
+    days = _days(22)
+    frame = _spike_frame(days)
+    before, at_cutoff, after = days[-3], days[-2], days[-1]
+
+    values = [
+        symbol_window(frame, "AAA", day).atr(_PERIOD)  # type: ignore[union-attr]  # every day has bars
+        for day in (before, at_cutoff, after)
+    ]
+
+    assert values[0] == pytest.approx(2.0)
+    assert values[1] == pytest.approx(2.0 + 8.0 / 14.0)
+    assert values[2] == pytest.approx(values[1] + (2.0 - values[1]) / 14.0)
+    assert values == [
+        atr_as_of(frame, "AAA", day, _PERIOD) for day in (before, at_cutoff, after)
+    ]
+
+
+def test_symbol_window_atr_is_nan_where_atr_as_of_reports_no_value() -> None:
+    # `atr_as_of` returns `None` below `period` bars; the window reports the
+    # same absence as `NaN`, which is what the engine's `math.isnan` guard
+    # tests. Pinned at the exact boundary session on both sides.
+    days = _days(_PERIOD)
+    frame = _frame(_flat_rows(days))
+
+    short = symbol_window(frame, "AAA", days[_PERIOD - 2])
+    exact = symbol_window(frame, "AAA", days[_PERIOD - 1])
+
+    assert short is not None
+    assert exact is not None
+    assert math.isnan(short.atr(_PERIOD))
+    assert atr_as_of(frame, "AAA", days[_PERIOD - 2], _PERIOD) is None
+    assert exact.atr(_PERIOD) == atr_as_of(frame, "AAA", days[_PERIOD - 1], _PERIOD)
+
+
+def test_symbol_window_is_none_for_a_symbol_the_frame_does_not_carry() -> None:
+    # The engine maps this to `NaN` and skips the trailing-stop update, exactly
+    # as `atr_as_of`'s `None` did.
+    days = _days(20)
+    frame = _frame(_flat_rows(days))
+
+    assert symbol_window(frame, "ZZZ", days[-1]) is None
+    assert atr_as_of(frame, "ZZZ", days[-1], _PERIOD) is None

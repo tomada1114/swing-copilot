@@ -114,12 +114,18 @@ class MinerviniStage2Signal:
 
     def evaluate(self, data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
         """Return symbols satisfying at least `min_criteria` of seven conditions."""
-        rs_percentiles = self._rs_percentiles(data, symbols)
+        # Issue #224: one window per symbol, built once in sorted order and
+        # shared with the RS pass, instead of that pass looking the same
+        # symbol up a second time. Insertion order is the previous
+        # `sorted(symbols)` order, so RS percentiles and hits are unchanged.
+        windows = {
+            symbol: window
+            for symbol in sorted(symbols)
+            if (window := symbol_window(data.bars, symbol, data.as_of)) is not None
+        }
+        rs_percentiles = self._rs_percentiles(windows)
         hits: list[SignalHit] = []
-        for symbol in sorted(symbols):
-            window = symbol_window(data.bars, symbol, data.as_of)
-            if window is None:
-                continue
+        for symbol, window in windows.items():
             metrics = self._metrics(window, rs_percentiles.get(symbol))
             criteria_met = int(metrics["minervini_criteria_met"])
             if criteria_met >= self._min_criteria:
@@ -134,15 +140,18 @@ class MinerviniStage2Signal:
                 )
         return hits
 
-    def _rs_percentiles(
-        self, data: ScreeningInput, symbols: set[str]
-    ) -> dict[str, float]:
+    def _rs_percentiles(self, windows: dict[str, SymbolWindow]) -> dict[str, float]:
         """Return deterministic universe-relative weighted-return percentiles.
 
         A one-member population has the same fixed 50.0 midpoint convention
         as P1-01 liquidity percentiles. A 252-day return needs 253 closes;
         shorter histories intentionally receive no RS value and therefore do
         not satisfy condition seven.
+
+        Args:
+            windows: One `as_of` window per symbol with any history at all,
+                in the deterministic symbol order the percentiles are ranked
+                in.
         """
         weights = (
             self._config.rs_weight_63d,
@@ -151,11 +160,10 @@ class MinerviniStage2Signal:
             self._config.rs_weight_252d,
         )
         values: list[tuple[str, float]] = []
-        for symbol in sorted(symbols):
-            series = symbol_bars(data.bars, symbol, data.as_of)
-            if series is None or len(series) < max(_MINERVINI_RS_PERIODS) + 1:
+        for symbol, window in windows.items():
+            if window.bar_count < max(_MINERVINI_RS_PERIODS) + 1:
                 continue
-            closes = series["close"]
+            closes = window.bars["close"]
             returns: list[float] = []
             for period in _MINERVINI_RS_PERIODS:
                 start = float(closes.iloc[-period - 1])

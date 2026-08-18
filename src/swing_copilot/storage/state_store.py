@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.verdict_records import (
         AnalysisSourceCoverageRecord,
+        CollectedRunRecords,
         PriorVerdictRecord,
         VerdictCitationRow,
         VerdictDecisionRow,
@@ -709,6 +710,27 @@ class StateStore:
         verdict_records.replace_run_verdicts(
             self._database, run_id, verdicts, sources, coverages
         )
+
+    def replace_collected_run(self, records: CollectedRunRecords) -> None:
+        """Replace one collected run's rows and its document fingerprint (#209).
+
+        Args:
+            records: The run's verdicts, citations, coverage rows, and the
+                digest of the `analysis_input.json`/`analysis_result.json`
+                pair they were built from. All of it commits or none does, so
+                a stored digest always describes rows that really exist.
+        """
+        verdict_records.replace_collected_run(self._database, records)
+
+    def get_verdict_collection_digests(self) -> dict[UUID, str]:
+        """Return the document fingerprint of every already-collected run."""
+        return verdict_records.get_verdict_collection_digests(self._database)
+
+    def get_recorded_outcome_slices(
+        self, run_ids: Sequence[UUID]
+    ) -> dict[tuple[UUID, int], frozenset[tuple[str, str]]]:
+        """Return each recorded `(run, horizon)` slice's symbol/verdict set."""
+        return verdict_records.get_recorded_outcome_slices(self._database, run_ids)
 
     def get_prior_verdicts(
         self, symbol: str, strategy_key: str, before_date: date, limit: int

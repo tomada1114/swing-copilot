@@ -69,12 +69,18 @@ _EVALUATION_WINDOW_PADDING_DAYS = 30
 
 @dataclass(frozen=True, slots=True)
 class EvaluateSummary:
-    """What one evaluation batch classified, deferred, and had to skip."""
+    """What one evaluation batch classified, deferred, and had to skip.
+
+    `recorded_slice_count` is only ever non-zero under `only_pending`
+    (Issue #209): the slices left alone because `verdict_outcomes` already
+    holds exactly the symbols and recommendations they would produce.
+    """
 
     evaluated_slice_count: int
     pending_slice_count: int
     outcome_count: int
     notes: tuple[str, ...]
+    recorded_slice_count: int = 0
 
 
 def classify_verdict_outcome(
@@ -141,26 +147,21 @@ def _classify_skip(
 def evaluate_verdicts(
     market_store: MarketStore,
     state_store: StateStore,
-    as_of: date,
-    thresholds: PostmortemConfig,
-    benchmark_symbol: str,
+    request: EvaluationRequest,
 ) -> EvaluateSummary:
     """Classify every collected verdict whose horizon matured by `as_of`.
 
-    Only prices dated `<= as_of` are ever read, and each horizon's return is
-    fixed at its own maturity session, so later sessions inside the window
-    cannot leak into a shorter horizon's result.
+    Only prices dated `<= request.as_of` are ever read, and each horizon's
+    return is fixed at its own maturity session, so later sessions inside the
+    window cannot leak into a shorter horizon's result.
 
     Args:
         market_store: Bars source for the trading calendar and each symbol's
             maturity close.
         state_store: Read source for `verdicts`, write target for
             `verdict_outcomes`.
-        as_of: The retrospective's point-in-time cutoff.
-        thresholds: Classification thresholds and the lookback window
-            (`settings.postmortem`).
-        benchmark_symbol: Trading-calendar reference symbol
-            (typically `settings.backtest.benchmark`).
+        request: The batch's cutoff, thresholds, benchmark symbol, and whether
+            to bound the work to slices that are not already recorded.
 
     Returns:
         Counts plus a note per symbol skipped for missing bars. A horizon that
@@ -169,8 +170,9 @@ def evaluate_verdicts(
         legitimately not due, and noting each one would drown the real
         data-quality signals.
     """
+    as_of = request.as_of
     window_start = as_of - timedelta(
-        days=thresholds.lookback_window_days + _EVALUATION_WINDOW_PADDING_DAYS
+        days=request.thresholds.lookback_window_days + _EVALUATION_WINDOW_PADDING_DAYS
     )
     # P8-124: classifying a same-day loser would write `verdict_outcomes` rows
     # that every window aggregate then double-counts.
@@ -179,14 +181,19 @@ def evaluate_verdicts(
             state_store.get_verdicts_in_window(window_start, as_of), state_store
         )
     )
-
-    request = _EvaluationRequest(
-        as_of=as_of, thresholds=thresholds, benchmark_symbol=benchmark_symbol
+    only_pending = request.only_pending
+    recorded = (
+        state_store.get_recorded_outcome_slices(tuple(runs)) if only_pending else {}
     )
+
     notes: list[str] = []
-    evaluated = pending = outcome_count = 0
+    evaluated = pending = already_recorded = outcome_count = 0
     for run_id, rows in runs.items():
+        expected = frozenset((row.symbol, row.recommendation) for row in rows)
         for horizon_days in HORIZON_DAYS:
+            if only_pending and recorded.get((run_id, horizon_days)) == expected:
+                already_recorded += 1
+                continue
             outcomes = _evaluate_slice(market_store, rows, horizon_days, request, notes)
             if outcomes is None:
                 pending += 1
@@ -198,22 +205,36 @@ def evaluate_verdicts(
     return EvaluateSummary(
         evaluated_slice_count=evaluated,
         pending_slice_count=pending,
+        recorded_slice_count=already_recorded,
         outcome_count=outcome_count,
         notes=tuple(notes),
     )
 
 
 @dataclass(frozen=True, slots=True)
-class _EvaluationRequest:
-    """Per-batch inputs `_evaluate_slice` needs beyond the run's own rows.
+class EvaluationRequest:
+    """One evaluation batch's cutoff, thresholds, benchmark, and scope.
 
-    Grouped into one value to keep the helper within the project's
-    parameter-count guideline, mirroring `postmortem._PostmortemRequest`.
+    Grouped into one value to keep `evaluate_verdicts` and `_evaluate_slice`
+    within the project's parameter-count guideline, mirroring
+    `postmortem._PostmortemRequest`.
+
+    `only_pending` is Issue #209's scope switch. `False` (the manual
+    `copilot-retro evaluate` / `prepare` batch) re-classifies every matured
+    slice in the window, which is how a *price* correction reaches
+    `verdict_outcomes`. `True` (the daily step, which now runs ahead of the
+    analysis export) leaves alone every slice whose recorded outcomes already
+    match the run's verdicts exactly, so the pre-export cost follows the
+    slices that newly matured rather than the whole window. A corrected
+    verdict -- a symbol added, dropped, or flipped between `proceed` and
+    `skip` -- stops matching and is reclassified either way, and so does a
+    slice still missing a symbol whose bars never arrived.
     """
 
     as_of: date
     thresholds: PostmortemConfig
     benchmark_symbol: str
+    only_pending: bool = False
 
 
 def _finite_or_none(value: float | None) -> float | None:
@@ -239,7 +260,7 @@ def _evaluate_slice(
     market_store: MarketStore,
     rows: Sequence[VerdictRow],
     horizon_days: int,
-    request: _EvaluationRequest,
+    request: EvaluationRequest,
     notes: list[str],
 ) -> list[VerdictOutcomeRecord] | None:
     """Classify one `(run, horizon)`; return `None` if it has not matured."""

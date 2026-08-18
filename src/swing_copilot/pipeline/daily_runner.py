@@ -337,22 +337,24 @@ def _run_soft_steps(
     )
     degraded = degraded or not text_outcome.success
 
-    # `retro_collect` runs *before* the export (Issue #207). It is the only
-    # writer of the `verdicts` table, and the export's `<prior_verdicts>`
-    # block reads that table, so leaving the collect behind the export put the
+    # `retro_collect` and `retro_evaluate` both run *before* the export
+    # (Issues #207 and #209), in that order because the evaluation classifies
+    # what the collection just archived. They are the only writers of
+    # `verdicts` and `verdict_outcomes`, and the export's `<prior_verdicts>`
+    # block pairs the two, so leaving either behind the export put that
     # feedback one further run in the past: on day D the export saw verdicts
-    # only up to D-2, silently blanking the most recent one or two business
-    # days -- exactly the interval "how did I judge this symbol last time" is
-    # about. Collecting first costs nothing extra: the scan is offline and
-    # idempotent, and the current run's own `analysis_result.json` does not
-    # exist yet at either position.
+    # only up to D-2, and an outcome that matured on D only reached the skill
+    # on D+1 -- an entry with its `HIT`/`MISS_*` still blank. Both steps are
+    # offline and idempotent, and the current run's own `analysis_result.json`
+    # does not exist yet at either position.
     #
-    # The export's time-budget verdict is taken here, *before* collect starts,
-    # so the decision is exactly the one the previous ordering made. The
-    # export is this run's only handoff to the analysis skill, so a slow
-    # bookkeeping scan must never become the reason it is skipped.
+    # The export's time-budget verdict is taken here, *before* either step
+    # starts, so the decision is exactly the one the previous ordering made.
+    # The export is this run's only handoff to the analysis skill, so slow
+    # bookkeeping must never become the reason it is skipped.
     export_over_budget = deps.monotonic() >= deadline
     degraded = _run_retro_collect_soft_step(deps, ctx, deadline) or degraded
+    degraded = _run_retro_evaluate_soft_step(deps, ctx, deadline) or degraded
 
     started_at = time.perf_counter()
     signal_performance: tuple[SignalPerformanceRow, ...]
@@ -391,7 +393,7 @@ def _run_soft_steps(
     _record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
     degraded = degraded or not postmortem_outcome.success
 
-    degraded = _run_retro_soft_steps(deps, ctx, deadline) or degraded
+    degraded = _run_track_update_soft_step(deps, ctx, deadline) or degraded
 
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
@@ -470,10 +472,10 @@ def _run_retro_collect_soft_step(
 ) -> bool:
     """Archive the previously ingested verdicts, ahead of the export (Issue #207).
 
-    Kept apart from `_run_retro_soft_steps` purely because of *when* it has to
-    run: it is the only writer of the `verdicts` table, and step 6 reads that
-    table to build each candidate's `<prior_verdicts>` block, so the archive
-    has to be current before the export rather than after it.
+    Kept apart from `_run_track_update_soft_step` purely because of *when* it
+    has to run: it is the only writer of the `verdicts` table, and step 6 reads
+    that table to build each candidate's `<prior_verdicts>` block, so the
+    archive has to be current before the export rather than after it.
 
     Like its siblings it is offline, idempotent (run-scoped
     DELETE-then-INSERT), and fail-soft: a broken scan degrades the run and
@@ -493,42 +495,68 @@ def _run_retro_collect_soft_step(
     return not outcome.success
 
 
-def _run_retro_soft_steps(
+def _run_retro_evaluate_soft_step(
     deps: DailyDependencies,
     ctx: _RunContext,
     deadline: float,
 ) -> bool:
-    """Run the offline, idempotent verdict-observation steps in the daily batch.
+    """Classify the matured verdicts, ahead of the export (Issue #209).
 
-    Only `collect` and `evaluate` belong here out of the retrospective: both
-    are offline and idempotent, and running them daily stops an un-evaluated
-    run from ageing out of the evaluation window while also backing up the
-    archived `analysis_result.json` into DuckDB. `export` (which fetches
-    freshness data over the network) and the `swing-retro` skill stay manual.
-    `collect` itself has already run by this point, in
-    `_run_retro_collect_soft_step`, because step 6 consumes what it writes.
+    The other half of what `<prior_verdicts>` shows. `retro_evaluate` is the
+    only writer of `verdict_outcomes`, so while it ran after step 6 an outcome
+    that matured on day D could not reach the skill until D+1: the entry was
+    exported with its `HIT`/`MISS_*` and forward return still blank, every
+    single day. It runs after `retro_collect` because it classifies exactly
+    what that scan archives.
 
-    `track_update` joins them for the same reasons -- offline, idempotent,
-    reading only already-persisted bars -- but answers a different question:
-    it carries each `proceed` verdict's virtual position forward under the
-    backtest's exit rules rather than classifying a matured horizon.
-
-    Each step runs even when an earlier one failed: the verdicts collected on
-    previous days remain evaluable, and the tracked positions remain
-    advanceable, regardless of today's scan.
+    Maturity stays anchored to the injected `ctx.run_date`, not to wall time,
+    so moving the step earlier in the run changes nothing about which horizons
+    are due. The step is fail-soft and budget-guarded like its siblings, and
+    the export's own budget verdict was taken before either of them started,
+    so a slow evaluation cannot cost the run its only skill handoff.
 
     Returns:
-        Whether any step degraded the run.
+        Whether the step degraded the run.
     """
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step retro_evaluate skipped: time budget exceeded")
-        evaluate_outcome = _TIME_BUDGET_STEP_OUTCOME
+        outcome = _TIME_BUDGET_STEP_OUTCOME
     else:
         logger.debug("step retro_evaluate starting")
-        evaluate_outcome = _run_step_retro_evaluate(deps, ctx.run_date)
-    _record_step(deps, ctx.run_id, "retro_evaluate", evaluate_outcome, started_at)
+        outcome = _run_step_retro_evaluate(deps, ctx.run_date)
+    _record_step(deps, ctx.run_id, "retro_evaluate", outcome, started_at)
+    return not outcome.success
 
+
+def _run_track_update_soft_step(
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
+) -> bool:
+    """Carry the verdict-tracking ledger forward, after the export.
+
+    Only `collect` and `evaluate` run daily out of the retrospective proper:
+    both are offline and idempotent, and running them daily stops an
+    un-evaluated run from ageing out of the evaluation window while also
+    backing up the archived `analysis_result.json` into DuckDB. `export`
+    (which fetches freshness data over the network) and the `swing-retro`
+    skill stay manual. Both of those steps have already run by this point --
+    ahead of step 6, which consumes what they write (Issues #207, #209).
+
+    `track_update` shares their properties -- offline, idempotent, reading
+    only already-persisted bars -- but answers a different question: it
+    carries each `proceed` verdict's virtual position forward under the
+    backtest's exit rules rather than classifying a matured horizon. Nothing
+    in the export reads what it writes, so it stays here rather than adding to
+    the work in front of the handoff.
+
+    It runs even when the earlier steps failed: the tracked positions remain
+    advanceable regardless of today's scan.
+
+    Returns:
+        Whether the step degraded the run.
+    """
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step track_update skipped: time budget exceeded")
@@ -537,8 +565,7 @@ def _run_retro_soft_steps(
         logger.debug("step track_update starting")
         track_outcome = _run_step_track_update(deps, ctx.run_date)
     _record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
-
-    return not evaluate_outcome.success or not track_outcome.success
+    return not track_outcome.success
 
 
 def _finalize_output(

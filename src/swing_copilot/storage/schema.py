@@ -259,6 +259,17 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, source_id)
     )
     """,
+    # Issue #209: the fingerprint of the two documents a run's collected rows
+    # were built from. It exists only so `retro collect` can prove a run is
+    # unchanged and skip re-parsing it; it is never read as evidence about the
+    # verdicts themselves. Written inside the same transaction as those rows,
+    # so "the digest says collected" and "the rows exist" can never disagree.
+    """
+    CREATE TABLE IF NOT EXISTS verdict_collections (
+        run_id           UUID PRIMARY KEY,
+        document_digest  VARCHAR NOT NULL
+    )
+    """,
     # `as_of` here is the *maturity* session, not the observation date --
     # intentionally unlike `signal_outcomes.as_of`, so a batch retrospective
     # produces the same rows no matter which day it is run (design §5.2, D7).

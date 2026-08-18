@@ -9,11 +9,14 @@ the batch. Zero scanned runs is a normal success, not an error -- no
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from swing_copilot.analysis.export import ANALYSIS_RESULT_FILENAME
 from swing_copilot.analysis.schemas import canonical_json_digest
+from swing_copilot.retro import collect as collect_module
 from swing_copilot.retro.collect import collect_verdicts
 from tests.analysis.conftest import (
     AS_OF,
@@ -29,6 +32,8 @@ from tests.analysis.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
     from swing_copilot.storage.state_store import StateStore
 
@@ -675,4 +680,160 @@ class TestSameDayDeduplication:
         assert summary.collected_run_count == 1
         assert _rows(state_store, "SELECT run_id FROM verdicts") == [
             (UUID(run_ids[-1]),)
+        ]
+
+
+class TestIncrementalScan:
+    """Issue #209: only archives whose documents changed are re-collected.
+
+    Every run directory is still enumerated on every scan -- a correction to
+    an old archive must always be picked up -- but the parse and the
+    DELETE-then-INSERT are spent only where the documents no longer hash to
+    the digest stored when the run was last collected.
+    """
+
+    def test_unchanged_runs_are_neither_reparsed_nor_rewritten(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run_ids = [
+            "00000000-0000-4000-8000-00000000ab01",
+            "00000000-0000-4000-8000-00000000ab02",
+            "00000000-0000-4000-8000-00000000ab03",
+        ]
+        for offset, run_id in enumerate(run_ids):
+            write_run(
+                analysis_input=input_payload(run_id=run_id),
+                result=result_payload(run_id=run_id),
+                run_id=run_id,
+                run_date=date(2027, 3, 1 + offset),
+            )
+        first = collect_verdicts(state_store, reports_root)
+        assert (first.parsed_run_count, first.collected_run_count) == (3, 3)
+
+        def _must_not_parse(path: Path) -> object:
+            msg = f"unchanged run re-parsed: {path}"
+            raise AssertionError(msg)
+
+        writes: list[object] = []
+        monkeypatch.setattr(collect_module, "load_analysis_input", _must_not_parse)
+        monkeypatch.setattr(collect_module, "load_analysis_result", _must_not_parse)
+        monkeypatch.setattr(state_store, "replace_collected_run", writes.append)
+
+        second = collect_verdicts(state_store, reports_root)
+
+        # Still enumerated -- only the parse and the write are skipped.
+        assert second.scanned_run_count == 3
+        assert (second.parsed_run_count, second.unchanged_run_count) == (0, 3)
+        assert (second.collected_run_count, second.verdict_count) == (0, 0)
+        assert (writes, second.notes) == ([], ())
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(3,)]
+
+    def test_a_corrected_result_is_recollected_at_identical_size_and_mtime(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # The correction invariant, at its hardest: the replacement is the
+        # same length and keeps the original timestamps, so only the content
+        # itself distinguishes it. A digest built from `stat()` would skip it.
+        directory = write_run()
+        collect_verdicts(state_store, reports_root)
+        result_path = directory / ANALYSIS_RESULT_FILENAME
+        before = result_path.stat()
+        corrected = symbol_payload(
+            verdict={
+                "recommendation": "proceed",
+                "reasons": [
+                    {"text": "No contradicting disclosure!", "source_ids": [FILING_ID]}
+                ],
+            }
+        )
+        result_path.write_text(
+            json.dumps(result_payload(symbols=[corrected])), encoding="utf-8"
+        )
+        assert result_path.stat().st_size == before.st_size
+        os.utime(result_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert (summary.parsed_run_count, summary.unchanged_run_count) == (1, 0)
+        assert summary.collected_run_count == 1
+        assert "No contradicting disclosure!" in str(
+            _rows(state_store, "SELECT reasons_json FROM verdicts")[0][0]
+        )
+
+    def test_a_corrected_input_document_is_recollected(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # The code-owned side of the archive is fingerprinted too: the verdict
+        # rows carry metadata resolved from `analysis_input.json`.
+        write_run()
+        collect_verdicts(state_store, reports_root)
+        assert _rows(state_store, "SELECT news_supply_level FROM verdicts") == [
+            ("sparse",)
+        ]
+
+        write_run(
+            _input_declaring_news_supply(
+                {
+                    "collected_items": 9,
+                    "exported_items": 9,
+                    "symbol_mention_items": 9,
+                    "level": "sufficient",
+                }
+            )
+        )
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert (summary.parsed_run_count, summary.unchanged_run_count) == (1, 0)
+        assert _rows(state_store, "SELECT news_supply_level FROM verdicts") == [
+            ("sufficient",)
+        ]
+
+    def test_an_unchanged_run_still_takes_part_in_same_day_deduplication(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        # P8-119 is decided before any write, so a run that is skipped as
+        # unchanged must still be weighed against a later same-day rerun --
+        # being cheap to skip is not the same as being invisible.
+        older = "00000000-0000-4000-8000-0000000000c1"
+        newer = "00000000-0000-4000-8000-0000000000c2"
+        write_run(
+            analysis_input=input_payload(run_id=older),
+            result=result_payload(run_id=older),
+            run_id=older,
+        )
+        _insert_run(state_store, older, AS_OF, datetime(2027, 3, 1, 15, 6, tzinfo=UTC))
+        collect_verdicts(state_store, reports_root)
+
+        write_run(
+            analysis_input=input_payload(run_id=newer),
+            result=result_payload(run_id=newer),
+            run_id=newer,
+        )
+        _insert_run(state_store, newer, AS_OF, datetime(2027, 3, 1, 16, 52, tzinfo=UTC))
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert (summary.parsed_run_count, summary.unchanged_run_count) == (1, 1)
+        assert summary.collected_run_count == 1
+        assert len(summary.notes) == 1
+        assert older in summary.notes[0]
+        # The unchanged run keeps the rows it was collected with: an
+        # unadopted run is never written *or* deleted (P8-119's Not In Scope).
+        assert _rows(state_store, "SELECT run_id FROM verdicts ORDER BY run_id") == [
+            (UUID(older),),
+            (UUID(newer),),
         ]

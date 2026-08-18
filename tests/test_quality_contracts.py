@@ -6,12 +6,14 @@ import ast
 import re
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+import duckdb
+import pytest
 
 from swing_copilot.pipeline import daily, daily_composition, daily_runner
-
-if TYPE_CHECKING:
-    import pytest
+from swing_copilot.storage.database import DEFAULT_DB_PATH
+from swing_copilot.storage.market_store import DEFAULT_PARQUET_ROOT
+from tests.conftest import _REPO_DATA_DIR, _guard_repo_directory
 
 PROJECT_ROOT = Path(__file__).parents[1]
 REQUIREMENTS = tuple(
@@ -196,6 +198,63 @@ def test_no_package_reaches_into_analysis_for_atomic_writes():
         "import the atomic writers from swing_copilot.io_atomic: "
         + ", ".join(violations)
     )
+
+
+def test_repo_data_guard_rejects_a_duckdb_connection_under_the_repo_data_dir():
+    """Issue #233: the autouse `data/` guard must actually fire.
+
+    This is the exact call `Database.connect()` makes for the repo-relative
+    `DEFAULT_DB_PATH` when a composition-root test forgets
+    `monkeypatch.chdir(tmp_path)`. The guard raises before DuckDB opens
+    anything, so this test never takes the operator's file lock.
+    """
+    repo_db = str(PROJECT_ROOT.resolve() / DEFAULT_DB_PATH)
+
+    with pytest.raises(AssertionError, match=r"DuckDB file under the repository"):
+        duckdb.connect(repo_db)
+
+
+def test_repo_data_guard_leaves_isolated_and_in_memory_connections_alone(tmp_path):
+    """The guard keys on the resolved path, so normal tests are unaffected."""
+    with duckdb.connect(str(tmp_path / "copilot.duckdb")) as isolated:
+        assert isolated.execute("SELECT 1").fetchone() == (1,)
+    with duckdb.connect() as in_memory:
+        assert in_memory.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_repo_directory_guard_fails_when_a_watched_file_appears(tmp_path):
+    """The mtime half shared by the `reports/` and `data/` guards must fire."""
+    guarded_dir = tmp_path / "data"
+    guarded_dir.mkdir()
+    watched = guarded_dir / "copilot.duckdb"
+
+    with (
+        pytest.raises(AssertionError, match=r"wrote into the repository's real"),
+        _guard_repo_directory(guarded_dir, watched),
+    ):
+        watched.write_bytes(b"fixture")
+
+
+def test_repo_directory_guard_stays_quiet_for_writes_outside_the_watched_tree(tmp_path):
+    """A guard that fires on isolated writes would be unusable, so pin it."""
+    guarded_dir = tmp_path / "data"
+    guarded_dir.mkdir()
+
+    with _guard_repo_directory(guarded_dir, guarded_dir / "copilot.duckdb"):
+        (tmp_path / "isolated.duckdb").write_bytes(b"fixture")
+
+
+def test_storage_defaults_stay_inside_the_directory_the_guard_watches():
+    """Moving a repo-relative default out of `data/` must not silently unguard it.
+
+    `_REPO_DATA_DIR` is what both `data/` guards key on. If `DEFAULT_DB_PATH`
+    or `DEFAULT_PARQUET_ROOT` were ever repointed elsewhere, the guards would
+    keep passing while protecting nothing, so pin the relationship here.
+    """
+    assert PROJECT_ROOT.resolve() / "data" == _REPO_DATA_DIR
+    for default in (DEFAULT_DB_PATH, DEFAULT_PARQUET_ROOT):
+        assert not default.is_absolute()
+        assert (PROJECT_ROOT.resolve() / default).parent == _REPO_DATA_DIR
 
 
 def _is_protocol_or_abc(base: ast.expr) -> bool:

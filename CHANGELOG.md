@@ -85,6 +85,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- テストスイートがリポジトリの実 `data/` 配下の DuckDB を開いてしまう問題を修正した
+  （Issue #233）。`tests/pipeline/test_cli.py::TestComposeDependencies` の3件が
+  `monkeypatch.chdir(tmp_path)` なしに `_compose_dependencies()` を呼んでおり、
+  その中の `Database(DEFAULT_DB_PATH)` + `state_store.init_schema()` が
+  repo 相対の `data/copilot.duckdb` を read-write で開いていた。この working copy は
+  18:30 の無人 routine の実行環境であり、DuckDB のファイルロックは read-write
+  プロセスと他のすべてに対して排他なので、テスト実行が routine と重なればその日の
+  run 全体を落としうる。当該3件に cwd 隔離を入れたうえで、`tests/conftest.py` に
+  autouse の `data/` ガードを2本追加した——`reports/` ガードと同じ mtime 方式（書き込みを
+  teardown で検知）に加え、`duckdb.connect` を差し替えて**オープンそのもの**を
+  即座に失敗させる方式である。後者が必要なのは、初期化済みファイルへの
+  `init_schema()` は mtime を動かさない一方でロックは取ってしまい、mtime 方式では
+  構造的に検知できないためだった。ガード自体の自己テスト（実 `data/` への接続が
+  失敗すること、隔離パス/インメモリ接続は素通りすること、mtime 方式が発火すること）は
+  `tests/test_quality_contracts.py` に置いた
+
 - fundamentals 取得（ステップ2）が NFR-03 の時間予算で打ち切られる際に、保有銘柄が
   取りこぼされうる問題を修正した（Issue #219）。走査順が `_select_symbols()` の
   素の辞書順だったため、打ち切りの被害者はアルファベット順という無関係な理由で

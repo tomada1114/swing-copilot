@@ -194,7 +194,9 @@ class TestComposeDependencies:
         with pytest.raises(ConfigError, match="edgar_identity"):
             _compose_dependencies(DailyRunOptions(skip_text=True), settings, strategies)
 
-    def test_skip_text_leaves_text_and_calendar_clients_none(self, monkeypatch):
+    def test_skip_text_leaves_text_and_calendar_clients_none(
+        self, monkeypatch, tmp_path
+    ):
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
@@ -202,6 +204,7 @@ class TestComposeDependencies:
         )
         settings = load_settings("config/settings.yaml")
         strategies = load_strategies("config/strategies.yaml")
+        monkeypatch.chdir(tmp_path)
 
         deps = _compose_dependencies(
             DailyRunOptions(skip_text=True), settings, strategies
@@ -214,7 +217,9 @@ class TestComposeDependencies:
         assert deps.calendar_client is None
         assert deps.notifier is None
 
-    def test_explicit_as_of_uses_the_point_in_time_universe_resolver(self, monkeypatch):
+    def test_explicit_as_of_uses_the_point_in_time_universe_resolver(
+        self, monkeypatch, tmp_path
+    ):
         settings = load_settings("config/settings.yaml")
         strategies = load_strategies("config/strategies.yaml")
         expected_as_of = date(2026, 7, 20)
@@ -242,6 +247,7 @@ class TestComposeDependencies:
             "load_secrets",
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
+        monkeypatch.chdir(tmp_path)
 
         deps = _compose_dependencies(
             DailyRunOptions(as_of=expected_as_of, skip_text=True),
@@ -258,7 +264,9 @@ class TestComposeDependencies:
         assert [member.symbol for member in deps.universe] == ["PIT"]
         assert deps.universe_snapshot_date == expected_as_of
 
-    def test_configured_secrets_wire_up_the_matching_clients(self, monkeypatch):
+    def test_configured_secrets_wire_up_the_matching_clients(
+        self, monkeypatch, tmp_path
+    ):
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
@@ -270,6 +278,7 @@ class TestComposeDependencies:
         )
         settings = load_settings("config/settings.yaml")
         strategies = load_strategies("config/strategies.yaml")
+        monkeypatch.chdir(tmp_path)
 
         deps = _compose_dependencies(DailyRunOptions(), settings, strategies)
 

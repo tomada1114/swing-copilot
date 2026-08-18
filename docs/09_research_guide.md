@@ -47,6 +47,8 @@ bars = research.bars(["AAPL", "MSFT"])
 | `scorecard()` | verdict × 当否 × スコア内訳 × リスク制約 × レジーム × 追跡 × セクター | `v_verdict_scorecard` |
 | `candidates()` | 候補とスコア内訳（JSON から型付き列へ展開済み） | `v_candidates` |
 | `tracked_positions()` | verdict 追跡台帳の仮想ポジション + recommendation（Issue #190 以降は `skip` のシャドウ建玉も含む） | `v_tracked_positions` |
+| `truncated_candidates()` | `candidate_limit` で順位落ちした near-miss とスコア内訳（列は `candidates()` と揃えてある） | `v_truncated_candidates` |
+| `universe_forward_returns()` | 候補 ∪ 順位落ち ∪ 落選の forward return（`outcome_class` / `reason_code` 付き） | `v_universe_forward_returns` |
 | `runs()` / `verdicts()` / `verdict_outcomes()` / `screening_rejections()` / `regime_snapshots()` | 各テーブルそのまま | 実テーブル |
 | `bars(symbols)` | 日足 OHLCV（in-memory DuckDB で Parquet を直読） | `data/parquet/` |
 | `query(sql, params)` | 任意 SQL の結果 | — |
@@ -84,6 +86,35 @@ bars = research.bars(["AAPL", "MSFT"])
 ない。`tracked_positions()` を集計するときは `recommendation` で層別するか、
 `proceed` へ絞ること。層別せずに平均を取ると「proceed だけ買った場合」でも
 「候補を全部買った場合」でもない、解釈できない数字になる。
+
+## Issue #188 で増えた対照群
+
+候補になった銘柄にしか forward return が付かない間、測れているのは**偽陽性率だけ**
+だった。`universe_forward_returns()` はその run が下した screening 判断すべてに
+同じ forward return を付ける。
+
+| 列 | 意味 | NULL の意味 |
+|---|---|---|
+| `outcome_class` | その日その銘柄がどちら側だったか（`candidate` / `truncated` / `rejected`） | — |
+| `reason_code` | 落選理由（`screening_rejections` と同じ閉じた enum） | 候補・順位落ちは「何にも落とされていない」ので理由が無い |
+| `rank` / `score` | 候補または順位落ちとしてのランキング位置 | 落選銘柄はそもそもランク付けされていない |
+| `gics_sector` | as-of 解決済みセクター（`v_symbol_sector_asof`） | snapshot が run 日以前に無い |
+
+```python
+# フィルタは利益に貢献しているか（落選銘柄のその後）
+df = research.universe_forward_returns()
+df[df.outcome_class == "rejected"].groupby("reason_code")["forward_return_pct"].mean()
+
+# candidate_limit を広げたら成績は上がるか（順位帯別）
+df[df.outcome_class.isin(["candidate", "truncated"])].groupby("rank")[
+    "forward_return_pct"
+].agg(["mean", "count"])
+```
+
+注意点が2つある。`truncated` 側は**切り口のすぐ下だけ**（`candidate_limit * 3` 件）
+しか保存していないので、順位帯の平均は保存範囲までしか語れない。もう一つ、
+これらは `signal_outcomes` / `verdict_outcomes` のような当否分類を持たない**生の
+リターン**であり、ここから「勝率」を作るときは分類の閾値を自分で決めることになる。
 
 ## 安全上の規約
 

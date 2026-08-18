@@ -712,7 +712,10 @@ def _run_step_screening(
     deps.state_store.record_screening_results(
         result.candidates,
         result.rejections,
-        ScreeningRunMeta(run_id, pipeline.strategy_key, as_of),
+        result.truncated,
+        ScreeningRunMeta(
+            run_id, pipeline.strategy_key, as_of, pipeline.candidate_limit
+        ),
     )
     return _StepOutcome(True), result
 

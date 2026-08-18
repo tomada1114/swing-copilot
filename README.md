@@ -60,6 +60,12 @@ from swing_copilot import research
 
 df = research.scorecard()
 df.groupby(["gate_verdict", "recommendation"])["forward_return_pct"].mean()
+
+# ...and the control groups: what the screen threw away also has a return.
+universe = research.universe_forward_returns()
+universe[universe.outcome_class == "rejected"].groupby("reason_code")[
+    "forward_return_pct"
+].mean()
 ```
 
 Backtest a strategy over a historical window, with risk-adjusted metrics

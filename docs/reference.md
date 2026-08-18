@@ -17,13 +17,15 @@ research.scorecard()            # verdict × 当否 × スコア内訳 × レジ
 research.candidates()           # 候補とスコア内訳（JSON展開済みの型付き列）
 research.tracked_positions()    # 追跡台帳 + recommendation
 research.screening_rejections() # 落選理由
+research.truncated_candidates()   # candidate_limit で順位落ちした near-miss
+research.universe_forward_returns()  # 候補 ∪ 順位落ち ∪ 落選の forward return
 research.bars(["AAPL"])        # Parquet 直読の日足（DBファイルに触れない）
 research.query("SELECT ...")   # 任意の read-only SQL
 research.ensure_views(path)     # ビュー未作成の古い DB を修復
 ```
 
-結合済みビュー（`v_verdict_scorecard` / `v_candidates` / `v_tracked_positions` /
-`v_symbol_sector_asof`）は `storage/schema.py` が定義し、`StateStore.init_schema()`
+結合済みビュー（`v_verdict_scorecard` / `v_candidates` / `v_truncated_candidates` /
+`v_universe_forward_returns` / `v_tracked_positions` / `v_symbol_sector_asof`）は `storage/schema.py` が定義し、`StateStore.init_schema()`
 （毎日次実行）が `CREATE OR REPLACE` で自己移行する。セクターの as-of 解決
 （`snapshot_date <= run_date` の inclusive 境界）は `v_symbol_sector_asof` に
 一元化されており、分析側で universe_membership を自前 JOIN してはならない。

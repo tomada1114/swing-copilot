@@ -22,22 +22,47 @@ if TYPE_CHECKING:
     import duckdb
 
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
+    from swing_copilot.screening.base import (
+        Candidate,
+        RejectionRecord,
+        SignalHit,
+        TruncatedCandidate,
+    )
     from swing_copilot.storage.database import Database
+
+#: How far past `candidate_limit` the truncated ranking is persisted
+#: (Issue #188). The questions these rows exist for -- "would a limit of 8
+#: have helped", "is rank 6-10 really worse than 1-5" -- all live just below
+#: the cut; the long tail of a few hundred also-rans would answer none of
+#: them while writing two orders of magnitude more rows every day. Three
+#: times the limit keeps roughly two further "pages" of the same size.
+PERSISTED_TRUNCATION_MULTIPLIER = 3
+
+#: `universe_forward_returns.outcome_class` values (Issue #188), matching the
+#: table's own CHECK constraint. Named here because the postmortem writer and
+#: the research accessors must agree on them exactly.
+OUTCOME_CLASS_CANDIDATE = "candidate"
+OUTCOME_CLASS_TRUNCATED = "truncated"
+OUTCOME_CLASS_REJECTED = "rejected"
 
 
 @dataclass(frozen=True, slots=True)
 class ScreeningRunMeta:
-    """Per-run identifiers `record_screening_results` needs beyond the rows themselves.
+    """Per-run values `record_screening_results` needs beyond the rows themselves.
 
-    Grouped into one value (rather than three positional params) to keep
+    Grouped into one value (rather than four positional params) to keep
     `record_screening_results`/`StateStore.record_screening_results` within
     the project's parameter-count guideline.
+
+    `candidate_limit` is the run's configured cap, carried here so the
+    truncation retention rule (`PERSISTED_TRUNCATION_MULTIPLIER`) is applied
+    once, at the write boundary, instead of at each call site.
     """
 
     run_id: UUID
     strategy_key: str
     as_of: date
+    candidate_limit: int
 
 
 def record_signals(
@@ -100,20 +125,63 @@ def record_candidates(
             )
 
 
+def select_persisted_truncations(
+    truncations: Sequence[TruncatedCandidate], candidate_limit: int
+) -> tuple[TruncatedCandidate, ...]:
+    """Return the retained near-misses, closest to the cut first (Issue #188).
+
+    Args:
+        truncations: One ranking's full truncated tail, in any order.
+        candidate_limit: The run's configured cap. A non-positive limit
+            retains nothing -- with no candidates there is no "just below the
+            cut" to compare against.
+
+    Returns:
+        At most `candidate_limit * PERSISTED_TRUNCATION_MULTIPLIER` rows,
+        sorted by `rank` ascending. Sorting here rather than trusting the
+        caller is what makes the retention rule mean "the best-ranked
+        near-misses" no matter how the sequence arrived.
+    """
+    if candidate_limit <= 0:
+        return ()
+    ordered = sorted(truncations, key=lambda item: item.rank)
+    return tuple(ordered[: candidate_limit * PERSISTED_TRUNCATION_MULTIPLIER])
+
+
 def record_screening_results(
     database: Database,
     candidates: Sequence[Candidate],
     rejections: Sequence[RejectionRecord],
+    truncations: Sequence[TruncatedCandidate],
     meta: ScreeningRunMeta,
 ) -> None:
-    """Record one run's candidates and rejections atomically (REQ-004/REQ-020).
+    """Record one run's candidates, rejections, and truncations atomically.
 
-    Both writes share one transaction: a failure partway through (either
-    table) leaves neither table's rows from this run committed. Mirrors
-    `record_signals`'s explicit transaction pattern above -- the pre-P1-02
-    `record_candidates` below has no such wrapper, which is the actual gap
-    this function closes for the production `_run_step_screening` call site.
+    REQ-004/REQ-020 plus Issue #188: all three writes share one transaction,
+    so a failure partway through (any table) leaves none of this run's rows
+    committed. Mirrors `record_signals`'s explicit transaction pattern above
+    -- the pre-P1-02 `record_candidates` below has no such wrapper, which is
+    the actual gap this function closes for the production
+    `_run_step_screening` call site.
+
+    Candidates and truncations are the two halves of one ranking, which is
+    why they cannot be two writes: a committed candidate set paired with a
+    missing (or stale) truncated tail would misstate where the cut fell.
+    The truncated tail is therefore written as a *replacement* -- this
+    strategy's existing rows for the run are deleted first -- rather than
+    upserted row by row, so a rerun whose ranking moved a symbol above the
+    cut does not leave it behind as a phantom near-miss.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        candidates: Ranked candidates that survived `candidate_limit`.
+        rejections: Classified rejection records for the rest of the universe.
+        truncations: The ranking's truncated tail; retained down to
+            `select_persisted_truncations`' cap.
+        meta: `(run_id, strategy_key, as_of, candidate_limit)` shared by
+            every row.
     """
+    retained = select_persisted_truncations(truncations, meta.candidate_limit)
     with database.connect() as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
@@ -158,11 +226,49 @@ def record_screening_results(
                         meta.as_of,
                     ],
                 )
+            _replace_truncations(conn, retained, meta)
         except Exception:
             conn.execute("ROLLBACK")
             raise
         else:
             conn.execute("COMMIT")
+
+
+def _replace_truncations(
+    conn: duckdb.DuckDBPyConnection,
+    truncations: Sequence[TruncatedCandidate],
+    meta: ScreeningRunMeta,
+) -> None:
+    """Replace this run/strategy's truncated tail inside the caller's transaction."""
+    conn.execute(
+        "DELETE FROM screening_truncations WHERE run_id = ? AND strategy_key = ?",
+        [str(meta.run_id), meta.strategy_key],
+    )
+    for truncation in truncations:
+        breakdown = truncation.score_breakdown
+        conn.execute(
+            """
+            INSERT INTO screening_truncations (
+                run_id, symbol, strategy_key, rank, score,
+                score_rsi_pullback, score_trend_quality, score_liquidity,
+                score_atr_pct, execution_state, execution_distance, as_of
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                str(meta.run_id),
+                truncation.symbol,
+                meta.strategy_key,
+                truncation.rank,
+                truncation.score,
+                breakdown.get("score_rsi_pullback"),
+                breakdown.get("score_trend_quality"),
+                breakdown.get("score_liquidity"),
+                breakdown.get("score_atr_pct"),
+                truncation.execution_state,
+                truncation.execution_distance,
+                meta.as_of,
+            ],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +374,96 @@ def replace_signal_outcomes(
                         list(outcome.signal_names),
                         outcome.forward_return_pct,
                         outcome.classification,
+                    ],
+                )
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseForwardReturnRecord:
+    """One symbol's realized return over one horizon, tagged by its screening fate.
+
+    `run_id` is the HISTORICAL run whose screening decision is being measured
+    (same convention as `SignalOutcomeRecord`), and `reason_code` is that
+    run's `screening_rejections.reason_code` when `outcome_class` is
+    `rejected`, `None` otherwise -- a candidate or a near-miss was rejected
+    by nothing, so there is no code to carry.
+    """
+
+    run_id: UUID
+    symbol: str
+    horizon_days: int
+    as_of: date
+    outcome_class: str
+    reason_code: str | None
+    forward_return_pct: float
+
+
+def replace_universe_forward_returns(
+    database: Database,
+    run_id: UUID,
+    horizon_days: int,
+    returns: Sequence[UniverseForwardReturnRecord],
+) -> None:
+    """Atomically replace one historical run/horizon's control-group returns.
+
+    Full replacement (DELETE then INSERT in one transaction), mirroring
+    `replace_signal_outcomes`: a rerun against corrected bars must not leave
+    behind a row whose symbol dropped out of the recomputed set, and a
+    partially rewritten horizon must never be readable. This is what makes
+    the postmortem step idempotent (Issue #188's DoD).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The historical run being evaluated.
+        horizon_days: The horizon being replaced.
+        returns: The complete recomputed set for that `(run_id, horizon)`.
+
+    Raises:
+        ValueError: A record disagrees with the `(run_id, horizon_days)`
+            slice being replaced -- writing it would silently touch another
+            slice the DELETE above did not clear.
+    """
+    if any(
+        record.run_id != run_id or record.horizon_days != horizon_days
+        for record in returns
+    ):
+        msg = "all returns must match the replacement run_id and horizon_days"
+        raise ValueError(msg)
+
+    with database.connect() as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute(
+                "DELETE FROM universe_forward_returns "
+                "WHERE run_id = ? AND horizon_days = ?",
+                [str(run_id), horizon_days],
+            )
+            for record in returns:
+                conn.execute(
+                    """
+                    INSERT INTO universe_forward_returns (
+                        run_id, symbol, horizon_days, as_of, outcome_class,
+                        reason_code, forward_return_pct
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE SET
+                        as_of = EXCLUDED.as_of,
+                        outcome_class = EXCLUDED.outcome_class,
+                        reason_code = EXCLUDED.reason_code,
+                        forward_return_pct = EXCLUDED.forward_return_pct
+                    """,
+                    [
+                        str(record.run_id),
+                        record.symbol,
+                        record.horizon_days,
+                        record.as_of,
+                        record.outcome_class,
+                        record.reason_code,
+                        record.forward_return_pct,
                     ],
                 )
         except Exception:

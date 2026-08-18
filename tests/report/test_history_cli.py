@@ -108,7 +108,8 @@ def _populate(state_store: StateStore) -> UUID:
                 detail={"rsi14": 70.0},
             )
         ],
-        ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+        [],
+        ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
     )
     state_store.record_risk_assessments(
         [

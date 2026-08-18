@@ -14,6 +14,7 @@ from swing_copilot.screening.base import (
     RejectionReasonCode,
     RejectionRecord,
     RejectionStage,
+    TruncatedCandidate,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
 from swing_copilot.storage.history_queries import (
@@ -25,6 +26,7 @@ from swing_copilot.storage.history_queries import (
     get_signal_outcomes,
     get_successful_run,
     get_symbol_timeline,
+    get_truncations,
     list_runs,
     run_exists,
 )
@@ -133,7 +135,8 @@ class TestGetRunDetail:
                     detail={"rsi14": 70.0},
                 )
             ],
-            ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            [],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
         state_store.record_risk_assessments(
             [
@@ -195,7 +198,8 @@ class TestGetRejections:
                     detail={"rsi14": 70.0, "note": "overbought"},
                 )
             ],
-            ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            [],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
         rows = get_rejections(state_store._database, run_id)  # noqa: SLF001
@@ -205,6 +209,44 @@ class TestGetRejections:
         assert rows[0].stage == "technical_signal"
         assert rows[0].reason_code == "SIGNAL_TREND_NOT_MET"
         assert rows[0].detail == {"rsi14": 70.0, "note": "overbought"}
+        assert rows[0].as_of == date(2026, 7, 20)
+
+
+class TestGetTruncations:
+    """Issue #188: reading back the near-misses one past run recorded."""
+
+    def test_unknown_run_returns_empty_list(self, state_store: StateStore) -> None:
+        assert get_truncations(state_store._database, uuid4()) == []  # noqa: SLF001
+
+    def test_returns_the_retained_tail_closest_to_the_cut_first(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
+        state_store.record_screening_results(
+            [],
+            [],
+            [
+                TruncatedCandidate(
+                    symbol=symbol,
+                    rank=rank,
+                    score=score,
+                    score_breakdown={"score_liquidity": 0.5},
+                    execution_state="READY",
+                    execution_distance=None,
+                )
+                for symbol, rank, score in (("FAR", 7, 0.3), ("NEAR", 6, 0.4))
+            ],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        rows = get_truncations(state_store._database, run_id)  # noqa: SLF001
+
+        assert [(row.symbol, row.rank, row.score) for row in rows] == [
+            ("NEAR", 6, 0.4),
+            ("FAR", 7, 0.3),
+        ]
+        assert rows[0].strategy_key == "default"
+        assert rows[0].execution_state == "READY"
         assert rows[0].as_of == date(2026, 7, 20)
 
 

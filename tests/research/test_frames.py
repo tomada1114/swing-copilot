@@ -1,6 +1,7 @@
 """Contract tests for the read-only research surface (`swing_copilot.research`).
 
 The views under test (`v_verdict_scorecard`, `v_candidates`,
+`v_truncated_candidates`, `v_universe_forward_returns`,
 `v_tracked_positions`, `v_symbol_sector_asof`) live in `storage/schema.py`;
 these tests exercise them through the public DataFrame accessors, including
 the as-of sector boundary, the immature-verdict row, read-only enforcement,
@@ -237,6 +238,88 @@ class TestTableAccessors:
         assert len(df) == 1
         assert df.iloc[0]["recommendation"] == "proceed"
         assert df.iloc[0]["entry_price"] == pytest.approx(190.0)
+
+
+def _insert_truncation(store, run_id, symbol="NEAR", strategy_key="default", rank=6):
+    with store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO screening_truncations VALUES "
+            "(?, ?, ?, ?, 0.42, 0.1, 0.2, 0.3, 0.4, 'READY', 0.02, ?)",
+            [str(run_id), symbol, strategy_key, rank, RUN_DATE],
+        )
+
+
+def _insert_universe_return(store, run_id, symbol, outcome_class, reason_code=None):
+    with store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO universe_forward_returns VALUES "
+            "(?, ?, 5, '2027-02-08', ?, ?, -3.5)",
+            [str(run_id), symbol, outcome_class, reason_code],
+        )
+
+
+class TestControlGroupAccessors:
+    """Issue #188: the truncated tail and the whole-universe forward returns."""
+
+    def test_truncated_candidates_expose_the_score_breakdown_as_columns(
+        self, state_store, tmp_path
+    ):
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_truncation(state_store, run_id)
+
+        df = research.truncated_candidates(db_path=tmp_path / "copilot.duckdb")
+
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["symbol"] == "NEAR"
+        assert row["rank"] == 6
+        assert row["score_liquidity"] == pytest.approx(0.3)
+        assert row["run_date"] == pd.Timestamp(RUN_DATE)
+
+    def test_universe_forward_returns_join_rank_score_and_sector(
+        self, state_store, tmp_path
+    ):
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_universe(state_store, RUN_DATE)
+        _insert_candidate(state_store, run_id, '{"score": 0.8}')
+        _insert_truncation(state_store, run_id)
+        _insert_universe_return(state_store, run_id, "AAPL", "candidate")
+        _insert_universe_return(state_store, run_id, "NEAR", "truncated")
+        _insert_universe_return(
+            state_store, run_id, "XYZ", "rejected", "FILTER_NEGATIVE_FCF"
+        )
+
+        df = research.universe_forward_returns(db_path=tmp_path / "copilot.duckdb")
+        by_symbol = df.set_index("symbol")
+
+        assert len(df) == 3
+        assert by_symbol.loc["AAPL", "rank"] == 1
+        assert by_symbol.loc["AAPL", "score"] == pytest.approx(0.8)
+        assert by_symbol.loc["AAPL", "gics_sector"] == "Information Technology"
+        assert by_symbol.loc["NEAR", "rank"] == 6
+        assert by_symbol.loc["XYZ", "reason_code"] == "FILTER_NEGATIVE_FCF"
+        # A rejected symbol was never ranked at all, so both ranking legs of
+        # the view stay null rather than defaulting to a position.
+        assert pd.isna(by_symbol.loc["XYZ", "rank"])
+
+    def test_a_symbol_ranked_by_two_strategies_stays_one_row(
+        self, state_store, tmp_path
+    ):
+        # `universe_forward_returns` records a decision about a symbol on a
+        # day, not per strategy: the view must not fan one decision out into
+        # one row per strategy the run happened to score.
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_truncation(state_store, run_id, strategy_key="default", rank=6)
+        _insert_truncation(state_store, run_id, strategy_key="vcp", rank=9)
+        _insert_universe_return(state_store, run_id, "NEAR", "truncated")
+
+        df = research.universe_forward_returns(db_path=tmp_path / "copilot.duckdb")
+
+        assert len(df) == 1
+        assert df.iloc[0]["rank"] == 6
 
 
 class TestQuery:

@@ -26,6 +26,8 @@ from swing_copilot.research.frames import (
     scorecard,
     screening_rejections,
     tracked_positions,
+    truncated_candidates,
+    universe_forward_returns,
     verdict_outcomes,
     verdicts,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "scorecard",
     "screening_rejections",
     "tracked_positions",
+    "truncated_candidates",
+    "universe_forward_returns",
     "verdict_outcomes",
     "verdicts",
 ]

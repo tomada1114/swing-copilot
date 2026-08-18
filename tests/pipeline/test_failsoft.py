@@ -22,6 +22,8 @@ import pytest
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from swing_copilot.retro.collect import CollectSummary
+
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
@@ -41,6 +43,7 @@ from swing_copilot.report.markdown_report import (
     write_markdown_report,
 )
 from swing_copilot.report.rejections import REJECTIONS_FILENAME
+from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -282,6 +285,17 @@ def _step_status(state_store: StateStore, run_id: UUID, step: str) -> str:
     return status
 
 
+def _step_detail(state_store: StateStore, run_id: UUID, step: str) -> str:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT detail FROM run_steps WHERE run_id = ? AND step = ?",
+            [str(run_id), step],
+        ).fetchone()
+    assert row is not None
+    detail: str = row[0]
+    return detail
+
+
 class TestTextCollectionFailureDegrades:
     def test_text_failure_degrades_but_still_completes_the_run(
         self, base_deps, state_store
@@ -478,6 +492,16 @@ class TestMaeMfeFailureDegrades:
         )
 
 
+class MutableMonotonic:
+    """A monotonic source a step under test can deliberately jump forward."""
+
+    def __init__(self, value: float = 0.0):
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
 class FakeMonotonic:
     """Returns each value in order, then repeats the last one forever."""
 
@@ -601,6 +625,70 @@ class TestRetroStepsRunDaily:
         assert _step_status(state_store, result.run_id, "retro_evaluate") == "skipped"
         assert _step_status(state_store, result.run_id, "track_update") == "skipped"
         assert _step_status(state_store, result.run_id, "8_output") == "success"
+
+
+class TestCollectPrecedesTheAnalysisExport:
+    """Issue #207: `retro_collect` now runs before step 6, and must stay cheap.
+
+    Step 6 is the run's only handoff to the analysis skill, so the bookkeeping
+    scan that was moved in front of it must not be able to cost it its slot,
+    and must not change which same-day run the scan adopts.
+    """
+
+    def test_a_collect_that_overruns_the_budget_does_not_skip_the_export(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        object.__setattr__(base_deps.settings.schedule, "timeout_minutes", 1)
+        monotonic = MutableMonotonic()
+        deps = replace(base_deps, news_client=FakeNewsClient(), monotonic=monotonic)
+
+        def _slow_collect(store: StateStore, reports_root: Path) -> CollectSummary:
+            monotonic.value = 999_999.0  # the scan burned the whole budget
+            return collect_verdicts(store, reports_root)
+
+        monkeypatch.setattr(daily_module, "collect_verdicts", _slow_collect)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert _step_status(state_store, result.run_id, "retro_collect") == "success"
+        assert (
+            _step_status(state_store, result.run_id, "6_analysis_export") == "success"
+        )
+        # The overrun was real: the next budgeted step did stop for it.
+        assert _step_status(state_store, result.run_id, "postmortem") == "skipped"
+
+    def test_a_same_day_rerun_adopts_the_archived_run_and_ignores_its_own_run(
+        self, base_deps: DailyDependencies, state_store: StateStore
+    ) -> None:
+        _write_archived_run(base_deps.output_dir)
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        second = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
+
+        with state_store.database.connect() as conn:
+            rows = conn.execute("SELECT run_id, symbol FROM verdicts").fetchall()
+        # Unchanged by the reordering: the only collectable run for the date
+        # is still the archived one, so `_adopted_runs` still picks it.
+        assert [(str(row[0]), row[1]) for row in rows] == [(ARCHIVED_RUN_ID, "AAPL")]
+        # The intentional difference: the first run's scan no longer sees its
+        # own half-written directory, because the export has not created it
+        # yet. The second run's scan does see it, and notes it exactly as
+        # before -- an archive without `analysis_result.json`.
+        assert (
+            _step_detail(state_store, first.run_id, "retro_collect")
+            == "collected 1/1 run(s), 1 verdict(s)"
+        )
+        second_detail = _step_detail(state_store, second.run_id, "retro_collect")
+        assert second_detail.startswith("collected 1/2 run(s), 1 verdict(s) / notes: ")
+        assert str(first.run_id) in second_detail
+        assert ANALYSIS_RESULT_FILENAME in second_detail
 
 
 class TestTrackUpdateStepRunsDaily:

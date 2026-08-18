@@ -337,9 +337,26 @@ def _run_soft_steps(
     )
     degraded = degraded or not text_outcome.success
 
+    # `retro_collect` runs *before* the export (Issue #207). It is the only
+    # writer of the `verdicts` table, and the export's `<prior_verdicts>`
+    # block reads that table, so leaving the collect behind the export put the
+    # feedback one further run in the past: on day D the export saw verdicts
+    # only up to D-2, silently blanking the most recent one or two business
+    # days -- exactly the interval "how did I judge this symbol last time" is
+    # about. Collecting first costs nothing extra: the scan is offline and
+    # idempotent, and the current run's own `analysis_result.json` does not
+    # exist yet at either position.
+    #
+    # The export's time-budget verdict is taken here, *before* collect starts,
+    # so the decision is exactly the one the previous ordering made. The
+    # export is this run's only handoff to the analysis skill, so a slow
+    # bookkeeping scan must never become the reason it is skipped.
+    export_over_budget = deps.monotonic() >= deadline
+    degraded = _run_retro_collect_soft_step(deps, ctx, deadline) or degraded
+
     started_at = time.perf_counter()
     signal_performance: tuple[SignalPerformanceRow, ...]
-    if deps.monotonic() >= deadline:
+    if export_over_budget:
         logger.warning("step 6_analysis_export skipped: time budget exceeded")
         export_outcome, analysis_input_path, analysis_input_digest = (
             _TIME_BUDGET_STEP_OUTCOME,
@@ -446,6 +463,36 @@ def _run_soft_steps(
     )
 
 
+def _run_retro_collect_soft_step(
+    deps: DailyDependencies,
+    ctx: _RunContext,
+    deadline: float,
+) -> bool:
+    """Archive the previously ingested verdicts, ahead of the export (Issue #207).
+
+    Kept apart from `_run_retro_soft_steps` purely because of *when* it has to
+    run: it is the only writer of the `verdicts` table, and step 6 reads that
+    table to build each candidate's `<prior_verdicts>` block, so the archive
+    has to be current before the export rather than after it.
+
+    Like its siblings it is offline, idempotent (run-scoped
+    DELETE-then-INSERT), and fail-soft: a broken scan degrades the run and
+    still leaves the export, the report, and the remaining retro steps to run.
+
+    Returns:
+        Whether the step degraded the run.
+    """
+    started_at = time.perf_counter()
+    if deps.monotonic() >= deadline:
+        logger.warning("step retro_collect skipped: time budget exceeded")
+        outcome = _TIME_BUDGET_STEP_OUTCOME
+    else:
+        logger.debug("step retro_collect starting")
+        outcome = _run_step_retro_collect(deps)
+    _record_step(deps, ctx.run_id, "retro_collect", outcome, started_at)
+    return not outcome.success
+
+
 def _run_retro_soft_steps(
     deps: DailyDependencies,
     ctx: _RunContext,
@@ -458,6 +505,8 @@ def _run_retro_soft_steps(
     run from ageing out of the evaluation window while also backing up the
     archived `analysis_result.json` into DuckDB. `export` (which fetches
     freshness data over the network) and the `swing-retro` skill stay manual.
+    `collect` itself has already run by this point, in
+    `_run_retro_collect_soft_step`, because step 6 consumes what it writes.
 
     `track_update` joins them for the same reasons -- offline, idempotent,
     reading only already-persisted bars -- but answers a different question:
@@ -471,15 +520,6 @@ def _run_retro_soft_steps(
     Returns:
         Whether any step degraded the run.
     """
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step retro_collect skipped: time budget exceeded")
-        collect_outcome = _TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step retro_collect starting")
-        collect_outcome = _run_step_retro_collect(deps)
-    _record_step(deps, ctx.run_id, "retro_collect", collect_outcome, started_at)
-
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step retro_evaluate skipped: time budget exceeded")
@@ -498,11 +538,7 @@ def _run_retro_soft_steps(
         track_outcome = _run_step_track_update(deps, ctx.run_date)
     _record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
 
-    return (
-        not collect_outcome.success
-        or not evaluate_outcome.success
-        or not track_outcome.success
-    )
+    return not evaluate_outcome.success or not track_outcome.success
 
 
 def _finalize_output(

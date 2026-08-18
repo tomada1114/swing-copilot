@@ -488,7 +488,9 @@ def _select_symbols(
         `universe.manual_include` entries and of holdings outside the
         snapshot. Nothing downstream reads this order as data: screening
         receives it as a `set` and re-derives its own universe order from
-        `deps.universe`.
+        `deps.universe`, and the one step whose progress makes an order
+        observable -- the NFR-03-budgeted fundamentals fetch -- re-orders it
+        held-first for itself (`_fundamentals_fetch_order`).
     """
     if limit is None:
         return sorted({member.symbol for member in universe} | held_symbols)
@@ -608,12 +610,43 @@ def _log_fundamentals_progress(position: int, total: int) -> None:
     logger.debug("fundamentals: %d/%d symbols processed", position, total)
 
 
+def _fundamentals_fetch_order(
+    symbols: list[str], held_symbols: frozenset[str]
+) -> list[str]:
+    """Order the fundamentals fetch held-first, mirroring `_text_target_symbols`.
+
+    The NFR-03 time budget truncates this step mid-sequence, so whatever sorts
+    last is what silently loses today's fundamentals. Plain lexicographic order
+    made that an arbitrary draw, and a held position sorting after the
+    candidates lost its refresh to alphabetically-earlier candidates (Issue
+    #219) -- the exact outcome `_text_target_symbols` already prevents on the
+    text side. Both blocks keep the incoming (lexicographic) order, so the
+    reordered sequence stays reproducible.
+
+    Args:
+        symbols: `_select_symbols()`'s return value, whose own lexicographic
+            order contract is unchanged; the reorder is local to this step.
+        held_symbols: Open holdings (real + virtual ledger), 3.14's held set.
+
+    Returns:
+        The same symbols, holdings first, each block in stable order.
+    """
+    held = [symbol for symbol in symbols if symbol in held_symbols]
+    rest = [symbol for symbol in symbols if symbol not in held_symbols]
+    return [*held, *rest]
+
+
 def _run_step_fundamentals(
-    deps: DailyDependencies, symbols: list[str], as_of: date, deadline: float
+    deps: DailyDependencies,
+    symbols: list[str],
+    as_of: date,
+    deadline: float,
+    *,
+    held_symbols: frozenset[str],
 ) -> _StepOutcome:
     """Fetch/upsert fundamentals for `symbols`, filed on or before `as_of`.
 
-    Two fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
+    Three fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
 
     - Same-day rerun skip: a symbol already fetched today (`fetched_at`'s
       date == `deps.clock.today()`) is not re-fetched over the network. This
@@ -630,6 +663,11 @@ def _run_step_fundamentals(
       the step still succeeds (not fatal) with a detail explaining the
       partial completion, mirroring the existing partial-per-symbol-failure
       convention below.
+    - Held-first fetch order (`_fundamentals_fetch_order`): because that
+      budget cut is what makes the order observable at all, `held_symbols`
+      goes first, so a truncated symbol is always a candidate-only one. This
+      changes the fetch order only -- never the `filed_at <= as_of` cutoff
+      applied to what is fetched.
     """
     edgar_client = deps.edgar_client
     if edgar_client is None:
@@ -645,7 +683,7 @@ def _run_step_fundamentals(
     skipped_same_day = 0
     budget_detail: str | None = None
 
-    for index, symbol in enumerate(symbols):
+    for index, symbol in enumerate(_fundamentals_fetch_order(symbols, held_symbols)):
         if deps.monotonic() >= deadline:
             budget_detail = f"time budget exceeded after {index}/{total} symbols"
             logger.warning("fundamentals step stopping early: %s", budget_detail)

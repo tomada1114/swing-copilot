@@ -787,7 +787,13 @@ verdict追跡台帳`verdict_positions`の`status='open'`かつ`recommendation='p
 この和集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
 だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。
 `_select_symbols()`は`--limit`の有無にかかわらずこの保有集合を必ず合流させる
-（Issue #212。3.21節の実装時追記）。仮想建玉を
+（Issue #212。3.21節の実装時追記）。
+
+NFR-03の予算で打ち切られうる収集ステップは、**打ち切られる側が常に候補のみの銘柄で
+あるように保有銘柄を先頭に並べる**。テキスト側の`_text_target_symbols()`（30銘柄の
+上限で切り落とす）と、ステップ2のfundamentals取得
+（`pipeline/daily.py::_fundamentals_fetch_order()`が時間予算での`break`に先立って
+並べ替える。Issue #219。3.21節の実装時追記）の両方に同じ原則を適用する。仮想建玉を
 サイジング・集中度・相関へ混ぜてはならない（3.24.1節の棲み分け）。台帳の読み取り失敗は
 fail-softで、警告ログを残して仮想側を空として続行する。
 
@@ -1406,7 +1412,9 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 
 **P0-212実装時追記（Issue #212）**: `_select_symbols(universe, held_symbols, limit)`はそのrunが価格取得・スクリーニングする銘柄集合を決める唯一の入口であり（`daily_runner.py`が`price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})`として`get_daily_bars()`とステップ1へ渡す。日次経路の価格取得はこの1本だけで、`pipeline/backfill.py`は運用者が手で叩く別コマンド）、**`--limit`の有無にかかわらず3.14節の保有集合を和集合として合流させる**。`limit is None`分岐だけが合流していなかったため、S&P 500スナップショットから外れた保有銘柄はその日のbarを1本も取得されず、トレーリングストップ・max-hold・レポートのポジション文脈が古い価格の上で走っていた——`--limit`はスモーク用フラグで本番の18:30 routineは渡さないため、欠陥は本番経路だけに出る。指数からの除外直後こそ手仕舞い判定が最も要るタイミングであり、他レイヤに代替の取得経路もガードも無かった。
 
-これは**取得対象集合**への追加であって、ユニバースのas-of解決（`snapshot_date <= as_of`）を迂回するものではない。`_run_step_screening()`は`ScreeningInput.universe`を`deps.universe`との積集合に絞り続けるため、スナップショット外の保有銘柄が新規エントリー候補として再浮上することはない（P1-02の落選分類が未取得銘柄を誤分類しないための既存の絞り込みが、そのまま入口側の防波堤にもなる）。戻り値は両分岐とも`sorted()`で辞書順に揃える。`get_latest_universe_membership()`が`ORDER BY symbol`で読むため本番の並びは実質不変で、変わるのは`universe.manual_include`で末尾に足された銘柄とスナップショット外の保有銘柄の位置だけである。この順序を下流はデータとして読まない——screening側は`set`で受け取り、ユニバース順は`deps.universe`から再導出する（RSパーセンタイル・流動性パーセンタイルはいずれも`percentile_ranks()`が`(値, symbol)`でソートするため入力順に依存しない）。順序が観測できるのはステップ2のfundamentals取得順（NFR-03の時間予算で打ち切られた際にどこまで進んだか）だけである。価格取得の失敗は従来どおりfail-softで、`result.failures`がステップのdetailに載る。
+これは**取得対象集合**への追加であって、ユニバースのas-of解決（`snapshot_date <= as_of`）を迂回するものではない。`_run_step_screening()`は`ScreeningInput.universe`を`deps.universe`との積集合に絞り続けるため、スナップショット外の保有銘柄が新規エントリー候補として再浮上することはない（P1-02の落選分類が未取得銘柄を誤分類しないための既存の絞り込みが、そのまま入口側の防波堤にもなる）。戻り値は両分岐とも`sorted()`で辞書順に揃える。`get_latest_universe_membership()`が`ORDER BY symbol`で読むため本番の並びは実質不変で、変わるのは`universe.manual_include`で末尾に足された銘柄とスナップショット外の保有銘柄の位置だけである。この順序を下流はデータとして読まない——screening側は`set`で受け取り、ユニバース順は`deps.universe`から再導出する（RSパーセンタイル・流動性パーセンタイルはいずれも`percentile_ranks()`が`(値, symbol)`でソートするため入力順に依存しない）。順序が観測できるのはステップ2のfundamentals取得順（NFR-03の時間予算で打ち切られた際にどこまで進んだか）だけであり、そのステップは受け取った並びを自分の内側で保有優先へ並べ替える（Issue #219。直後の実装時追記）。価格取得の失敗は従来どおりfail-softで、`result.failures`がステップのdetailに載る。
+
+**P2-219実装時追記（Issue #219）**: ステップ2の`_run_step_fundamentals()`は`deps.monotonic() >= deadline`で走査を打ち切るため、**その並びの末尾にいる銘柄が今日のファンダメンタルズ更新を失う**。`_select_symbols()`の戻り値は辞書順なので、打ち切りの被害者はアルファベット順という無関係な理由で決まっており、候補より後ろに並ぶ保有銘柄は、単に先頭に近いだけの通常候補へ予算を使い切られていた。3.14節の held-first 原則がテキスト側（`_text_target_symbols()`）にしか実装されていなかった取りこぼしであり、意図的な差ではない。`held_symbols`を`daily_runner.py`の呼び出し側から引数で受け取り、`_fundamentals_fetch_order(symbols, held_symbols)`が保有ブロック→残りの順に並べ替えてから走査する。両ブロックとも入力の辞書順を保つので再現性は変わらない。変更するのは**取得順だけ**で、取得した内容に掛かる`filed_at <= as_of`のカットオフ、予算切れの fail-soft 境界（`success` + 部分完了detail）、同日再取得スキップ（`fetched_at`の日付 == `deps.clock.today()`。P6-25）はいずれも不変である。`_select_symbols()`自身の戻り値の順序契約（両分岐とも辞書順）も変えていない——並べ替えはステップ2の内側に閉じている。共有ヘルパへの一本化は見送った（`_text_target_symbols()`は`list[Candidate]`と30銘柄上限を扱い、こちらは`list[str]`と時間予算を扱う）。回帰は`tests/pipeline/test_daily_core.py::TestFundamentalsHeldFirstOrder`が押さえる——ユニバース外・辞書順で最後の保有銘柄を置き、予算が1銘柄分しかない run でその1回が保有銘柄に使われることを確認する。
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 

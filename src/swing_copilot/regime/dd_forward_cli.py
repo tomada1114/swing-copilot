@@ -69,7 +69,11 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureVerdict
 from swing_copilot.regime.gate import GateThresholds, RegimeThresholds
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import (
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseFetchOptions, select_persisted_universe
 
@@ -103,6 +107,12 @@ _CONFIG_EXIT = ExitPolicy(errors=(ConfigError,), code=1)
 _ARGUMENT_EXIT = ExitPolicy(errors=(DdForwardCliError,))
 #: The replay also rejects an impossible window through `ValueError`.
 _SCAN_EXIT = ExitPolicy(errors=(DdForwardCliError, ValueError))
+
+#: What a bars-root-less scan produced instead of failing (Issue #221).
+_MISSING_BARS_CONSEQUENCE = (
+    "このまま実行しても全銘柄が NO_DATA となり、"
+    "本物の結果と同じ体裁の診断を正常終了として出してしまう。"
+)
 
 
 def _parse_args(argv: list[str] | None = None) -> Namespace:
@@ -242,8 +252,8 @@ def _read_bars(args: Namespace, settings: Settings) -> tuple[pd.DataFrame, date]
         The bars and the resolved first observation date.
 
     Raises:
-        DdForwardCliError: `--db` is absent or unreadable, or it holds no bars
-            at or before `--as-of`.
+        DdForwardCliError: `--db` is absent or unreadable, its sibling `bars/`
+            is absent, or it holds no bars at or before `--as-of`.
     """
     db_path: Path = args.db
     if not db_path.exists():
@@ -255,9 +265,17 @@ def _read_bars(args: Namespace, settings: Settings) -> tuple[pd.DataFrame, date]
         raise DdForwardCliError(msg)
 
     # Parquet bars live alongside the DuckDB file, mirroring `backtest/cli.py`:
-    # `--db` overrides both together, never just the database.
+    # `--db` overrides both together, never just the database. Validated
+    # before `Database` is opened, so the mistake costs neither the DuckDB
+    # write lock nor a diagnostic table (Issue #221).
+    try:
+        parquet_root = resolve_parquet_root(
+            db_path, consequence=_MISSING_BARS_CONSEQUENCE
+        )
+    except ParquetRootNotFoundError as exc:
+        raise DdForwardCliError(str(exc)) from exc
     database = Database(db_path)
-    store = MarketStore(database, parquet_root=db_path.parent / "bars")
+    store = MarketStore(database, parquet_root=parquet_root)
     as_of: date = args.as_of
     start: date = args.start or date.min
     try:

@@ -315,6 +315,9 @@ class TestReadOnlyGuarantee:
         self, tmp_path, config
     ):
         path = tmp_path / "bare.duckdb"
+        # The bars root exists so the run reaches the schema check: only a
+        # missing root fails earlier (Issue #221).
+        (tmp_path / "bars").mkdir()
         with Database(path).connect() as conn:
             conn.execute("CREATE TABLE unrelated (id INTEGER)")
 
@@ -325,6 +328,29 @@ class TestReadOnlyGuarantee:
         with Database(path).connect() as conn:
             tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
         assert tables == {"unrelated"}
+
+    def test_a_db_without_its_sibling_bars_root_fails_before_opening_it(
+        self, tmp_path, config, capsys
+    ):
+        """A DuckDB copy whose `bars/` was left behind is fatal (Issue #221).
+
+        Without the guard every bar-based check reports "data gap" for the
+        whole universe, and the matrix measures local coverage instead of the
+        configured thresholds -- in exactly the layout of a real answer.
+        """
+        copied = tmp_path / "copy"
+        copied.mkdir()
+        path = copied / "copilot.duckdb"
+        with Database(path).connect() as conn:
+            conn.execute("CREATE TABLE unrelated (id INTEGER)")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--as-of", AS_OF.isoformat(), "--db", str(path), *config])
+
+        message = str(exc_info.value)
+        assert "Parquetディレクトリが見つかりません" in message
+        assert str(copied / "bars") in message
+        assert capsys.readouterr().out == ""
 
 
 class TestUnmeasurableStrategy:

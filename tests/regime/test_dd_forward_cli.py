@@ -148,6 +148,40 @@ def test_missing_database_is_an_error_not_a_fresh_one(tmp_path: Path) -> None:
     assert not missing.exists()
 
 
+def test_a_db_without_its_sibling_bars_root_fails_before_scanning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A DuckDB copy whose `bars/` was left behind is fatal (Issue #221).
+
+    Without the guard every symbol reads as `NO_DATA` and the diagnostic is
+    rendered in the same shape as a real one.
+    """
+    copied = tmp_path / "copy"
+    copied.mkdir()
+    db_path = copied / "copilot.duckdb"
+    StateStore(Database(db_path)).init_schema()
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--as-of", _AS_OF.isoformat(), "--db", str(db_path)])
+
+    message = str(exc_info.value)
+    assert "Parquetディレクトリが見つかりません" in message
+    assert str(copied / "bars") in message
+    assert capsys.readouterr().out == ""
+
+
+def test_an_existing_but_empty_bars_root_reports_no_bars_not_a_layout_error(
+    tmp_path: Path,
+) -> None:
+    """A present-but-empty root keeps its own message (Issue #221)."""
+    db_path = tmp_path / "copilot.duckdb"
+    StateStore(Database(db_path)).init_schema()
+    (tmp_path / "bars").mkdir()
+
+    with pytest.raises(SystemExit, match="バーが1本もありません"):
+        main(["--as-of", _AS_OF.isoformat(), "--db", str(db_path)])
+
+
 def test_runs_offline_and_reports_every_level(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

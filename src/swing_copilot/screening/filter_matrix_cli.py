@@ -48,7 +48,11 @@ from swing_copilot.screening.filter_matrix import (
 )
 from swing_copilot.screening.pipeline import PRICE_HISTORY_LOOKBACK_DAYS
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import (
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseFetchOptions, select_persisted_universe
 
@@ -75,6 +79,12 @@ class FilterMatrixCliError(SwingCopilotError):
 _CONFIG_EXIT = ExitPolicy(errors=(ConfigError,), code=1)
 #: A bad argument: the argparse convention (message as the exit status).
 _ARGUMENT_EXIT = ExitPolicy(errors=(FilterMatrixCliError,))
+
+#: What a bars-root-less matrix produced instead of failing (Issue #221).
+_MISSING_BARS_CONSEQUENCE = (
+    "このまま実行してもバー系チェックが全銘柄データ不足となり、"
+    "設定した閾値ではなく手元の欠測を測った表を出してしまう。"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,10 +140,11 @@ def _screening_input(args: Namespace, settings: Settings) -> MeasuredUniverse:
     measures local coverage rather than the configured thresholds.
 
     Raises:
-        FilterMatrixCliError: `--db` does not exist, cannot be read, or holds
-            no universe snapshot at or before `--as-of`. Refetching one would
-            be a network call, and a live membership would not be the
-            membership that `--as-of` saw.
+        FilterMatrixCliError: `--db` does not exist, its sibling `bars/` does
+            not exist, `--db` cannot be read, or it holds no universe snapshot
+            at or before `--as-of`. Refetching one would be a network call,
+            and a live membership would not be the membership that `--as-of`
+            saw.
     """
     as_of: date = args.as_of
     db_path: Path = args.db
@@ -144,10 +155,19 @@ def _screening_input(args: Namespace, settings: Settings) -> MeasuredUniverse:
         )
         raise FilterMatrixCliError(msg)
 
-    database = Database(db_path)
     # Parquet bars live alongside the DuckDB file, mirroring
     # `backtest/cli.py`: `--db` overrides both together, never just the DB.
-    market_store = MarketStore(database, parquet_root=db_path.parent / "bars")
+    # Validated before `Database` is opened, so the mistake costs neither the
+    # DuckDB write lock nor a matrix nobody can trust (Issue #221).
+    try:
+        parquet_root = resolve_parquet_root(
+            db_path, consequence=_MISSING_BARS_CONSEQUENCE
+        )
+    except ParquetRootNotFoundError as exc:
+        raise FilterMatrixCliError(str(exc)) from exc
+
+    database = Database(db_path)
+    market_store = MarketStore(database, parquet_root=parquet_root)
     state_store = StateStore(database)
 
     try:

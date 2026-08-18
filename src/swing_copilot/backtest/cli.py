@@ -59,7 +59,11 @@ from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import (
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import (
     UniverseFetchOptions,
@@ -940,19 +944,20 @@ def render_grid_markdown(
     return "\n".join(lines)
 
 
+#: What a bars-root-less backtest produced instead of failing (Issue #217).
+_MISSING_BARS_CONSEQUENCE = (
+    "このまま実行すると全銘柄がデータ不足となり、取引ゼロのレポートを"
+    "正常終了として書いてしまう。"
+)
+
+
 def _resolve_parquet_root(db_path: Path) -> Path:
     """Resolve `--db`'s sibling bars root, failing fast when it is absent (Issue #217).
 
-    Parquet bars live alongside the DuckDB file, mirroring the
-    `DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT` pairing ("data/copilot.duckdb" +
-    "data/bars") -- `--db` overrides both together, never just the DB.
-
-    A missing root is never a legitimate backtest input: `read_bars` would
-    return nothing for every symbol, so the run wrote a zero-trade report in
-    seconds and exited 0, with only a yellow "insufficient data" warning to
-    tell an operator mistake apart from a real result. "A few symbols have no
-    bars" (new listings, say) stays fail-soft; only the root being absent
-    altogether is fatal, which is exactly what makes the two distinguishable.
+    Thin adapter over `storage.market_store.resolve_parquet_root`, which the
+    other `--db`-taking CLIs share since Issue #221: the check and its message
+    are one implementation, and each command only supplies its own
+    consequence sentence and converts to its own error type.
 
     Args:
         db_path: The `--db` value.
@@ -963,18 +968,10 @@ def _resolve_parquet_root(db_path: Path) -> Path:
     Raises:
         BacktestCliError: The resolved `bars/` is not an existing directory.
     """
-    parquet_root = db_path.parent / "bars"
-    if not parquet_root.is_dir():
-        msg = (
-            f"価格バーのParquetディレクトリが見つかりません: {parquet_root}\n"
-            f"--db {db_path} は価格バーの根を同ディレクトリの bars/ として解決する"
-            "（data/copilot.duckdb + data/bars と同じ対応規約）。"
-            "DuckDBファイルだけをコピーして bars/ を並置し忘れていないか確認すること。"
-            "このまま実行すると全銘柄がデータ不足となり、取引ゼロのレポートを"
-            "正常終了として書いてしまう。"
-        )
-        raise BacktestCliError(msg)
-    return parquet_root
+    try:
+        return resolve_parquet_root(db_path, consequence=_MISSING_BARS_CONSEQUENCE)
+    except ParquetRootNotFoundError as exc:
+        raise BacktestCliError(str(exc)) from exc
 
 
 def _compose_dependencies(

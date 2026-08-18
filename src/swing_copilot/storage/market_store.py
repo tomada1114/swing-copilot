@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from swing_copilot.exceptions import SwingCopilotError
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date, datetime
@@ -30,6 +32,8 @@ if TYPE_CHECKING:
     from swing_copilot.storage.database import Database
 
 DEFAULT_PARQUET_ROOT = Path("data/bars")
+#: The bars root's directory name, relative to the DuckDB file's directory.
+_BARS_DIRNAME = "bars"
 BARS_COLUMNS = (
     "symbol",
     "date",
@@ -41,6 +45,60 @@ BARS_COLUMNS = (
     "provider",
     "fetched_at",
 )
+
+
+class ParquetRootNotFoundError(SwingCopilotError):
+    """Raised when the bars root resolved from a `--db` value does not exist.
+
+    A *fail-fast* signal for the CLIs that take `--db`, never raised by
+    `MarketStore` itself: the daily/backfill write path legitimately creates
+    the root lazily (`_write_partition`'s `mkdir(parents=True,
+    exist_ok=True)`), so validating in `__init__` would break the first run
+    on a fresh checkout.
+    """
+
+
+def resolve_parquet_root(db_path: Path | str, *, consequence: str) -> Path:
+    """Resolve `--db`'s sibling bars root, failing fast when it is absent.
+
+    Parquet bars live alongside the DuckDB file, mirroring the
+    `DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT` pairing ("data/copilot.duckdb" +
+    "data/bars") -- `--db` overrides both together, never just the DB. A
+    command pointed at a DuckDB copy whose `bars/` was left behind therefore
+    reads zero bars for *every* symbol, and every one of the affected
+    commands turns that into a plausible-looking zero result at exit 0
+    (Issue #217, generalized in Issue #221).
+
+    Only the root being absent altogether is fatal. "A few symbols have no
+    bars" (new listings, say) and "the root exists but holds no partition
+    yet" stay fail-soft -- what this closes is that a whole-root mistake was
+    indistinguishable from those.
+
+    Args:
+        db_path: The `--db` value.
+        consequence: One sentence naming what this particular command would
+            silently produce instead of failing, appended to the shared
+            explanation. The layout mistake is common; the damage is not.
+
+    Returns:
+        The `bars/` directory next to `db_path`.
+
+    Raises:
+        ParquetRootNotFoundError: The resolved `bars/` is not an existing
+            directory. Each CLI converts this to its own exit convention.
+    """
+    parquet_root = Path(db_path).parent / _BARS_DIRNAME
+    if not parquet_root.is_dir():
+        msg = (
+            f"価格バーのParquetディレクトリが見つかりません: {parquet_root}\n"
+            f"--db {db_path} は価格バーの根を同ディレクトリの bars/ として解決する"
+            "（data/copilot.duckdb + data/bars と同じ対応規約）。"
+            "DuckDBファイルだけをコピーして bars/ を並置し忘れていないか確認すること。"
+            f"{consequence}"
+        )
+        raise ParquetRootNotFoundError(msg)
+    return parquet_root
+
 
 _CREATE_FUNDAMENTALS_TABLE = """
 CREATE TABLE IF NOT EXISTS fundamentals (

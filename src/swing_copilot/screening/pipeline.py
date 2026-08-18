@@ -216,6 +216,16 @@ class ScreeningPipeline:
         self._execution_config = settings.technical_signals.execution
 
     @property
+    def candidate_limit(self) -> int:
+        """The configured cap this run's ranking is truncated at.
+
+        Exposed (Issue #188) so the persistence layer can size how much of
+        the truncated tail to keep relative to the cut, instead of the call
+        site re-reading `strategies.yaml` to find the same number.
+        """
+        return self._candidate_limit
+
+    @property
     def required_bars(self) -> int:
         """Trading bars one screening run needs at a single `as_of`.
 

@@ -7,10 +7,25 @@ from itertools import pairwise
 
 import pandas as pd
 
+from swing_copilot.screening.indicators import wilder_atr
+
 _MIN_ZIGZAG_BARS = 3
 _MIN_PATTERN_CONTRACTIONS = 2
 _PIVOT_VOLUME_WINDOW = 10
 _VOLUME_BASELINE_WINDOW = 50
+
+#: Bars kept ahead of the longest admissible pattern so the zigzag ATR and the
+#: 50-bar dry-up volume baseline are warmed up before the earliest bar a
+#: pattern may start on. Lives here rather than in `technical_signals.py`
+#: because `evaluate_vcp` -- not the Signal wrapper -- is what defines the
+#: window a VCP verdict is computed over (Issue #188).
+VCP_WARMUP_BARS = 60
+
+#: `VcpEvaluation.miss_reason` values that `validate_contractions` cannot
+#: produce, because they precede or follow contraction validation.
+MISS_NO_PATTERN = "NO_PATTERN"
+MISS_DRY_UP_UNAVAILABLE = "DRY_UP_UNAVAILABLE"
+MISS_CHASING_PIVOT = "CHASING_PIVOT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +194,74 @@ def validate_contractions(
     ):
         return ContractionValidation(False, "CONTRACTIONS_NOT_DECREASING")
     return ContractionValidation(True)
+
+
+@dataclass(frozen=True, slots=True)
+class VcpEvaluation:
+    """One symbol's complete VCP verdict, hit or miss, with its evidence.
+
+    Introduced by Issue #188 so the screening signal and the rejection
+    classifier share one implementation of "does this symbol set up". Before
+    it, a miss reached the ledger as the generic `SIGNAL_TREND_NOT_MET` with
+    no cause attached, which is one reason VCP firing once in 6.5 years
+    (Issue #186) went unnoticed for so long.
+
+    `miss_reason` is `None` exactly when the setup is a hit; otherwise it is
+    one of the `MISS_*` constants or a `ContractionValidation.reason`.
+    """
+
+    close: float
+    pattern: VcpPattern | None
+    miss_reason: str | None
+
+    @property
+    def is_hit(self) -> bool:
+        """Whether the symbol is a valid, non-chasing VCP setup."""
+        return self.miss_reason is None
+
+
+def evaluate_vcp(
+    series: pd.DataFrame,
+    thresholds: VcpThresholds = _DEFAULT_THRESHOLDS,
+    *,
+    is_small_cap: bool = False,
+) -> VcpEvaluation:
+    """Run the full zigzag -> pattern -> validation -> chase check on one window.
+
+    Args:
+        series: One symbol's bars up to `as_of`, ascending. The caller is
+            responsible for the point-in-time cut and for passing a
+            non-empty frame; the fixed-width window this evaluates is taken
+            here (`pattern_days_max + VCP_WARMUP_BARS`) so the same symbol
+            and `as_of` cannot flip verdicts between callers that happened
+            to read different amounts of history (Issue #186).
+        thresholds: Configured P5-24 thresholds.
+        is_small_cap: Widens the permitted first-contraction depth.
+
+    Returns:
+        The verdict plus whatever evidence was reached: `pattern` is `None`
+        when no admissible contraction sequence exists at all.
+    """
+    window = series.tail(thresholds.pattern_days_max + VCP_WARMUP_BARS)
+    close = float(window["close"].iloc[-1])
+    atr = wilder_atr(window["high"], window["low"], window["close"])
+    swings = detect_atr_zigzag(window["close"], atr, thresholds.zigzag_atr_multiplier)
+    pattern = extract_pattern(swings, window["volume"], thresholds)
+    if pattern is None:
+        return VcpEvaluation(close, None, MISS_NO_PATTERN)
+    if pattern.dry_up_ratio is None:
+        return VcpEvaluation(close, pattern, MISS_DRY_UP_UNAVAILABLE)
+    validation = validate_contractions(
+        list(pattern.depths),
+        pattern.pattern_days,
+        is_small_cap=is_small_cap,
+        thresholds=thresholds,
+    )
+    if not validation.is_valid:
+        return VcpEvaluation(close, pattern, validation.reason)
+    if is_chasing_pivot(close, pattern.pivot, thresholds):
+        return VcpEvaluation(close, pattern, MISS_CHASING_PIVOT)
+    return VcpEvaluation(close, pattern, None)
 
 
 def classify_dry_up(

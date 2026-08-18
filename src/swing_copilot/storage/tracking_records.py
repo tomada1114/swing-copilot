@@ -250,6 +250,71 @@ def get_untracked_verdicts(
     )
 
 
+#: `TrackableVerdict.recommendation` for a near-miss opened from
+#: `screening_truncations` rather than from a verdict (Issue #188). The column
+#: has no DB-level CHECK, and the tracking ledger already carries two sides
+#: (`proceed` / `skip`), so a third label is what keeps them separable.
+TRUNCATED_SIDE = "truncated"
+
+
+def get_untracked_truncations(
+    database: Database, as_of: date
+) -> tuple[TrackableVerdict, ...]:
+    """Return truncated candidates dated `<= as_of` with no shadow position yet.
+
+    The extension point Issue #188's DoD asks for, and only that:
+    `tracking/update.py` does not call this yet, so no truncated position is
+    opened today. It exists because the shape of the answer is the whole
+    question -- once these rows come back as `TrackableVerdict`s, applying
+    the ledger's 2.5xATR / 25-session exit rules to the near-misses is a
+    matter of concatenating them onto `get_untracked_verdicts`' result, with
+    `_seed_position`'s existing fallbacks (close on `as_of` for the entry, an
+    ATR-derived stop) covering the fact that a truncated symbol never reached
+    the risk layer and therefore has no `risk_assessments` row.
+
+    Deliberately *not* filtered to one strategy: a symbol truncated under two
+    strategies on the same day is one virtual position either way, which is
+    why the natural key is `(run_id, symbol)` here as in `verdict_positions`.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        as_of: Inclusive point-in-time cutoff on the truncation's `as_of`.
+
+    Returns:
+        Rows ordered by `(as_of, run_id, symbol)`, each with
+        `recommendation=TRUNCATED_SIDE`, `no_trade=False`, and no
+        risk-layer entry/stop price.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.run_id, t.symbol, min(t.as_of) AS as_of,
+                   min(t.strategy_key) AS strategy_key
+            FROM screening_truncations t
+            LEFT JOIN verdict_positions vp
+              ON vp.run_id = t.run_id AND vp.symbol = t.symbol
+            WHERE t.as_of <= ?
+              AND vp.run_id IS NULL
+            GROUP BY t.run_id, t.symbol
+            ORDER BY as_of, t.run_id, t.symbol
+            """,
+            [as_of],
+        ).fetchall()
+    return tuple(
+        TrackableVerdict(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            as_of=row[2],
+            strategy_key=row[3],
+            recommendation=TRUNCATED_SIDE,
+            no_trade=False,
+            entry_price=None,
+            stop_price=None,
+        )
+        for row in rows
+    )
+
+
 _ORPHANED_POSITIONS = """
     SELECT vp.run_id, vp.symbol
     FROM verdict_positions vp

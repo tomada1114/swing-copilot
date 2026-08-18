@@ -47,10 +47,16 @@ if TYPE_CHECKING:
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.screening.base import Candidate, RejectionRecord, SignalHit
+    from swing_copilot.screening.base import (
+        Candidate,
+        RejectionRecord,
+        SignalHit,
+        TruncatedCandidate,
+    )
     from swing_copilot.storage.audit_records import (
         ScreeningRunMeta,
         SignalOutcomeRecord,
+        UniverseForwardReturnRecord,
     )
     from swing_copilot.storage.database import Database
     from swing_copilot.storage.paper_records import TradeDecisionRecord
@@ -644,19 +650,41 @@ class StateStore:
         self,
         candidates: Sequence[Candidate],
         rejections: Sequence[RejectionRecord],
+        truncations: Sequence[TruncatedCandidate],
         meta: ScreeningRunMeta,
     ) -> None:
-        """Record one run's candidates and rejections in one transaction.
+        """Record one run's candidates, rejections, and truncations in one transaction.
 
-        REQ-004/REQ-020: both tables commit or roll back together.
+        REQ-004/REQ-020 plus Issue #188: all three tables commit or roll back
+        together, because they are one ranking's three outcomes.
 
         Args:
             candidates: Ranked candidates to record.
             rejections: Classified rejection records to record.
-            meta: `(run_id, strategy_key, as_of)` shared by every row.
+            truncations: The `candidate_limit` near-misses; retained down to
+                `audit_records.PERSISTED_TRUNCATION_MULTIPLIER` pages.
+            meta: `(run_id, strategy_key, as_of, candidate_limit)` shared by
+                every row.
         """
         audit_records.record_screening_results(
-            self._database, candidates, rejections, meta
+            self._database, candidates, rejections, truncations, meta
+        )
+
+    def replace_universe_forward_returns(
+        self,
+        run_id: UUID,
+        horizon_days: int,
+        returns: Sequence[UniverseForwardReturnRecord],
+    ) -> None:
+        """Replace one historical run/horizon's control-group forward returns.
+
+        Args:
+            run_id: The historical run being evaluated.
+            horizon_days: The horizon being replaced.
+            returns: The complete recomputed set for that slice (Issue #188).
+        """
+        audit_records.replace_universe_forward_returns(
+            self._database, run_id, horizon_days, returns
         )
 
     def record_risk_assessments(
@@ -869,6 +897,17 @@ class StateStore:
         return tracking_records.get_untracked_verdicts(
             self._database, as_of, recommendations
         )
+
+    def get_untracked_truncations(self, as_of: date) -> tuple[TrackableVerdict, ...]:
+        """Return truncated candidates dated `<= as_of` with no shadow position yet.
+
+        Issue #188's tracking extension point: nothing in the daily loop
+        calls this yet: see `tracking_records.get_untracked_truncations`.
+
+        Args:
+            as_of: Inclusive point-in-time cutoff on the truncation's `as_of`.
+        """
+        return tracking_records.get_untracked_truncations(self._database, as_of)
 
     def sync_verdict_position_recommendations(
         self,

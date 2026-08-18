@@ -10,6 +10,7 @@ would block the unattended daily run. Never keep a raw connection open in a
 notebook; call these functions instead.
 
 The joined views these functions read (`v_verdict_scorecard`, `v_candidates`,
+`v_truncated_candidates`, `v_universe_forward_returns`,
 `v_tracked_positions`, `v_symbol_sector_asof`) are defined in
 `storage/schema.py` and created by `StateStore.init_schema()` — i.e. by any
 daily run. On a database from before the views existed, call
@@ -152,6 +153,40 @@ def screening_rejections(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
     """Why each symbol was rejected, one row per (run, symbol)."""
     return query(
         "SELECT * FROM screening_rejections ORDER BY as_of, symbol",
+        db_path=db_path,
+    )
+
+
+def truncated_candidates(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """The near-misses `candidate_limit` cut, with their score breakdown.
+
+    Reads `v_truncated_candidates`, whose columns line up with
+    `candidates()`' so the two populations can be compared (or concatenated)
+    directly: "is rank 6-10 really worse than rank 1-5" is the question these
+    rows exist for (Issue #188). Only the retained top of the tail is stored
+    -- see `audit_records.PERSISTED_TRUNCATION_MULTIPLIER`.
+    """
+    return query(
+        "SELECT * FROM v_truncated_candidates ORDER BY run_date, strategy_key, rank",
+        db_path=db_path,
+    )
+
+
+def universe_forward_returns(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """Forward returns for every screening decision, not just the candidates.
+
+    Reads `v_universe_forward_returns`: one row per (evaluated run, symbol,
+    horizon), tagged `candidate` / `truncated` / `rejected` and carrying the
+    rejection's own `reason_code`. This is the frame that makes a filter's
+    worth measurable -- ``df[df.outcome_class == "rejected"].groupby(
+    "reason_code")["forward_return_pct"].mean()`` says what the symbols each
+    filter threw away actually went on to do (Issue #188).
+    """
+    return query(
+        """
+        SELECT * FROM v_universe_forward_returns
+        ORDER BY run_date, horizon_days, outcome_class, symbol
+        """,
         db_path=db_path,
     )
 

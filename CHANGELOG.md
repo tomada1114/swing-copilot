@@ -34,6 +34,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 対照群を永続化し、スクリーニングの**偽陰性**を測れるようにした（Issue #188）。
+  これまで forward return と当否分類が付くのは候補になった銘柄だけで、測れて
+  いたのは偽陽性率だけだった——「切り捨てた側がその後どうなったか」を語る行が
+  どこにも無く、`candidate_limit` を 5→8 にすべきか、`FILTER_NEGATIVE_FCF` の
+  ような重い足切りが利益に貢献しているかは、原理的に検証できなかった。
+  - 新テーブル `screening_truncations`: `candidate_limit` で順位落ちした
+    near-miss を、算出済みのスコア内訳ごと保存する。書き込みは `candidates` /
+    `screening_rejections` と**同一トランザクション**（候補と順位落ちは同じ
+    ランキングの表裏）。保持は切り口の直下 `candidate_limit * 3` 件まで。
+    再実行は当該 run/strategy の全置換で、幻の near-miss を残さない
+  - 新テーブル `universe_forward_returns`: ポストモーテムを候補 ∪ 順位落ち ∪
+    落選の和集合へ広げ、`outcome_class` と落選側の `reason_code` を添えて
+    forward return を記録する。価格は取得済み Parquet なので追加の
+    ネットワーク I/O はゼロ。`(run_id, horizon_days)` スライスの完全置換なので
+    再実行は冪等
+  - 落選 detail の充実: minervini は失敗した条件番号（7 条件のうち、単体で
+    再現できない universe 相対の RS だけは `null`＝未計測として区別）、VCP は
+    `ContractionValidation.reason` と契約の証拠を `detail` へ記録する。判定は
+    シグナル本体と同じ純粋関数（`minervini_template` / `evaluate_vcp`）を共有
+    するので、台帳の語る理由と screen の実際の判断は乖離しない。`reason_code`
+    の CHECK 制約は不変（スキーマ移行なし）
+  - 分析ビュー `v_truncated_candidates` / `v_universe_forward_returns` と、
+    `research.truncated_candidates()` / `research.universe_forward_returns()`
+  - 順位落ちにも tracking（2.5×ATR／25 セッション）を後から適用できるよう、
+    `StateStore.get_untracked_truncations()` を**拡張ポイントとしてのみ**用意
+    した（日次ループはまだ呼ばない）
 - `copilot-backtest --policy regime+risk` の決算ゲートに point-in-time な決算日を
   供給し、実カウントを報告するようにした（Issue #201、#184 の follow-up）。#184 が
   用意した注入口 `build_entry_policy(..., earnings_guard_fn=...)` は、シミュレータに

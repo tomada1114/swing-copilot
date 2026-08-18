@@ -95,6 +95,66 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol)
     )
     """,
+    # Issue #188: the other side of the same ranking `candidates` holds. A
+    # symbol here failed nothing -- it was cut by `candidate_limit` -- so it
+    # cannot be a `screening_rejections` row (that table's `reason_code` is a
+    # closed enum guarded by a CHECK constraint, and "ranked 11th" is a
+    # configuration cap, not a verdict). Written in the SAME transaction as
+    # `candidates`, because the two are one ranking's two halves and a run
+    # holding one without the other would silently misstate the cut.
+    #
+    # The score components are exploded into typed columns rather than kept
+    # as `metrics_json`: unlike a candidate's metrics (which feed the report
+    # and the analysis export), the only reason these rows exist is to be
+    # aggregated -- "is rank 6-10 really worse than 1-5" is a GROUP BY, and
+    # a JSON extraction per column would make every such query re-CAST.
+    """
+    CREATE TABLE IF NOT EXISTS screening_truncations (
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        rank                INTEGER NOT NULL,
+        score               DOUBLE NOT NULL,
+        score_rsi_pullback  DOUBLE,
+        score_trend_quality DOUBLE,
+        score_liquidity     DOUBLE,
+        score_atr_pct       DOUBLE,
+        execution_state     VARCHAR NOT NULL,
+        execution_distance  DOUBLE,
+        as_of               DATE NOT NULL,
+        PRIMARY KEY (run_id, symbol, strategy_key)
+    )
+    """,
+    # Issue #188: forward returns for the control groups, so the measurable
+    # question stops being "how often was a candidate wrong" (false positives
+    # only) and becomes "was the cut itself right". One row per
+    # (evaluated run, symbol, horizon); `run_id` is the HISTORICAL run being
+    # evaluated, exactly like `signal_outcomes.run_id`.
+    #
+    # `outcome_class` says which side of the run's own screening the symbol
+    # was on, and `reason_code` carries `screening_rejections.reason_code` for
+    # the rejected side (NULL for the other two, which were rejected by
+    # nothing) -- which is what makes `SELECT reason_code,
+    # avg(forward_return_pct) ... WHERE outcome_class = 'rejected' GROUP BY 1`
+    # a one-line answer to "does this filter earn its place".
+    # Deliberately not merged into `signal_outcomes`: that table is
+    # per-signal-attributed and classified into hit/miss buckets, whereas this
+    # one is a raw return per screening decision, including symbols no signal
+    # ever fired on.
+    """
+    CREATE TABLE IF NOT EXISTS universe_forward_returns (
+        run_id             UUID NOT NULL,
+        symbol             VARCHAR NOT NULL,
+        horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+        as_of              DATE NOT NULL,
+        outcome_class      VARCHAR NOT NULL CHECK (outcome_class IN (
+            'candidate','truncated','rejected'
+        )),
+        reason_code        VARCHAR,
+        forward_return_pct DOUBLE NOT NULL,
+        PRIMARY KEY (run_id, symbol, horizon_days)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS risk_assessments (
         run_id          UUID NOT NULL,
@@ -524,6 +584,68 @@ ANALYSIS_VIEW_STATEMENTS = (
         c.metrics_json
     FROM candidates c
     JOIN runs r ON r.run_id = c.run_id
+    """,
+    # Issue #188: the near-misses, in the same column shape as `v_candidates`
+    # so "rank 1-5 vs rank 6-10" is a UNION ALL away instead of a reshape.
+    """
+    CREATE OR REPLACE VIEW v_truncated_candidates AS
+    SELECT
+        r.run_date,
+        r.mode,
+        r.status AS run_status,
+        r.config_hash,
+        t.run_id,
+        t.symbol,
+        t.strategy_key,
+        t.rank,
+        t.score,
+        t.score_rsi_pullback,
+        t.score_trend_quality,
+        t.score_liquidity,
+        t.score_atr_pct,
+        t.execution_state,
+        t.execution_distance,
+        t.as_of
+    FROM screening_truncations t
+    JOIN runs r ON r.run_id = t.run_id
+    """,
+    # Issue #188: one row per (screening decision, matured horizon), with the
+    # ranking evidence attached where the symbol had any. Both rank/score legs
+    # are pre-aggregated subqueries rather than plain joins: `universe_
+    # forward_returns` has no `strategy_key` (a decision about a symbol on a
+    # day, not about a strategy's ranking of it), so joining the
+    # strategy-keyed tables directly would fan a single decision out into one
+    # row per strategy the run happened to score.
+    """
+    CREATE OR REPLACE VIEW v_universe_forward_returns AS
+    SELECT
+        r.run_date,
+        r.mode,
+        r.config_hash,
+        u.run_id,
+        u.symbol,
+        u.horizon_days,
+        u.as_of,
+        u.outcome_class,
+        u.reason_code,
+        u.forward_return_pct,
+        COALESCE(c.rank, t.rank)   AS rank,
+        COALESCE(c.score, t.score) AS score,
+        s.gics_sector
+    FROM universe_forward_returns u
+    JOIN runs r ON r.run_id = u.run_id
+    LEFT JOIN (
+        SELECT run_id, symbol, min(rank) AS rank, max(score) AS score
+        FROM v_candidates
+        GROUP BY run_id, symbol
+    ) c ON c.run_id = u.run_id AND c.symbol = u.symbol
+    LEFT JOIN (
+        SELECT run_id, symbol, min(rank) AS rank, max(score) AS score
+        FROM screening_truncations
+        GROUP BY run_id, symbol
+    ) t ON t.run_id = u.run_id AND t.symbol = u.symbol
+    LEFT JOIN v_symbol_sector_asof s
+      ON s.run_id = u.run_id AND s.symbol = u.symbol
     """,
     """
     CREATE OR REPLACE VIEW v_tracked_positions AS

@@ -19,7 +19,13 @@ from swing_copilot.pipeline.postmortem import (
     compute_signal_performance,
     run_postmortem_step,
 )
-from swing_copilot.screening.base import Candidate
+from swing_copilot.screening.base import (
+    Candidate,
+    RejectionReasonCode,
+    RejectionRecord,
+    RejectionStage,
+    TruncatedCandidate,
+)
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.history_queries import SignalOutcomeRow
@@ -239,7 +245,8 @@ class TestRunPostmortemStepHappyPath:
         state_store.record_screening_results(
             [_candidate("AAPL", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # 100 -> 101.5: +1.5% -> TRUE_POSITIVE (> 0.5% neutral threshold).
         market_store.write_bars(_bars("AAPL", {run_date_5d: 100.0, AS_OF: 101.5}))
@@ -269,7 +276,8 @@ class TestRunPostmortemStepRerunCorrection:
         state_store.record_screening_results(
             [_candidate("AAPL", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(_bars("AAPL", {run_date_5d: 100.0, AS_OF: 101.5}))
 
@@ -330,7 +338,8 @@ class TestRunPostmortemStepMissingPriceData:
         state_store.record_screening_results(
             [_candidate("MISSING", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # No bars written for "MISSING" at all -- a genuine data-quality gap.
 
@@ -356,7 +365,8 @@ class TestRunPostmortemStepMissingPriceData:
         state_store.record_screening_results(
             [_candidate("GAP", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A bar exists in the read window, but not on either date actually
         # needed (run_date_5d or AS_OF) -- a data gap, not a total absence.
@@ -375,7 +385,8 @@ class TestRunPostmortemStepMissingPriceData:
         state_store.record_screening_results(
             [_candidate("ZERO", run_date_5d, 0.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A zero entry close would divide-by-zero if not guarded.
         market_store.write_bars(_bars("ZERO", {run_date_5d: 0.0, AS_OF: 10.0}))
@@ -393,7 +404,8 @@ class TestRunPostmortemStepMissingPriceData:
         state_store.record_screening_results(
             [_candidate("GAPPY", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A bar exists inside [run_date, as_of], but neither endpoint has one
         # -- still a data-quality skip, not a crash.
@@ -420,7 +432,8 @@ class TestFindTargetTradingDayInsufficientHistory:
         state_store.record_screening_results(
             [_candidate("AAPL", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(_bars("AAPL", {run_date_5d: 100.0, short_as_of: 101.5}))
 
@@ -445,7 +458,8 @@ class TestRunPostmortemStepLookAheadPrevention:
         state_store.record_screening_results(
             [_candidate("AAPL", run_date_5d, 100.0)],
             [],
-            ScreeningRunMeta(run_id, "default", run_date_5d),
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(
             _bars(
@@ -466,3 +480,131 @@ class TestRunPostmortemStepLookAheadPrevention:
         assert len(rows) == 1
         assert rows[0][0] == pytest.approx(1.5)
         assert rows[0][1] == TRUE_POSITIVE
+
+
+def _universe_return_rows(
+    state_store: StateStore, horizon_days: int
+) -> list[tuple[object, ...]]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        return conn.execute(
+            "SELECT symbol, outcome_class, reason_code, forward_return_pct "
+            "FROM universe_forward_returns WHERE horizon_days = ? ORDER BY symbol",
+            [horizon_days],
+        ).fetchall()
+
+
+def _seed_control_group_run(
+    market_store: MarketStore, state_store: StateStore, run_date: date
+) -> None:
+    """One past run holding a candidate, a near-miss, and a rejection."""
+    run_id = state_store.start_run(run_date, RunMode.LIVE, "cfg")
+    state_store.record_screening_results(
+        [_candidate("CAND", run_date, 100.0)],
+        [
+            RejectionRecord(
+                symbol="GONE",
+                stage=RejectionStage.FUNDAMENTAL_FILTER,
+                reason_code=RejectionReasonCode.FILTER_NEGATIVE_FCF,
+                detail={"fcf": -1.0, "threshold": 0},
+            )
+        ],
+        [
+            TruncatedCandidate(
+                symbol="NEAR",
+                rank=6,
+                score=0.4,
+                score_breakdown={"score_liquidity": 0.5},
+                execution_state="READY",
+                execution_distance=None,
+            )
+        ],
+        ScreeningRunMeta(run_id, "default", run_date, 5),
+    )
+    market_store.write_bars(_bars("CAND", {run_date: 100.0, AS_OF: 101.5}))
+    market_store.write_bars(_bars("NEAR", {run_date: 50.0, AS_OF: 55.0}))
+    market_store.write_bars(_bars("GONE", {run_date: 20.0, AS_OF: 19.0}))
+
+
+class TestRunPostmortemStepControlGroups:
+    """Issue #188: the near-misses and rejections get forward returns too."""
+
+    def test_records_the_union_of_candidates_truncations_and_rejections(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_date_5d = AS_OF - timedelta(days=5)
+        _seed_benchmark(market_store, AS_OF)
+        _seed_control_group_run(market_store, state_store, run_date_5d)
+
+        run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
+
+        assert _universe_return_rows(state_store, 5) == [
+            ("CAND", "candidate", None, pytest.approx(1.5)),
+            ("GONE", "rejected", "FILTER_NEGATIVE_FCF", pytest.approx(-5.0)),
+            ("NEAR", "truncated", None, pytest.approx(10.0)),
+        ]
+
+    def test_signal_outcomes_still_cover_candidates_only(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The widened measurement must not leak into the per-signal hit-rate
+        # table, whose rows are attributed to signals that actually fired.
+        run_date_5d = AS_OF - timedelta(days=5)
+        _seed_benchmark(market_store, AS_OF)
+        _seed_control_group_run(market_store, state_store, run_date_5d)
+
+        run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            symbols = conn.execute(
+                "SELECT symbol FROM signal_outcomes ORDER BY symbol"
+            ).fetchall()
+        assert symbols == [("CAND",)]
+
+    def test_rerun_replaces_rather_than_duplicates_and_takes_corrections(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_date_5d = AS_OF - timedelta(days=5)
+        _seed_benchmark(market_store, AS_OF)
+        _seed_control_group_run(market_store, state_store, run_date_5d)
+        run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
+
+        # Corrected bar for the rejected symbol, then an identical rerun.
+        market_store.write_bars(_bars("GONE", {AS_OF: 22.0}))
+        run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
+
+        rows = _universe_return_rows(state_store, 5)
+        assert len(rows) == 3
+        assert rows[1] == (
+            "GONE",
+            "rejected",
+            "FILTER_NEGATIVE_FCF",
+            pytest.approx(10.0),
+        )
+
+    def test_a_symbol_without_bars_is_skipped_rather_than_stored(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_date_5d = AS_OF - timedelta(days=5)
+        _seed_benchmark(market_store, AS_OF)
+        run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
+        state_store.record_screening_results(
+            [],
+            [
+                RejectionRecord(
+                    symbol="NOBARS",
+                    stage=RejectionStage.DATA_QUALITY,
+                    reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                    detail={"available_bars": 0, "required_bars": 200},
+                )
+            ],
+            [],
+            ScreeningRunMeta(run_id, "default", run_date_5d, 5),
+        )
+
+        note, _performance = run_postmortem_step(
+            market_store, state_store, AS_OF, PostmortemConfig(), "SPY"
+        )
+
+        assert _universe_return_rows(state_store, 5) == []
+        assert note is not None
+        assert "20d" in note

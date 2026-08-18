@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 import duckdb
 import pytest
 
+from swing_copilot.screening.base import TruncatedCandidate
+from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.tracking_records import (
     VerdictPosition,
     VerdictPositionMark,
@@ -346,6 +348,88 @@ class TestUntrackedVerdicts:
         _seed_verdict(state_store)
 
         assert state_store.get_untracked_verdicts(ENTRY_DATE, ()) == ()
+
+
+def _seed_truncation(
+    state_store: StateStore, symbol: str = SYMBOL, as_of: date = ENTRY_DATE
+) -> None:
+    state_store.record_screening_results(
+        [],
+        [],
+        [
+            TruncatedCandidate(
+                symbol=symbol,
+                rank=6,
+                score=0.4,
+                score_breakdown={"score_liquidity": 0.5},
+                execution_state="READY",
+                execution_distance=None,
+            )
+        ],
+        ScreeningRunMeta(RUN_ID, "default", as_of, 5),
+    )
+
+
+class TestUntrackedTruncations:
+    """Issue #188's tracking extension point (a read accessor, not a behavior)."""
+
+    def test_a_truncation_is_listed_as_a_trackable_with_no_risk_prices(
+        self, state_store: StateStore
+    ) -> None:
+        # A near-miss never reaches the risk layer, so it has no
+        # `risk_assessments` row: the ledger's own fallbacks would size it.
+        _seed_truncation(state_store)
+
+        rows = state_store.get_untracked_truncations(ENTRY_DATE)
+
+        assert [
+            (row.symbol, row.recommendation, row.no_trade, row.entry_price)
+            for row in rows
+        ] == [(SYMBOL, "truncated", False, None)]
+
+    def test_a_truncation_after_the_cutoff_is_not_listed(
+        self, state_store: StateStore
+    ) -> None:
+        # Point-in-time boundary: `as_of` itself is included, the next day is
+        # not.
+        _seed_truncation(state_store)
+
+        assert state_store.get_untracked_truncations(ENTRY_DATE) != ()
+        assert (
+            state_store.get_untracked_truncations(ENTRY_DATE - timedelta(days=1)) == ()
+        )
+
+    def test_an_already_tracked_truncation_disappears_from_the_list(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_truncation(state_store)
+        state_store.upsert_verdict_position(_position())
+
+        assert state_store.get_untracked_truncations(ENTRY_DATE) == ()
+
+    def test_one_symbol_truncated_under_two_strategies_yields_one_row(
+        self, state_store: StateStore
+    ) -> None:
+        # The ledger's natural key is `(run_id, symbol)`, so two strategies'
+        # rankings must not open the same virtual position twice.
+        _seed_truncation(state_store)
+        state_store.record_screening_results(
+            [],
+            [],
+            [
+                TruncatedCandidate(
+                    symbol=SYMBOL,
+                    rank=8,
+                    score=0.2,
+                    score_breakdown={},
+                    execution_state="READY",
+                    execution_distance=None,
+                )
+            ],
+            ScreeningRunMeta(RUN_ID, "vcp", ENTRY_DATE, 5),
+        )
+
+        assert len(state_store.get_untracked_truncations(ENTRY_DATE)) == 1
 
 
 class TestVerdictReasons:

@@ -20,8 +20,13 @@ from swing_copilot.screening.base import (
     RejectionRecord,
     RejectionStage,
     SignalHit,
+    TruncatedCandidate,
 )
-from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
+from swing_copilot.storage.audit_records import (
+    ScreeningRunMeta,
+    SignalOutcomeRecord,
+    UniverseForwardReturnRecord,
+)
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.base import EXHIBIT_TRUNCATION_MARKER, TextItem
@@ -1073,7 +1078,8 @@ class TestRecordScreeningResults:
         state_store.record_screening_results(
             candidates,
             rejections,
-            ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+            [],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1104,7 +1110,10 @@ class TestRecordScreeningResults:
         )
 
         state_store.record_screening_results(
-            [], [rejection], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+            [],
+            [rejection],
+            [],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1196,7 +1205,8 @@ class TestRecordScreeningResults:
             state_store.record_screening_results(
                 candidates,
                 rejections,
-                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+                [],
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1247,7 +1257,8 @@ class TestRecordScreeningResults:
             state_store.record_screening_results(
                 candidates,
                 rejections,
-                ScreeningRunMeta(run_id, "default", date(2026, 7, 20)),
+                [],
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
         monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
@@ -1255,7 +1266,8 @@ class TestRecordScreeningResults:
         state_store.record_screening_results(
             candidates,
             rejections,
-            ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20)),
+            [],
+            ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20), 5),
         )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1282,7 +1294,10 @@ class TestRecordScreeningResults:
         ]
 
         state_store.record_screening_results(
-            candidates, [], ScreeningRunMeta(run_id, "default", date(2026, 7, 20))
+            candidates,
+            [],
+            [],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
         with state_store._database.connect() as conn:  # noqa: SLF001
@@ -1291,6 +1306,429 @@ class TestRecordScreeningResults:
                 [str(run_id)],
             ).fetchone()
         assert count == (0,)
+
+
+def _truncated(symbol: str, rank: int, score: float = 0.5) -> TruncatedCandidate:
+    return TruncatedCandidate(
+        symbol=symbol,
+        rank=rank,
+        score=score,
+        score_breakdown={
+            "score_rsi_pullback": 0.1,
+            "score_trend_quality": 0.2,
+            "score_liquidity": 0.3,
+            "score_atr_pct": 0.4,
+        },
+        execution_state="READY",
+        execution_distance=0.02,
+    )
+
+
+class _FlakyTruncationConnection:
+    """Wraps a real connection; raises on the Nth `INSERT INTO screening_truncations`.
+
+    Targets the third table of `record_screening_results`' single transaction,
+    so the rollback assertion covers a failure that lands *after* candidate
+    rows, rejection rows, and an earlier truncation row all succeeded.
+    """
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO screening_truncations"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later truncation insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+class TestRecordScreeningTruncations:
+    """Issue #188: `screening_truncations` and its share of the one transaction."""
+
+    def test_records_rank_score_and_breakdown_columns(self, state_store):
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            [],
+            [],
+            [_truncated("NEAR", rank=6, score=0.42)],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                """
+                SELECT symbol, strategy_key, rank, score, score_rsi_pullback,
+                       score_trend_quality, score_liquidity, score_atr_pct,
+                       execution_state, execution_distance, as_of
+                FROM screening_truncations WHERE run_id = ?
+                """,
+                [str(run_id)],
+            ).fetchone()
+        assert row == (
+            "NEAR",
+            "default",
+            6,
+            0.42,
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            "READY",
+            0.02,
+            date(2026, 7, 20),
+        )
+
+    def test_retains_only_three_pages_below_the_cut_closest_first(self, state_store):
+        # The retention rule is `candidate_limit * 3`, applied by rank, and it
+        # must not depend on the order the sequence arrived in.
+        run_id = uuid4()
+        truncations = [_truncated(f"T{rank}", rank) for rank in range(9, 2, -1)]
+
+        state_store.record_screening_results(
+            [],
+            [],
+            truncations,
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 2),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            ranks = conn.execute(
+                "SELECT rank FROM screening_truncations WHERE run_id = ? ORDER BY rank",
+                [str(run_id)],
+            ).fetchall()
+        assert ranks == [(3,), (4,), (5,), (6,), (7,), (8,)]
+
+    def test_zero_candidate_limit_retains_nothing(self, state_store):
+        # Boundary: with no candidates there is no "just below the cut" to
+        # compare a near-miss against, so nothing is worth storing.
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            [],
+            [],
+            [_truncated("NEAR", rank=1)],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 0),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (0,)
+
+    def test_rerun_replaces_the_tail_instead_of_leaving_phantom_near_misses(
+        self, state_store
+    ):
+        # Snapshot-replacement semantics: a symbol that the corrected ranking
+        # moved above the cut must not survive as a near-miss.
+        run_id = uuid4()
+        meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
+        state_store.record_screening_results(
+            [], [], [_truncated("GONE", 6), _truncated("STAY", 7)], meta
+        )
+
+        state_store.record_screening_results(
+            [], [], [_truncated("STAY", rank=6, score=0.9)], meta
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, rank, score FROM screening_truncations "
+                "WHERE run_id = ? ORDER BY symbol",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("STAY", 6, 0.9)]
+
+    def test_replacement_is_scoped_to_the_written_strategy(self, state_store):
+        # Two strategies screened in one run are two independent rankings;
+        # writing one must not delete the other's tail.
+        run_id = uuid4()
+        state_store.record_screening_results(
+            [],
+            [],
+            [_truncated("OTHER", 6)],
+            ScreeningRunMeta(run_id, "vcp", date(2026, 7, 20), 5),
+        )
+
+        state_store.record_screening_results(
+            [],
+            [],
+            [_truncated("NEAR", 6)],
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT strategy_key, symbol FROM screening_truncations "
+                "WHERE run_id = ? ORDER BY strategy_key",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("default", "NEAR"), ("vcp", "OTHER")]
+
+    def test_rolls_back_all_three_tables_when_a_later_truncation_insert_fails(
+        self, state_store, monkeypatch
+    ):
+        # Failure injection after >=1 candidate, >=1 rejection, and >=1
+        # truncation row already succeeded inside the same transaction.
+        run_id = uuid4()
+        candidates = [
+            Candidate(
+                symbol="AAPL",
+                as_of=date(2026, 7, 20),
+                signal_names=(),
+                metrics={},
+                rank=1,
+            )
+        ]
+        rejections = [
+            RejectionRecord(
+                symbol="R1",
+                stage=RejectionStage.DATA_QUALITY,
+                reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                detail={"available_quarters": 0, "required_quarters": 4},
+            )
+        ]
+        truncations = [_truncated(f"T{rank}", rank) for rank in (6, 7, 8)]
+
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyTruncationConnection(real_connect(), fail_on_call=3),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results(
+                candidates,
+                rejections,
+                truncations,
+                ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+            )
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            counts = conn.execute(
+                "SELECT "
+                "(SELECT count(*) FROM candidates WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_rejections WHERE run_id = ?), "
+                "(SELECT count(*) FROM screening_truncations WHERE run_id = ?)",
+                [str(run_id)] * 3,
+            ).fetchone()
+        assert counts == (0, 0, 0)
+
+    def test_rerun_after_a_rolled_back_truncation_failure_succeeds(
+        self, state_store, monkeypatch
+    ):
+        run_id = uuid4()
+        meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
+        truncations = [_truncated(f"T{rank}", rank) for rank in (6, 7)]
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyTruncationConnection(real_connect(), fail_on_call=2),
+        )
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_screening_results([], [], truncations, meta)
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        state_store.record_screening_results([], [], truncations, meta)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert count == (2,)
+
+
+class _FlakyUniverseReturnConnection:
+    """Wraps a real connection; raises on the Nth `INSERT INTO universe_forward_returns`."""
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO universe_forward_returns"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later universe return insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
+def _universe_return(  # noqa: PLR0913 - a record factory mirroring the row's own columns
+    run_id: UUID,
+    symbol: str,
+    outcome_class: str = "rejected",
+    reason_code: str | None = "FILTER_NEGATIVE_FCF",
+    forward_return_pct: float = -1.5,
+    horizon_days: int = 5,
+) -> UniverseForwardReturnRecord:
+    return UniverseForwardReturnRecord(
+        run_id=run_id,
+        symbol=symbol,
+        horizon_days=horizon_days,
+        as_of=date(2026, 7, 27),
+        outcome_class=outcome_class,
+        reason_code=reason_code,
+        forward_return_pct=forward_return_pct,
+    )
+
+
+class TestReplaceUniverseForwardReturns:
+    """Issue #188: the control-group forward returns and their replacement."""
+
+    def test_persists_each_outcome_class_with_its_reason_code(self, state_store):
+        run_id = uuid4()
+
+        state_store.replace_universe_forward_returns(
+            run_id,
+            5,
+            [
+                _universe_return(run_id, "CAND", "candidate", None, 3.0),
+                _universe_return(run_id, "NEAR", "truncated", None, 1.0),
+                _universe_return(run_id, "GONE", "rejected", "FILTER_NEGATIVE_FCF"),
+            ],
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, outcome_class, reason_code, forward_return_pct "
+                "FROM universe_forward_returns WHERE run_id = ? ORDER BY symbol",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [
+            ("CAND", "candidate", None, 3.0),
+            ("GONE", "rejected", "FILTER_NEGATIVE_FCF", -1.5),
+            ("NEAR", "truncated", None, 1.0),
+        ]
+
+    def test_invalid_outcome_class_violates_check_constraint(self, state_store):
+        with (
+            state_store._database.connect() as conn,  # noqa: SLF001
+            pytest.raises(ConstraintException),
+        ):
+            conn.execute(
+                """
+                INSERT INTO universe_forward_returns (
+                    run_id, symbol, horizon_days, as_of, outcome_class,
+                    reason_code, forward_return_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [str(uuid4()), "XYZ", 5, date(2026, 7, 27), "shortlisted", None, 1.0],
+            )
+
+    def test_replacement_drops_symbols_absent_from_the_recomputed_set(
+        self, state_store
+    ):
+        run_id = uuid4()
+        state_store.replace_universe_forward_returns(
+            run_id, 5, [_universe_return(run_id, "GONE"), _universe_return(run_id, "A")]
+        )
+
+        state_store.replace_universe_forward_returns(
+            run_id, 5, [_universe_return(run_id, "A", forward_return_pct=2.25)]
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol, forward_return_pct FROM universe_forward_returns "
+                "WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [("A", 2.25)]
+
+    def test_replacement_leaves_the_other_horizon_untouched(self, state_store):
+        run_id = uuid4()
+        state_store.replace_universe_forward_returns(
+            run_id, 20, [_universe_return(run_id, "A", horizon_days=20)]
+        )
+
+        state_store.replace_universe_forward_returns(
+            run_id, 5, [_universe_return(run_id, "B")]
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT horizon_days, symbol FROM universe_forward_returns "
+                "WHERE run_id = ? ORDER BY horizon_days",
+                [str(run_id)],
+            ).fetchall()
+        assert rows == [(5, "B"), (20, "A")]
+
+    @pytest.mark.parametrize(
+        ("run_id_matches", "horizon_days"),
+        [
+            pytest.param(False, 5, id="foreign-run-id"),
+            pytest.param(True, 20, id="foreign-horizon"),
+        ],
+    )
+    def test_records_outside_the_replaced_slice_raise(
+        self, state_store, run_id_matches, horizon_days
+    ):
+        run_id = uuid4()
+        record_run_id = run_id if run_id_matches else uuid4()
+
+        with pytest.raises(ValueError, match="must match the replacement"):
+            state_store.replace_universe_forward_returns(
+                run_id,
+                5,
+                [_universe_return(record_run_id, "A", horizon_days=horizon_days)],
+            )
+
+    def test_rolls_back_when_a_later_insert_fails(self, state_store, monkeypatch):
+        run_id = uuid4()
+        state_store.replace_universe_forward_returns(
+            run_id, 5, [_universe_return(run_id, "KEEP")]
+        )
+        real_connect = state_store._database.connect  # noqa: SLF001
+        monkeypatch.setattr(
+            state_store._database,  # noqa: SLF001
+            "connect",
+            lambda: _FlakyUniverseReturnConnection(real_connect(), fail_on_call=2),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.replace_universe_forward_returns(
+                run_id,
+                5,
+                [_universe_return(run_id, "A"), _universe_return(run_id, "B")],
+            )
+
+        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                "SELECT symbol FROM universe_forward_returns WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchall()
+        # The DELETE that opened the failed replacement rolled back too, so the
+        # previously committed slice is still readable in full.
+        assert rows == [("KEEP",)]
 
 
 class TestRecordRiskAssessments:

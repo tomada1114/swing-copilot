@@ -1976,6 +1976,22 @@ CREATE TABLE IF NOT EXISTS screening_rejections (
     PRIMARY KEY (run_id, symbol)
 );
 
+CREATE TABLE IF NOT EXISTS screening_truncations (
+    run_id              UUID NOT NULL,
+    symbol              VARCHAR NOT NULL,
+    strategy_key        VARCHAR NOT NULL,
+    rank                INTEGER NOT NULL,
+    score               DOUBLE NOT NULL,
+    score_rsi_pullback  DOUBLE,
+    score_trend_quality DOUBLE,
+    score_liquidity     DOUBLE,
+    score_atr_pct       DOUBLE,
+    execution_state     VARCHAR NOT NULL,
+    execution_distance  DOUBLE,
+    as_of               DATE NOT NULL,
+    PRIMARY KEY (run_id, symbol, strategy_key)
+);
+
 CREATE TABLE IF NOT EXISTS signal_outcomes (
     run_id             UUID NOT NULL,
     symbol             VARCHAR NOT NULL,
@@ -1986,6 +2002,19 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     classification     VARCHAR NOT NULL CHECK (classification IN (
         'TRUE_POSITIVE','FALSE_POSITIVE_MILD','FALSE_POSITIVE_SEVERE','NEUTRAL'
     )),
+    PRIMARY KEY (run_id, symbol, horizon_days)
+);
+
+CREATE TABLE IF NOT EXISTS universe_forward_returns (
+    run_id             UUID NOT NULL,
+    symbol             VARCHAR NOT NULL,
+    horizon_days       INTEGER NOT NULL CHECK (horizon_days IN (5, 20)),
+    as_of              DATE NOT NULL,
+    outcome_class      VARCHAR NOT NULL CHECK (outcome_class IN (
+        'candidate','truncated','rejected'
+    )),
+    reason_code        VARCHAR,
+    forward_return_pct DOUBLE NOT NULL,
     PRIMARY KEY (run_id, symbol, horizon_days)
 );
 
@@ -2176,6 +2205,53 @@ CREATE TABLE IF NOT EXISTS text_items (
 `_classify_fundamentals()`は`min_profitable_quarters`件のうち`net_income > 0`を満たさない四半期があると、直近4件中で実際に条件を満たさなかった最新の四半期（NaN含む）を`fiscal_period_end`とともに`detail`へ記録する（P6-25で、常に最新四半期の値を報告していた旧実装のバグを修正）。その四半期の`net_income`が`NaN`（EDGARデータの実欠損。純損失という事実とは別物）の場合は8番目の値`DATA_MISSING_NET_INCOME`（`stage='data_quality'`。`DATA_INSUFFICIENT_HISTORY`と同じ扱い）を、非NaNで`<=0`の場合のみ既存の`FILTER_NEGATIVE_NET_INCOME`（`stage='fundamental_filter'`）を使う。
 
 `report/daily_brief.py::build_daily_brief()`は`context.rejections`から`reason_code`別の件数を`DailyBrief.rejection_counts`として集計する。terminal（`report/terminal_report.py`）・Markdown（`report/markdown_report.py`）はいずれも「落選サマリ」節としてこれを表示し、0件のときも例外を出さず「該当なし(0件)」で描画する。
+
+**Issue #188実装時追記（対照群の永続化）**: 上段の「candidate_limitだけで順位落ちした銘柄は
+`rejections.json`にしか残らない」という設計は、「candidate_limitを5→8にしたら成績は上がるか」
+「11位以下は1〜5位より本当に悪いのか」に答える手段を持たない。理由コードを付けられないことは
+変わらないので（順位落ちは落選ではない）、**別テーブル**`screening_truncations`を新設する。
+主キーは`(run_id, symbol, strategy_key)`で、書き込みは`record_screening_results()`が
+`candidates` / `screening_rejections`と**同一トランザクション**で行う——候補と順位落ちは同一
+ランキングの表裏であり、片方だけがcommitされた状態は「切り口がどこだったか」を偽るためである。
+順位落ちの尾は`candidate_limit * 3`件（`audit_records.PERSISTED_TRUNCATION_MULTIPLIER`）まで
+保持する。上の問いはいずれも切り口のすぐ下にあり、数百件の裾を全部書いてもどれ一つ答えられない
+ためである。この1テーブルだけは行単位upsertではなく**当該run/strategyの全削除→再挿入**とする
+（同じ1トランザクション内）。再実行でランキングが変わり切り口の上へ移った銘柄が、幻の
+near-missとして残らないようにするためである。スコア内訳をJSONではなく型付き列へ展開するのは、
+この行の存在理由が集計そのもの（GROUP BY）であり、`candidates.metrics_json`のようにレポートや
+分析exportへ渡る値ではないからである。
+
+`universe_forward_returns`（Issue #188）は、forward returnと当否分類が候補にしか付かない
+——つまり測れているのは偽陽性率だけ——という構造的な盲点を閉じる。`(run_id, symbol,
+horizon_days)`を主キーに、その過去runにおける**候補 ∪ 順位落ち ∪ 落選**の和集合1銘柄1行を
+記録し、`outcome_class`（`candidate` / `truncated` / `rejected`）と、落選側のみ
+`screening_rejections.reason_code`を併記する。`signal_outcomes`と統合しないのは、あちらが
+シグナル別に按分されHIT/MISSへ分類された値であるのに対し、こちらはシグナルが一度も発火して
+いない銘柄まで含む**分類前の生リターン**だからである。`run_id`は`signal_outcomes`と同様
+**評価対象の過去run**を指す。書き込みは`replace_universe_forward_returns()`が
+`(run_id, horizon_days)`スライスをDELETE後に再INSERTする完全置換（1トランザクション）で、
+これがポストモーテム再実行の冪等性を担保する。価格は取得済みParquetなので追加の
+ネットワークI/Oはゼロである。層化サンプリングは導入していない——全ユニバース分を
+書いてもDuckDBの行数としては些少で、サンプリングは`reason_code`別の平均に選択バイアスを
+持ち込むためである。
+
+これで`SELECT reason_code, avg(forward_return_pct) FROM universe_forward_returns
+WHERE outcome_class = 'rejected' GROUP BY 1`の1行が「そのフィルタは利益に貢献しているか」に
+答える。分析ビューは`v_truncated_candidates`（`v_candidates`と列を揃えてあるので上位と
+下位を直接比較できる）と`v_universe_forward_returns`（rank・score・セクターを結合済み）を
+`ANALYSIS_VIEW_STATEMENTS`へ追加し、`swing_copilot.research`に
+`truncated_candidates()` / `universe_forward_returns()`アクセサを置く（9節）。
+なお`v_universe_forward_returns`のrank/score結合は、`universe_forward_returns`が
+strategy_keyを持たない（1日1銘柄の判断であって戦略別のランキングではない）ため、
+strategy_key付きテーブルを素で結合するとrunが評価した戦略の数だけ1判断が増殖する。
+これを避けるため両脚とも`(run_id, symbol)`で事前集約したサブクエリとして結合する。
+
+順位落ちにもtracking（2.5×ATR／25セッション）を後から適用できるよう、
+`tracking_records.get_untracked_truncations()`を**拡張ポイントとしてのみ**用意した
+（`tracking/update.py`はまだ呼ばない）。戻り値は`get_untracked_verdicts()`と同じ
+`TrackableVerdict`で、`recommendation`は`truncated`、`entry_price`/`stop_price`は
+`None`である（順位落ち銘柄はリスク層に到達しないので`risk_assessments`行が無い。
+`_seed_position`の既存フォールバック——`as_of`終値とATR由来のストップ——がそのまま効く）。
 
 `signal_outcomes`（P2-11、roadmap §5 P2-11）は詳細を3.21a節に譲る。主キー`(run_id, symbol, horizon_days)`の`run_id`は**評価対象の過去run**のIDであり、今日ポストモーテムを実行しているrunのIDではない。通常の補正upsertは`storage/audit_records.py::record_signal_outcomes()`が`ON CONFLICT DO UPDATE`で扱う。ポストモーテム再計算は`replace_signal_outcomes()`が同一`(run_id, horizon_days)`の既存集合をDELETE後に再INSERTする完全置換を1トランザクションで行い、訂正で消えた結果を残さない（`ON CONFLICT DO NOTHING`は使わない）。
 

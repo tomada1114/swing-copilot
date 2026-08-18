@@ -80,6 +80,23 @@ class RejectionRow:
 
 
 @dataclass(frozen=True, slots=True)
+class TruncationRow:
+    """One `screening_truncations` row for one run (Issue #188).
+
+    Deliberately not `TruncatedCandidate`: that value carries the in-memory
+    score breakdown a single ranking produced, whereas this is what a *past*
+    run persisted, retained only down to the configured cap.
+    """
+
+    symbol: str
+    strategy_key: str
+    rank: int
+    score: float
+    execution_state: str
+    as_of: date
+
+
+@dataclass(frozen=True, slots=True)
 class SymbolCandidacyRow:
     """One run where a symbol appeared as a candidate (REQ-004)."""
 
@@ -441,6 +458,40 @@ def get_rejections(database: Database, run_id: UUID) -> list[RejectionRow]:
             reason_code=row[2],
             detail=_load_detail(row[3]),
             as_of=row[4],
+        )
+        for row in rows
+    ]
+
+
+def get_truncations(database: Database, run_id: UUID) -> list[TruncationRow]:
+    """Return `screening_truncations` rows for one run (Issue #188's table).
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The run whose near-misses to read.
+
+    Returns:
+        Rows ordered by rank, closest to the cut first. Empty for a run that
+        predates the table or whose ranking had no tail at all.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, strategy_key, rank, score, execution_state, as_of
+            FROM screening_truncations
+            WHERE run_id = ?
+            ORDER BY rank, symbol
+            """,
+            [str(run_id)],
+        ).fetchall()
+    return [
+        TruncationRow(
+            symbol=row[0],
+            strategy_key=row[1],
+            rank=row[2],
+            score=row[3],
+            execution_state=row[4],
+            as_of=row[5],
         )
         for row in rows
     ]

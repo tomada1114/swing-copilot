@@ -1445,6 +1445,70 @@ class TestScreeningRejections:
         assert "該当なし(0件)" in report_text
 
 
+class TestScreeningTruncations:
+    """Issue #188: `screening_truncations` end-to-end through the daily pipeline."""
+
+    def test_the_symbol_cut_by_candidate_limit_is_persisted_with_its_rank(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        # Both symbols pass every filter/signal, so a limit of 1 makes the
+        # second one a near-miss: the case that previously survived only in
+        # the run directory's `rejections.json`.
+        capped = {
+            "strategies": {
+                "default": {
+                    "filters_all": ["volume_min"],
+                    "signals_all": ["trend_sma"],
+                    "candidate_limit": 1,
+                }
+            }
+        }
+        deps = DailyDependencies(
+            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=(_member("AAPL"), _member("MSFT")),
+            strategies_config=capped,
+            clock=FakeClock(),
+            edgar_client=None,
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            candidate_count, truncation_rows = (
+                conn.execute(
+                    "SELECT count(*) FROM candidates WHERE run_id = ?",
+                    [str(result.run_id)],
+                ).fetchone()[0],
+                conn.execute(
+                    "SELECT symbol, strategy_key, rank, as_of "
+                    "FROM screening_truncations WHERE run_id = ?",
+                    [str(result.run_id)],
+                ).fetchall(),
+            )
+        assert candidate_count == 1
+        assert len(truncation_rows) == 1
+        assert truncation_rows[0][1:] == ("default", 2, AS_OF)
+        # The truncated symbol is the one that is *not* the candidate.
+        assert truncation_rows[0][0] in {"AAPL", "MSFT"}
+
+    def test_no_truncation_is_recorded_when_every_candidate_fits(
+        self, deps, state_store
+    ):
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
+                [str(result.run_id)],
+            ).fetchone()
+        assert count == (0,)
+
+
 class TestPastDecisionsThreading:
     """P1-05 REQ-008 strategy_key threading test.
 

@@ -4,7 +4,16 @@ Each daily run looks back at the candidates from the run 5 and 20 trading
 days ago, computes what their price actually did since then (the "forward
 return"), classifies each as a hit or miss, persists it to `signal_outcomes`,
 and aggregates the trailing window into per-signal hit-rate stats for the
-Markdown report. This is purely retrospective: it never adjusts screening,
+Markdown report.
+
+Issue #188 widens the *measurement* (not the classification) to that run's
+whole screened universe: the same forward return is also stored, untagged by
+hit/miss, for the near-misses `candidate_limit` cut and for every symbol a
+filter or signal rejected (`universe_forward_returns`). Without those two
+control groups only the false-positive rate is knowable -- nothing says
+whether the symbols the screen threw away would have done better.
+
+This is purely retrospective: it never adjusts screening,
 ranking, or risk in response to what it finds (roadmap's explicit
 "not in scope" -- weight auto-tuning stays a human decision).
 """
@@ -21,11 +30,19 @@ from swing_copilot.pipeline.forward_returns import (
     find_target_trading_day,
 )
 from swing_copilot.report.daily_brief import SignalPerformanceRow
-from swing_copilot.storage.audit_records import SignalOutcomeRecord
+from swing_copilot.storage.audit_records import (
+    OUTCOME_CLASS_CANDIDATE,
+    OUTCOME_CLASS_REJECTED,
+    OUTCOME_CLASS_TRUNCATED,
+    SignalOutcomeRecord,
+    UniverseForwardReturnRecord,
+)
 from swing_copilot.storage.history_queries import (
+    get_rejections,
     get_run_by_date,
     get_run_detail,
     get_signal_outcomes,
+    get_truncations,
 )
 
 if TYPE_CHECKING:
@@ -180,6 +197,56 @@ class _PostmortemRequest:
     benchmark_symbol: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ScreeningDecision:
+    """What one past run decided about one symbol, for the control-group pass."""
+
+    symbol: str
+    outcome_class: str
+    reason_code: str | None
+
+
+def _screening_decisions(
+    state_store: StateStore, detail: RunDetail
+) -> tuple[_ScreeningDecision, ...]:
+    """Union one past run's candidates, near-misses, and rejections (Issue #188).
+
+    One row per symbol, and a symbol claimed by an earlier group keeps that
+    group: a run screening two strategies can rank a symbol into one's
+    candidates while another truncates or rejects it, and "it was a
+    candidate that day" is the strongest true statement about how the
+    screen treated it. `candidate > truncated > rejected` is therefore the
+    precedence, matching the natural-key `(run_id, symbol, horizon_days)`
+    the rows are stored under.
+
+    Args:
+        state_store: Read source for the truncation and rejection ledgers.
+        detail: The historical run's own candidate list.
+
+    Returns:
+        Deduplicated decisions, candidates first (dict insertion order).
+    """
+    decisions: dict[str, _ScreeningDecision] = {}
+    for candidate in detail.candidates:
+        decisions.setdefault(
+            candidate.symbol,
+            _ScreeningDecision(candidate.symbol, OUTCOME_CLASS_CANDIDATE, None),
+        )
+    for truncation in get_truncations(state_store.database, detail.run_id):
+        decisions.setdefault(
+            truncation.symbol,
+            _ScreeningDecision(truncation.symbol, OUTCOME_CLASS_TRUNCATED, None),
+        )
+    for rejection in get_rejections(state_store.database, detail.run_id):
+        decisions.setdefault(
+            rejection.symbol,
+            _ScreeningDecision(
+                rejection.symbol, OUTCOME_CLASS_REJECTED, rejection.reason_code
+            ),
+        )
+    return tuple(decisions.values())
+
+
 def _process_horizon(
     market_store: MarketStore,
     state_store: StateStore,
@@ -211,34 +278,73 @@ def _process_horizon(
     # branch solely for defensive coverage suppression.
     detail = cast("RunDetail", get_run_detail(state_store.database, historical_run_id))
 
-    records: list[SignalOutcomeRecord] = []
-    for candidate in detail.candidates:
-        forward_return_pct = compute_forward_return(
-            market_store, candidate.symbol, target_date, as_of
+    decisions = _screening_decisions(state_store, detail)
+    returns = _forward_returns(market_store, decisions, target_date, as_of)
+
+    records = [
+        SignalOutcomeRecord(
+            run_id=historical_run_id,
+            symbol=candidate.symbol,
+            horizon_days=horizon_days,
+            as_of=as_of,
+            signal_names=candidate.signal_names,
+            forward_return_pct=returns[candidate.symbol],
+            classification=classify_forward_return(
+                returns[candidate.symbol],
+                neutral_threshold_pct=request.thresholds.neutral_threshold_pct,
+                severe_threshold_pct=request.thresholds.severe_threshold_pct,
+            ),
         )
-        if forward_return_pct is None:
-            continue
-        records.append(
-            SignalOutcomeRecord(
-                run_id=historical_run_id,
-                symbol=candidate.symbol,
-                horizon_days=horizon_days,
-                as_of=as_of,
-                signal_names=candidate.signal_names,
-                forward_return_pct=forward_return_pct,
-                classification=classify_forward_return(
-                    forward_return_pct,
-                    neutral_threshold_pct=request.thresholds.neutral_threshold_pct,
-                    severe_threshold_pct=request.thresholds.severe_threshold_pct,
-                ),
-            )
-        )
+        for candidate in detail.candidates
+        if candidate.symbol in returns
+    ]
     state_store.replace_signal_outcomes(
         historical_run_id,
         horizon_days,
         records,
     )
+    state_store.replace_universe_forward_returns(
+        historical_run_id,
+        horizon_days,
+        [
+            UniverseForwardReturnRecord(
+                run_id=historical_run_id,
+                symbol=decision.symbol,
+                horizon_days=horizon_days,
+                as_of=as_of,
+                outcome_class=decision.outcome_class,
+                reason_code=decision.reason_code,
+                forward_return_pct=returns[decision.symbol],
+            )
+            for decision in decisions
+            if decision.symbol in returns
+        ],
+    )
     return None
+
+
+def _forward_returns(
+    market_store: MarketStore,
+    decisions: Sequence[_ScreeningDecision],
+    target_date: date,
+    as_of: date,
+) -> dict[str, float]:
+    """Return each decided symbol's realized move, skipping the ones with no bars.
+
+    Bars are already local Parquet, so widening the pass from the candidates
+    to the whole screened union (Issue #188) adds no network I/O. A symbol
+    missing a close on either end is simply absent from the result -- the
+    same fail-soft data-quality skip the candidate-only pass always made,
+    never an exception.
+    """
+    returns: dict[str, float] = {}
+    for decision in decisions:
+        forward_return_pct = compute_forward_return(
+            market_store, decision.symbol, target_date, as_of
+        )
+        if forward_return_pct is not None:
+            returns[decision.symbol] = forward_return_pct
+    return returns
 
 
 def run_postmortem_step(
@@ -253,6 +359,10 @@ def run_postmortem_step(
     For each of `HORIZON_DAYS` (5 and 20 trading days back), locates the run
     at that target trading day, classifies each of its candidates' forward
     returns as of `as_of`, and upserts the results (REQ-001/REQ-006/REQ-007).
+    The same pass records the untagged forward return of that run's
+    truncated near-misses and rejected symbols too (Issue #188). Both writes
+    replace their `(run_id, horizon_days)` slice wholesale, so re-running a
+    day is idempotent rather than additive.
     A horizon with no prior run, or a candidate with missing bars, is a
     normal skip -- never an exception -- so a brand-new database (no run
     history yet) completes this step successfully with nothing to show
@@ -264,9 +374,10 @@ def run_postmortem_step(
     Args:
         market_store: Bars source for both the trading-calendar derivation
             and each candidate's forward-return closes.
-        state_store: Write target for `signal_outcomes`, and (via its
-            `database` property) the read source for the historical run
-            lookup, its candidates, and the trailing-window aggregation.
+        state_store: Write target for `signal_outcomes` and
+            `universe_forward_returns`, and (via its `database` property) the
+            read source for the historical run lookup, its candidates,
+            near-misses, and rejections, and the trailing-window aggregation.
         as_of: Today's evaluation date -- the forward-return endpoint.
         thresholds: Classification/weight/sample-size settings
             (`settings.postmortem`).

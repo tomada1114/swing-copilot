@@ -27,6 +27,7 @@ from swing_copilot.retro.evaluate import (
     MISS_SEVERE,
     NEUTRAL,
     EvaluateSummary,
+    EvaluationRequest,
     classify_verdict_outcome,
     evaluate_verdicts,
 )
@@ -152,7 +153,11 @@ def _evaluate(
     market_store: MarketStore, state_store: StateStore, as_of: date
 ) -> EvaluateSummary:
     return evaluate_verdicts(
-        market_store, state_store, as_of, PostmortemConfig(), BENCHMARK
+        market_store,
+        state_store,
+        EvaluationRequest(
+            as_of=as_of, thresholds=PostmortemConfig(), benchmark_symbol=BENCHMARK
+        ),
     )
 
 
@@ -186,7 +191,13 @@ class TestEvaluateHappyPath:
         )
 
         summary = evaluate_verdicts(
-            market_store, state_store, CALENDAR[25], PostmortemConfig(), BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=CALENDAR[25],
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+            ),
         )
 
         assert (summary.evaluated_slice_count, summary.outcome_count) == (2, 2)
@@ -283,9 +294,11 @@ class TestEvaluateMaturityCutoff:
         summary = evaluate_verdicts(
             market_store,
             state_store,
-            MATURITY_5D - timedelta(days=1),
-            PostmortemConfig(),
-            BENCHMARK,
+            EvaluationRequest(
+                as_of=MATURITY_5D - timedelta(days=1),
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+            ),
         )
 
         assert summary.pending_slice_count == 2
@@ -340,7 +353,13 @@ class TestEvaluateFailSoft:
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
 
         summary = evaluate_verdicts(
-            market_store, state_store, CALENDAR[10], PostmortemConfig(), BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=CALENDAR[10],
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+            ),
         )
 
         assert [row[0] for row in _outcome_rows(state_store, 5)] == ["AAPL"]
@@ -354,7 +373,13 @@ class TestEvaluateFailSoft:
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
 
         summary = evaluate_verdicts(
-            market_store, state_store, CALENDAR[10], PostmortemConfig(), BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=CALENDAR[10],
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+            ),
         )
 
         assert (summary.evaluated_slice_count, summary.outcome_count) == (0, 0)
@@ -364,7 +389,13 @@ class TestEvaluateFailSoft:
         self, market_store: MarketStore, state_store: StateStore
     ) -> None:
         summary = evaluate_verdicts(
-            market_store, state_store, CALENDAR[10], PostmortemConfig(), BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=CALENDAR[10],
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+            ),
         )
 
         assert (summary.evaluated_slice_count, summary.notes) == (0, ())
@@ -415,7 +446,11 @@ class TestEvaluateWindow:
         _seed_verdict(state_store, run_id, run_date=stale_run_date)
 
         summary = evaluate_verdicts(
-            market_store, state_store, as_of, thresholds, BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=as_of, thresholds=thresholds, benchmark_symbol=BENCHMARK
+            ),
         )
 
         assert summary.evaluated_slice_count == 0
@@ -442,7 +477,142 @@ class TestEvaluateWindow:
         )
 
         summary = evaluate_verdicts(
-            market_store, state_store, as_of, thresholds, BENCHMARK
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=as_of, thresholds=thresholds, benchmark_symbol=BENCHMARK
+            ),
         )
 
         assert summary.outcome_count >= 1
+
+
+class TestOnlyPendingScope:
+    """Issue #209: the daily pass evaluates only what is not already recorded.
+
+    It runs ahead of the analysis export now, so its cost has to follow the
+    slices that newly matured rather than the whole evaluation window -- but
+    never at the price of keeping a stale classification of a corrected
+    verdict.
+    """
+
+    def _pending_only(
+        self, market_store: MarketStore, state_store: StateStore, as_of: date
+    ) -> EvaluateSummary:
+        return evaluate_verdicts(
+            market_store,
+            state_store,
+            EvaluationRequest(
+                as_of=as_of,
+                thresholds=PostmortemConfig(),
+                benchmark_symbol=BENCHMARK,
+                only_pending=True,
+            ),
+        )
+
+    def test_an_already_recorded_slice_is_left_alone(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        first = self._pending_only(market_store, state_store, CALENDAR[10])
+        assert (first.evaluated_slice_count, first.recorded_slice_count) == (1, 0)
+
+        # A later bar for the same maturity session would reclassify the slice
+        # if it were re-read; the daily pass deliberately does not re-read it.
+        market_store.write_bars(bars("AAPL", {MATURITY_5D: 90.0}))
+
+        second = self._pending_only(market_store, state_store, CALENDAR[10])
+
+        assert (second.evaluated_slice_count, second.recorded_slice_count) == (0, 1)
+        assert _outcome_rows(state_store, 5) == [
+            ("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(1.5), HIT)
+        ]
+
+    def test_a_full_batch_still_reclassifies_after_a_price_correction(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The manual `copilot-retro evaluate` keeps the correction path the
+        # daily pass gives up: same inputs, `only_pending` off.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        self._pending_only(market_store, state_store, CALENDAR[10])
+        market_store.write_bars(bars("AAPL", {MATURITY_5D: 90.0}))
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _outcome_rows(state_store, 5) == [
+            ("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(-10.0), MISS_SEVERE)
+        ]
+
+    def test_a_corrected_verdict_is_reclassified(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        self._pending_only(market_store, state_store, CALENDAR[10])
+
+        # `retro collect` re-collected the run and the verdict flipped, so the
+        # recorded slice no longer describes this run's verdicts.
+        _seed_verdict(state_store, run_id, recommendation="skip")
+
+        summary = self._pending_only(market_store, state_store, CALENDAR[10])
+
+        assert (summary.evaluated_slice_count, summary.recorded_slice_count) == (1, 0)
+        assert _outcome_rows(state_store, 5) == [
+            ("AAPL", 5, MATURITY_5D, "skip", pytest.approx(1.5), MISS_MILD)
+        ]
+
+    def test_a_slice_missing_a_symbols_bars_keeps_being_retried(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The recorded set is a strict subset of the run's verdicts, so the
+        # slice never counts as done and picks the symbol up once its bars
+        # arrive.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        state_store.replace_run_verdicts(
+            run_id,
+            [
+                VerdictRecord(
+                    run_id=run_id,
+                    symbol=symbol,
+                    as_of=RUN_DATE,
+                    strategy_key="default",
+                    recommendation="proceed",
+                    reasons=(),
+                    no_trade=False,
+                )
+                for symbol in ("AAPL", "MSFT")
+            ],
+            [],
+        )
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        first = self._pending_only(market_store, state_store, CALENDAR[10])
+        assert len(first.notes) == 1
+
+        market_store.write_bars(bars("MSFT", {RUN_DATE: 100.0, MATURITY_5D: 99.0}))
+
+        second = self._pending_only(market_store, state_store, CALENDAR[10])
+
+        assert second.recorded_slice_count == 0
+        assert _outcome_rows(state_store, 5) == [
+            ("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(1.5), HIT),
+            ("MSFT", 5, MATURITY_5D, "proceed", pytest.approx(-1.0), MISS_MILD),
+        ]
+
+    def test_an_empty_window_asks_the_store_for_nothing(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        _seed_calendar(market_store)
+
+        summary = self._pending_only(market_store, state_store, CALENDAR[10])
+
+        assert (summary.evaluated_slice_count, summary.recorded_slice_count) == (0, 0)
+        assert state_store.get_recorded_outcome_slices(()) == {}

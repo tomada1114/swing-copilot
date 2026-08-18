@@ -584,3 +584,37 @@ class TestPriorVerdictsReachBackToTheLastRun:
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
         aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
         assert aapl["prior_verdicts"] is None
+
+
+class TestPriorVerdictOutcomesReachTheSameDaysExport:
+    """Issue #209: an outcome maturing on day D belongs in day D's own export.
+
+    `retro_evaluate` is the only writer of `verdict_outcomes`, so while it ran
+    after step 6 every `<prior_verdicts>` entry whose horizon came due that
+    morning was exported with its classification still blank, and the skill
+    only saw it the next run.
+    """
+
+    def test_an_outcome_maturing_on_the_run_date_is_exported_with_it(self, deps):
+        # `_uptrending_bars` writes one bar per calendar day, so the benchmark
+        # calendar makes the 5th session after the archived run exactly the
+        # live run's own date -- the boundary case (maturity == as_of).
+        archived_date = LIVE_RUN_DATE - timedelta(days=5)
+        _archive_ingested_run(deps.output_dir, archived_date)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.run_date == LIVE_RUN_DATE
+        with deps.state_store.database.connect() as conn:
+            matured = conn.execute(
+                "SELECT as_of, horizon_days, classification FROM verdict_outcomes"
+            ).fetchall()
+        assert matured == [(LIVE_RUN_DATE, 5, "HIT")]
+
+        assert result.analysis_input_path is not None
+        payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
+        aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
+        assert aapl["prior_verdicts"] is not None
+        # The whole point of the reordering: the classification, not the
+        # "評価期間が未到来" placeholder the old ordering always produced here.
+        assert "結果: 5日: HIT (+1.10%)" in aapl["prior_verdicts"]

@@ -72,7 +72,7 @@ from swing_copilot.report.markdown_report import (
 )
 from swing_copilot.report.rejections import RejectionsArtifact, write_rejections
 from swing_copilot.retro.collect import collect_verdicts
-from swing_copilot.retro.evaluate import evaluate_verdicts
+from swing_copilot.retro.evaluate import EvaluationRequest, evaluate_verdicts
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
     PortfolioHeatResult,
@@ -1242,6 +1242,10 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
     skill's ingest. Today's run is therefore simply not scanned, and any run
     whose skill answer was never ingested becomes a note -- the collector's
     normal fail-soft outcome, not a degradation.
+
+    Issue #209: the scan re-parses and re-writes only the archives whose
+    documents changed, so the cost it adds in front of the export stops
+    growing with the length of the history.
     """
     try:
         summary = collect_verdicts(deps.state_store, Path(deps.output_dir))
@@ -1252,6 +1256,7 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
         True,
         _retro_step_detail(
             f"collected {summary.collected_run_count}/{summary.scanned_run_count} run(s), "
+            f"{summary.unchanged_run_count} unchanged, "
             f"{summary.verdict_count} verdict(s)",
             summary.notes,
         ),
@@ -1265,14 +1270,24 @@ def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutco
     maturity session (`verdict_outcomes.as_of`, decision D7), so evaluating
     daily produces exactly the rows a manual batch would, without missed or
     double-counted slices. Reads only prices dated `<= as_of`.
+
+    Issue #209: the daily pass runs `only_pending`, ahead of the export, so
+    the work in front of the run's only skill handoff follows the number of
+    slices that have newly matured rather than the whole evaluation window.
+    Re-classifying an already-recorded slice after a *price* correction stays
+    the manual `copilot-retro evaluate` / `prepare` batch's job -- it is the
+    same command the correction itself is noticed from.
     """
     try:
         summary = evaluate_verdicts(
             deps.market_store,
             deps.state_store,
-            as_of,
-            deps.settings.postmortem,
-            deps.settings.backtest.benchmark,
+            EvaluationRequest(
+                as_of=as_of,
+                thresholds=deps.settings.postmortem,
+                benchmark_symbol=deps.settings.backtest.benchmark,
+                only_pending=True,
+            ),
         )
     except Exception as exc:
         logger.exception("retro evaluate step raised unexpectedly")
@@ -1282,6 +1297,7 @@ def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutco
         _retro_step_detail(
             f"evaluated {summary.evaluated_slice_count} slice(s), "
             f"{summary.pending_slice_count} pending, "
+            f"{summary.recorded_slice_count} already recorded, "
             f"{summary.outcome_count} outcome(s)",
             summary.notes,
         ),

@@ -20,6 +20,7 @@ import pytest
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
+    CollectedRunRecords,
     NewsSupplyRecord,
     PriorVerdictOutcome,
     VerdictOutcomeRecord,
@@ -123,6 +124,69 @@ def _rows(
 ) -> list[tuple[object, ...]]:
     with state_store._database.connect() as conn:  # noqa: SLF001
         return conn.execute(sql, parameters or []).fetchall()
+
+
+class TestCollectedRunDigest:
+    """Issue #209: the fingerprint that lets a scan prove a run unchanged."""
+
+    def test_a_digest_written_with_the_rows_is_read_back_per_run(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+
+        state_store.replace_collected_run(
+            CollectedRunRecords(
+                run_id=run_id,
+                verdicts=[_verdict(run_id, "AAPL")],
+                document_digest="sha256:aapl",
+            )
+        )
+
+        assert state_store.get_verdict_collection_digests() == {run_id: "sha256:aapl"}
+
+    def test_a_replacement_without_a_digest_clears_the_previous_one(
+        self, state_store: StateStore
+    ) -> None:
+        # Rows written from documents the caller cannot name must never let a
+        # later scan skip the run.
+        run_id = uuid4()
+        state_store.replace_collected_run(
+            CollectedRunRecords(
+                run_id=run_id,
+                verdicts=[_verdict(run_id, "AAPL")],
+                document_digest="sha256:aapl",
+            )
+        )
+
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        assert state_store.get_verdict_collection_digests() == {}
+
+    def test_a_failed_replacement_rolls_the_digest_back_with_the_rows(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_collected_run(
+            CollectedRunRecords(
+                run_id=run_id,
+                verdicts=[_verdict(run_id, "AAPL")],
+                document_digest="sha256:original",
+            )
+        )
+
+        with pytest.raises(duckdb.Error):
+            state_store.replace_collected_run(
+                CollectedRunRecords(
+                    run_id=run_id,
+                    verdicts=[_verdict(run_id, "MSFT", recommendation="invalid")],
+                    document_digest="sha256:corrected",
+                )
+            )
+
+        assert state_store.get_verdict_collection_digests() == {
+            run_id: "sha256:original"
+        }
+        assert _rows(state_store, "SELECT symbol FROM verdicts") == [("AAPL",)]
 
 
 class TestReplaceRunVerdicts:

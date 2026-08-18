@@ -261,7 +261,11 @@ copilot-retro ingest reports/retro/2027-03-11        # スキルの回答を検�
 完全置換で`verdicts`/`verdict_sources`へ取り込む。`strategy_key`と
 `source_type`はコードが所有する`analysis_input.json`から解決し、スキルの
 申告値を採用しない。文書欠損・解析不能のrunと入力側に存在しない`source_id`は
-noteを残してスキップする（fail-soft）。走査0件は正常終了である。
+noteを残してスキップする（fail-soft）。走査0件は正常終了である。ディレクトリの
+列挙は毎回全件だが、前回の取り込み時と2文書のハッシュが一致するrunは再パース
+も再書き込みもしない（Issue #209）。出力は「走査 / 解析 / 無変更 / 取り込み」の
+run数を並べて表示する。どちらかの文書を書き換えれば——サイズと更新時刻が同じ
+でも——ハッシュが変わるので、訂正は必ず取り込み直される。
 
 `evaluate`はrun_dateから5/20営業日先の**満期営業日**を求め、`満期日 <= as_of`の
 ものだけを分類して`verdict_outcomes`へ`(run_id, horizon_days)`単位の完全置換で
@@ -270,6 +274,9 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 意図的に異なる）。分類は非対称で、`proceed`は「重大な逆行がなかった」という
 片側の主張のためNEUTRALを持たず、`skip`は下落を的中・上昇を機会損失として
 扱う。閾値は`settings.postmortem`の既存値を流用し、新しい閾値体系を作らない。
+このコマンドは窓内の満期スライスを**全件**再分類するので、株価が訂正された
+場合の分類の更新もここで起きる（日次ステップ側は未記録のスライスだけを評価
+する。Issue #209）。
 
 `export`は満期日が`[as_of - lookback_window_days, as_of]`に入る当否行を集約し、
 `reports/retro/<as_of>/retro_input.json`をstrictスキーマ`retro-input-v1`で

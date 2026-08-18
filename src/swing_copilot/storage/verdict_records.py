@@ -51,6 +51,10 @@ _INSERT_ANALYSIS_COVERAGE = """
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+_INSERT_VERDICT_COLLECTION = """
+    INSERT INTO verdict_collections (run_id, document_digest) VALUES (?, ?)
+"""
+
 _INSERT_VERDICT_OUTCOME = """
     INSERT INTO verdict_outcomes (
         run_id, symbol, horizon_days, as_of, recommendation,
@@ -303,6 +307,22 @@ def _news_supply_from_row(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CollectedRunRecords:
+    """Everything one `retro collect` write replaces for a single run.
+
+    Grouped into one value rather than five parameters because they are one
+    replacement unit: the rows and the fingerprint of the documents they came
+    from are committed together or not at all (Issue #209).
+    """
+
+    run_id: UUID
+    verdicts: Sequence[VerdictRecord] = ()
+    sources: Sequence[VerdictSourceRecord] = ()
+    coverages: Sequence[AnalysisSourceCoverageRecord] = ()
+    document_digest: str | None = None
+
+
 def replace_run_verdicts(
     database: Database,
     run_id: UUID,
@@ -310,7 +330,11 @@ def replace_run_verdicts(
     sources: Sequence[VerdictSourceRecord],
     coverages: Sequence[AnalysisSourceCoverageRecord] = (),
 ) -> None:
-    """Atomically replace one run's complete verdict and citation set.
+    """Atomically replace one run's verdict and citation set, unfingerprinted.
+
+    The digest-free entry point: it clears any previous `verdict_collections`
+    fingerprint, so rows written from documents this call cannot name never
+    let a later scan skip the run (Issue #209).
 
     Args:
         database: Shared DuckDB connection owner.
@@ -319,10 +343,35 @@ def replace_run_verdicts(
             result that no longer analyzes any symbol).
         sources: The `source_id`s those verdicts' analyses cited.
         coverages: Every filing source offered to the analysis, cited or not.
+    """
+    replace_collected_run(
+        database,
+        CollectedRunRecords(
+            run_id=run_id,
+            verdicts=verdicts,
+            sources=sources,
+            coverages=coverages,
+        ),
+    )
+
+
+def replace_collected_run(database: Database, records: CollectedRunRecords) -> None:
+    """Atomically replace one run's complete verdict, citation, and digest set.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        records: The run's replacement rows plus, optionally, the fingerprint
+            of the two documents they were built from. The fingerprint is
+            written in the same transaction so a later scan can prove the
+            archive unchanged; `None` *removes* any previous fingerprint
+            rather than leaving it behind.
 
     Raises:
-        ValueError: A record belongs to a different run than `run_id`.
+        ValueError: A record belongs to a different run than `records.run_id`.
     """
+    run_id = records.run_id
+    verdicts, sources = records.verdicts, records.sources
+    coverages = records.coverages
     _reject_foreign_run(run_id, (record.run_id for record in verdicts))
     _reject_foreign_run(run_id, (record.run_id for record in sources))
     _reject_foreign_run(run_id, (record.run_id for record in coverages))
@@ -336,6 +385,14 @@ def replace_run_verdicts(
                 "DELETE FROM analysis_source_coverage WHERE run_id = ?",
                 [str(run_id)],
             )
+            conn.execute(
+                "DELETE FROM verdict_collections WHERE run_id = ?", [str(run_id)]
+            )
+            if records.document_digest is not None:
+                conn.execute(
+                    _INSERT_VERDICT_COLLECTION,
+                    [str(run_id), records.document_digest],
+                )
             for verdict in verdicts:
                 conn.execute(
                     _INSERT_VERDICT,
@@ -394,6 +451,54 @@ def replace_run_verdicts(
             raise
         else:
             conn.execute("COMMIT")
+
+
+def get_verdict_collection_digests(database: Database) -> dict[UUID, str]:
+    """Return every collected run's document fingerprint (Issue #209).
+
+    One query for the whole table rather than one per run directory: the scan
+    compares against every archive it walks, and the table holds one short row
+    per already-collected run.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            "SELECT run_id, document_digest FROM verdict_collections"
+        ).fetchall()
+    return {UUID(str(row[0])): str(row[1]) for row in rows}
+
+
+def get_recorded_outcome_slices(
+    database: Database, run_ids: Sequence[UUID]
+) -> dict[tuple[UUID, int], frozenset[tuple[str, str]]]:
+    """Return each recorded `(run, horizon)` slice's `(symbol, recommendation)` set.
+
+    Issue #209: what an evaluation would have to reproduce for a slice to be
+    left alone. The recommendation travels with the symbol so a corrected
+    verdict -- a symbol added, dropped, or flipped between `proceed` and
+    `skip` -- shows up as a different set and forces the slice to be
+    reclassified rather than silently kept.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_ids: The runs to report on. Empty returns an empty mapping
+            without querying.
+    """
+    if not run_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in run_ids)
+    with database.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT run_id, horizon_days, symbol, recommendation
+            FROM verdict_outcomes
+            WHERE run_id IN ({placeholders})
+            """,  # noqa: S608 - placeholders only, every value stays bound
+            [str(run_id) for run_id in run_ids],
+        ).fetchall()
+    slices: dict[tuple[UUID, int], set[tuple[str, str]]] = defaultdict(set)
+    for row in rows:
+        slices[(UUID(str(row[0])), int(row[1]))].add((str(row[2]), str(row[3])))
+    return {key: frozenset(value) for key, value in slices.items()}
 
 
 def get_analysis_source_coverages(

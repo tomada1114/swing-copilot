@@ -44,6 +44,7 @@ from swing_copilot.report.markdown_report import (
 )
 from swing_copilot.report.rejections import REJECTIONS_FILENAME
 from swing_copilot.retro.collect import collect_verdicts
+from swing_copilot.retro.evaluate import EvaluateSummary, evaluate_verdicts
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -683,12 +684,73 @@ class TestCollectPrecedesTheAnalysisExport:
         # before -- an archive without `analysis_result.json`.
         assert (
             _step_detail(state_store, first.run_id, "retro_collect")
-            == "collected 1/1 run(s), 1 verdict(s)"
+            == "collected 1/1 run(s), 0 unchanged, 1 verdict(s)"
         )
+        # Issue #209: the second scan re-enumerates both directories but
+        # rewrites neither -- the archive still hashes to the digest the first
+        # scan stored, so its rows (asserted above) are left in place.
         second_detail = _step_detail(state_store, second.run_id, "retro_collect")
-        assert second_detail.startswith("collected 1/2 run(s), 1 verdict(s) / notes: ")
+        assert second_detail.startswith(
+            "collected 0/2 run(s), 1 unchanged, 0 verdict(s) / notes: "
+        )
         assert str(first.run_id) in second_detail
         assert ANALYSIS_RESULT_FILENAME in second_detail
+
+
+class TestEvaluatePrecedesTheAnalysisExport:
+    """Issue #209: `retro_evaluate` now runs before step 6 as well.
+
+    It is the only writer of `verdict_outcomes`, the half of
+    `<prior_verdicts>` that says whether the earlier judgement was right, and
+    it must not be able to cost step 6 its slot any more than the collect can.
+    """
+
+    def test_evaluate_runs_before_the_export(
+        self, base_deps: DailyDependencies, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[str] = []
+        real_export = daily_module._run_step_analysis_export  # noqa: SLF001
+
+        def _spy_evaluate(*args: object, **kwargs: object) -> EvaluateSummary:
+            order.append("retro_evaluate")
+            return evaluate_verdicts(*args, **kwargs)  # type: ignore[arg-type]
+
+        def _spy_export(*args: object, **kwargs: object) -> object:
+            order.append("6_analysis_export")
+            return real_export(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(daily_module, "evaluate_verdicts", _spy_evaluate)
+        monkeypatch.setattr(daily_runner, "_run_step_analysis_export", _spy_export)
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert order == ["retro_evaluate", "6_analysis_export"]
+
+    def test_an_evaluate_that_overruns_the_budget_does_not_skip_the_export(
+        self,
+        base_deps: DailyDependencies,
+        state_store: StateStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        object.__setattr__(base_deps.settings.schedule, "timeout_minutes", 1)
+        monotonic = MutableMonotonic()
+        deps = replace(base_deps, news_client=FakeNewsClient(), monotonic=monotonic)
+
+        def _slow_evaluate(*args: object, **kwargs: object) -> EvaluateSummary:
+            monotonic.value = 999_999.0  # the evaluation burned the whole budget
+            return evaluate_verdicts(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(daily_module, "evaluate_verdicts", _slow_evaluate)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert _step_status(state_store, result.run_id, "retro_evaluate") == "success"
+        assert (
+            _step_status(state_store, result.run_id, "6_analysis_export") == "success"
+        )
+        # The overrun was real: the next budgeted step did stop for it.
+        assert _step_status(state_store, result.run_id, "postmortem") == "skipped"
 
 
 class TestTrackUpdateStepRunsDaily:

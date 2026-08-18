@@ -17,10 +17,20 @@ Two rules shape the error handling:
   an unresolvable `source_id` is recorded as a note and skipped, because one
   bad archive must not block the rest of the history (E30.2/E30.4). Scanning
   zero runs is a normal success.
+
+Issue #209 makes the scan incremental. Every run directory is still
+enumerated on every scan -- listing directories is cheap, and a correction
+made to a months-old archive must still be picked up, which a date window
+would permanently forbid. What is skipped is the expensive half: a run whose
+two documents hash to exactly the digest stored when it was last collected is
+neither re-parsed nor re-written. The skip is therefore justified by proven
+byte-identity, not by "we have seen this run before" -- the distinction the
+correction invariant turns on.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -39,6 +49,7 @@ from swing_copilot.analysis.validate import (
 from swing_copilot.retro.adoption import adopt_one_run_per_date
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
+    CollectedRunRecords,
     NewsSupplyRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -74,9 +85,24 @@ class RunDirectory:
 
 @dataclass(frozen=True, slots=True)
 class CollectSummary:
-    """What one scan found, wrote, and had to skip."""
+    """What one scan found, wrote, and had to skip.
+
+    `scanned_run_count` keeps its original meaning -- run directories
+    enumerated -- and is therefore still linear in history length. The two
+    counts added by Issue #209 separate the work actually done from the work
+    avoided: `parsed_run_count` counts the archives this scan opened and tried
+    to parse (including the ones that turned out to be unusable), and
+    `unchanged_run_count` those whose stored digest proved them byte-identical
+    to their last collection.
+
+    `notes` therefore only ever describes the runs in `parsed_run_count`: a
+    citation an old archive could not resolve was noted on the scan that
+    collected it and is not repeated daily thereafter.
+    """
 
     scanned_run_count: int
+    parsed_run_count: int
+    unchanged_run_count: int
     collected_run_count: int
     verdict_count: int
     source_count: int
@@ -85,7 +111,7 @@ class CollectSummary:
 
 
 def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSummary:
-    """Scan `reports_root` and replace each archived run's verdict rows.
+    """Scan `reports_root` and replace each changed archived run's verdict rows.
 
     Same-day duplicates (P8-119: more than one collectable run directory
     sharing a `run_date`, the "input" side of what #118 now guards at the
@@ -93,6 +119,13 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
     is latest is collected, and the rest are noted as skipped rather than
     written. A run this scan does not adopt is never touched -- its
     previously collected rows, if any, are left exactly as they were.
+
+    Issue #209: a run whose two documents still hash to the digest stored at
+    its last collection is neither re-parsed nor re-written, so the cost of a
+    daily scan follows the number of *changed* archives rather than the length
+    of the history. Any edit to either document changes the digest and brings
+    the run straight back into the parse-and-replace path, which is what keeps
+    a corrected `analysis_result.json` from being skipped.
 
     Args:
         state_store: Write target for `verdicts` / `verdict_sources`.
@@ -107,14 +140,21 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
     notes: list[str] = []
     collected = verdict_count = source_count = coverage_count = 0
     run_directories = find_run_directories(reports_root)
-    for run_directory, loaded in _adopted_runs(state_store, run_directories, notes):
-        written = _write_run(state_store, run_directory, loaded, notes)
+    scan = _scan_candidates(state_store, run_directories, notes)
+    for candidate in _adopted_runs(state_store, scan.candidates, notes):
+        loaded = candidate.loaded
+        if loaded is None:
+            # Adopted, and already collected from exactly these bytes.
+            continue
+        written = _write_run(state_store, candidate, loaded, notes)
         collected += 1
         verdict_count += written[0]
         source_count += written[1]
         coverage_count += written[2]
     return CollectSummary(
         scanned_run_count=len(run_directories),
+        parsed_run_count=scan.parsed_run_count,
+        unchanged_run_count=scan.unchanged_run_count,
         collected_run_count=collected,
         verdict_count=verdict_count,
         source_count=source_count,
@@ -131,65 +171,140 @@ class _LoadedRun:
     result: AnalysisResult
 
 
-def _adopted_runs(
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """One collectable run directory, parsed only if this scan has to write it.
+
+    `loaded is None` means the run's documents hashed to the digest stored
+    when it was last collected: it is known collectable without being parsed
+    again, and its rows already are what a re-collection would produce.
+    """
+
+    run_directory: RunDirectory
+    document_digest: str | None
+    loaded: _LoadedRun | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ScanResult:
+    """The collectable candidates found, and how much work finding them cost."""
+
+    candidates: list[_Candidate]
+    parsed_run_count: int
+    unchanged_run_count: int
+
+
+def _scan_candidates(
     state_store: StateStore,
     run_directories: tuple[RunDirectory, ...],
     notes: list[str],
-) -> list[tuple[RunDirectory, _LoadedRun]]:
+) -> _ScanResult:
+    """Reduce every enumerated directory to the candidates worth deduplicating.
+
+    A run is skipped only against the digest of the exact documents its stored
+    rows were built from, so a correction -- to either document, of any age --
+    always falls through to the parsing path. A digest that cannot be computed
+    (a document missing, or unreadable) is never treated as a match; the run
+    takes the normal fail-soft route and is noted there.
+    """
+    stored_digests = state_store.get_verdict_collection_digests()
+    candidates: list[_Candidate] = []
+    parsed = unchanged = 0
+    for run_directory in run_directories:
+        digest = _document_digest(run_directory)
+        if digest is not None and stored_digests.get(run_directory.run_id) == digest:
+            candidates.append(_Candidate(run_directory, digest, loaded=None))
+            unchanged += 1
+            continue
+        parsed += 1
+        loaded = _load_collectable_run(run_directory, notes)
+        if loaded is not None:
+            candidates.append(_Candidate(run_directory, digest, loaded=loaded))
+    return _ScanResult(
+        candidates=candidates,
+        parsed_run_count=parsed,
+        unchanged_run_count=unchanged,
+    )
+
+
+def _document_digest(run_directory: RunDirectory) -> str | None:
+    """Fingerprint one archive's two documents, or `None` if it cannot be read.
+
+    Content, not `mtime`/size: the stored digest is the only evidence allowed
+    to justify skipping a run, and a restored or same-size correction must not
+    be able to look unchanged. Reading two JSON files is a small fraction of
+    parsing them under the strict schemas and re-writing their rows, which is
+    what the digest buys back.
+    """
+    digests: list[str] = []
+    for filename in (ANALYSIS_INPUT_FILENAME, ANALYSIS_RESULT_FILENAME):
+        path = run_directory.path / filename
+        try:
+            with path.open("rb") as handle:
+                digests.append(hashlib.file_digest(handle, "sha256").hexdigest())
+        except OSError:
+            return None
+    return hashlib.sha256("|".join(digests).encode("ascii")).hexdigest()
+
+
+def _adopted_runs(
+    state_store: StateStore,
+    candidates: list[_Candidate],
+    notes: list[str],
+) -> list[_Candidate]:
     """Return the one run directory to collect per `run_date` (P8-119).
 
     Collectability -- both documents exist, parse, and `result.run_id`
     matches the directory name -- is decided first and independently of
     deduplication, so a broken later rerun can never hide an earlier good
-    run (design Example 2). Only among directories that clear that bar does
+    run (design Example 2). A candidate skipped as unchanged (Issue #209)
+    carries that same proof: its bytes are identical to the ones a previous
+    scan parsed and collected. Only among directories that clear that bar does
     a `run_date` with more than one candidate get narrowed to the single
     latest `runs.started_at` (ties broken on the greater `run_id` string,
     for determinism). A `run_date` with exactly one collectable candidate is
     always adopted, matching prior behavior even when its `started_at`
     cannot be resolved.
     """
-    by_date: dict[date, list[tuple[RunDirectory, _LoadedRun]]] = {}
-    for run_directory in run_directories:
-        loaded = _load_collectable_run(run_directory, notes)
-        if loaded is not None:
-            by_date.setdefault(run_directory.run_date, []).append(
-                (run_directory, loaded)
-            )
+    by_date: dict[date, list[_Candidate]] = {}
+    for candidate in candidates:
+        by_date.setdefault(candidate.run_directory.run_date, []).append(candidate)
 
-    adopted: list[tuple[RunDirectory, _LoadedRun]] = []
-    for run_date, candidates in by_date.items():
-        if len(candidates) == 1:
+    adopted: list[_Candidate] = []
+    for run_date, same_date in by_date.items():
+        if len(same_date) == 1:
             # REQ-007: a single collectable candidate is always adopted,
             # unconditionally on `started_at` -- there is nothing to dedupe
             # against, so resolving it would only add a note no prior
             # behavior ever produced.
-            adopted.append(candidates[0])
+            adopted.append(same_date[0])
             continue
         started_at_by_run_id: dict[UUID, datetime | None] = {}
-        for run_directory, _loaded in candidates:
-            started_at = state_store.get_run_started_at(run_directory.run_id)
-            started_at_by_run_id[run_directory.run_id] = started_at
+        for candidate in same_date:
+            run_id = candidate.run_directory.run_id
+            started_at = state_store.get_run_started_at(run_id)
+            started_at_by_run_id[run_id] = started_at
             if started_at is None:
                 notes.append(
-                    f"{run_date.isoformat()}: run {run_directory.run_id} の "
+                    f"{run_date.isoformat()}: run {run_id} の "
                     "started_at を解決できないため同日重複の判定を適用しない"
                 )
         adopted_run_ids = adopt_one_run_per_date(
-            ((run_date, run_directory.run_id) for run_directory, _ in candidates),
+            ((run_date, candidate.run_directory.run_id) for candidate in same_date),
             started_at_by_run_id,
         )
         winner = next(
             candidate
-            for candidate in candidates
-            if candidate[0].run_id in adopted_run_ids
+            for candidate in same_date
+            if candidate.run_directory.run_id in adopted_run_ids
         )
         adopted.append(winner)
-        for run_directory, _loaded in candidates:
-            if run_directory is winner[0]:
+        for candidate in same_date:
+            if candidate is winner:
                 continue
             notes.append(
-                f"{run_date.isoformat()}: run {run_directory.run_id} は同日の"
-                f"重複のため収集をスキップ (採用: {winner[0].run_id})"
+                f"{run_date.isoformat()}: run {candidate.run_directory.run_id} は同日の"
+                f"重複のため収集をスキップ (採用: {winner.run_directory.run_id})"
             )
     return adopted
 
@@ -286,11 +401,17 @@ def _load_collectable_run(
 
 def _write_run(
     state_store: StateStore,
-    run_directory: RunDirectory,
+    candidate: _Candidate,
     loaded: _LoadedRun,
     notes: list[str],
 ) -> tuple[int, int, int]:
-    """Replace one adopted run's rows; return `(verdicts, sources, coverages)`."""
+    """Replace one adopted run's rows; return `(verdicts, sources, coverages)`.
+
+    The digest of the documents just parsed is written in the same transaction
+    (Issue #209), so the next scan may skip this run exactly as long as those
+    documents stay byte-identical.
+    """
+    run_directory = candidate.run_directory
     label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
     analysis_input, result = loaded.analysis_input, loaded.result
     source_types = _SourceTypeIndex(analysis_input)
@@ -345,7 +466,15 @@ def _write_run(
             )
         )
 
-    state_store.replace_run_verdicts(run_directory.run_id, verdicts, sources, coverages)
+    state_store.replace_collected_run(
+        CollectedRunRecords(
+            run_id=run_directory.run_id,
+            verdicts=verdicts,
+            sources=sources,
+            coverages=coverages,
+            document_digest=candidate.document_digest,
+        )
+    )
     return len(verdicts), len(sources), len(coverages)
 
 

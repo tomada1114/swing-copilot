@@ -34,7 +34,7 @@ from swing_copilot.config import Settings, load_secrets, load_settings
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.retro.collect import collect_verdicts
-from swing_copilot.retro.evaluate import evaluate_verdicts
+from swing_copilot.retro.evaluate import EvaluationRequest, evaluate_verdicts
 from swing_copilot.retro.export import (
     DEFAULT_LEDGER_PATH,
     RetroExportDependencies,
@@ -117,6 +117,8 @@ def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -
     summary = collect_verdicts(state_store, reports_dir)
     console.print(
         f"走査 {summary.scanned_run_count} run / "
+        f"解析 {summary.parsed_run_count} run / "
+        f"無変更 {summary.unchanged_run_count} run / "
         f"取り込み {summary.collected_run_count} run / "
         f"verdict {summary.verdict_count} 件 / "
         f"source {summary.source_count} 件 / "
@@ -146,12 +148,17 @@ def _run_evaluate(
 ) -> None:
     settings = _load_settings(args.settings)
     market_store = _market_store(state_store, args.db)
+    # `only_pending` stays off here: the manual batch is where a price
+    # correction is meant to reach `verdict_outcomes`, so it re-classifies
+    # every matured slice in the window (Issue #209).
     summary = evaluate_verdicts(
         market_store,
         state_store,
-        args.as_of,
-        settings.postmortem,
-        settings.backtest.benchmark,
+        EvaluationRequest(
+            as_of=args.as_of,
+            thresholds=settings.postmortem,
+            benchmark_symbol=settings.backtest.benchmark,
+        ),
     )
     console.print(
         f"評価 {summary.evaluated_slice_count} slice / "

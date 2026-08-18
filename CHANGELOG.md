@@ -34,6 +34,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 蓄積された日次分析結果を閲覧する読み取り専用ローカルダッシュボード
+  `copilot-dashboard` を追加した。FastAPI + Jinja2 のサーバレンダリングで、
+  run 概観（`/runs/{run_id}`）・銘柄詳細（`/runs/{run_id}/symbols/{symbol}`）・
+  推移（`/history`）の 3 画面と run 切替を持つ。既定で `127.0.0.1:8787` にのみ
+  バインドする。**完全な読み取り専用である**: DuckDB へは `swing_copilot.research`
+  経由でのみ触り（クエリごとに開いて閉じる）、接続も DataFrame もキャッシュせず、
+  `ensure_views()` はこのプロセスから呼ばない——DuckDB のファイルロックは読み書き
+  プロセスと他のすべての間で排他であり、接続を保持したブラウザタブは無人日次 run を
+  丸一日落としうるためである。ビュー不在は `ResearchError` をエラーページへ変換し、
+  別シェルで一度実行するよう案内する。表示面では、列ごとに意味の異なる NULL
+  （未成熟／verdict未取込／計測導入前／未記録／追跡未開始／該当なし／snapshotなし／
+  タグ導入前）を区別したトークンで描き、ゼロや `UNKNOWN` と読めるようにしない。
+  とくに `verdicts` は次の run の retro collect で取り込まれるため最新 run に
+  verdict 行が無いのは正常であり、`skip` や空欄ではなく「verdict未取込」と出す。
+  台帳と成績は #190 の skip シャドウ追跡があるため必ず `recommendation` で層別する。
+  チャートはサーバ側生成のインライン SVG で、JS ライブラリ・CDN・外部フォントを
+  読み込まず完全オフラインで動作する。依存に `fastapi` / `jinja2` / `uvicorn` を
+  追加した（`[tool.uv] exclude-newer` は据え置き）
+
 - 非有限 OHLCV の store 側防御層を追加した（Issue #227）。`MarketStore.write_bars()`
   は `open` / `high` / `low` / `close` / `volume` に NaN・±inf（および数値化できない値）
   を含む DataFrame を `NonFiniteBarsError` で拒否する。**該当行だけ落とす fail-soft

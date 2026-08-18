@@ -196,7 +196,7 @@ def _reason_rows(frame: pd.DataFrame) -> tuple[ReasonRow, ...]:
     """Verdict reasons in the order the analysis wrote them."""
     return tuple(
         ReasonRow(
-            index=common.as_int(record.get("reason_index")) or 0,
+            index=fmt.as_int(record.get("reason_index")) or 0,
             text=str(record.get("text", "")),
             basis=fmt.text(record.get("basis"), key="pre_tagging"),
             source_id_count=fmt.integer(record.get("source_id_count"), key="none"),
@@ -216,11 +216,11 @@ def _tracking(frame: pd.DataFrame, symbol: str) -> TrackingPanel | None:
         recommendation=common.verdict_badge(recommendation),
         status=Badge(text=status, tone=_POSITION_TONES.get(status, "quiet")),
         stats=(
-            Stat("建玉日", fmt.text(record.get("entry_date"), key="untracked")),
+            Stat("建玉日", fmt.day(record.get("entry_date"), key="untracked")),
             Stat("建値", fmt.number(record.get("entry_price"), key="untracked")),
             Stat("ストップ", fmt.number(record.get("stop_price"), key="untracked")),
             Stat("経過営業日", fmt.integer(record.get("days_held"), key="untracked")),
-            Stat("手仕舞日", fmt.text(record.get("exit_date"), key="none")),
+            Stat("手仕舞日", fmt.day(record.get("exit_date"), key="none")),
             Stat(
                 "実現リターン",
                 fmt.number(

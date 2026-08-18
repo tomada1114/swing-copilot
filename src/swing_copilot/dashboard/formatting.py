@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -129,6 +130,43 @@ def text(value: object, *, key: str = "none") -> Cell:
         return missing(key)
     rendered = str(value).strip()
     return missing(key) if not rendered else Cell(text=rendered)
+
+
+def as_date(value: object) -> date | None:
+    """A DuckDB DATE/TIMESTAMP column as a plain `date`, or `None`."""
+    if is_missing(value):
+        return None
+    if isinstance(value, datetime):  # pandas Timestamp is a datetime
+        return value.date()
+    return value if isinstance(value, date) else None
+
+
+def as_float(value: object) -> float | None:
+    """A numeric column as a `float`, or `None` when absent or non-numeric."""
+    if is_missing(value):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return None
+
+
+def as_int(value: object) -> int | None:
+    """A numeric column as an `int`, or `None` when absent or non-numeric."""
+    numeric = as_float(value)
+    return None if numeric is None else int(numeric)
+
+
+def day(value: object, *, key: str = "none") -> Cell:
+    """Render a date column as `YYYY-MM-DD`, or the named absence token.
+
+    DuckDB DATE columns arrive as pandas `Timestamp`s, whose `str()` appends
+    a midnight time (`2026-07-29 00:00:00`). That time is not data — the
+    column has no time component at all — so rendering it would invent
+    precision the ledger does not have.
+    """
+    resolved = as_date(value)
+    return missing(key) if resolved is None else Cell(text=resolved.isoformat())
 
 
 def number(

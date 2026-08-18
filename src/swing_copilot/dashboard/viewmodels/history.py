@@ -78,8 +78,8 @@ def _classification_panels(
     buckets: dict[tuple[str, int], dict[date, Counter[str]]] = {}
     for record in records:
         classification = common.optional_text(record.get("classification"))
-        horizon = common.as_int(record.get("horizon_days"))
-        run_date = common.as_date(record.get("run_date"))
+        horizon = fmt.as_int(record.get("horizon_days"))
+        run_date = fmt.as_date(record.get("run_date"))
         recommendation = common.optional_text(record.get("recommendation"))
         if (
             classification is None
@@ -125,12 +125,12 @@ def _regime_points(frame: pd.DataFrame) -> tuple[RegimePoint, ...]:
     points = [
         RegimePoint(
             run_date=run_date,
-            vix_close=common.as_float(record.get("vix_close")),
+            vix_close=fmt.as_float(record.get("vix_close")),
             dd_level=common.optional_text(record.get("dd_level")),
             gate_verdict=common.optional_text(record.get("gate_verdict")),
         )
         for record in common.to_records(frame)
-        if (run_date := common.as_date(record.get("run_date"))) is not None
+        if (run_date := fmt.as_date(record.get("run_date"))) is not None
     ]
     points.sort(key=lambda point: point.run_date)
     return tuple(points)
@@ -152,18 +152,18 @@ def _ledger_rows(
 def _ledger_row(record: Mapping[str, object]) -> LedgerRow:
     status = common.optional_text(record.get("status")) or "unknown"
     return LedgerRow(
-        run_date=fmt.text(record.get("run_date"), key="none"),
+        run_date=fmt.day(record.get("run_date"), key="none"),
         symbol=str(record.get("symbol", "")),
         run_id=str(record.get("run_id", "")),
         recommendation=common.verdict_badge(
             common.optional_text(record.get("recommendation"))
         ),
-        entry_date=fmt.text(record.get("entry_date"), key="untracked"),
+        entry_date=fmt.day(record.get("entry_date"), key="untracked"),
         entry_price=fmt.number(record.get("entry_price"), key="untracked"),
         stop_price=fmt.number(record.get("stop_price"), key="untracked"),
         days_held=fmt.integer(record.get("days_held"), key="untracked"),
         status=Badge(text=status, tone=_POSITION_TONES.get(status, "quiet")),
-        exit_date=fmt.text(record.get("exit_date"), key="none"),
+        exit_date=fmt.day(record.get("exit_date"), key="none"),
         exit_reason=fmt.text(record.get("exit_reason"), key="none"),
         realized_return=fmt.number(
             record.get("realized_return_pct"), suffix="%", key="none", signed=True
@@ -178,7 +178,7 @@ def _closed_summaries(
     returns: dict[str, list[float]] = {name: [] for name in RECOMMENDATIONS}
     for record in records:
         recommendation = common.optional_text(record.get("recommendation"))
-        realized = common.as_float(record.get("realized_return_pct"))
+        realized = fmt.as_float(record.get("realized_return_pct"))
         is_closed = common.optional_text(record.get("status")) == _CLOSED
         if not is_closed or recommendation not in returns or realized is None:
             continue

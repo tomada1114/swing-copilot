@@ -190,8 +190,8 @@ def _regime_panel(frame: pd.DataFrame, run_id: str) -> RegimePanel | None:
 
 def _dd_pair(dd15: object, dd5: object) -> fmt.Cell:
     """Render the 15/5-session drawdown counts as one `15 / 5` cell."""
-    long_window = common.as_float(dd15)
-    short_window = common.as_float(dd5)
+    long_window = fmt.as_float(dd15)
+    short_window = fmt.as_float(dd5)
     if long_window is None or short_window is None:
         return fmt.missing("no_snapshot")
     return fmt.Cell(text=f"{long_window:.0f} / {short_window:.0f}")
@@ -199,8 +199,8 @@ def _dd_pair(dd15: object, dd5: object) -> fmt.Cell:
 
 def _ema_gap(close: object, ema: object) -> fmt.Cell:
     """Render the SPY close-versus-EMA gap in percent."""
-    price = common.as_float(close)
-    trend = common.as_float(ema)
+    price = fmt.as_float(close)
+    trend = fmt.as_float(ema)
     if price is None or not trend:
         return fmt.missing("no_snapshot")
     return fmt.number((price / trend - 1.0) * 100.0, suffix="%", signed=True)

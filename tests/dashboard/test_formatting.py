@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, date, datetime
 
 import pandas as pd
 import pytest
@@ -69,6 +70,50 @@ class TestNumber:
 
     def test_infinity_is_treated_as_unrenderable(self) -> None:
         assert fmt.number(math.inf, key="absent").absence == "absent"
+
+
+class TestScalarCoercion:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("not a number", id="text"),
+            pytest.param(object(), id="object"),
+        ],
+    )
+    def test_a_non_numeric_column_reads_as_absent(self, value: object) -> None:
+        # `record.get()` is typed `object`: a schema change that turned a
+        # numeric column into text must not crash a page.
+        assert fmt.as_float(value) is None
+        assert fmt.as_int(value) is None
+
+    def test_a_numeric_string_is_still_read(self) -> None:
+        assert fmt.as_float("2.5") == 2.5
+        assert fmt.as_int("2.5") == 2
+
+    def test_an_absent_value_yields_none(self) -> None:
+        assert fmt.as_float(pd.NA) is None
+        assert fmt.as_int(None) is None
+
+
+class TestDay:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(date(2026, 7, 29), id="date"),
+            pytest.param(datetime(2026, 7, 29, 0, 0, tzinfo=UTC), id="datetime"),
+            pytest.param(pd.Timestamp("2026-07-29"), id="pandas-timestamp"),
+        ],
+    )
+    def test_a_date_column_never_renders_a_time(self, value: object) -> None:
+        # DuckDB DATE columns arrive as pandas Timestamps; `str()` would
+        # append a midnight time that carries no information.
+        assert fmt.day(value).text == "2026-07-29"
+
+    def test_an_absent_date_uses_the_named_token(self) -> None:
+        assert fmt.day(pd.NaT, key="untracked").absence == "untracked"
+
+    def test_a_non_date_value_reads_as_absent(self) -> None:
+        assert fmt.day("not a date").absence == "none"
 
 
 class TestText:

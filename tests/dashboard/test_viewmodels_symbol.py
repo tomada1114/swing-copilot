@@ -181,6 +181,8 @@ class TestTracking:
         assert (panel.status.text, panel.status.tone) == ("open", "info")
         assert panel.recommendation.text == "proceed"
         labels = {item.label: item.value for item in panel.stats}
+        assert labels["建玉日"].text == "2027-03-01"
+        assert labels["手仕舞日"].absence == "none"
         assert labels["建値"].text == "101.25"
         assert labels["ストップ"].text == "95.00"
         assert labels["実現リターン"].absence == "none"
@@ -200,6 +202,7 @@ class TestTracking:
         assert panel is not None
         assert panel.exit_reason.text == "stop"
         labels = {item.label: item.value for item in panel.stats}
+        assert labels["手仕舞日"].text == "2027-03-10"
         assert labels["実現リターン"].text == "-6.25%"
         assert labels["実現リターン"].tone == "neg"
 

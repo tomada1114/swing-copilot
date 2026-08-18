@@ -9,7 +9,6 @@ that says *why* it is absent. Nothing downstream re-derives either.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
 from typing import TYPE_CHECKING, cast
 
 from swing_copilot.dashboard import formatting as fmt
@@ -59,31 +58,6 @@ class ScorecardEntry:
         return self.values.get(column)
 
 
-def as_date(value: object) -> date | None:
-    """A DuckDB date/timestamp column as a plain `date`, or `None`."""
-    if fmt.is_missing(value):
-        return None
-    if isinstance(value, datetime):  # pandas Timestamp is a datetime
-        return value.date()
-    return value if isinstance(value, date) else None
-
-
-def as_float(value: object) -> float | None:
-    """A numeric column as a `float`, or `None` when absent or non-numeric."""
-    if fmt.is_missing(value):
-        return None
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except TypeError, ValueError:
-        return None
-
-
-def as_int(value: object) -> int | None:
-    """A numeric column as an `int`, or `None` when absent or non-numeric."""
-    numeric = as_float(value)
-    return None if numeric is None else int(numeric)
-
-
 def to_records(frame: pd.DataFrame) -> tuple[Mapping[str, object], ...]:
     """Convert a DataFrame to plain per-row mappings.
 
@@ -104,7 +78,7 @@ def run_refs(frame: pd.DataFrame) -> tuple[RunRef, ...]:
 def _run_ref(record: Mapping[str, object]) -> RunRef:
     return RunRef(
         run_id=str(record.get("run_id", "")),
-        run_date=as_date(record.get("run_date")),
+        run_date=fmt.as_date(record.get("run_date")),
         mode=_text(record.get("mode")),
         status=_text(record.get("status")),
         status_tone=fmt.tone_of(fmt.RUN_STATUS_TONES, _text(record.get("status"))),
@@ -211,7 +185,7 @@ def aggregate_scorecard(frame: pd.DataFrame) -> dict[tuple[str, str], ScorecardE
                 symbol=key[0], strategy_key=key[1], values=record, outcomes=()
             )
             outcomes[key] = []
-        horizon = as_int(record.get("horizon_days"))
+        horizon = fmt.as_int(record.get("horizon_days"))
         classification = optional_text(record.get("classification"))
         if horizon is not None and classification is not None:
             outcomes[key].append(

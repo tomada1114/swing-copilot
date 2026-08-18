@@ -155,6 +155,8 @@ class TestLedger:
         rows = build(dashboard_db).open_positions
 
         assert [row.symbol for row in rows] == ["ZZZ", "AAA"]
+        assert rows[0].entry_date.text == "2027-03-01", "a date column carries no time"
+        assert rows[0].run_date.text == "2027-03-01"
         assert rows[0].entry_price.text == "101.25"
         assert rows[1].recommendation.text == "skip"
 

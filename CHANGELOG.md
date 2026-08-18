@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--limit` を渡さない**本番経路**でだけ、保有銘柄が価格取得の対象集合へ
+  合流していなかった問題を修正した（Issue #212）。`_select_symbols()` の
+  `limit is None` 分岐だけが `held_symbols` を union しておらず、しかも
+  この戻り値は日次経路で価格を取得する唯一の入口である。結果として
+  S&P 500 スナップショットから外れた保有銘柄はその日の bar を 1 本も
+  取得されず、トレーリングストップ・max-hold の手仕舞い判定とレポートの
+  ポジション文脈が古い価格の上で走っていた——指数からの除外直後こそ
+  手仕舞い判定を最も必要とする局面である。`--limit` 経路は元から union
+  していたので、これに揃えた。追加されるのは**取得対象集合**だけで、
+  `_run_step_screening()` は従来どおり `ScreeningInput.universe` を
+  `deps.universe` との積集合に絞るため、スナップショット外の保有銘柄が
+  新規エントリー候補として再浮上することはない。戻り値は両分岐とも
+  辞書順に揃えた（ユニバースは元々 `ORDER BY symbol` で読むため本番の
+  並びは実質不変）
 - `analysis_input.json` の `<prior_verdicts>` が直近 2 営業日分を含んで
   いなかった問題を修正した（Issue #207）。`verdicts` 表へ書く唯一の経路で
   ある `retro_collect` ステップが、その表を読むステップ 6 の**後**に走って

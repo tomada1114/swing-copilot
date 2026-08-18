@@ -50,7 +50,7 @@ from swing_copilot.pipeline.daily import (
     _warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
-from swing_copilot.storage.tracking_records import OPEN
+from swing_copilot.storage.tracking_records import OPEN, PROCEED
 
 logger = logging.getLogger(__name__)
 _HISTORICAL_POSITION_NOTICE = (
@@ -96,6 +96,14 @@ def _held_symbols(
     never fires at all, and Finnhub company-news cannot be fetched
     retroactively, so every missed day is permanent data loss.
 
+    Only the `proceed` side of the ledger counts as held (Issue #190). The
+    ledger also shadow-tracks `skip` verdicts now, but nothing is notionally
+    held there -- those positions exist purely so the retrospective can state
+    what the rejected candidates would have done. Treating them as held would
+    quietly redirect the held-first text budget onto every symbol the
+    qualitative layer turned down, which is the opposite of what 3.14's
+    priority is for.
+
     A historical replay (`--as-of`) deliberately skips the ledger and keeps the
     held set to the (empty) real positions: the ledger records the *current*
     position state with no point-in-time history, so reading it would leak
@@ -116,7 +124,7 @@ def _held_symbols(
     if is_historical:
         return symbols
     try:
-        tracked = deps.state_store.get_verdict_positions(OPEN)
+        tracked = deps.state_store.get_verdict_positions(OPEN, (PROCEED,))
     except Exception:
         logger.exception(
             "verdict tracking ledger unreadable: continuing without virtual positions"

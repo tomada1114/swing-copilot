@@ -92,9 +92,17 @@ uv run copilot-track update
 uv run copilot-track list --status open
 ```
 
-列は symbol / ⚠ / run_id / entry_date / entry / stop / last close / 含み損益 /
+列は symbol / 区分 / ⚠ / run_id / entry_date / entry / stop / last close / 含み損益 /
 保有・上限 / 残（営業日）/ exit_date / 理由 / 確定損益。open 行が entry_date 降順で先、
 closed 行が exit_date 降順で後に並ぶ。
+
+`list` / `show` の既定は `--recommendation proceed` である。Issue #190 以降、
+台帳は `skip` も**同一の出口ルール**でシャドウ追跡しているが、それは
+「proceed だけ買った場合 vs 候補を全部買った場合」を比べるための計測用母集団で
+あって、提案された建玉ではない。**日々のレビューでは既定のまま proceed だけを
+見ること**。skip 側の建玉を手仕舞い候補として提示したり、`close` / `note` の
+対象にしたりしてはならない。skip 側を見る必要があるのは成績を比べるときだけで、
+そのための入口は次の `stats` である。
 
 `⚠` 列が `no_trade` の行は、銘柄単体の判定は proceed だが run 全体は当日
 エントリー非推奨（no_trade）だった中の proceed である。判定の質を測る材料としては
@@ -111,6 +119,25 @@ closed 行が exit_date 降順で後に並ぶ。
 該当が無ければ「★該当なし」と明示する。全 open 行を機械的に列挙するのではなく、
 **上位数件に絞って**ユーザーへ提示する。手仕舞い済みの確認が要る場合のみ
 `--status closed` / `--status all` を追加で叩く。
+
+### 成績を比べる（任意）
+
+ユーザーが「verdict は当たっているのか」「skip した銘柄はどうなったか」と
+聞いたときだけ:
+
+```bash
+uv run copilot-track stats
+```
+
+`proceed` / `skip` / `all` の 3 層で勝率・PF・期待値・平均 R・保有日数中央値・
+手仕舞い理由内訳が出る。損益はすべて % 単位（シャドウ建玉に株数は無いので
+$100 notional へ正規化されている）。読むときの約束:
+
+- **点推定を config 変更の根拠にしない。** 台帳の集計に信頼区間は付いていない。
+  改善提案は `swing-retro` の証拠ゲート（`retro_input.json` の `ci_low`/`ci_high`）を
+  通す。ここで見えた差は「調べる価値がありそう」までである
+- proceed と skip の差を読むときは両群の `手仕舞い` 件数を必ず併記する。
+  片側が数件しかない差は差ではない
 
 ## Step 3: 気になる銘柄を突き合わせる
 

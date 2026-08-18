@@ -1,7 +1,7 @@
 """Replay every tracked verdict forward one trading day at a time.
 
-A `proceed` verdict is treated as a purchase at that run's closing price, and
-from then on the position is carried with **the backtest's own exit rules**:
+A verdict is treated as a purchase at that run's closing price, and from then
+on the position is carried with **the backtest's own exit rules**:
 `backtest/exits.py`'s `next_trailing_stop` and `evaluate_exit`, imported rather
 than reimplemented, so the ledger the human reads every morning cannot drift
 away from what the simulator would have done.
@@ -11,6 +11,12 @@ session classification of whether the verdict was right) and deliberately not
 `paper/positions` (what a human actually decided to hold, the FR-11/CON-04
 gate). It answers a third question: if this verdict had been followed
 mechanically, where would the position stand today, and what would close it.
+
+Both verdict sides are replayed (Issue #190). A `skip` position is a shadow:
+nobody was ever told to buy it, and it exists only so the ledger can state
+what the rejected candidates would have done under exactly the rules the
+accepted ones were carried under. Identical rules are the whole point --
+a counterfactual measured any other way is not one.
 
 Everything here takes an explicit `as_of` and reads only stored bars: no
 clock, no network. Bars are whatever `copilot-daily`'s price step already
@@ -31,9 +37,8 @@ from typing import TYPE_CHECKING, Any
 
 from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
 from swing_copilot.backtest.exits import (
-    ATR_PERIOD,
-    atr14_as_of,
-    atr14_by_date,
+    atr_as_of,
+    atr_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
@@ -128,8 +133,8 @@ def update_tracking(
     Args:
         state_store: Verdict source and tracking-ledger target.
         market_store: Stored bars; nothing is fetched.
-        backtest_config: `exit_atr_multiple` and `max_hold_days`, the same
-            values the simulator uses.
+        backtest_config: `exit_atr_multiple`, `exit_atr_period` and
+            `max_hold_days`, the same values the simulator uses.
         as_of: Inclusive point-in-time cutoff. No bar dated later is read, and
             no verdict from a later run is opened.
 
@@ -139,11 +144,19 @@ def update_tracking(
     notes: list[str] = []
     for run_id, symbol in state_store.delete_orphaned_verdict_positions():
         notes.append(
-            f"{symbol} ({run_id}): proceed verdict が取り消されたため"
-            "追跡ポジションを削除した"
+            f"{symbol} ({run_id}): verdict 行が消えたため追跡ポジションを削除した"
+        )
+    for (
+        run_id,
+        symbol,
+        recommendation,
+    ) in state_store.sync_verdict_position_recommendations():
+        notes.append(
+            f"{symbol} ({run_id}): verdict が {recommendation} に訂正されたため"
+            "追跡ポジションの区分を追随させた"
         )
 
-    candidates = state_store.get_untracked_proceed_verdicts(as_of)
+    candidates = state_store.get_untracked_verdicts(as_of)
     open_positions = state_store.get_verdict_positions(OPEN)
     if not candidates and not open_positions:
         return TrackingUpdateResult(0, 0, 0, tuple(notes))
@@ -331,11 +344,11 @@ def _seed_position(
 
     stop_price = candidate.stop_price
     if stop_price is None:
-        atr = atr14_as_of(bars, candidate.symbol, candidate.as_of)
+        atr = atr_as_of(bars, candidate.symbol, candidate.as_of, config.exit_atr_period)
         if atr is None:
             notes.append(
                 f"{candidate.symbol} {candidate.as_of.isoformat()}: "
-                f"ATR({ATR_PERIOD})を算出できずストップ未設定で追跡する"
+                f"ATR({config.exit_atr_period})を算出できずストップ未設定で追跡する"
                 "（最大保有日数のみで手仕舞い判定）"
             )
         else:
@@ -345,6 +358,7 @@ def _seed_position(
         run_id=candidate.run_id,
         symbol=candidate.symbol,
         strategy_key=candidate.strategy_key,
+        recommendation=candidate.recommendation,
         no_trade=candidate.no_trade,
         entry_date=candidate.as_of,
         entry_price=entry_price,
@@ -387,7 +401,11 @@ def _advance(
     sessions = _sessions(work.bars, position.symbol, resume_after, as_of)
     # One smoothing pass for the whole replay, and none at all on the common
     # rerun where `last_marked_date` already sits on `as_of`.
-    atr_by_date = atr14_by_date(work.bars, position.symbol, as_of) if sessions else {}
+    atr_per_session = (
+        atr_by_date(work.bars, position.symbol, as_of, config.exit_atr_period)
+        if sessions
+        else {}
+    )
 
     for record in sessions:
         session_date: date = record["date"]
@@ -425,7 +443,7 @@ def _advance(
             break
 
         stop_price = position.stop_price
-        atr = atr_by_date.get(session_date)
+        atr = atr_per_session.get(session_date)
         if atr is not None:
             stop_price = next_trailing_stop(
                 current_stop=stop_price,

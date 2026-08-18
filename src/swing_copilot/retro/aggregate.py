@@ -26,6 +26,8 @@ no existing home is the proceed severe-miss watch level below.
 
 from __future__ import annotations
 
+import math
+import statistics
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,6 +36,14 @@ from typing import TYPE_CHECKING
 from swing_copilot.analysis.news_supply import (
     DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS,
 )
+from swing_copilot.backtest.metrics import (
+    compute_avg_r_multiple,
+    compute_expectancy_per_trade,
+    compute_profit_factor,
+    compute_win_rate,
+    exit_reason_breakdown,
+    holding_days_stats,
+)
 from swing_copilot.retro.evaluate import (
     HIT,
     HORIZON_DAYS,
@@ -41,11 +51,22 @@ from swing_copilot.retro.evaluate import (
     NEUTRAL,
     PROCEED,
 )
+from swing_copilot.storage.tracking_records import (
+    OPEN,
+    TRACKED_RECOMMENDATIONS,
+    TRACKING_EXIT_REASONS,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+    from datetime import date
+    from uuid import UUID
 
     from swing_copilot.config import PostmortemConfig
+    from swing_copilot.storage.tracking_records import (
+        VerdictPosition,
+        VerdictPositionMark,
+    )
     from swing_copilot.storage.verdict_records import (
         VerdictCitationRow,
         VerdictDecisionRow,
@@ -74,7 +95,20 @@ UNRECORDED_NEWS_SUPPLY_LEVEL = "unrecorded"
 #: that is untagged is what says whether the tagged rows mean anything.
 UNTAGGED_VERDICT_BASIS = "untagged"
 
+#: Two-sided 95% normal quantile, the confidence level every interval in this
+#: module reports (Issue #190). Hard-coded rather than configurable on
+#: purpose: an interval whose level can be tuned per run is an interval that
+#: can be widened until a proposal passes its gate.
+CONFIDENCE_LEVEL = 0.95
+_Z_TWO_SIDED_95 = 1.959963984540054
+
+#: Below two observations a sample variance is undefined, so the spread is
+#: reported as unknown rather than as zero.
+_MIN_SAMPLES_FOR_SPREAD = 2
+
 _SEPARATION = "separation"
+_SEPARATION_PAIRED = "separation_paired"
+_SEPARATION_PAIRED_EXCESS = "separation_paired_excess"
 _PROCEED_SEVERE_MISS_RATE = "proceed_severe_miss_rate"
 _SKIP_HIT_RATE = "skip_hit_rate"
 _VERDICT_MIX = "verdict_mix"
@@ -99,6 +133,16 @@ class MetricSummary:
 
     `horizon_days is None` marks the weight-composed headline; `sample_size`
     is the raw row count behind it, which is what the preliminary flag reads.
+
+    Issue #190 added the dispersion fields. A point estimate with no spread
+    around it is exactly what let `n >= 20` alone promote noise into a config
+    change, so `stderr` / `ci_low` / `ci_high` travel with every value that
+    has a defined one. They are `None` on the weight-composed headline
+    deliberately: two horizons measured over the same runs are not
+    independent samples, so any interval computed across them would be
+    narrower than the truth and would read as more certain than the data is.
+    `excluded_day_count` is set only by the paired metrics, where it counts
+    the run days dropped for having just one verdict side.
     """
 
     metric_id: str
@@ -106,11 +150,23 @@ class MetricSummary:
     value: float | None
     sample_size: int
     is_preliminary: bool
+    stderr: float | None = None
+    ci_low: float | None = None
+    ci_high: float | None = None
+    excluded_day_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RateMetricSummary:
-    """A rate metric plus the same-period baseline it is judged against."""
+    """A rate metric plus the same-period baseline it is judged against.
+
+    `ci_low` / `ci_high` are a Wilson score interval (Issue #190), which
+    stays inside `[0, 1]` and stays sane at the small counts and extreme
+    rates this window routinely produces -- both places where the textbook
+    normal interval on a proportion misbehaves. `None` on the weight-composed
+    headline, for the same non-independence reason as `MetricSummary`, and
+    because its "counts" are weighted rather than observed.
+    """
 
     metric_id: str
     horizon_days: int | None
@@ -119,6 +175,8 @@ class RateMetricSummary:
     is_flagged: bool
     sample_size: int
     is_preliminary: bool
+    ci_low: float | None = None
+    ci_high: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +253,80 @@ class AlignmentCell:
     mean_forward_return_pct: float
     hit_count: int
     severe_miss_count: int
+
+
+#: Notional every shadow position is normalized to before its P&L is measured
+#: (Issue #190). The tracking ledger never decided a share count -- nobody
+#: sized a position that was never put on offer -- so `pnl` in dollars would
+#: mean "one share of a $400 stock beats ten of a $20 one". Sizing every
+#: position to $100 instead makes `pnl` numerically identical to the realized
+#: return in percent, which is what profit factor and expectancy then report.
+_SHADOW_NOTIONAL_USD = 100.0
+
+_TRACKED_PERFORMANCE = "tracked_performance"
+
+#: The stratum that pools both verdict sides. Not a recommendation value, so
+#: it cannot collide with one.
+ALL_RECOMMENDATIONS = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowTrade:
+    """One closed shadow position in `backtest.metrics.ClosedTrade` shape.
+
+    Sized to `_SHADOW_NOTIONAL_USD`, so `pnl` *is* the realized return in
+    percentage points; `days_held` is the ledger's own session count, not a
+    calendar difference.
+    """
+
+    entry_date: date
+    entry_price: float
+    exit_date: date
+    exit_price: float
+    shares: float
+    initial_stop_price: float | None
+    exit_reason: str
+    days_held: int
+
+    @property
+    def pnl(self) -> float:
+        """Realized return in percentage points (see `_SHADOW_NOTIONAL_USD`)."""
+        return (self.exit_price - self.entry_price) * self.shares
+
+
+@dataclass(frozen=True, slots=True)
+class ExitReasonCount:
+    """How many of a stratum's closed shadow positions ended a given way."""
+
+    reason: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedPerformance:
+    """One verdict side's realized record in the shadow-tracking ledger.
+
+    The measurement Issue #190 exists to supply: `proceed` and `skip` carried
+    under identical exit rules, so the difference between the two rows is the
+    qualitative layer's contribution rather than an artifact of two different
+    measurements. Every rate here comes from `backtest/metrics.py`, the same
+    functions the simulator and the paper journal use.
+
+    All monetary figures are percentage points, never dollars (see
+    `_SHADOW_NOTIONAL_USD`). `None` means "not computable from this set",
+    never zero: an empty stratum and a genuinely flat one read oppositely.
+    """
+
+    metric_id: str
+    recommendation: str
+    closed_count: int
+    open_count: int
+    win_rate: float | None
+    profit_factor: float | None
+    expectancy_pct: float | None
+    avg_r_multiple: float | None
+    avg_holding_days: float | None
+    exit_reason_counts: tuple[ExitReasonCount, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,13 +411,218 @@ def _separation_for(
         if proceed and skip
         else None
     )
+    stderr = _welch_stderr(proceed, skip) if value is not None else None
     return MetricSummary(
         metric_id=_metric_id(_SEPARATION, horizon_days),
         horizon_days=horizon_days,
         value=value,
         sample_size=len(rows),
         is_preliminary=len(rows) < thresholds.preliminary_sample_threshold,
+        stderr=stderr,
+        ci_low=_ci_bound(value, stderr, sign=-1),
+        ci_high=_ci_bound(value, stderr, sign=1),
     )
+
+
+def compute_separation_paired(
+    outcomes: Sequence[VerdictOutcomeRecord], thresholds: PostmortemConfig
+) -> tuple[MetricSummary, ...]:
+    """Return separation as the mean of *per-run-day* proceed-minus-skip gaps.
+
+    The pooled `compute_separation` averages every `proceed` in the window
+    against every `skip` in it, which silently compares symbols judged on
+    different days under different market conditions: a window whose
+    `proceed`s cluster on strong days scores well for reasons the verdict
+    layer had nothing to do with. Differencing inside each run day removes
+    that day's common move before anything is averaged, so the market's own
+    swings cancel instead of accumulating (Issue #190).
+
+    Days carrying only one verdict side state no difference at all and are
+    excluded rather than treated as zero; `excluded_day_count` reports how
+    many, because a metric computed from three of twenty days is a different
+    claim from one computed from twenty.
+
+    Args:
+        outcomes: Classified rows for the window, both horizons mixed.
+        thresholds: Horizon weights and the preliminary-sample floor.
+
+    Returns:
+        One summary per horizon plus the weight-composed headline. Each
+        horizon's `sample_size` counts the rows that actually contributed.
+    """
+    return _paired_separation(outcomes, thresholds, _SEPARATION_PAIRED, _raw_return)
+
+
+def compute_separation_paired_excess(
+    outcomes: Sequence[VerdictOutcomeRecord], thresholds: PostmortemConfig
+) -> tuple[MetricSummary, ...]:
+    """Return the paired separation measured on *excess* (benchmark-relative) returns.
+
+    The same day-by-day pairing as `compute_separation_paired`, over
+    `forward_return_pct - benchmark_return_pct`. Published as its own metric
+    rather than replacing the raw one: pairing already removes the common
+    daily move, so agreement between the two versions is evidence that the
+    effect is not a beta artifact, and disagreement is itself the finding.
+
+    Rows whose `benchmark_return_pct` was never measured (classified before
+    the column existed, or evaluated without benchmark bars) contribute
+    nothing rather than being treated as zero excess.
+
+    Args:
+        outcomes: Classified rows for the window, both horizons mixed.
+        thresholds: Horizon weights and the preliminary-sample floor.
+
+    Returns:
+        One summary per horizon plus the weight-composed headline. An archive
+        with no benchmark column yields `value=None` throughout, which reads
+        as "not measurable here" rather than as "no excess".
+    """
+    return _paired_separation(
+        outcomes, thresholds, _SEPARATION_PAIRED_EXCESS, _excess_return
+    )
+
+
+def _raw_return(row: VerdictOutcomeRecord) -> float | None:
+    return row.forward_return_pct
+
+
+def _excess_return(row: VerdictOutcomeRecord) -> float | None:
+    if row.benchmark_return_pct is None:
+        return None
+    return row.forward_return_pct - row.benchmark_return_pct
+
+
+def _paired_separation(
+    outcomes: Sequence[VerdictOutcomeRecord],
+    thresholds: PostmortemConfig,
+    metric: str,
+    value_of: Callable[[VerdictOutcomeRecord], float | None],
+) -> tuple[MetricSummary, ...]:
+    per_horizon = [
+        _paired_separation_for(
+            [row for row in outcomes if row.horizon_days == horizon_days],
+            horizon_days,
+            thresholds,
+            metric,
+            value_of,
+        )
+        for horizon_days in HORIZON_DAYS
+    ]
+    return (*per_horizon, _composed_mean(per_horizon, metric, thresholds))
+
+
+def _paired_separation_for(
+    rows: Sequence[VerdictOutcomeRecord],
+    horizon_days: int,
+    thresholds: PostmortemConfig,
+    metric: str,
+    value_of: Callable[[VerdictOutcomeRecord], float | None],
+) -> MetricSummary:
+    """Average one horizon's per-day gaps.
+
+    Days are keyed on `verdict_outcomes.as_of`, the *maturity* session. Within
+    a single horizon that is a one-to-one relabelling of the run date (the
+    maturity day is N sessions after the run), and `keep_adopted_rows` has
+    already reduced each run date to one run, so grouping on it groups exactly
+    one run day per key without needing a `runs` join.
+    """
+    # Seeded from *every* row's day, not just the usable ones: a day whose
+    # rows were all dropped (no benchmark recorded, say) still stated no
+    # difference and must be counted as excluded rather than vanishing.
+    by_day: dict[date, list[tuple[str, float]]] = {row.as_of: [] for row in rows}
+    contributing = 0
+    for row in rows:
+        value = value_of(row)
+        if value is None:
+            continue
+        contributing += 1
+        by_day[row.as_of].append((row.recommendation, value))
+
+    differences: list[float] = []
+    excluded_day_count = 0
+    for cell in by_day.values():
+        proceed = [value for side, value in cell if side == PROCEED]
+        skip = [value for side, value in cell if side != PROCEED]
+        if not proceed or not skip:
+            excluded_day_count += 1
+            continue
+        differences.append(sum(proceed) / len(proceed) - sum(skip) / len(skip))
+
+    value = statistics.fmean(differences) if differences else None
+    stderr = _mean_stderr(differences)
+    return MetricSummary(
+        metric_id=_metric_id(metric, horizon_days),
+        horizon_days=horizon_days,
+        value=value,
+        sample_size=contributing,
+        is_preliminary=contributing < thresholds.preliminary_sample_threshold,
+        stderr=stderr,
+        ci_low=_ci_bound(value, stderr, sign=-1),
+        ci_high=_ci_bound(value, stderr, sign=1),
+        excluded_day_count=excluded_day_count,
+    )
+
+
+def _welch_stderr(group_a: Sequence[float], group_b: Sequence[float]) -> float | None:
+    """Standard error of a difference of two independent means (Welch).
+
+    `None` when either group has fewer than two observations, where the
+    sample variance is undefined -- reported as unknown rather than as zero
+    spread, which would manufacture a razor-thin interval around a single
+    point.
+    """
+    if len(group_a) < _MIN_SAMPLES_FOR_SPREAD or len(group_b) < _MIN_SAMPLES_FOR_SPREAD:
+        return None
+    return math.sqrt(
+        statistics.variance(group_a) / len(group_a)
+        + statistics.variance(group_b) / len(group_b)
+    )
+
+
+def _mean_stderr(values: Sequence[float]) -> float | None:
+    """Standard error of a mean; `None` below two observations."""
+    if len(values) < _MIN_SAMPLES_FOR_SPREAD:
+        return None
+    return statistics.stdev(values) / math.sqrt(len(values))
+
+
+def _ci_bound(value: float | None, stderr: float | None, *, sign: int) -> float | None:
+    """One end of the normal-approximation interval, or `None` without a spread."""
+    if value is None or stderr is None:
+        return None
+    return value + sign * _Z_TWO_SIDED_95 * stderr
+
+
+def wilson_interval(
+    successes: float, trials: float
+) -> tuple[float | None, float | None]:
+    """Return the Wilson score interval for a proportion (Issue #190).
+
+    Preferred over the normal ("Wald") interval because it stays within
+    `[0, 1]` and remains sensible at zero or unanimous counts, which this
+    window produces routinely -- a `skip_hit_rate` of 0/3 is a real state, and
+    a Wald interval reports it as the point `[0, 0]`.
+
+    Args:
+        successes: Observed successes. Must not exceed `trials`.
+        trials: Observations behind the rate.
+
+    Returns:
+        `(low, high)`, or `(None, None)` when `trials <= 0` -- there is no
+        proportion to bound.
+    """
+    if trials <= 0:
+        return None, None
+    z_squared = _Z_TWO_SIDED_95**2
+    observed = successes / trials
+    denominator = 1 + z_squared / trials
+    center = (observed + z_squared / (2 * trials)) / denominator
+    half_width = (
+        _Z_TWO_SIDED_95
+        * math.sqrt(observed * (1 - observed) / trials + z_squared / (4 * trials**2))
+        / denominator
+    )
+    return max(0.0, center - half_width), min(1.0, center + half_width)
 
 
 def _composed_mean(
@@ -426,6 +763,120 @@ def compute_skip_hit_rate(
         for horizon_days, rows in _rows_by_horizon(outcomes)
     ]
     return _rate_summaries(parts, _SKIP_HIT_RATE, thresholds, _flag_below_baseline)
+
+
+def shadow_trade(
+    position: VerdictPosition, initial_mark: VerdictPositionMark | None
+) -> ShadowTrade | None:
+    """Adapt one closed shadow position into the shared measurement shape.
+
+    Args:
+        position: A tracked position; `None` is returned unless it is closed
+            with both an exit price and an exit reason recorded.
+        initial_mark: The position's entry-session mark, whose `stop_price` is
+            the stop actually in force at entry. `VerdictPosition.stop_price`
+            is *not* usable for this: it ratchets upward with the trailing
+            stop, so reading it would understate the risk taken and inflate
+            every R-multiple.
+
+    Returns:
+        The adapted trade, or `None` when the position is still open or its
+        exit was never fully recorded (a corrupted row, excluded rather than
+        measured with a guessed exit).
+    """
+    if (
+        position.exit_date is None
+        or position.exit_price is None
+        or position.exit_reason is None
+        or position.entry_price <= 0
+    ):
+        return None
+    return ShadowTrade(
+        entry_date=position.entry_date,
+        entry_price=position.entry_price,
+        exit_date=position.exit_date,
+        exit_price=position.exit_price,
+        shares=_SHADOW_NOTIONAL_USD / position.entry_price,
+        initial_stop_price=None if initial_mark is None else initial_mark.stop_price,
+        exit_reason=position.exit_reason,
+        days_held=position.days_held,
+    )
+
+
+def compute_tracked_performance(
+    positions: Sequence[VerdictPosition],
+    marks: Mapping[tuple[UUID, str], VerdictPositionMark],
+) -> tuple[TrackedPerformance, ...]:
+    """Summarize the shadow ledger's realized record, stratified by verdict side.
+
+    Issue #190's counterfactual: `proceed` and `skip` positions were opened at
+    their run's close and carried under the same trailing stop and max-hold,
+    so the two rows differ only by the judgement being measured. The pooled
+    `all` row is the "buy every screened candidate" arm.
+
+    Args:
+        positions: Tracked positions, open and closed. The caller decides the
+            window (this function is pure and applies no cutoff of its own).
+        marks: Each position's *entry-session* mark, keyed by `(run_id,
+            symbol)` -- `StateStore.get_earliest_verdict_position_marks()`.
+            A position missing from the mapping simply contributes no
+            R-multiple.
+
+    Returns:
+        One row per verdict side plus the pooled `all` row, always in that
+        fixed order so a dossier's rows do not reshuffle between windows. A
+        side with no positions still gets a row, with `None` rates and zero
+        counts: "nothing has been tracked on this side yet" is exactly the
+        reading the sample-size argument needs.
+    """
+    strata = (*TRACKED_RECOMMENDATIONS, ALL_RECOMMENDATIONS)
+    return tuple(
+        _tracked_performance(
+            stratum,
+            [
+                position
+                for position in positions
+                if stratum in (position.recommendation, ALL_RECOMMENDATIONS)
+            ],
+            marks,
+        )
+        for stratum in strata
+    )
+
+
+def _tracked_performance(
+    recommendation: str,
+    positions: Sequence[VerdictPosition],
+    marks: Mapping[tuple[UUID, str], VerdictPositionMark],
+) -> TrackedPerformance:
+    trades = [
+        trade
+        for position in positions
+        if (
+            trade := shadow_trade(
+                position, marks.get((position.run_id, position.symbol))
+            )
+        )
+        is not None
+    ]
+    holding = holding_days_stats(trades)
+    return TrackedPerformance(
+        metric_id=f"{_METRIC_PREFIX}:{_TRACKED_PERFORMANCE}:{recommendation}",
+        recommendation=recommendation,
+        closed_count=len(trades),
+        open_count=sum(1 for position in positions if position.status == OPEN),
+        win_rate=compute_win_rate(trades),
+        profit_factor=compute_profit_factor(trades),
+        expectancy_pct=compute_expectancy_per_trade(trades),
+        avg_r_multiple=compute_avg_r_multiple(trades),
+        avg_holding_days=None if holding is None else holding.median,
+        exit_reason_counts=tuple(
+            ExitReasonCount(reason=reason, count=count)
+            for reason, count in sorted(
+                exit_reason_breakdown(trades, TRACKING_EXIT_REASONS).items()
+            )
+        ),
+    )
 
 
 def compute_verdict_mix(verdicts: Sequence[VerdictRow]) -> VerdictMixSummary:
@@ -588,6 +1039,14 @@ def _rate_summary(
         if part.baseline_denominator > 0
         else None
     )
+    # The weight-composed headline's numerator/denominator are weighted, not
+    # observed, counts; a Wilson interval on them would describe a sample that
+    # was never drawn. Only the per-horizon rows get one (Issue #190).
+    ci_low, ci_high = (
+        wilson_interval(part.numerator, part.denominator)
+        if horizon_days is not None
+        else (None, None)
+    )
     return RateMetricSummary(
         metric_id=metric_id,
         horizon_days=horizon_days,
@@ -596,6 +1055,8 @@ def _rate_summary(
         is_flagged=is_flagged(value, baseline),
         sample_size=part.sample_size,
         is_preliminary=part.sample_size < thresholds.preliminary_sample_threshold,
+        ci_low=ci_low,
+        ci_high=ci_high,
     )
 
 

@@ -833,18 +833,33 @@ class StateStore:
             self._database, window_start, as_of
         )
 
-    def get_untracked_proceed_verdicts(
-        self, as_of: date
+    def get_untracked_verdicts(
+        self,
+        as_of: date,
+        recommendations: Sequence[str] = tracking_records.TRACKED_RECOMMENDATIONS,
     ) -> tuple[TrackableVerdict, ...]:
-        """Return `proceed` verdicts dated `<= as_of` that have no position yet.
+        """Return verdicts dated `<= as_of` that have no shadow position yet.
 
         Args:
             as_of: Inclusive point-in-time cutoff on the verdict's run date.
+            recommendations: Verdict sides to open positions for.
         """
-        return tracking_records.get_untracked_proceed_verdicts(self._database, as_of)
+        return tracking_records.get_untracked_verdicts(
+            self._database, as_of, recommendations
+        )
+
+    def sync_verdict_position_recommendations(
+        self,
+    ) -> tuple[tuple[UUID, str, str], ...]:
+        """Realign tracked positions with their verdict's current side.
+
+        Returns:
+            `(run_id, symbol, new_recommendation)` per realigned position.
+        """
+        return tracking_records.sync_verdict_position_recommendations(self._database)
 
     def delete_orphaned_verdict_positions(self) -> tuple[tuple[UUID, str], ...]:
-        """Drop tracked positions whose `proceed` verdict no longer exists.
+        """Drop tracked positions whose verdict row no longer exists.
 
         Returns:
             The deleted positions' `(run_id, symbol)` identities.
@@ -852,14 +867,19 @@ class StateStore:
         return tracking_records.delete_orphaned_verdict_positions(self._database)
 
     def get_verdict_positions(
-        self, status: str | None = None
+        self,
+        status: str | None = None,
+        recommendations: Sequence[str] | None = None,
     ) -> tuple[VerdictPosition, ...]:
-        """Return tracked virtual positions, optionally narrowed to one status.
+        """Return tracked virtual positions, optionally narrowed.
 
         Args:
             status: `"open"`, `"closed"`, or `None` for both.
+            recommendations: Verdict sides to include, or `None` for all.
         """
-        return tracking_records.get_verdict_positions(self._database, status)
+        return tracking_records.get_verdict_positions(
+            self._database, status, recommendations
+        )
 
     def get_verdict_position(self, run_id: UUID, symbol: str) -> VerdictPosition | None:
         """Return one tracked position, or `None` when it was never opened."""
@@ -891,6 +911,12 @@ class StateStore:
     ) -> dict[tuple[UUID, str], VerdictPositionMark]:
         """Return each tracked position's most recent mark, keyed by identity."""
         return tracking_records.get_latest_verdict_position_marks(self._database)
+
+    def get_earliest_verdict_position_marks(
+        self,
+    ) -> dict[tuple[UUID, str], VerdictPositionMark]:
+        """Return each tracked position's first (entry-session) mark."""
+        return tracking_records.get_earliest_verdict_position_marks(self._database)
 
     def upsert_verdict_position_note(self, note: VerdictPositionNote) -> None:
         """Correction-upsert one dated note on a tracked position."""

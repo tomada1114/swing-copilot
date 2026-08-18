@@ -37,6 +37,7 @@ def _position(**overrides: object) -> VerdictPosition:
         run_id=RUN_ID,
         symbol=SYMBOL,
         strategy_key="default",
+        recommendation="proceed",
         no_trade=False,
         entry_date=ENTRY_DATE,
         entry_price=100.0,
@@ -74,6 +75,28 @@ def _seed_verdict(
                 recommendation=recommendation,
                 reasons=(VerdictReasonRecord(text="出来高が伴う", source_ids=()),),
                 no_trade=no_trade,
+            )
+        ],
+        [],
+    )
+
+
+def _seed_verdicts(state_store: StateStore, recommendations: tuple[str, str]) -> None:
+    """Archive one run holding `SYMBOL` and `BBB`, each on the given side."""
+    state_store.replace_run_verdicts(
+        RUN_ID,
+        [
+            VerdictRecord(
+                run_id=RUN_ID,
+                symbol=symbol,
+                as_of=ENTRY_DATE,
+                strategy_key="default",
+                recommendation=recommendation,
+                reasons=(),
+                no_trade=False,
+            )
+            for symbol, recommendation in zip(
+                (SYMBOL, "BBB"), recommendations, strict=True
             )
         ],
         [],
@@ -267,7 +290,7 @@ class TestUntrackedVerdicts:
                 [str(RUN_ID), SYMBOL],
             )
 
-        rows = state_store.get_untracked_proceed_verdicts(ENTRY_DATE)
+        rows = state_store.get_untracked_verdicts(ENTRY_DATE)
 
         assert [(row.symbol, row.entry_price, row.stop_price) for row in rows] == [
             (SYMBOL, 100.0, 95.0)
@@ -278,7 +301,7 @@ class TestUntrackedVerdicts:
     ) -> None:
         _seed_verdict(state_store)
 
-        rows = state_store.get_untracked_proceed_verdicts(ENTRY_DATE)
+        rows = state_store.get_untracked_verdicts(ENTRY_DATE)
 
         assert [(row.entry_price, row.stop_price) for row in rows] == [(None, None)]
 
@@ -287,7 +310,7 @@ class TestUntrackedVerdicts:
     ) -> None:
         _seed_verdict(state_store, no_trade=True)
 
-        rows = state_store.get_untracked_proceed_verdicts(ENTRY_DATE)
+        rows = state_store.get_untracked_verdicts(ENTRY_DATE)
 
         assert [(row.symbol, row.no_trade) for row in rows] == [(SYMBOL, True)]
 
@@ -297,12 +320,32 @@ class TestUntrackedVerdicts:
         _seed_verdict(state_store)
         state_store.upsert_verdict_position(_position())
 
-        assert state_store.get_untracked_proceed_verdicts(ENTRY_DATE) == ()
+        assert state_store.get_untracked_verdicts(ENTRY_DATE) == ()
 
-    def test_a_skip_verdict_is_never_listed(self, state_store: StateStore) -> None:
+    def test_a_skip_verdict_is_listed_and_carries_its_side(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #190: skip is shadow-tracked, so it must reach the ledger with
+        # its own side recorded rather than being filtered out here.
         _seed_verdict(state_store, recommendation="skip")
 
-        assert state_store.get_untracked_proceed_verdicts(ENTRY_DATE) == ()
+        rows = state_store.get_untracked_verdicts(ENTRY_DATE)
+
+        assert [(row.symbol, row.recommendation) for row in rows] == [(SYMBOL, "skip")]
+
+    def test_a_side_left_out_of_the_request_is_not_listed(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store, recommendation="skip")
+
+        assert state_store.get_untracked_verdicts(ENTRY_DATE, ("proceed",)) == ()
+
+    def test_an_empty_recommendation_set_selects_nothing(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+
+        assert state_store.get_untracked_verdicts(ENTRY_DATE, ()) == ()
 
 
 class TestVerdictReasons:
@@ -328,15 +371,15 @@ class TestOrphanReconciliation:
     def test_a_position_whose_verdict_is_gone_is_deleted_with_its_marks_and_notes(
         self, state_store: StateStore
     ) -> None:
-        _seed_verdict(state_store)
         state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
         state_store.upsert_verdict_position_note(
             VerdictPositionNote(
                 run_id=RUN_ID, symbol=SYMBOL, note_date=ENTRY_DATE, note="様子見"
             )
         )
-        # Re-ingesting a corrected result replaces the run's verdicts wholesale.
-        _seed_verdict(state_store, recommendation="skip")
+        # Re-ingesting a corrected result replaces the run's verdicts wholesale
+        # and this symbol is no longer analyzed at all: nothing explains the
+        # position any more, so it goes with its marks and notes.
 
         deleted = state_store.delete_orphaned_verdict_positions()
 
@@ -344,6 +387,74 @@ class TestOrphanReconciliation:
         assert state_store.get_verdict_positions() == ()
         assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
         assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
+
+    def test_a_demoted_verdict_keeps_its_position_and_is_realigned(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #190: both sides are tracked under identical exit rules, so a
+        # proceed -> skip correction moves the row between strata instead of
+        # destroying a replay that is still exactly right.
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+        _seed_verdict(state_store, recommendation="skip")
+
+        assert state_store.delete_orphaned_verdict_positions() == ()
+        assert state_store.sync_verdict_position_recommendations() == (
+            (RUN_ID, SYMBOL, "skip"),
+        )
+
+        stored = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert stored is not None
+        assert stored.recommendation == "skip"
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) != ()
+
+    def test_a_partial_realign_rolls_back_after_an_earlier_row_already_moved(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two drifted positions; the second UPDATE fails once the first has
+        # already been applied inside the transaction. A half-realigned ledger
+        # would report one symbol under a side its verdict no longer says.
+        _seed_verdicts(state_store, ("proceed", "proceed"))
+        state_store.upsert_verdict_position(_position())
+        state_store.upsert_verdict_position(_position(symbol="BBB"))
+        _seed_verdicts(state_store, ("skip", "skip"))
+        real_connect = state_store.database.connect
+        monkeypatch.setattr(
+            state_store.database,
+            "connect",
+            lambda: _FlakyConnection(real_connect(), fail_on=4),
+        )
+
+        with pytest.raises(RuntimeError, match="injected failure"):
+            state_store.sync_verdict_position_recommendations()
+        monkeypatch.undo()
+
+        assert {
+            position.recommendation for position in state_store.get_verdict_positions()
+        } == {"proceed"}
+
+    def test_realigning_an_already_aligned_ledger_changes_nothing(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position())
+
+        assert state_store.sync_verdict_position_recommendations() == ()
+
+    def test_a_legacy_null_recommendation_reads_as_proceed(
+        self, state_store: StateStore
+    ) -> None:
+        # A row written before the column existed. NULL must behave exactly
+        # like an explicit 'proceed' for both the realign check and the filter.
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position())
+        with state_store.database.connect() as conn:
+            conn.execute("UPDATE verdict_positions SET recommendation = NULL")
+
+        assert state_store.sync_verdict_position_recommendations() == ()
+
+        stored = state_store.get_verdict_positions(None, ("proceed",))
+        assert [position.recommendation for position in stored] == ["proceed"]
 
     def test_a_position_backed_by_a_standing_proceed_verdict_is_kept(
         self, state_store: StateStore

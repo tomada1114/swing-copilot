@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from dataclasses import dataclass
 from datetime import date
 
 import pytest
@@ -28,6 +29,7 @@ from swing_copilot.backtest.metrics import (
     exit_reason_breakdown,
     holding_days_stats,
     max_hold_binding_rate,
+    trade_r_multiple,
 )
 from swing_copilot.config import BacktestConfig
 
@@ -357,3 +359,70 @@ class TestMaxConcurrentReached:
 
     def test_no_sessions_report_zero(self):
         assert compute_max_concurrent_reached(()) == 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ForeignTrade:
+    """A closed round trip belonging to no ledger in particular (Issue #190).
+
+    Deliberately not a `Trade`: it exists to prove the metrics are typed
+    against the `ClosedTrade` Protocol rather than against one class. Its
+    `pnl` is also deliberately inconsistent with its price fields, which is
+    how the test shows `pnl` is taken from the ledger and never re-derived
+    (a ledger that charges commission must keep it).
+    """
+
+    pnl: float
+    initial_stop_price: float | None
+    exit_reason: str
+    entry_date: date = _D0
+    exit_date: date = _D1
+    entry_price: float = 100.0
+    exit_price: float = 112.0
+    shares: float = 1.0
+    days_held: int = 1
+
+
+class TestClosedTradeProtocol:
+    def test_a_foreign_ledgers_row_is_measured_without_becoming_a_trade(self):
+        trades = (
+            _ForeignTrade(pnl=12.0, initial_stop_price=90.0, exit_reason="manual"),
+            _ForeignTrade(pnl=-4.0, initial_stop_price=90.0, exit_reason="stop"),
+        )
+
+        assert compute_win_rate(trades) == 0.5
+        assert compute_profit_factor(trades) == 3.0
+        assert compute_expectancy_per_trade(trades) == 4.0
+        # R = pnl / ((100 - 90) * 1) -> +1.2 and -0.4, mean +0.4.
+        assert compute_avg_r_multiple(trades) == pytest.approx(0.4)
+
+    def test_a_single_trades_r_multiple_is_available_for_omission_counting(self):
+        assert (
+            trade_r_multiple(
+                _ForeignTrade(pnl=12.0, initial_stop_price=None, exit_reason="stop")
+            )
+            is None
+        )
+        assert (
+            trade_r_multiple(
+                _ForeignTrade(pnl=12.0, initial_stop_price=100.0, exit_reason="stop")
+            )
+            is None
+        )
+
+    def test_a_ledgers_own_exit_vocabulary_replaces_the_simulators(self):
+        trades = (
+            _ForeignTrade(pnl=1.0, initial_stop_price=None, exit_reason="manual"),
+        )
+
+        assert exit_reason_breakdown(trades, ("stop", "max_hold", "manual")) == {
+            "stop": 0,
+            "max_hold": 0,
+            "manual": 1,
+        }
+        # The simulator's own vocabulary stays the default, unchanged.
+        assert set(exit_reason_breakdown(())) == {
+            "stop",
+            "max_hold",
+            "end_of_backtest",
+        }

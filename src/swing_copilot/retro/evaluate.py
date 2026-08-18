@@ -26,6 +26,7 @@ observation-only: it never adjusts screening, sizing, ranking, or config.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -215,6 +216,17 @@ class _EvaluationRequest:
     benchmark_symbol: str
 
 
+def _finite_or_none(value: float | None) -> float | None:
+    """Collapse an unusable benchmark return to `None` (Issue #190).
+
+    A stored bar with a `NaN` close produces a `NaN` return rather than a
+    missing one. Persisting that into `benchmark_return_pct` would put a value
+    in a column whose `NULL` means "not measured", and a `NaN` silently
+    poisons every excess-return average computed from it.
+    """
+    return None if value is None or not math.isfinite(value) else value
+
+
 def _group_by_run(rows: Sequence[VerdictRow]) -> dict[UUID, list[VerdictRow]]:
     """Group verdict rows by run, preserving the query's deterministic order."""
     grouped: dict[UUID, list[VerdictRow]] = {}
@@ -249,6 +261,17 @@ def _evaluate_slice(
         )
         return None
 
+    # Issue #190: one benchmark read per `(run, horizon)`, not per symbol --
+    # every row in the slice spans exactly the same two sessions, so the
+    # market's move over it is one number. `None` (no benchmark bars) is
+    # recorded as such; it must not become a silent zero, which would turn
+    # "unmeasured" into "the market went nowhere".
+    benchmark_return_pct = _finite_or_none(
+        compute_forward_return(
+            market_store, request.benchmark_symbol, run_date, maturity_date
+        )
+    )
+
     outcomes: list[VerdictOutcomeRecord] = []
     for row in rows:
         forward_return_pct = compute_forward_return(
@@ -268,6 +291,7 @@ def _evaluate_slice(
                 as_of=maturity_date,
                 recommendation=row.recommendation,
                 forward_return_pct=forward_return_pct,
+                benchmark_return_pct=benchmark_return_pct,
                 classification=classify_verdict_outcome(
                     row.recommendation,
                     forward_return_pct,

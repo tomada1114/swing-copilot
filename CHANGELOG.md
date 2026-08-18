@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように
+  なった（Issue #190、2026-08 アーキテクチャレビューの R7）。「verdict
+  レイヤに価値があるか」は本質的に「proceed だけ買った場合 vs screening
+  通過を全部買った場合」の差であり、片側しか追跡していない台帳では
+  その反実仮想が作れなかった。`verdict_positions.recommendation`
+  （nullable、NULL = `proceed`）が区分を持ち、両群が同じトレーリング
+  ストップと最大保有日数で運ばれる。サンプル母数が採用少数派から候補
+  全体へ広がる。`list` / `show` の既定表示は `proceed` のみ
+  （`--recommendation` で明示的に開く）なので、日常操作の見え方は
+  変わらない
+- `copilot-track stats`: 勝率・プロフィットファクタ・期待値・平均 R 倍数・
+  保有日数中央値・手仕舞い理由内訳を `proceed` / `skip` / `all` で層別して
+  出す。損益はすべて % 単位（シャドウ建玉に株数の決定は存在しないため、
+  各建玉を $100 notional へ正規化して測る）
+- `retro_input.json` に `aggregates.tracked_performance` を追加
+  （`metric:tracked_performance:{proceed,skip,all}`）。追跡台帳の実現損益が
+  振り返りの証拠に入るようになった（従来 `retro/export.py` は台帳を一切
+  参照していなかった）
+- separation のペアード版と超過リターン版
+  （`metric:separation_paired:*` / `metric:separation_paired_excess:*`）。
+  従来の窓全体プール平均差は地合いと交絡しうるため、run 日ごとに
+  proceed−skip を取ってから日次差を平均する版を併記する。片群しか無い日は
+  除外し、除外日数を `excluded_day_count` に出す。超過版のために
+  `verdict_outcomes.benchmark_return_pct`（nullable、backfill しない）を
+  追加した
+- 集約指標に散らばりの指標を追加した。`MetricEntry` に `stderr` /
+  `ci_low` / `ci_high`、`RateMetricEntry` に Wilson スコア区間の
+  `ci_low` / `ci_high`（いずれも両側 95%）。重み合成のヘッドラインには
+  区間を出さない——5 日と 20 日は同じ run を測り直した非独立な 2 窓であり、
+  そこから作った区間は実際より狭くなる。これに合わせて `swing-retro` の
+  L1 証拠ゲートを「n≥20 かつ CI が 0 を跨がない」へ強化した
+
+### Changed
+
+- 勝率・プロフィットファクタ・期待値・R 倍数・保有日数・手仕舞い理由内訳の
+  定義を `backtest/metrics.py` に一本化した（Issue #190）。同モジュールは
+  `engine.Trade` ではなく `ClosedTrade` Protocol を受け取るようになり、
+  バックテスト・紙トレ台帳（`paper/journal.py`）・verdict 追跡台帳の 3 者が
+  同じ関数を通る。`PaperJournal._win_rate` などの private な二重実装は削除
+  （`PerformanceSummary` の外形は不変）
+- `copilot-daily` の「保有銘柄」（開示・ニュース収集の優先対象、設計 3.14）が
+  読む仮想建玉を `proceed` に限定した。`skip` のシャドウ建玉には notional にも
+  何も保有されておらず、含めると保有優先のテキスト予算が定性レイヤの落とした
+  銘柄すべてへ向いてしまう
+- `proceed` から `skip` へ訂正された verdict の追跡ポジションを**削除しなく
+  なった**。両側を同じ出口ルールで追跡している以上リプレイは依然正しく、
+  削除すると訂正のたびに skip 側の標本が痩せる。`recommendation` 列だけを
+  verdict 側へ追随させ、その旨を note に出す。verdict 行そのものが消えた
+  場合（銘柄が分析対象から外れた場合）は従来どおり削除する
+
 - バックテストが本番と同じ系を測るようになった（Issue #184、2026-08
   アーキテクチャレビューの P1）。本番は候補と建玉の間にレジーム
   （`CASH_PRIORITY` / `REDUCE_ONLY`）・portfolio heat・決算・サーキット
@@ -114,6 +164,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   続けるリスクがあった。`PreflightAbort` に閉集合の `reason` を持たせ、
   stderr 先頭へ機械可読な `PREFLIGHT_ABORT[<reason>]:` プレフィックスを
   書く契約へ変更し、スキル側の分岐を更新した
+- `backtest.exit_atr_period` が死んだ設定キーだった（`settings.yaml` にあり
+  strict スキーマも受け付けるのに、`backtest/exits.py` の `ATR_PERIOD = 14`
+  固定でどこからも読まれず、「設定した = 検証した」の誤認を招いていた）。
+  `atr14_as_of` / `atr14_by_date` を `atr_as_of` / `atr_by_date`
+  （`period` 引数は既定値なし）へ一般化し、`BacktestEngine` のトレーリング
+  ストップと `tracking/update.py` の台帳リプレイが
+  `settings.backtest.exit_atr_period` を渡すようにした（Issue #194）。
+  これで #185 の感応度グリッドの 1 次元スイープ対象にできる。エントリー側の
+  ストップ距離はランキング指標 `atr14`（`screening/pipeline.py` の
+  `_ATR_WINDOW`、本番 `risk/checks.py` と同じ値）のままで、意図的に統合
+  していない
+- `copilot-backtest --limit N` が `ORDER BY symbol` の先頭 N 件、つまり
+  「A で始まる N 銘柄」を返していた（Issue #194）。セクター構成が S&P 500 と
+  別物になるうえ、Minervini の RS パーセンタイル（条件 7）のように*渡された
+  集合内の相対順位*で決まるチェックは条件の意味自体が変わる。`gics_sector`
+  で比例配分（最大剰余法）したうえで各セクター内を salt 付き blake2b の
+  ハッシュ順に選ぶ決定論的サンプリングへ変更し、採用方式・実銘柄数・
+  セクター構成を terminal と markdown 双方のレポート冒頭に必ず出すように
+  した（生存者バイアス注記と同じ扱い）
 
 ### Changed
 

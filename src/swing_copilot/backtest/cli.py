@@ -12,8 +12,10 @@ and classifies it as spike/plateau/inconclusive.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import tempfile
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
@@ -80,6 +82,10 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # weighting variant needs its own override alongside --settings.
 DEFAULT_STRATEGIES_PATH = "config/strategies.yaml"
 _CONSOLE_WIDTH = 200
+#: Salt of the `--limit` sample's shuffle order (Issue #194). Fixed forever:
+#: changing it re-draws every sample and silently breaks comparability with
+#: previously published reports.
+_SAMPLING_SALT = b"swing-copilot/backtest/limit/v1"
 #: `--policy` default: the pre-Issue-#184 behaviour, so an existing command
 #: line keeps measuring what it used to measure.
 _DEFAULT_POLICY = EntryPolicyArm.NONE.value
@@ -90,6 +96,37 @@ class BacktestCliError(SwingCopilotError):
 
 
 @dataclass(frozen=True, slots=True)
+class UniverseSample:
+    """Which symbols the run actually backtested, and how they were chosen.
+
+    Carried into every report because a `--limit` run measures a *sample*:
+    without the method and the sector composition beside the metrics, a
+    truncated run reads exactly like a full-universe one (Issue #194).
+    """
+
+    symbols: tuple[str, ...]
+    universe_size: int
+    is_stratified_sample: bool
+    sector_counts: tuple[tuple[str, int], ...]
+
+    def summary_lines(self) -> tuple[str, ...]:
+        """The two lines every report prepends: method, then composition."""
+        if not self.is_stratified_sample:
+            method = f"ユニバース: 全 {self.universe_size} 銘柄（--limit 指定なし）"
+        else:
+            method = (
+                f"ユニバース: {len(self.symbols)}/{self.universe_size} 銘柄の"
+                "決定論的サンプル（gics_sector 比例配分 + blake2b ハッシュ順、"
+                "シード固定・再現可能）"
+            )
+        composition = "セクター構成: " + (
+            ", ".join(f"{sector} {count}" for sector, count in self.sector_counts)
+            or "(なし)"
+        )
+        return (method, composition)
+
+
+@dataclass(frozen=True, slots=True)
 class ReportMeta:
     """Shared render context: what was backtested and any skipped symbols."""
 
@@ -97,6 +134,7 @@ class ReportMeta:
     start: date
     end: date
     missing_data_symbols: Sequence[str]
+    universe_sample: UniverseSample
 
 
 def _add_common_args(
@@ -205,9 +243,86 @@ def _reject_grid_policy(args: argparse.Namespace) -> None:
         raise BacktestCliError(msg)
 
 
-def _select_symbols(universe: Sequence[UniverseMember], limit: int | None) -> list[str]:
-    symbols = [member.symbol for member in universe]
-    return symbols if limit is None else symbols[:limit]
+def _hash_rank(symbol: str) -> bytes:
+    """Deterministic, universe-independent shuffle key for one symbol."""
+    return hashlib.blake2b(
+        _SAMPLING_SALT + symbol.encode("utf-8"), digest_size=8
+    ).digest()
+
+
+def _sector_counts(members: Sequence[UniverseMember]) -> tuple[tuple[str, int], ...]:
+    counts = Counter(member.gics_sector for member in members)
+    return tuple(sorted(counts.items()))
+
+
+def _sector_quotas(sizes: dict[str, int], limit: int) -> dict[str, int]:
+    """Split `limit` across sectors proportionally, by largest remainder.
+
+    Every sector keeps its floor share; the seats left over go to the largest
+    fractional remainders, ties broken by sector name so the allocation is a
+    pure function of the universe and the limit.
+    """
+    total = sum(sizes.values())
+    exact = {sector: size * limit / total for sector, size in sizes.items()}
+    quotas = {sector: int(value) for sector, value in exact.items()}
+    # Each remainder is < 1 and they sum to an integer, so only sectors with a
+    # non-zero remainder can be topped up and no quota can exceed its sector.
+    leftover = limit - sum(quotas.values())
+    by_remainder = sorted(exact, key=lambda sector: (-(exact[sector] % 1), sector))
+    for sector in by_remainder[:leftover]:
+        quotas[sector] += 1
+    return quotas
+
+
+def _select_symbols(
+    universe: Sequence[UniverseMember], limit: int | None
+) -> UniverseSample:
+    """Pick the symbols to backtest, without the alphabetical bias of `[:limit]`.
+
+    Truncating a `symbol`-sorted universe made `--limit 60` mean "the 60
+    tickers starting with A", which is not an S&P 500 sample: its sector mix
+    is arbitrary, and Minervini's RS percentile (condition 7) ranks candidates
+    *within the set it is given*, so the check itself changes meaning
+    (Issue #194). Instead each sector keeps its proportional share, and which
+    of its members are taken is decided by a salted blake2b order — unrelated
+    to the alphabet, identical on every machine, and identical on every rerun.
+
+    Args:
+        universe: Resolved universe membership for the run's `as_of`.
+        limit: `--limit`, or `None` for the whole universe.
+
+    Returns:
+        The selected symbols (alphabetical) plus the provenance every report
+        prints beside its metrics.
+    """
+    members = sorted(universe, key=lambda member: member.symbol)
+    if limit is None or limit >= len(members):
+        return UniverseSample(
+            symbols=tuple(member.symbol for member in members),
+            universe_size=len(members),
+            is_stratified_sample=False,
+            sector_counts=_sector_counts(members),
+        )
+
+    by_sector: dict[str, list[UniverseMember]] = defaultdict(list)
+    for member in members:
+        by_sector[member.gics_sector].append(member)
+    quotas = _sector_quotas(
+        {sector: len(group) for sector, group in by_sector.items()}, limit
+    )
+    picked = [
+        member
+        for sector, group in sorted(by_sector.items())
+        for member in sorted(group, key=lambda member: _hash_rank(member.symbol))[
+            : quotas[sector]
+        ]
+    ]
+    return UniverseSample(
+        symbols=tuple(sorted(member.symbol for member in picked)),
+        universe_size=len(members),
+        is_stratified_sample=True,
+        sector_counts=_sector_counts(picked),
+    )
 
 
 def _output_path(args: argparse.Namespace) -> Path:
@@ -225,12 +340,12 @@ def _grid_output_path(args: argparse.Namespace) -> Path:
 
 
 def _missing_data_symbols(
-    market_store: MarketStore, symbols: list[str], start: date, end: date
+    market_store: MarketStore, symbols: Sequence[str], start: date, end: date
 ) -> list[str]:
     """Symbols with zero bars anywhere in [start, end] (REQ-020's fail-soft note)."""
     if not symbols:
         return []
-    bars = market_store.read_bars(symbols, start, end, as_of=end)
+    bars = market_store.read_bars(list(symbols), start, end, as_of=end)
     present = set(bars["symbol"].unique()) if not bars.empty else set()
     return sorted(set(symbols) - present)
 
@@ -367,6 +482,16 @@ def _equity_curve_summary_lines(result: BacktestResult) -> list[str]:
     ]
 
 
+def _universe_console_lines(meta: ReportMeta) -> list[str]:
+    """Sampling provenance, dimmed, for the terminal renderers."""
+    return [f"[dim]{line}[/dim]" for line in meta.universe_sample.summary_lines()]
+
+
+def _universe_markdown_lines(meta: ReportMeta) -> list[str]:
+    """Sampling provenance for the top of a markdown report."""
+    return [*meta.universe_sample.summary_lines(), ""]
+
+
 def render_terminal(result: BacktestResult, meta: ReportMeta) -> str:
     """Render `result` as Rich terminal text (REQ-007/009)."""
     buffer = StringIO()
@@ -375,6 +500,8 @@ def render_terminal(result: BacktestResult, meta: ReportMeta) -> str:
         f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
         f"{meta.start.isoformat()}..{meta.end.isoformat()}"
     )
+    for line in _universe_console_lines(meta):
+        console.print(line)
 
     metrics_table = Table(title="Backtest metrics", header_style="bold")
     metrics_table.add_column("Metric")
@@ -447,6 +574,7 @@ def render_markdown(result: BacktestResult, meta: ReportMeta) -> str:
     lines = [
         f"# Backtest: {meta.strategy} ({meta.start.isoformat()} .. {meta.end.isoformat()})",
         "",
+        *_universe_markdown_lines(meta),
         "## Metrics",
         "",
         "| Metric | Value |",
@@ -518,6 +646,8 @@ def render_terminal_comparison(
         f"[bold]copilot-backtest[/bold] strategy={meta.strategy} "
         f"{meta.start.isoformat()}..{meta.end.isoformat()} (normal vs pessimistic)"
     )
+    for line in _universe_console_lines(meta):
+        console.print(line)
 
     table = Table(title="Backtest metrics: normal vs pessimistic", header_style="bold")
     table.add_column("Metric")
@@ -563,6 +693,7 @@ def render_markdown_comparison(
         f"# Backtest: {meta.strategy} ({meta.start.isoformat()} .. "
         f"{meta.end.isoformat()}) -- normal vs pessimistic",
         "",
+        *_universe_markdown_lines(meta),
         "## Metrics",
         "",
         "| Metric | Normal (x1.0) | Pessimistic |",
@@ -623,6 +754,8 @@ def render_policy_comparison_terminal(
         f"{meta.start.isoformat()}..{meta.end.isoformat()} "
         f"(policy: {' vs '.join(labels)})"
     )
+    for line in _universe_console_lines(meta):
+        console.print(line)
 
     metrics_table = Table(title="Backtest metrics by policy", header_style="bold")
     metrics_table.add_column("Metric")
@@ -670,6 +803,7 @@ def render_policy_comparison_markdown(
         "",
         f"同一候補ストリームに対して {', '.join(labels)} を比較した。",
         "",
+        *_universe_markdown_lines(meta),
         "## Metrics",
         "",
         header,
@@ -748,6 +882,8 @@ def render_grid_terminal(
         f"[bold]copilot-backtest grid[/bold] strategy={meta.strategy} "
         f"{meta.start.isoformat()}..{meta.end.isoformat()}"
     )
+    for line in _universe_console_lines(meta):
+        console.print(line)
     console.print(f"Verdict: {grid.verdict_label}")
 
     table = Table(title="Sensitivity grid: expectancy_per_trade (n=trade_count)")
@@ -799,6 +935,7 @@ def render_grid_markdown(
         f"# Backtest sensitivity grid: {meta.strategy} "
         f"({meta.start.isoformat()} .. {meta.end.isoformat()})",
         "",
+        *_universe_markdown_lines(meta),
         f"Verdict: {grid.verdict_label}",
         "",
         header,
@@ -822,8 +959,8 @@ def render_grid_markdown(
 
 def _compose_dependencies(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
-) -> tuple[BacktestDependencies, list[str], list[str]]:
-    """Wire real collaborators (composition root); returns deps, symbols, missing data."""
+) -> tuple[BacktestDependencies, UniverseSample, list[str]]:
+    """Wire real collaborators (composition root); returns deps, sample, missing data."""
     database = Database(args.db)
     # Parquet bars live alongside the DuckDB file, mirroring the
     # DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing ("data/copilot.duckdb" +
@@ -849,9 +986,9 @@ def _compose_dependencies(
             )
         )
     )
-    symbols = _select_symbols(universe, args.limit)
+    sample = _select_symbols(universe, args.limit)
     missing_data_symbols = _missing_data_symbols(
-        market_store, symbols, args.start, args.end
+        market_store, sample.symbols, args.start, args.end
     )
     deps = BacktestDependencies(
         market_store=market_store,
@@ -859,7 +996,7 @@ def _compose_dependencies(
         settings=settings,
         strategies_config=strategies.model_dump(),
     )
-    return deps, symbols, missing_data_symbols
+    return deps, sample, missing_data_symbols
 
 
 def _resolve_candidate_stream(
@@ -914,11 +1051,11 @@ def _run_backtest_command(
 ) -> None:
     try:
         _validate_args(args, strategies)
-        deps, symbols, missing_data_symbols = _compose_dependencies(
+        deps, sample, missing_data_symbols = _compose_dependencies(
             args, settings, strategies
         )
         request = BacktestRequest(
-            symbols=symbols,
+            symbols=list(sample.symbols),
             start=args.start,
             end=args.end,
             initial_cash=settings.backtest.initial_cash_usd,
@@ -976,6 +1113,7 @@ def _run_backtest_command(
         start=args.start,
         end=args.end,
         missing_data_symbols=missing_data_symbols,
+        universe_sample=sample,
     )
     if args.pessimistic:
         terminal_text = render_terminal_comparison(
@@ -1005,11 +1143,11 @@ def _run_grid_command(
     try:
         _validate_args(args, strategies)
         _reject_grid_policy(args)
-        deps, symbols, missing_data_symbols = _compose_dependencies(
+        deps, sample, missing_data_symbols = _compose_dependencies(
             args, settings, strategies
         )
         request = BacktestRequest(
-            symbols=symbols,
+            symbols=list(sample.symbols),
             start=args.start,
             end=args.end,
             initial_cash=settings.backtest.initial_cash_usd,
@@ -1051,6 +1189,7 @@ def _run_grid_command(
         start=args.start,
         end=args.end,
         missing_data_symbols=missing_data_symbols,
+        universe_sample=sample,
     )
     gray_threshold = settings.backtest.insufficient_trade_count_threshold
 

@@ -139,12 +139,14 @@ class TestOpening:
             (ENTRY_DATE, 0.0)
         ]
 
-    def test_a_skip_verdict_is_never_tracked(
+    def test_a_skip_verdict_is_shadow_tracked_under_the_same_rules(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: BacktestConfig,
     ) -> None:
+        # Issue #190: the counterfactual only exists if the rejected
+        # candidates are carried exactly the way the accepted ones are.
         seed_verdict(state_store, symbol="SKP", recommendation="skip")
         write_bars(market_store, flat_prelude(symbol="SKP"))
 
@@ -152,8 +154,25 @@ class TestOpening:
             state_store, market_store, backtest_config, as_of=ENTRY_DATE
         )
 
-        assert result.opened_count == 0
-        assert state_store.get_verdict_positions() == ()
+        assert result.opened_count == 1
+        position = state_store.get_verdict_position(RUN_ID, "SKP")
+        assert position is not None
+        assert position.recommendation == "skip"
+        assert position.entry_date == ENTRY_DATE
+        assert position.status == "open"
+
+    def test_the_skip_side_is_absent_from_the_default_display_filter(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store, symbol="SKP", recommendation="skip")
+        write_bars(market_store, flat_prelude(symbol="SKP"))
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        assert state_store.get_verdict_positions(None, ("proceed",)) == ()
+        assert len(state_store.get_verdict_positions(None, ("skip",))) == 1
 
     def test_a_no_trade_proceed_verdict_is_tracked_with_the_flag_carried_through(
         self,
@@ -812,7 +831,7 @@ class TestManualWrites:
 
 
 class TestVerdictReconciliation:
-    def test_a_retracted_proceed_verdict_removes_what_it_opened(
+    def test_a_verdict_deleted_outright_removes_what_it_opened(
         self,
         state_store: StateStore,
         market_store: MarketStore,
@@ -828,8 +847,9 @@ class TestVerdictReconciliation:
         )
 
         # Re-ingesting a corrected analysis_result.json replaces the run's
-        # verdicts wholesale; AAA is demoted from proceed to skip.
-        seed_verdict(state_store, recommendation="skip")
+        # verdicts wholesale; AAA is no longer analyzed at all, so nothing
+        # explains the position any more.
+        state_store.replace_run_verdicts(RUN_ID, [], [])
         result = update_tracking(
             state_store, market_store, backtest_config, as_of=DAY_2
         )
@@ -837,7 +857,34 @@ class TestVerdictReconciliation:
         assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
         assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
         assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
-        assert any("取り消された" in note for note in result.notes)
+        assert any("verdict 行が消えた" in note for note in result.notes)
+        assert result.opened_count == 0
+
+    def test_a_demoted_proceed_verdict_keeps_its_position_and_is_realigned(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Issue #190: skip is tracked too, so the replay stays valid and the
+        # row moves strata instead of being destroyed (which would also shrink
+        # the skip sample every time an analysis was corrected).
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [_rise(DAY_1, 102.0)])
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+
+        seed_verdict(state_store, recommendation="skip")
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_1
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.recommendation == "skip"
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) != ()
+        assert any("区分を追随" in note for note in result.notes)
         assert result.opened_count == 0
 
     def test_a_standing_proceed_verdict_keeps_its_position(
@@ -1131,6 +1178,7 @@ class TestSplitRebase:
                 run_id=RUN_ID,
                 symbol=SYMBOL,
                 strategy_key="default",
+                recommendation="proceed",
                 no_trade=False,
                 entry_date=ENTRY_DATE,
                 entry_price=0.0,
@@ -1277,3 +1325,107 @@ class TestSplitRebase:
         assert [mark.as_of_date for mark in marks] == [ENTRY_DATE]
         assert marks[0].close == pytest.approx(FLAT_CLOSE)
         assert marks[0].stop_price == pytest.approx(RISK_STOP)
+
+
+class TestExitAtrPeriod:
+    """Issue #194: the ledger's ATR period is `backtest.exit_atr_period` too.
+
+    The prelude's true range is exactly 2.00 every session, so ATR is 2.00 for
+    any period. `_QUIET_DAY` then drops the true range to 0.40, which the
+    shorter period absorbs faster: ATR(5) = 1.68 (stop 95.80) against
+    ATR(14) = 1.885714... (stop 95.285714...).
+    """
+
+    _SHORT_PERIOD = 5
+
+    def _quiet_day(self) -> dict[str, Any]:
+        return bar(DAY_1, open_price=100.0, high=100.2, low=99.8, close=100.0)
+
+    def _gap_between_the_two_stops(self) -> dict[str, Any]:
+        return bar(DAY_2, open_price=95.5, high=95.9, low=95.4, close=95.6)
+
+    def test_shorter_period_ratchets_the_stop_higher_and_closes_the_position(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        config = backtest_config.model_copy(
+            update={"exit_atr_period": self._SHORT_PERIOD}
+        )
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [self._quiet_day(), self._gap_between_the_two_stops()])
+
+        update_tracking(state_store, market_store, config, as_of=DAY_2)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "closed"
+        assert position.exit_date == DAY_2
+        # The open gaps through the 95.80 stop, so it fills at the open.
+        assert position.exit_price == pytest.approx(95.5)
+        assert position.exit_reason == "stop"
+        assert position.realized_return_pct == pytest.approx(-4.5)
+
+    def test_default_period_keeps_the_position_open_on_the_same_bars(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # The pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline:
+        # 95.285714... sits below DAY_2's low, so nothing closes.
+        assert backtest_config.exit_atr_period == 14
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [self._quiet_day(), self._gap_between_the_two_stops()])
+
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_2)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.status == "open"
+        assert position.stop_price == pytest.approx(
+            FLAT_CLOSE - EXIT_ATR_MULTIPLE * (2.0 - 1.6 / 14)
+        )
+
+    def test_seeding_a_stop_uses_the_configured_period_for_its_history_minimum(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Six sessions are too few for ATR(14) but enough for ATR(5), so the
+        # configured period decides whether a verdict without a risk stop is
+        # tracked with one at all -- and the note quotes that same period.
+        seed_verdict(state_store)
+        seed_risk(state_store, stop_price=None)
+        write_bars(market_store, flat_prelude(sessions=6))
+
+        default_result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.stop_price is None
+        assert any("ATR(14)を算出できず" in note for note in default_result.notes)
+
+        short_run_id = uuid4()
+        seed_verdict(state_store, run_id=short_run_id, symbol="BBB")
+        seed_risk(state_store, run_id=short_run_id, symbol="BBB", stop_price=None)
+        write_bars(market_store, flat_prelude(sessions=6, symbol="BBB"))
+        short_result = update_tracking(
+            state_store,
+            market_store,
+            backtest_config.model_copy(update={"exit_atr_period": self._SHORT_PERIOD}),
+            as_of=ENTRY_DATE,
+        )
+
+        assert short_result.notes == ()
+        seeded = state_store.get_verdict_position(short_run_id, "BBB")
+        assert seeded is not None
+        assert seeded.stop_price == pytest.approx(RISK_STOP)

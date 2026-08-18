@@ -270,23 +270,37 @@ INIT_SCHEMA_STATEMENTS = (
         as_of              DATE NOT NULL,
         recommendation     VARCHAR NOT NULL,
         forward_return_pct DOUBLE NOT NULL,
+        -- Issue #190: the benchmark's return over the *same* span, so
+        -- separation can be stated in excess terms instead of being confounded
+        -- with the market's own move. Nullable even here: a row evaluated
+        -- before the column existed, or one whose benchmark bars were
+        -- unavailable, records NULL ("not measured"), which readers must not
+        -- read as a flat benchmark.
+        benchmark_return_pct DOUBLE,
         classification     VARCHAR NOT NULL CHECK (classification IN (
             'HIT','MISS_MILD','MISS_SEVERE','NEUTRAL'
         )),
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
-    # Verdict tracking: the virtual position a `proceed` verdict implies, the
-    # daily marks that follow it, and the human's notes about it. Deliberately
-    # separate from `positions` (the FR-11/CON-04 paper-trading gate, which
-    # records what a *human* decided to hold) and from `verdict_outcomes` (a
-    # two-point 5/20-session classification): this layer replays the backtest's
-    # own exit rules forward, one trading day at a time.
+    # Verdict tracking: the virtual position a verdict implies, the daily marks
+    # that follow it, and the human's notes about it. Deliberately separate
+    # from `positions` (the FR-11/CON-04 paper-trading gate, which records what
+    # a *human* decided to hold) and from `verdict_outcomes` (a two-point 5/20
+    # session classification): this layer replays the backtest's own exit rules
+    # forward, one trading day at a time.
+    #
+    # Issue #190: `skip` verdicts are shadow-tracked under the *same* exit
+    # rules, which is what makes "proceed only vs every screened candidate" a
+    # counterfactual rather than two incomparable numbers. `recommendation`
+    # records which side a row belongs to; NULL means `proceed`, because every
+    # row written before this change could only have been one.
     """
     CREATE TABLE IF NOT EXISTS verdict_positions (
         run_id              UUID NOT NULL,
         symbol              VARCHAR NOT NULL,
         strategy_key        VARCHAR NOT NULL,
+        recommendation      VARCHAR,
         no_trade            BOOLEAN NOT NULL,
         entry_date          DATE NOT NULL,
         entry_price         DOUBLE NOT NULL,
@@ -423,6 +437,24 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE verdicts "
     "ADD COLUMN IF NOT EXISTS news_supply_symbol_mention_items INTEGER",
     "ALTER TABLE verdicts ADD COLUMN IF NOT EXISTS news_supply_level VARCHAR",
+    # Issue #190: `skip` verdicts are now shadow-tracked alongside `proceed`
+    # ones, so a position has to say which side it belongs to. Backfilled to
+    # 'proceed', on the same reasoning as `verdict_positions.no_trade` above:
+    # every row already in the table was necessarily opened while only
+    # `proceed` verdicts were tracked, so this restates a fact those rows
+    # already carry rather than guessing at one. Application code still reads
+    # NULL as 'proceed' (`tracking_records._position`), so a database that
+    # somehow skips the backfill still reads correctly. Both idempotent.
+    "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS recommendation VARCHAR",
+    "UPDATE verdict_positions SET recommendation = 'proceed' "
+    "WHERE recommendation IS NULL",
+    # Issue #190: the benchmark's return over each classification's own span,
+    # for the excess-return separation metric. Explicitly *not* backfilled --
+    # nothing in an existing row says what the benchmark did over its span, and
+    # a backfilled 0 would read as a measured flat market. A re-`evaluate`
+    # fills it in, because `replace_verdict_outcomes` replaces the slice
+    # wholesale.
+    "ALTER TABLE verdict_outcomes ADD COLUMN IF NOT EXISTS benchmark_return_pct DOUBLE",
 )
 
 # Read-only analysis views for `swing_copilot.research` and ad-hoc SQL
@@ -489,7 +521,9 @@ ANALYSIS_VIEW_STATEMENTS = (
         p.run_id,
         p.symbol,
         p.strategy_key,
-        v.recommendation,
+        -- Issue #190: the position's own side, falling back to the verdict's
+        -- for a row written before the column existed (NULL == 'proceed').
+        COALESCE(p.recommendation, v.recommendation) AS recommendation,
         p.no_trade,
         p.entry_date,
         p.entry_price,

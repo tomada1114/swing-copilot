@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
-from swing_copilot.backtest.exits import atr14_as_of, evaluate_exit, next_trailing_stop
+from swing_copilot.backtest.exits import atr_as_of, evaluate_exit, next_trailing_stop
 from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
     ENTRY_BLOCK_INSUFFICIENT_CASH,
@@ -272,6 +272,11 @@ class BacktestEngine:
         self._max_concurrent_positions = max(1, int(1 / settings.risk.max_position_pct))
         self._max_position_pct = settings.risk.max_position_pct
         self._max_trade_risk_pct = settings.risk.max_trade_risk_pct
+        # Issue #194: the trailing stop's ATR period is configuration, not a
+        # constant. It governs the *exit* side only; the entry stop keeps using
+        # the screening metric `atr14` so the simulator sizes a position with
+        # exactly the number `risk/checks.py` would have used in production.
+        self._exit_atr_period = settings.backtest.exit_atr_period
         # P2-09: applied on both entry and exit (incl. forced liquidation) --
         # a single computed rate so every call site stays in sync.
         self._slippage_pct = (
@@ -599,13 +604,13 @@ class BacktestEngine:
     ) -> None:
         for position in state.open_positions.values():
             bar = _bar(bars, position.symbol, day)
-            atr14 = atr14_as_of(bars, position.symbol, day)
-            if bar is None or atr14 is None:
+            atr = atr_as_of(bars, position.symbol, day, self._exit_atr_period)
+            if bar is None or atr is None:
                 continue
             position.stop_price = next_trailing_stop(
                 current_stop=position.stop_price,
                 close=bar["close"],
-                atr=atr14,
+                atr=atr,
                 exit_atr_multiple=self._backtest_config.exit_atr_multiple,
             )
 

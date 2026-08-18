@@ -91,9 +91,10 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    求めていなければ**上書きしない**。既存の提案を要約して報告し、再実行するか確認する
 2. `retro_input.json` を読み、`as_of` / `input_digest` / `window_start` を控える
    （2 値は後段で result に逐語転記する。不一致は run ごと hard fail）
-3. 読む順序: `aggregates`（verdict_mix → separation → proceed 重大外し率 → skip 的中率
-   → news_supply）→
-   `signal_performance` → `human_alignment` → `source_contribution` → `basis_contribution` → `surprises` →
+3. 読む順序: `aggregates`（verdict_mix → separation 3 版 → tracked_performance →
+   proceed 重大外し率 → skip 的中率 → news_supply）→
+   `signal_performance` → `human_alignment` → `source_contribution` →
+   `basis_contribution` → `surprises` →
    `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
    proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、
    `verdict_mix` は成熟を待たず窓内の verdicts から算出されるため沈黙しない
@@ -102,6 +103,20 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    過去に却下・検証不合格になった提案は Step 4 の突合対象になる
 5. `is_preliminary: true` の指標は「暫定」。`value: null` は「この窓では測れない」で
    あって「ゼロ」ではない。両者を混同した提案は書かない
+5b. separation は 3 版ある（`metric:separation:*` = 窓全体プール平均差、
+   `metric:separation_paired:*` = run 日ごとの差の平均、
+   `metric:separation_paired_excess:*` = 同じペアリングをベンチマーク超過リターンで）。
+   **プール版だけを根拠にしない**——地合いと交絡しうる。3 版が一致すれば効果はベータ
+   由来でないことの傍証、食い違えばその食い違い自体が所見である。一致するまで版を
+   選び直すのは AC15 の「検査を通すための書き換え」に当たる
+5c. `stderr` / `ci_low` / `ci_high`（両側 95%）を必ず見る。**区間が 0 を跨ぐ点推定を
+   根拠に config を動かさない**。重み合成のヘッドラインに区間が無いのは意図であり
+   （5 日と 20 日は同じ run を測り直した非独立な 2 窓）、そこを「精度が高い」と
+   読んではならない。詳細は `references/proposal-rules.md`
+5d. `tracked_performance` は追跡台帳の実現成績を proceed / skip / all で層別したもの。
+   skip 群は**同一の出口ルールで仮想追跡した反実仮想**であって実際に提案された建玉では
+   ない。proceed と skip の差が verdict レイヤの寄与そのものだが、両群の
+   `closed_count` を必ず併記して読むこと
 6. `input_coverage` と各サプライズの `input_filing_coverage` を確認する。
    `severe_miss_symbol_count_with_gap` は情報不足との併存数であり因果を証明しない。
    `without_gap` / `unknown` と比較し、個別dossierの章状態を読んだうえでのみ

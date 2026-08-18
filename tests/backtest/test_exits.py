@@ -15,15 +15,17 @@ import pandas as pd
 import pytest
 
 from swing_copilot.backtest.exits import (
-    ATR_PERIOD,
     ExitDecision,
-    atr14_as_of,
-    atr14_by_date,
+    atr_as_of,
+    atr_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
 
 _START = date(2027, 1, 1)
+#: `settings.backtest.exit_atr_period`'s shipped value; these tests pin the
+#: shape of the function, not the configured number (Issue #194).
+_PERIOD = 14
 
 
 def _days(count: int) -> list[date]:
@@ -249,32 +251,64 @@ def test_next_trailing_stop_equal_candidate_keeps_same_value() -> None:
     )
 
 
-# --- atr14_as_of -------------------------------------------------------------
+# --- atr_as_of -------------------------------------------------------------
 
 
-def test_atr14_as_of_uses_fourteen_period_window() -> None:
-    assert ATR_PERIOD == 14
+def test_atr_as_of_smoothing_period_follows_the_argument() -> None:
+    # Issue #194: the period is configuration, not a constant. A shorter
+    # period reacts faster to one spike day, so the two values must differ by
+    # exactly the Wilder step each period implies.
+    days = _days(21)
+    rows = _flat_rows(days[:20])
+    rows.append(
+        {
+            "symbol": "AAA",
+            "date": days[20],
+            "open": 100.0,
+            "high": 110.0,
+            "low": 100.0,
+            "close": 105.0,
+        }
+    )
+    frame = _frame(rows)
+
+    with_14 = atr_as_of(frame, "AAA", days[20], 14)
+    with_7 = atr_as_of(frame, "AAA", days[20], 7)
+
+    assert with_14 == pytest.approx(2.0 + 8.0 / 14.0)
+    assert with_7 == pytest.approx(2.0 + 8.0 / 7.0)
 
 
-def test_atr14_as_of_insufficient_history_returns_none() -> None:
-    days = _days(ATR_PERIOD - 1)
+def test_atr_as_of_minimum_history_boundary_follows_the_period() -> None:
+    days = _days(10)
+    frame = _frame(_flat_rows(days))
 
-    assert atr14_as_of(_frame(_flat_rows(days)), "AAA", days[-1]) is None
-
-
-def test_atr14_as_of_exactly_period_bars_returns_value() -> None:
-    days = _days(ATR_PERIOD)
-
-    assert atr14_as_of(_frame(_flat_rows(days)), "AAA", days[-1]) == pytest.approx(2.0)
+    # 10 bars is short of a 14-period ATR but enough for a 10-period one.
+    assert atr_as_of(frame, "AAA", days[-1], 14) is None
+    assert atr_as_of(frame, "AAA", days[-1], 10) == pytest.approx(2.0)
 
 
-def test_atr14_as_of_unknown_symbol_returns_none() -> None:
+def test_atr_as_of_insufficient_history_returns_none() -> None:
+    days = _days(_PERIOD - 1)
+
+    assert atr_as_of(_frame(_flat_rows(days)), "AAA", days[-1], _PERIOD) is None
+
+
+def test_atr_as_of_exactly_period_bars_returns_value() -> None:
+    days = _days(_PERIOD)
+
+    assert atr_as_of(
+        _frame(_flat_rows(days)), "AAA", days[-1], _PERIOD
+    ) == pytest.approx(2.0)
+
+
+def test_atr_as_of_unknown_symbol_returns_none() -> None:
     days = _days(20)
 
-    assert atr14_as_of(_frame(_flat_rows(days)), "ZZZ", days[-1]) is None
+    assert atr_as_of(_frame(_flat_rows(days)), "ZZZ", days[-1], _PERIOD) is None
 
 
-def test_atr14_as_of_all_nan_bars_returns_none() -> None:
+def test_atr_as_of_all_nan_bars_returns_none() -> None:
     days = _days(20)
     rows: list[dict[str, object]] = [
         {
@@ -288,10 +322,10 @@ def test_atr14_as_of_all_nan_bars_returns_none() -> None:
         for day in days
     ]
 
-    assert atr14_as_of(_frame(rows), "AAA", days[-1]) is None
+    assert atr_as_of(_frame(rows), "AAA", days[-1], _PERIOD) is None
 
 
-def test_atr14_as_of_ignores_bars_after_cutoff() -> None:
+def test_atr_as_of_ignores_bars_after_cutoff() -> None:
     days = _days(21)
     rows = _flat_rows(days[:20])
     spike_day = days[20]
@@ -309,19 +343,19 @@ def test_atr14_as_of_ignores_bars_after_cutoff() -> None:
     )
     frame = _frame(rows)
 
-    before = atr14_as_of(frame, "AAA", days[19])
-    at_cutoff = atr14_as_of(frame, "AAA", spike_day)
+    before = atr_as_of(frame, "AAA", days[19], _PERIOD)
+    at_cutoff = atr_as_of(frame, "AAA", spike_day, _PERIOD)
 
     assert before == pytest.approx(2.0)
     assert at_cutoff == pytest.approx(2.0 + 8.0 / 14.0)
 
 
-# --- atr14_by_date -----------------------------------------------------------
+# --- atr_by_date -----------------------------------------------------------
 
 
-def test_atr14_by_date_matches_atr14_as_of_for_every_session() -> None:
+def test_atr_by_date_matches_atr_as_of_for_every_session() -> None:
     # The one-pass map is the contract: a caller replaying a position day by
-    # day must get exactly what a per-day `atr14_as_of` call would return, or
+    # day must get exactly what a per-day `atr_as_of` call would return, or
     # the ledger's trailing stop drifts away from the engine's.
     days = _days(21)
     rows = _flat_rows(days[:20])
@@ -337,39 +371,64 @@ def test_atr14_by_date_matches_atr14_as_of_for_every_session() -> None:
     )
     frame = _frame(rows)
 
-    by_date = atr14_by_date(frame, "AAA", days[-1])
+    by_date = atr_by_date(frame, "AAA", days[-1], _PERIOD)
 
     assert by_date == {
-        day: pytest.approx(atr14_as_of(frame, "AAA", day))
+        day: pytest.approx(atr_as_of(frame, "AAA", day, _PERIOD))
         for day in days
-        if atr14_as_of(frame, "AAA", day) is not None
+        if atr_as_of(frame, "AAA", day, _PERIOD) is not None
     }
 
 
-def test_atr14_by_date_omits_sessions_without_enough_history() -> None:
-    days = _days(ATR_PERIOD + 1)
+def test_atr_by_date_smoothing_period_follows_the_argument() -> None:
+    # The one-pass map must honor the same configured period as `atr_as_of`,
+    # or a ledger replay would trail a different stop than the simulator.
+    days = _days(21)
+    rows = _flat_rows(days[:20])
+    rows.append(
+        {
+            "symbol": "AAA",
+            "date": days[20],
+            "open": 100.0,
+            "high": 110.0,
+            "low": 100.0,
+            "close": 105.0,
+        }
+    )
+    frame = _frame(rows)
 
-    by_date = atr14_by_date(_frame(_flat_rows(days)), "AAA", days[-1])
+    assert atr_by_date(frame, "AAA", days[20], 7)[days[20]] == pytest.approx(
+        atr_as_of(frame, "AAA", days[20], 7)
+    )
+    assert atr_by_date(frame, "AAA", days[20], 7)[days[20]] != pytest.approx(
+        atr_by_date(frame, "AAA", days[20], 14)[days[20]]
+    )
 
-    # `min_periods=ATR_PERIOD`: the first value lands on the 14th session.
-    assert sorted(by_date) == days[ATR_PERIOD - 1 :]
+
+def test_atr_by_date_omits_sessions_without_enough_history() -> None:
+    days = _days(_PERIOD + 1)
+
+    by_date = atr_by_date(_frame(_flat_rows(days)), "AAA", days[-1], _PERIOD)
+
+    # `min_periods=_PERIOD`: the first value lands on the 14th session.
+    assert sorted(by_date) == days[_PERIOD - 1 :]
 
 
-def test_atr14_by_date_ignores_bars_after_cutoff() -> None:
+def test_atr_by_date_ignores_bars_after_cutoff() -> None:
     days = _days(21)
 
-    by_date = atr14_by_date(_frame(_flat_rows(days)), "AAA", days[15])
+    by_date = atr_by_date(_frame(_flat_rows(days)), "AAA", days[15], _PERIOD)
 
     assert max(by_date) == days[15]
 
 
-def test_atr14_by_date_insufficient_history_returns_empty() -> None:
-    days = _days(ATR_PERIOD - 1)
+def test_atr_by_date_insufficient_history_returns_empty() -> None:
+    days = _days(_PERIOD - 1)
 
-    assert atr14_by_date(_frame(_flat_rows(days)), "AAA", days[-1]) == {}
+    assert atr_by_date(_frame(_flat_rows(days)), "AAA", days[-1], _PERIOD) == {}
 
 
-def test_atr14_by_date_unknown_symbol_returns_empty() -> None:
+def test_atr_by_date_unknown_symbol_returns_empty() -> None:
     days = _days(20)
 
-    assert atr14_by_date(_frame(_flat_rows(days)), "ZZZ", days[-1]) == {}
+    assert atr_by_date(_frame(_flat_rows(days)), "ZZZ", days[-1], _PERIOD) == {}

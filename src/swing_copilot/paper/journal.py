@@ -17,10 +17,18 @@ from datetime import datetime, time
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from swing_copilot.backtest.metrics import (
+    compute_avg_r_multiple,
+    compute_expectancy_per_trade,
+    compute_profit_factor,
+    compute_win_rate,
+    trade_r_multiple,
+)
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from datetime import date
     from uuid import UUID
 
@@ -44,6 +52,42 @@ class PositionNotClosableError(SwingCopilotError):
 
 class InvalidDecisionError(SwingCopilotError):
     """Raised when `record_decision()` receives an unrecognized `decision` value."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ClosedPaperTrade:
+    """One closed paper `Position` in `backtest.metrics.ClosedTrade` shape.
+
+    Issue #190: the journal used to carry private copies of the win-rate,
+    profit-factor, and R-multiple rules, which is how three ledgers ended up
+    able to disagree about what a "win" is. It now adapts its rows into the
+    shared protocol instead and delegates every rate to `backtest/metrics.py`.
+
+    `pnl` is the raw price move times the size -- the paper journal charges no
+    commission, unlike the simulator -- and `days_held` counts calendar days
+    between the two fills, because this layer has no trading calendar of its
+    own. `strategy_key` is carried along purely so the breakdowns can group
+    the same objects the aggregates are computed from.
+    """
+
+    entry_date: date
+    entry_price: float
+    exit_date: date
+    exit_price: float
+    shares: float
+    initial_stop_price: float | None
+    exit_reason: str
+    strategy_key: str
+
+    @property
+    def pnl(self) -> float:
+        """Realized profit/loss in USD, before any (unmodelled) costs."""
+        return (self.exit_price - self.entry_price) * self.shares
+
+    @property
+    def days_held(self) -> int:
+        """Calendar days between entry and exit fills."""
+        return (self.exit_date - self.entry_date).days
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,30 +312,57 @@ class PaperJournal:
             )
 
         positions = [position for position, _ in rows]
-        pnls = [self._position_pnl(position) for position in positions]
-        trade_count = len(pnls)
+        trades = [self._closed_trade(position, key) for position, key in rows]
+        trade_count = len(trades)
         earliest_entry = min(position.entry_date for position in positions)
 
-        avg_r_multiple, omitted_count, warning = self._r_multiple_stats(positions, pnls)
+        avg_r_multiple, omitted_count, warning = self._r_multiple_stats(trades)
         avg_mae, avg_mfe, excursion_omitted = self._excursion_stats(positions, as_of)
-        expectancy = sum(pnls) / trade_count
+        # Non-None by construction: `trades` is non-empty on this branch.
+        expectancy = compute_expectancy_per_trade(trades)
+        assert expectancy is not None  # noqa: S101
 
         return PerformanceSummary(
             closed_trade_count=trade_count,
-            total_pnl_usd=sum(pnls),
-            win_rate=self._win_rate(pnls),
+            total_pnl_usd=sum(trade.pnl for trade in trades),
+            win_rate=compute_win_rate(trades),
             spy_return_pct=self._spy_return_pct(market_store, earliest_entry, as_of),
             expectancy_usd=expectancy,
-            profit_factor=self._profit_factor(pnls),
+            profit_factor=compute_profit_factor(trades),
             avg_r_multiple=avg_r_multiple,
             r_multiple_omitted_count=omitted_count,
             r_multiple_omitted_warning=warning,
-            by_exit_reason=self._breakdown_by_exit_reason(positions, pnls),
-            by_strategy=self._breakdown_by_strategy(rows, pnls),
+            by_exit_reason=self._rows_from_groups(
+                self._group_by(trades, lambda trade: trade.exit_reason)
+            ),
+            by_strategy=self._rows_from_groups(
+                self._group_by(trades, lambda trade: trade.strategy_key)
+            ),
             avg_mae_usd=avg_mae,
             avg_mfe_usd=avg_mfe,
             excursion_omitted_count=excursion_omitted,
             excursion_notes=self._excursion_notes(avg_mae, avg_mfe, expectancy),
+        )
+
+    @staticmethod
+    def _closed_trade(
+        position: Position, strategy_key: str | None
+    ) -> _ClosedPaperTrade:
+        """Adapt one closed paper position into the shared measurement shape."""
+        # Only ever called on rows from get_closed_positions*(): status="closed"
+        # is set exclusively by close_position(), which always sets close_price
+        # and close_date too.
+        assert position.close_price is not None  # noqa: S101
+        assert position.close_date is not None  # noqa: S101
+        return _ClosedPaperTrade(
+            entry_date=position.entry_date,
+            entry_price=position.entry_price,
+            exit_date=position.close_date,
+            exit_price=position.close_price,
+            shares=position.shares,
+            initial_stop_price=position.stop_price,
+            exit_reason=position.exit_reason or _UNKNOWN_BUCKET_KEY,
+            strategy_key=strategy_key or _UNKNOWN_BUCKET_KEY,
         )
 
     def _excursion_stats(
@@ -337,98 +408,46 @@ class PaperJournal:
         return tuple(notes)
 
     @staticmethod
-    def _position_pnl(position: Position) -> float:
-        # Only ever called on rows from get_closed_positions*(): status="closed"
-        # is set exclusively by close_position(), which always sets close_price too.
-        assert position.close_price is not None  # noqa: S101
-        return (position.close_price - position.entry_price) * position.shares
-
-    @staticmethod
-    def _win_rate(pnls: list[float]) -> float | None:
-        # P1-06 win/loss convention (documented once, applied everywhere
-        # win_rate is computed): pnl > 0 is a win; pnl == 0 is neutral
-        # (counted in the denominator, excluded from the win numerator);
-        # pnl < 0 is a loss. None only when there are zero trades to rate.
-        if not pnls:
-            return None
-        wins = sum(1 for pnl in pnls if pnl > 0)
-        return wins / len(pnls)
-
-    @staticmethod
-    def _profit_factor(pnls: list[float]) -> float | None:
-        # Same win/neutral/loss convention as _win_rate(): pnl == 0
-        # contributes to neither the gain nor the loss sum (REQ-021/022's
-        # boundary text leaves this choice to the implementation; fixed here).
-        gains = sum(pnl for pnl in pnls if pnl > 0)
-        losses = sum(-pnl for pnl in pnls if pnl < 0)  # positive magnitude
-        if losses == 0:
-            return None
-        return gains / losses
-
-    @staticmethod
-    def _r_multiple(position: Position, pnl: float) -> float | None:
-        # R-multiple = pnl / ((entry - stop) * shares). Omitted when stop
-        # isn't recorded, and also — a defensive extension beyond the
-        # issue's literal text — when entry - stop <= 0: that's a data
-        # anomaly (stop at or above entry), not a legitimate zero/negative
-        # risk-per-share, and would otherwise divide by zero or invert sign.
-        if position.stop_price is None:
-            return None
-        risk_per_share = position.entry_price - position.stop_price
-        if risk_per_share <= 0:
-            return None
-        return pnl / (risk_per_share * position.shares)
-
-    @classmethod
     def _r_multiple_stats(
-        cls, positions: list[Position], pnls: list[float]
+        trades: Sequence[_ClosedPaperTrade],
     ) -> tuple[float | None, int, str | None]:
-        computed: list[float] = []
-        omitted_count = 0
-        for position, pnl in zip(positions, pnls, strict=True):
-            r_multiple = cls._r_multiple(position, pnl)
-            if r_multiple is None:
-                omitted_count += 1
-            else:
-                computed.append(r_multiple)
-        avg_r_multiple = sum(computed) / len(computed) if computed else None
+        """Average the computable R-multiples and count what was left out.
+
+        The average itself is `backtest.metrics.compute_avg_r_multiple`; only
+        the *reporting* of the omissions (REQ-022) lives here, counted through
+        the same `trade_r_multiple` rule the average uses so the two can never
+        disagree about which trades were excluded.
+        """
+        omitted_count = sum(1 for trade in trades if trade_r_multiple(trade) is None)
         warning = (
             f"{omitted_count}件のトレードでstop未記録のためR-multiple省略"
             if omitted_count > 0
             else None
         )
-        return avg_r_multiple, omitted_count, warning
+        return compute_avg_r_multiple(trades), omitted_count, warning
 
-    @classmethod
-    def _breakdown_by_exit_reason(
-        cls, positions: list[Position], pnls: list[float]
-    ) -> tuple[PerformanceBreakdownRow, ...]:
-        groups: dict[str, list[float]] = defaultdict(list)
-        for position, pnl in zip(positions, pnls, strict=True):
-            groups[position.exit_reason or _UNKNOWN_BUCKET_KEY].append(pnl)
-        return cls._rows_from_groups(groups)
+    @staticmethod
+    def _group_by(
+        trades: Sequence[_ClosedPaperTrade],
+        key: Callable[[_ClosedPaperTrade], str],
+    ) -> dict[str, list[_ClosedPaperTrade]]:
+        groups: dict[str, list[_ClosedPaperTrade]] = defaultdict(list)
+        for trade in trades:
+            groups[key(trade)].append(trade)
+        return groups
 
-    @classmethod
-    def _breakdown_by_strategy(
-        cls, rows: list[tuple[Position, str | None]], pnls: list[float]
-    ) -> tuple[PerformanceBreakdownRow, ...]:
-        groups: dict[str, list[float]] = defaultdict(list)
-        for (_, strategy_key), pnl in zip(rows, pnls, strict=True):
-            groups[strategy_key or _UNKNOWN_BUCKET_KEY].append(pnl)
-        return cls._rows_from_groups(groups)
-
-    @classmethod
+    @staticmethod
     def _rows_from_groups(
-        cls, groups: dict[str, list[float]]
+        groups: dict[str, list[_ClosedPaperTrade]],
     ) -> tuple[PerformanceBreakdownRow, ...]:
         return tuple(
             PerformanceBreakdownRow(
                 key=key,
-                trade_count=len(group_pnls),
-                win_rate=cls._win_rate(group_pnls),
-                avg_pnl_usd=sum(group_pnls) / len(group_pnls) if group_pnls else None,
+                trade_count=len(group),
+                win_rate=compute_win_rate(group),
+                avg_pnl_usd=compute_expectancy_per_trade(group),
             )
-            for key, group_pnls in sorted(groups.items())
+            for key, group in sorted(groups.items())
         )
 
     @staticmethod

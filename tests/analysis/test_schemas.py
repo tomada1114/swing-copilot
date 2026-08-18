@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
+    VERDICT_BASES,
     AnalysisContextBlocks,
     AnalysisInput,
     AnalysisResult,
@@ -255,6 +256,25 @@ class TestProvenanceShape:
         )
         assert reason.source_ids == []
 
+    def test_an_untagged_reason_keeps_basis_none_rather_than_a_default_kind(self):
+        """Issue #191: absent means "not tagged", never "tagged as technical"."""
+        reason = VerdictReason.model_validate(
+            {"text": "Score alone justifies proceeding."}
+        )
+        assert reason.basis is None
+
+    @pytest.mark.parametrize("basis", VERDICT_BASES)
+    def test_every_documented_basis_value_is_accepted(self, basis):
+        reason = VerdictReason.model_validate(
+            {"text": "Earnings beat.", "source_ids": [NEWS_ID], "basis": basis}
+        )
+        assert reason.basis == basis
+
+    def test_a_basis_outside_the_closed_vocabulary_is_rejected(self):
+        """A free-text tag cannot be aggregated, which is the whole point."""
+        with pytest.raises(ValidationError, match="basis"):
+            VerdictReason.model_validate({"text": "Gut feeling.", "basis": "vibes"})
+
     def test_a_quote_below_the_minimum_length_is_rejected(self):
         # Wording this common occurs in any body, so it would evidence nothing.
         with pytest.raises(ValidationError, match="at least 12 characters"):
@@ -344,6 +364,24 @@ class TestInputRoundTrip:
     def test_a_generated_input_reparses_unchanged(self):
         parsed = AnalysisInput.model_validate(input_payload())
         assert AnalysisInput.model_validate(parsed.model_dump(mode="json")) == parsed
+
+    def test_an_input_archived_before_prior_verdicts_still_verifies(self):
+        """Issue #191 added a field; P8 collect must keep reading old runs.
+
+        The digest is checked against the document as written, so an archive
+        that never had the key hashes exactly as it did the day it was
+        written -- and comes back as "no prior verdict", not as a failure.
+        """
+        payload = input_payload()
+        for candidate in payload["candidates"]:
+            del candidate["prior_verdicts"]
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+
+        parsed = AnalysisInput.model_validate(payload)
+
+        assert parsed.candidates[0].prior_verdicts is None
 
 
 class TestCalendarEventsContext:

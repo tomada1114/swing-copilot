@@ -103,6 +103,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/09_research_guide.md`、アドホック分析の入口は `swing-research`
   スキル。2026-08 アーキテクチャレビュー（`docs/08_architecture_review_2026-08.md`、
   改修計画は Issue #184〜#195）の実装第一弾
+- **同一銘柄が再候補になったとき、過去の verdict とその後の当否が
+  `analysis_input.json` に載るようになった**（Issue #191、2026-08 アーキテクチャ
+  レビューの P1）。従来スキルは「前回自分がどの根拠で proceed/skip し、その後
+  どうなったか」を見る経路が構造的に無く、繰り返し外している根拠パターンに
+  自ら気づけなかった。`candidates[].prior_verdicts` に、同一銘柄・戦略の過去
+  verdict と成熟済みの `HIT`/`MISS_*`・`forward_return_pct` を対で載せる。
+  人間の記帳である `decision_history` とは別読み（`trades_journal` は人間が
+  記録したときしか行を持たないため）。時点整合性は `as_of < run_date` の厳密
+  不等号で、過去 run の `source_id` は持ち帰らない
+- **`verdict.reasons[].basis`（根拠タイプの閉集合タグ）を追加した**（Issue
+  #191）。`technical_score` / `news_catalyst` / `filing_fundamental` /
+  `risk_sizing` / `market_regime` / `peer_relative` の 6 値。retro に
+  `basis_contribution`（根拠タイプ別の verdict 件数と HIT 比率）が加わり、
+  「決算根拠の proceed」と「テクニカルのみ根拠の proceed」のヒット率を初めて
+  比較できる。従来 `source_contribution` は provider 単位までしか切れなかった。
+  タグの無い理由は `untagged` として計上し、タグ付与率そのものを可視化する。
+  ingest はこのタグの正しさを検証できない（照合先が入力に無い）ため、スキル
+  文書側で「自信が無ければ省略する」を規約化した
+- **`score_breakdown` に加重前の生値が並ぶようになった**（Issue #191）。
+  `close` / `rsi14` / `sma50` / `sma200` / `avg_volume` と導出 `atr14_pct` を
+  「参考情報（コード計算・上書き不可）」として同じブロック内へ追記する。
+  正規化済みの加重値だけでは RSI14 が 28 なのか 44 なのかを区別できず、
+  押し目の深さという定性的読みがまさにその情報に依存していた
+- スキーマとスキル文書のドリフト検出テスト（Issue #191）。`AnalysisResult` の
+  pydantic `model_fields` を再帰的に走査し、全フィールド名と全 `basis` 値が
+  `references/output-schema.md` に現れることを検証する
+
+### Changed
+
+- `analysis.sufficient_news_mention_items`（既定 5）を新設し、`news_supply` の
+  `sufficient` しきい値を設定化した（Issue #191）。従来は
+  `news_supply.py` の定数で、1 run の較正値がそのまま固定されていた
+- 開示の per-symbol 予算配分順を「決算関連 8-K > 10-Q > その他」へ再設計した
+  （Issue #191）。従来は 10-Q 固定優先で、予算枯渇時に決算プレスリリース
+  （`EX-99*` を伴う 8-K）だけが `omitted_symbol_budget` になりえた。
+  変わるのは配分順だけで、返却順は従来どおり新しい順
 
 ### Fixed
 

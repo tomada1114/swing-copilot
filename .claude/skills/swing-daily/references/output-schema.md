@@ -285,7 +285,8 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
       },
       "verdict": {                   // 全銘柄必須
         "recommendation": "proceed",  // "proceed" | "skip" の 2 値【固定】
-        "reasons": [ { "text": "...", "source_ids": ["news-..."] } ]
+        "reasons": [ { "text": "...", "source_ids": ["news-..."],
+                       "basis": "news_catalyst" } ]
       }
     }
   ],
@@ -311,6 +312,23 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   ingest の provenance 検査に落ちる。`verdict.reasons` にはこのフィールドは無い。
 - `verdict.reasons[].source_ids`: ニュース／開示／`context.calendar_events`に基づく
   理由は該当 `source_id` を必ず引用。スコア等の決定論的入力のみに基づく理由は空リスト可。
+- `verdict.reasons[].basis`: その理由がどの**種類**の根拠に立っているかを表す
+  閉集合タグ。次の 6 値のいずれか、または省略（`null`）。
+  - `technical_score` — `score_breakdown` の複合スコア・加重内訳・生値
+    （RSI14 / SMA50 / SMA200 / ATR14 比率 / 終値 / 平均出来高）に基づく理由
+  - `news_catalyst` — ニュース記事が報じた材料に基づく理由
+  - `filing_fundamental` — 開示（10-Q / 10-K / 8-K）の内容に基づく理由
+  - `risk_sizing` — `risk_constraints` の binding_constraint・株数・warnings に
+    基づく理由
+  - `market_regime` — `context.market_regime` のゲート・分配日・エクスポージャ
+    上限に基づく理由
+  - `peer_relative` — 同業他社・セクター全体との相対比較に基づく理由
+  1 つの理由が複数種類にまたがるなら、**その理由を分割して 1 つずつ書く**。
+  迷ったら省略してよい（`untagged` として集計される）が、根拠が明確なものは
+  必ず付ける: このタグだけが「決算根拠の proceed とテクニカルのみ根拠の proceed の
+  どちらが当たっているか」を後から測れる唯一の手掛かりであり、ingest 側は
+  正しさを検証できない（＝誤ったタグは provenance 検査に掛からず、集計だけを
+  歪める）。
 - `no_trade=true` のときだけ、非空白の `no_trade_reason` に理由を書く（CON-03 検査対象）。
   `no_trade=false` のときは `no_trade_reason` を必ず `null` にする。
 

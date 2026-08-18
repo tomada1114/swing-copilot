@@ -22,6 +22,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.documents import read_text_document
 from swing_copilot.exceptions import ConfigError
 
@@ -347,6 +348,14 @@ class AnalysisConfig(_StrictModel):
     # to any one candidate).
     max_calendar_events: int = Field(default=20, ge=1)
     max_calendar_chars_per_item: int = Field(default=2000, ge=1)
+    # How many exported articles must name the candidate before its news feed
+    # is graded `sufficient` (Issue #130's measurement, made configurable by
+    # Issue #191). The shipped default is one run's calibration, so it is a
+    # threshold requiring validation and therefore belongs in settings rather
+    # than in a module constant.
+    sufficient_news_mention_items: int = Field(
+        default=DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS, ge=1
+    )
 
     @model_validator(mode="after")
     def _verify_filing_export_budgets(self) -> Self:

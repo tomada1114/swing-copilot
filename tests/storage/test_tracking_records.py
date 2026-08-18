@@ -357,7 +357,9 @@ class TestVerdictReasons:
         raw = state_store.get_verdict_reasons_json(RUN_ID, SYMBOL)
 
         assert raw is not None
-        assert json.loads(raw) == [{"text": "出来高が伴う", "source_ids": []}]
+        assert json.loads(raw) == [
+            {"text": "出来高が伴う", "source_ids": [], "basis": None}
+        ]
 
     def test_a_position_whose_verdict_is_gone_reads_back_as_none(
         self, state_store: StateStore

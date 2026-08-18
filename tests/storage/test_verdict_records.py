@@ -21,6 +21,7 @@ from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
     NewsSupplyRecord,
+    PriorVerdictOutcome,
     VerdictOutcomeRecord,
     VerdictReasonRecord,
     VerdictRecord,
@@ -153,7 +154,7 @@ class TestReplaceRunVerdicts:
             ("AAPL", "default", AS_OF, "proceed", False)
         ]
         assert json.loads(str(rows[0][5])) == [
-            {"text": "堅調な受注", "source_ids": ["news-1"]}
+            {"text": "堅調な受注", "source_ids": ["news-1"], "basis": None}
         ]
         assert _rows(
             state_store,
@@ -924,3 +925,212 @@ class TestGetVerdictDecisionAlignment:
         state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
 
         assert state_store.get_verdict_decision_alignment(AS_OF, AS_OF) == ()
+
+
+class TestGetPriorVerdicts:
+    """Issue #191: a repeat candidate's own earlier verdicts, fed back in."""
+
+    @staticmethod
+    def _write(
+        state_store: StateStore,
+        symbol: str,
+        as_of: date,
+        *,
+        reasons: tuple[VerdictReasonRecord, ...] = (),
+        strategy_key: str = "default",
+    ) -> UUID:
+        run_id = uuid4()
+        verdict = replace(
+            _verdict(run_id, symbol, as_of=as_of, reasons=reasons),
+            strategy_key=strategy_key,
+        )
+        state_store.replace_run_verdicts(run_id, [verdict], [])
+        return run_id
+
+    def test_returns_the_reasons_and_their_matured_outcomes(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = self._write(
+            state_store,
+            "AAPL",
+            date(2026, 7, 1),
+            reasons=(
+                VerdictReasonRecord(
+                    text="受注が伸びている",
+                    source_ids=("edgar:1",),
+                    basis="filing_fundamental",
+                ),
+            ),
+        )
+        state_store.replace_verdict_outcomes(
+            run_id,
+            5,
+            [
+                _outcome(
+                    run_id,
+                    "AAPL",
+                    5,
+                    forward_return_pct=-6.0,
+                    classification="MISS_SEVERE",
+                )
+            ],
+        )
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+
+        assert len(prior) == 1
+        assert prior[0].recommendation == "proceed"
+        assert prior[0].reasons[0].basis == "filing_fundamental"
+        assert prior[0].outcomes == (
+            PriorVerdictOutcome(
+                horizon_days=5, classification="MISS_SEVERE", forward_return_pct=-6.0
+            ),
+        )
+
+    def test_a_verdict_whose_horizons_are_still_open_returns_no_outcomes(
+        self, state_store: StateStore
+    ) -> None:
+        """Not an error and not a neutral result -- just not measurable yet."""
+        self._write(state_store, "AAPL", date(2026, 7, 1))
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+
+        assert len(prior) == 1
+        assert prior[0].outcomes == ()
+
+    @pytest.mark.parametrize(
+        ("verdict_date", "is_visible"),
+        [
+            pytest.param(date(2026, 7, 19), True, id="day_before_cutoff"),
+            pytest.param(AS_OF, False, id="exactly_at_cutoff"),
+            pytest.param(date(2026, 7, 21), False, id="day_after_cutoff"),
+        ],
+    )
+    def test_the_point_in_time_cutoff_is_strictly_exclusive(
+        self, state_store: StateStore, verdict_date: date, is_visible: bool
+    ) -> None:
+        """Today's own verdict can never be fed back into today's own input."""
+        self._write(state_store, "AAPL", verdict_date)
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+
+        assert bool(prior) is is_visible
+
+    def test_only_the_same_strategys_verdicts_are_comparable_feedback(
+        self, state_store: StateStore
+    ) -> None:
+        self._write(
+            state_store, "AAPL", date(2026, 7, 1), strategy_key="mean_reversion"
+        )
+
+        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+
+    def test_another_symbols_verdict_is_never_returned(
+        self, state_store: StateStore
+    ) -> None:
+        self._write(state_store, "MSFT", date(2026, 7, 1))
+
+        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+
+    def test_the_newest_verdicts_are_kept_when_the_limit_bites(
+        self, state_store: StateStore
+    ) -> None:
+        for day in (1, 2, 3):
+            self._write(state_store, "AAPL", date(2026, 7, day))
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 2)
+
+        assert [record.as_of for record in prior] == [
+            date(2026, 7, 3),
+            date(2026, 7, 2),
+        ]
+
+    def test_a_non_positive_limit_reads_nothing_at_all(
+        self, state_store: StateStore
+    ) -> None:
+        self._write(state_store, "AAPL", date(2026, 7, 1))
+
+        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 0) == ()
+
+    def test_a_symbol_with_no_archived_verdict_returns_empty(
+        self, state_store: StateStore
+    ) -> None:
+        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+
+
+class TestGetVerdictReasonBasesInWindow:
+    """Issue #191: the `basis` counterpart of the citation window read."""
+
+    @staticmethod
+    def _matured(
+        state_store: StateStore,
+        symbol: str,
+        reasons: tuple[VerdictReasonRecord, ...],
+    ) -> UUID:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, symbol, reasons=reasons)], []
+        )
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, symbol)])
+        return run_id
+
+    def test_a_basis_repeated_within_one_verdict_is_counted_once(
+        self, state_store: StateStore
+    ) -> None:
+        """Measures which evidence decided a verdict, not how verbose it was."""
+        self._matured(
+            state_store,
+            "AAPL",
+            (
+                VerdictReasonRecord("a", (), "filing_fundamental"),
+                VerdictReasonRecord("b", (), "filing_fundamental"),
+                VerdictReasonRecord("c", (), "news_catalyst"),
+            ),
+        )
+
+        rows = state_store.get_verdict_reason_bases_in_window(AS_OF, AS_OF)
+
+        assert [row.basis for row in rows] == ["filing_fundamental", "news_catalyst"]
+
+    def test_an_untagged_reason_is_reported_rather_than_dropped(
+        self, state_store: StateStore
+    ) -> None:
+        self._matured(state_store, "AAPL", (VerdictReasonRecord("a", ()),))
+
+        rows = state_store.get_verdict_reason_bases_in_window(AS_OF, AS_OF)
+
+        assert [row.basis for row in rows] == [None]
+
+    def test_untagged_reasons_sort_after_every_tagged_one(
+        self, state_store: StateStore
+    ) -> None:
+        self._matured(
+            state_store,
+            "AAPL",
+            (
+                VerdictReasonRecord("a", ()),
+                VerdictReasonRecord("b", (), "technical_score"),
+            ),
+        )
+
+        rows = state_store.get_verdict_reason_bases_in_window(AS_OF, AS_OF)
+
+        assert [row.basis for row in rows] == ["technical_score", None]
+
+    def test_a_verdict_that_never_matured_is_outside_the_window(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id,
+            [
+                _verdict(
+                    run_id,
+                    "AAPL",
+                    reasons=(VerdictReasonRecord("a", (), "technical_score"),),
+                )
+            ],
+            [],
+        )
+
+        assert state_store.get_verdict_reason_bases_in_window(AS_OF, AS_OF) == ()

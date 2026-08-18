@@ -66,6 +66,7 @@ def input_payload(**overrides: Any) -> dict[str, Any]:
                 "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
                 "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
                 "decision_history": None,
+                "prior_verdicts": None,
                 "news": [
                     {
                         "source_id": NEWS_ID,

@@ -962,17 +962,20 @@ def format_score_breakdown(candidate: Candidate) -> str: ...          # P1-01複
 def format_risk_constraints(risk_assessment: RiskAssessment) -> str: ...  # P1-03サイジング内訳
 def format_performance_summary(summary: PerformanceSummary | None) -> str: ...  # P1-06実現損益
 def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str: ...
+def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str: ...  # Issue #191
 
 # analysis/export.py
 @dataclass(frozen=True, slots=True)
 class TextExportLimits:
     """max_news_items / max_news_chars / max_filing_chars /
     max_filing_chars_per_symbol /
-    max_calendar_events / max_calendar_chars"""
+    max_calendar_events / max_calendar_chars /
+    sufficient_news_mention_items"""
 
 @dataclass(frozen=True, slots=True)
 class ExportCandidate:
-    """candidate / risk_assessment / text_items / decision_history"""
+    """candidate / risk_assessment / text_items / decision_history /
+    prior_verdicts"""
 
 @dataclass(frozen=True, slots=True)
 class ExportRequest:
@@ -987,9 +990,13 @@ def form_type_of(title: str | None) -> str: ...   # validate.py と共有
 
 **改修原則4「判断はコード、叙述はスキル」（roadmap §5 P2-12の継承）**: `format_score_breakdown()`（P1-01）・`format_risk_constraints()`（P1-03）・`format_performance_summary()`（P1-06）は、いずれも「これはコードの決定論的計算結果であり分析側が再計算・上書きできない」旨を本文へ明記した純関数である。`format_risk_constraints()`は`not_calculable`や拒否判定でも空にせず常に描画する——「コードが既にREJECTと言っている」という信号自体が、保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採る）の前提情報だからである。逆に`format_score_breakdown()`と`format_performance_summary()`は構成要素が欠けていればプレースホルダを置かず`""`を返し、`export.py`が`None`へ落とす。
 
+**情報密度（Issue #191）**: `format_score_breakdown()`は加重後の内訳に続けて、加重前の生値（`close` / `rsi14` / `sma50` / `sma200` / `avg_volume`、および`atr14/close`から導出する`atr14_pct`）を「参考情報（コード計算・上書き不可）」として同じ`<score_breakdown>`要素の中へ追記する。正規化は大きさを潰すため、加重値だけではRSI14が28なのか44なのかを分析側が区別できない——押し目の深さという定性的読みがまさに依存する情報である。スキーマ変更ではなく文字列ブロックの追記とするのは、生値も加重値と同じ「コードが計算し分析側が書き換えられない値」であり、両側の契約を変えずに済むためである。生値は加重値と違い**フィールド単位で**劣化する（当該シグナルが未設定なら当該行だけ落ちる）。
+
+`format_prior_verdicts()`は同一銘柄・戦略の過去`verdicts`と、成熟済みの`verdict_outcomes`（`HIT`/`MISS_*`と`forward_return_pct`）を対にして`<prior_verdicts>`ブロックへ整形する。`format_decision_history()`（人間の記帳）とは別読みである——`trades_journal`は人間が記録したときにしか行を持たないため、そこへLEFT JOINすると「記帳された銘柄でしか自分の過去判断が見えない」という、本件が最も対象としない場合だけが残る。過去の理由文はスキルが書いた散文なので`format_decision_history()`と同じくエスケープしデータとして枠付けし、過去runの`source_ids`は持ち帰らない（当該runのIDではなく、`validate.py`が拒否すべき provenance 主張を誘発するため）。
+
 **レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・判断履歴は候補ごとの`news`/`filings`/`decision_history`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
 
-**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、10-Q/10-Q-Aを他様式より先に割り当てる。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴はdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。
+**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、決算関連8-K（`EX-99*`添付を持つ、または主文書がItem 2.02を名指しするもの）→ 10-Q/10-Q-A → その他様式の順に割り当てる（Issue #191。予算枯渇で決算プレスリリースだけが`omitted_symbol_budget`になる事象の解消。割り当て順のみを変え、返却順は従来どおり新しい順）。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴と過去verdictはdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。過去verdictの読み出しは`as_of < run_date`の**厳密な**不等号なので、当日の verdict が当日の入力へ還流することはない。なお`verdicts`表へ書くのは`retro_collect`ステップであり、これはステップ6のエクスポートより後に走るため、過去verdictの還流には1run分の遅延がある。
 
 10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
@@ -1651,7 +1658,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v3`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
 
-内容物（`aggregates`にはIssue #154の`news_supply`クロス集計を含む）: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+内容物（`aggregates`にはIssue #154の`news_supply`クロス集計を含む）: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `basis_contribution`（Issue #191。根拠タイプ別のverdict件数とHIT比率。`retro-input-v1`の互換のため既定は空リストで、digestは空の既定を無視する——追加以前に書かれたdossierの`input_digest`が当日から検証できなくなるのを避けるため）/ `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
 
 `collect`は各runの開示`coverage`を`analysis_source_coverage`へverdictと同じトランザクションで完全置換する。`input_coverage`は開示数、切り詰め（export段の`truncated_filing_count`と取得段の`exhibit_truncated_filing_count`。Issue #157、上記3.15）・fallback・銘柄予算による省略数と、重大外し銘柄の`with_gap` / `without_gap` / `unknown`をコードで数える。`with_gap`はどちらの段の切り詰めでも立ち、`without_gap`は全行が「gap無し」かつ`exhibit_truncated`記録済みのときだけ立つ（未記録を含めば`unknown`）。各サプライズにも当時の`input_filing_coverage`を付ける。この集計は「情報不足と外しの併存」を切り分ける観測であり、情報不足が外しを引き起こしたという因果判定ではない。過去の`analysis-input-v2`はcoverage不明として`unknown`へ数える。
 
@@ -1665,6 +1672,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 - verdict_mix: `verdict_mix`（`metric:`接頭辞を持たない素の文字列。ホライズンもベースラインも持たない単一値としてP8-120が採番したもので、他の集約指標と形が違う。スキルは`aggregates.verdict_mix.metric_id`の値をそのまま引き、接頭辞を補ってはならない）
 - 人間整合: `metric:human_alignment:<decision>:<recommendation>:<N>d`
 - ソース貢献: `metric:source_contribution:<source_type>:<provider>`
+- 根拠タイプ貢献: `metric:basis_contribution:<basis>`（`basis`は`analysis.schemas.VerdictBasis`の閉集合＋`untagged`）
 - news_supply: `metric:news_supply`（全体）と`metric:news_supply:<level>:<recommendation>`（セル）
 - サプライズ: `surprise:<run_id>:<SYMBOL>`
 - 引用ソース: `source_id`（引用・reasons・鮮度データのnews/filings）

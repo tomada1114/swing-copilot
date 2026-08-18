@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from swing_copilot.analysis.news_supply import SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.config import Settings
 from swing_copilot.retro.export import (
     RETRO_INPUT_FILENAME,
@@ -27,6 +27,7 @@ from swing_copilot.retro.export import (
 )
 from swing_copilot.retro.schemas import RETRO_INPUT_SCHEMA_VERSION, RetroInput
 from swing_copilot.retro.surprises import FreshnessSources
+from swing_copilot.retro.validate import evidence_id_space
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.tracking_records import VerdictPosition
@@ -104,7 +105,11 @@ def _verdict(
         strategy_key="default",
         recommendation=recommendation,
         reasons=(
-            VerdictReasonRecord(text="受注は堅調に見える", source_ids=("finnhub:1",)),
+            VerdictReasonRecord(
+                text="受注は堅調に見える",
+                source_ids=("finnhub:1",),
+                basis="news_catalyst",
+            ),
         ),
         no_trade=False,
     )
@@ -447,7 +452,7 @@ class TestBuildRetroInput:
 
         supply = document.aggregates.news_supply
         assert supply is not None
-        assert supply.sufficient_threshold == SUFFICIENT_SYMBOL_MENTION_ITEMS
+        assert supply.sufficient_threshold == DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
         assert (supply.recorded_verdict_count, supply.unrecorded_verdict_count) == (
             2,
             1,
@@ -591,6 +596,32 @@ class TestBuildRetroInput:
             (row.source_type, row.provider, row.citation_count)
             for row in document.source_contribution
         ] == [("news", "finnhub", 1)]
+
+    def test_tallies_the_hit_rate_of_each_evidence_kind(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """Issue #191: a `basis` split the provider tally cannot produce."""
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert [
+            (row.basis, row.verdict_count) for row in document.basis_contribution
+        ] == [("news_catalyst", 2)]
+        assert (
+            document.basis_contribution[0].basis_id
+            == "metric:basis_contribution:news_catalyst"
+        )
+
+    def test_the_basis_tally_is_citable_evidence_for_a_proposal(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """An aggregate a proposal cannot cite is an aggregate nobody can act on."""
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.basis_contribution[0].basis_id in evidence_id_space(document)
 
     def test_builds_a_dossier_for_the_severe_miss_only(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

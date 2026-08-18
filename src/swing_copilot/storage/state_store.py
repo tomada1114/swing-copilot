@@ -62,9 +62,11 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.verdict_records import (
         AnalysisSourceCoverageRecord,
+        PriorVerdictRecord,
         VerdictCitationRow,
         VerdictDecisionRow,
         VerdictOutcomeRecord,
+        VerdictReasonBasisRow,
         VerdictRecord,
         VerdictRow,
         VerdictSourceRecord,
@@ -706,6 +708,29 @@ class StateStore:
         """
         verdict_records.replace_run_verdicts(
             self._database, run_id, verdicts, sources, coverages
+        )
+
+    def get_prior_verdicts(
+        self, symbol: str, strategy_key: str, before_date: date, limit: int
+    ) -> tuple[PriorVerdictRecord, ...]:
+        """Return a symbol's earlier verdicts and matured outcomes (Issue #191).
+
+        Args:
+            symbol: The candidate's ticker.
+            strategy_key: Only the same strategy's verdicts are comparable.
+            before_date: Exclusive point-in-time cutoff on the verdict date.
+            limit: Maximum verdicts to return, newest first.
+        """
+        return verdict_records.get_prior_verdicts(
+            self._database, symbol, strategy_key, before_date, limit
+        )
+
+    def get_verdict_reason_bases_in_window(
+        self, window_start: date, as_of: date
+    ) -> tuple[VerdictReasonBasisRow, ...]:
+        """Return the evidence kinds behind verdicts maturing in a window."""
+        return verdict_records.get_verdict_reason_bases_in_window(
+            self._database, window_start, as_of
         )
 
     def get_analysis_source_coverages(

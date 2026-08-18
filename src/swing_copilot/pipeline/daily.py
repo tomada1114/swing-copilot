@@ -1107,6 +1107,14 @@ def _export_request(
                 )
                 if include_decision_history
                 else (),
+                prior_verdicts=deps.state_store.get_prior_verdicts(
+                    candidate.symbol,
+                    deps.strategy_key,
+                    ctx.run_date,
+                    _DECISION_HISTORY_LIMIT,
+                )
+                if include_decision_history
+                else (),
             )
             for candidate in ctx.candidates
         ),
@@ -1117,6 +1125,9 @@ def _export_request(
             max_filing_chars_per_symbol=(analysis_config.max_filing_chars_per_symbol),
             max_calendar_events=analysis_config.max_calendar_events,
             max_calendar_chars=analysis_config.max_calendar_chars_per_item,
+            sufficient_news_mention_items=(
+                analysis_config.sufficient_news_mention_items
+            ),
         ),
         calendar_events=tuple(
             item for item in text_items if item.source_type == "calendar"

@@ -554,6 +554,7 @@ def test_analysis_config_has_documented_defaults():
     assert settings.analysis.max_filings_per_symbol == 3
     assert settings.analysis.max_calendar_events == 20
     assert settings.analysis.max_calendar_chars_per_item == 2000
+    assert settings.analysis.sufficient_news_mention_items == 5
 
 
 def test_analysis_config_max_filing_chars_is_directly_configurable():
@@ -661,3 +662,10 @@ def test_band_atr_multiple_accepts_a_positive_multiple():
     )
 
     assert settings.technical_signals.pullback.band_atr_multiple == pytest.approx(2.0)
+
+
+def test_analysis_config_rejects_a_non_positive_news_mention_floor():
+    # Issue #191: a floor of 0 would grade every feed `sufficient`, silently
+    # undoing Issue #130's declaration rather than loosening it visibly.
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"analysis": {"sufficient_news_mention_items": 0}})

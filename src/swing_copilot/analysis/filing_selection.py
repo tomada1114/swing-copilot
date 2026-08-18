@@ -97,6 +97,24 @@ _BOILERPLATE_PHRASES = (
 #: of its own to match on.
 _ABOUT_HEADING_PATTERN = re.compile(r"^[#*>\s]*about\s+\S", re.IGNORECASE)
 
+#: Order in which a symbol's per-filing budgets are allocated out of the
+#: per-symbol ceiling. The earnings 8-K leads: it carries the quarter's press
+#: release, the single most decision-relevant document a symbol publishes, and
+#: allocating it after every 10-Q let it reach a zero budget and export as
+#: `omitted_symbol_budget` (Issue #191). Only allocation order changes -- the
+#: exported list stays in document order, newest first.
+_TIER_EARNINGS_EIGHT_K = 0
+_TIER_TEN_Q = 1
+_TIER_OTHER = 2
+#: Any `EX-99*` document type. Broader than `_PRESS_RELEASE_TYPES`, which ranks
+#: exhibits *within* one filing: here the question is only whether the filing
+#: is an earnings 8-K at all, and a supplemental 99.2 answers that too.
+_EX_99_PREFIX = "ex-99"
+#: Form 8-K Item 2.02, "Results of Operations and Financial Condition" -- the
+#: item an issuer files its quarterly results under. Matched only in the
+#: primary document, where the item list lives.
+_EARNINGS_ITEM_PATTERN = re.compile(r"item\s+2\.02", re.IGNORECASE)
+
 
 @dataclass(frozen=True, slots=True)
 class FilingTextSelection:
@@ -146,25 +164,42 @@ class _ExhibitPart:
 def select_filing_inputs(
     items: Sequence[TextItem], *, per_filing_chars: int, per_symbol_chars: int
 ) -> list[FilingInput]:
-    """Return newest-first filing inputs under both character ceilings."""
+    """Return newest-first filing inputs under both character ceilings.
+
+    The per-symbol ceiling is consumed in priority order -- earnings 8-K, then
+    10-Q, then everything else, each tier newest first -- so a filing late in
+    that order is the one that runs out of budget and exports as
+    `omitted_symbol_budget`. The returned list is independent of that order:
+    it is always the filings in document order, newest first.
+
+    Args:
+        items: This symbol's collected text items; non-filing sources are
+            ignored.
+        per_filing_chars: Ceiling on one filing's exported excerpt.
+        per_symbol_chars: Ceiling on every exported excerpt for this symbol
+            together.
+
+    Returns:
+        One `FilingInput` per filing, newest first.
+    """
     filings = sorted(
         (item for item in items if item.source_type == "filing"),
         key=lambda item: (item.published_at, item.source_id),
         reverse=True,
     )
-    quarterly = [
-        index
-        for index, item in enumerate(filings)
-        if _form_type(item.title) in _TEN_Q_FORMS
-    ]
-    allocation_order = quarterly + [
-        index for index in range(len(filings)) if index not in quarterly
-    ]
+    form_types = [_form_type(item.title) for item in filings]
+    allocation_order = sorted(
+        range(len(filings)),
+        key=lambda index: (
+            _allocation_tier(filings[index], form_types[index]),
+            index,
+        ),
+    )
     remaining = per_symbol_chars
     selected: dict[int, FilingInput] = {}
     for index in allocation_order:
         item = filings[index]
-        form_type = _form_type(item.title)
+        form_type = form_types[index]
         selection = select_filing_text(
             item, form_type, min(per_filing_chars, remaining)
         )
@@ -178,6 +213,58 @@ def select_filing_inputs(
         )
         remaining -= len(selection.text)
     return [selected[index] for index in range(len(filings))]
+
+
+def _allocation_tier(item: TextItem, form_type: str) -> int:
+    """Rank one filing for budget allocation: earnings 8-K, 10-Q, then the rest.
+
+    Args:
+        item: The collected filing.
+        form_type: Its EDGAR form type, as `_form_type` read it.
+
+    Returns:
+        The tier constant; index within a tier keeps the newest-first order.
+    """
+    if _is_earnings_eight_k(item, form_type):
+        return _TIER_EARNINGS_EIGHT_K
+    if form_type in _TEN_Q_FORMS:
+        return _TIER_TEN_Q
+    return _TIER_OTHER
+
+
+def _is_earnings_eight_k(item: TextItem, form_type: str) -> bool:
+    """Whether an 8-K plausibly carries the quarter's earnings release.
+
+    Deliberately conservative, and deliberately built from what the collected
+    text already carries rather than from a headline classifier: an 8-K is
+    treated as earnings-related only when it furnishes an `EX-99*` exhibit --
+    where the press release and its financial-statement tables live, which is
+    the whole reason `_split_exhibit_parts` exists -- or when its primary
+    document names Item 2.02, the item an issuer reports quarterly results
+    under. A merger or officer-departure 8-K matches neither, so it stays in
+    the trailing tier; misjudging one the other way merely allocates its
+    budget slightly earlier.
+
+    Args:
+        item: The collected filing.
+        form_type: Its EDGAR form type, as `_form_type` read it.
+
+    Returns:
+        `True` for an 8-K variant carrying either signal.
+    """
+    if form_type not in _EIGHT_K_FORMS:
+        return False
+    content = item.content_text
+    matches = list(_EXHIBIT_HEADER_PATTERN.finditer(content))
+    if any(
+        match.group("document_type").lower().startswith(_EX_99_PREFIX)
+        for match in matches
+    ):
+        return True
+    # Everything before the first exhibit header is the primary document; a
+    # filing with no exhibit at all is primary document throughout.
+    primary_end = matches[0].start() if matches else len(content)
+    return _EARNINGS_ITEM_PATTERN.search(content, 0, primary_end) is not None
 
 
 def select_filing_text(

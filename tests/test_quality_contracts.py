@@ -110,6 +110,54 @@ def test_daily_console_script_facade_delegates_to_composition(
     assert received == [["--dry-run"]]
 
 
+def test_atomic_writers_live_in_a_dependency_zero_module():
+    """Issue #193: wanting an atomic write must not import anything."""
+    tree = ast.parse(
+        (PROJECT_ROOT / "src/swing_copilot/io_atomic.py").read_text(encoding="utf-8")
+    )
+    imported = {
+        module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (module := node.module) is not None
+    } | {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert not [name for name in imported if name.startswith("swing_copilot")]
+
+
+def test_no_package_reaches_into_analysis_for_atomic_writes():
+    """Issue #193: no reverse dependency on `analysis` just to replace a file.
+
+    `regime`, `screening`, `report` and `retro` import the writers from
+    `swing_copilot.io_atomic`. `analysis/export.py` itself keeps the
+    compatibility re-export, so it is the one allowed reference.
+    """
+    writers = {"write_json_atomically", "write_text_atomically"}
+    violations: list[str] = []
+    for source_path in (PROJECT_ROOT / "src").rglob("*.py"):
+        if source_path.name == "export.py" and source_path.parent.name == "analysis":
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        violations.extend(
+            f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "swing_copilot.analysis.export"
+            and writers.intersection(alias.name for alias in node.names)
+        )
+
+    assert not violations, (
+        "import the atomic writers from swing_copilot.io_atomic: "
+        + ", ".join(violations)
+    )
+
+
 def _is_protocol_or_abc(base: ast.expr) -> bool:
     if isinstance(base, ast.Name):
         return base.id in {"Protocol", "ABC"}

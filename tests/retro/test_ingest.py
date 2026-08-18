@@ -268,7 +268,7 @@ class TestAtomicWrites:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("swing_copilot.analysis.export.os.replace", failing_replace)
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", failing_replace)
         _write_result(
             retro_dir, narrations=[narration_payload(narrative="書き換えられた叙述")]
         )

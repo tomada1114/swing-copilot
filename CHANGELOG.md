@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- 原子的書き込み `write_json_atomically()` / `write_text_atomically()` を、依存
+  ゼロの新モジュール `swing_copilot/io_atomic.py` へ移した（Issue #193、挙動不変）。
+  「宛先と同じディレクトリの一時ファイル＋`os.replace`」は AGENTS.md の
+  リポジトリ全体の不変条件であって `analysis` 固有の関心ではないのに、定義が
+  `analysis/export.py` にあったため、`regime` / `screening` / `report` / `retro` が
+  原子的に書きたいというだけの理由で `analysis` パッケージへ逆流依存していた。
+  `analysis/export.py` は後方互換の re-export を残すので、この2関数を従来の場所から
+  import しているコード・設計文書はそのまま動く。置換セマンティクス（失敗時に旧宛先を
+  保持し一時ファイルを掃除する）は既存テストがそのまま通ることで担保し、逆流依存が
+  消えたことは `tests/test_quality_contracts.py` の import 規約テストで固定した
+
 ### Added
 
 - `copilot-backtest --policy regime+risk` の決算ゲートに point-in-time な決算日を

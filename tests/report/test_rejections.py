@@ -187,7 +187,7 @@ class TestAtomicReplacement:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("swing_copilot.analysis.export.os.replace", _explode)
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _explode)
 
         with pytest.raises(OSError, match="disk full"):
             write_rejections(

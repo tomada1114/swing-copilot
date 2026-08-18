@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from swing_copilot.analysis.export import write_json_atomically
+from swing_copilot.io_atomic import write_json_atomically
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

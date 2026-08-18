@@ -432,7 +432,7 @@ def _check_finite(value: object) -> None:
     """
 ```
 
-第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`analysis/export.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
+第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`io_atomic.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
 
 ### 3.9 `screening/base.py`（NFR-07）
 
@@ -992,8 +992,12 @@ class ExportRequest:
 
 def build_analysis_input(request: ExportRequest) -> AnalysisInput: ...
 def write_analysis_input(payload: AnalysisInput, output_dir: str | Path) -> Path: ...
-def write_json_atomically(destination: Path, payload: object) -> None: ...
 def form_type_of(title: str | None) -> str: ...   # validate.py と共有
+
+# io_atomic.py（依存ゼロ。Issue #193 で analysis/export.py から移設し、
+# analysis/export.py は後方互換の re-export を残している）
+def write_json_atomically(destination: Path, payload: object) -> None: ...
+def write_text_atomically(destination: Path, content: str) -> None: ...
 ```
 
 **改修原則4「判断はコード、叙述はスキル」（roadmap §5 P2-12の継承）**: `format_score_breakdown()`（P1-01）・`format_risk_constraints()`（P1-03）・`format_performance_summary()`（P1-06）は、いずれも「これはコードの決定論的計算結果であり分析側が再計算・上書きできない」旨を本文へ明記した純関数である。`format_risk_constraints()`は`not_calculable`や拒否判定でも空にせず常に描画する——「コードが既にREJECTと言っている」という信号自体が、保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採る）の前提情報だからである。逆に`format_score_breakdown()`と`format_performance_summary()`は構成要素が欠けていればプレースホルダを置かず`""`を返し、`export.py`が`None`へ落とす。
@@ -1588,7 +1592,7 @@ DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録な
 
 ### 3.22a `report/rejections.py`（run成果物 `rejections.json`）
 
-run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（schema `rejections-v1`）を置く。書き出しはステップ8（`_run_step_output()`）が`report_context.json`のあとに行い、`analysis/export.py::write_json_atomically()`を再利用する（一時ファイル＋`os.replace`）。失敗はfail-soft——run固有Markdownは既に残っているので、`RunStatus.DEGRADED`・終了コード0とする。
+run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（schema `rejections-v1`）を置く。書き出しはステップ8（`_run_step_output()`）が`report_context.json`のあとに行い、`io_atomic.py::write_json_atomically()`を再利用する（一時ファイル＋`os.replace`）。失敗はfail-soft——run固有Markdownは既に残っているので、`RunStatus.DEGRADED`・終了コード0とする。
 
 既存の出力にはギャップが2つあった。ひとつはMarkdown/`report_context.json`の落選サマリが`reason_code`別の**件数**しか持たず、「どの銘柄がなぜ落ちたか」を見るにはDuckDBを引く必要があったこと。もうひとつは、全Filter・全Signalを通過しながら`candidate_limit`で順位落ちした銘柄が候補にも`screening_rejections`にも載らず、**どこにも記録されていなかった**こと（4.2節の`screening_rejections`）。このファイルは両方を1箇所に残す。
 

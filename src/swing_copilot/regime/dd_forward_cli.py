@@ -34,9 +34,9 @@ import duckdb
 from rich.console import Console
 from rich.table import Table
 
-from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.config import load_settings
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
+from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.regime.dd_forward import (
     DEFAULT_HORIZONS,
     INDEX_TARGETS,

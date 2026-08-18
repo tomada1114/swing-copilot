@@ -32,8 +32,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from swing_copilot.analysis.export import write_text_atomically
 from swing_copilot.documents import read_text_document
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.retro.validate import RetroIngestError
 
 if TYPE_CHECKING:

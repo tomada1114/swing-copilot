@@ -26,7 +26,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
-from swing_copilot.analysis.export import write_json_atomically
 from swing_copilot.analysis.schemas import (
     FilingCoverage,
     FilingSectionCoverage,
@@ -36,6 +35,7 @@ from swing_copilot.analysis.schemas import (
     NewsSupplyLevel,
     canonical_json_digest,
 )
+from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.pipeline.postmortem import compute_signal_performance
 from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.retro.aggregate import (

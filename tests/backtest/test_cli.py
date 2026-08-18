@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,7 +45,7 @@ from swing_copilot.backtest.metrics import (
     holding_days_stats,
     max_hold_binding_rate,
 )
-from swing_copilot.backtest.policy import EntryPolicyArm
+from swing_copilot.backtest.policy import EntryPolicyArm, build_entry_policy
 from swing_copilot.backtest.runner import run_backtest
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
@@ -55,8 +56,13 @@ from swing_copilot.backtest.sensitivity import (
     SensitivityGridResult,
 )
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
+from swing_copilot.risk.checks import EarningsGuardInput
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import DEFAULT_PARQUET_ROOT, MarketStore
+from swing_copilot.storage.market_store import (
+    DEFAULT_PARQUET_ROOT,
+    FundamentalsRecord,
+    MarketStore,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 from swing_copilot.universe_sampling import UniverseSample
@@ -67,6 +73,8 @@ if TYPE_CHECKING:
 
 _D0 = date(2027, 1, 1)
 _D1 = date(2027, 1, 2)
+#: The `build_entry_policy(..., earnings_guard_fn=...)` seam's signature.
+_EarningsGuardFn = Callable[[date, tuple[str, ...]], EarningsGuardInput]
 
 
 def _with_provider_columns(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1857,3 +1865,116 @@ class TestPolicyEndToEnd:
                     str(tmp_path / "grid.md"),
                 ]
             )
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestEarningsGuardWiring:
+    """`--policy regime+risk` supplies a real earnings calendar (Issue #201).
+
+    Before this, `build_entry_policy` was always called without
+    `earnings_guard_fn`, so the earnings gate could only ever report 0.
+    """
+
+    @staticmethod
+    def _seed_filings(db_path: Path, filed_dates: Sequence[date]) -> None:
+        store = MarketStore(Database(db_path), parquet_root=db_path.parent / "bars")
+        store.upsert_fundamentals(
+            [
+                FundamentalsRecord(
+                    accession_no=f"acc-{filed_on.isoformat()}",
+                    symbol="AAA",
+                    form="10-Q",
+                    fiscal_period_end=filed_on - timedelta(days=30),
+                    filed_at=pd.Timestamp(filed_on, tz="UTC").to_pydatetime(),
+                    revenue=1.0,
+                    net_income=1.0,
+                    fcf=1.0,
+                    equity=1.0,
+                    assets=2.0,
+                    shares=1.0,
+                    source_url="https://www.sec.gov/example",
+                    fetched_at=pd.Timestamp("2027-01-20", tz="UTC").to_pydatetime(),
+                )
+                for filed_on in filed_dates
+            ]
+        )
+
+    @staticmethod
+    def _capture_policy_kwargs(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[_EarningsGuardFn | None]:
+        captured: list[_EarningsGuardFn | None] = []
+
+        def recording(*args, **kwargs):
+            captured.append(kwargs.get("earnings_guard_fn"))
+            return build_entry_policy(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "build_entry_policy", recording)
+        return captured
+
+    def _argv(
+        self, db_path: Path, days: list[date], output: Path, policy: str
+    ) -> list[str]:
+        return [
+            "--strategy",
+            "default",
+            "--start",
+            days[0].isoformat(),
+            "--end",
+            days[-1].isoformat(),
+            "--db",
+            str(db_path),
+            "--output",
+            str(output),
+            "--policy",
+            policy,
+        ]
+
+    def test_regime_risk_arm_receives_the_filing_derived_calendar(
+        self, seeded_db, tmp_path, capsys, monkeypatch
+    ):
+        db_path, days = seeded_db
+        self._seed_filings(db_path, [days[0] - timedelta(days=91), days[0]])
+        captured = self._capture_policy_kwargs(monkeypatch)
+
+        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+risk"))
+
+        assert len(captured) == 1
+        assert captured[0] is not None
+        # The coverage line must say how many symbols could be derived at all:
+        # a 0-count earnings gate over an empty calendar means something very
+        # different from one over a covered universe.
+        assert (
+            "決算ゲート: 提出履歴（10-K/10-Q）から1/2 銘柄" in capsys.readouterr().out
+        )
+
+    def test_the_supplied_lookup_is_point_in_time(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        filed = [days[0] - timedelta(days=91), days[0]]
+        self._seed_filings(db_path, filed)
+        captured = self._capture_policy_kwargs(monkeypatch)
+
+        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+risk"))
+
+        guard_fn = captured[0]
+        assert guard_fn is not None
+        before = guard_fn(days[0] - timedelta(days=1), ("AAA",))
+        at = guard_fn(days[0], ("AAA",))
+        assert before.lookups_by_symbol["AAA"].recent_event is not None
+        assert before.lookups_by_symbol["AAA"].recent_event.earnings_date == filed[0]
+        assert at.lookups_by_symbol["AAA"].recent_event is not None
+        assert at.lookups_by_symbol["AAA"].recent_event.earnings_date == filed[1]
+
+    def test_arms_that_cannot_use_the_gate_never_read_the_filing_history(
+        self, seeded_db, tmp_path, capsys, monkeypatch
+    ):
+        db_path, days = seeded_db
+        self._seed_filings(db_path, [days[0] - timedelta(days=91), days[0]])
+        captured = self._capture_policy_kwargs(monkeypatch)
+
+        main(self._argv(db_path, days, tmp_path / "regime.md", "none,regime"))
+
+        assert captured == [None, None]
+        assert "決算ゲート" not in capsys.readouterr().out

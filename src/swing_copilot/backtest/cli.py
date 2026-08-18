@@ -31,6 +31,10 @@ from swing_copilot.backtest.candidate_stream import (
     load_market_frame,
     save_candidate_stream,
 )
+from swing_copilot.backtest.earnings_history import (
+    EARNINGS_FILING_FORMS,
+    load_derived_earnings_calendar,
+)
 from swing_copilot.backtest.policy import (
     EntryPolicyArm,
     EntryPolicyError,
@@ -64,12 +68,13 @@ from swing_copilot.universe import (
 from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
     from swing_copilot.backtest.engine import BacktestResult
     from swing_copilot.backtest.sensitivity import SensitivityGridResult
     from swing_copilot.config import Settings, StrategiesConfig
+    from swing_copilot.risk.checks import EarningsGuardInput
     from swing_copilot.universe_sampling import UniverseSample
 
 _DEFAULT_OUTPUT_DIR = Path("reports/backtests")
@@ -1056,6 +1061,47 @@ def _resolve_candidate_stream(
     return stream
 
 
+def _earnings_guard_fn(
+    deps: BacktestDependencies,
+    sample: UniverseSample,
+    arms: Sequence[EntryPolicyArm],
+    *,
+    as_of: date,
+) -> Callable[[date, tuple[str, ...]], EarningsGuardInput] | None:
+    """Build the point-in-time earnings lookup, when an arm can use one (#201).
+
+    Only `regime+risk` consults the earnings guard, so the filing history is
+    read only for that arm — a `none`/`regime` run must not pay for a query
+    whose answer it would discard, nor print a coverage line about a gate it
+    never applies.
+
+    Args:
+        deps: Real collaborators; supplies the store and `risk.*` settings.
+        sample: The symbols this run backtests.
+        arms: The `--policy` arms about to run.
+        as_of: The backtest window's end; the calendar re-applies the cutoff
+            per simulated day.
+
+    Returns:
+        The lookup, or `None` when no arm applies the earnings gate.
+    """
+    if EntryPolicyArm.REGIME_RISK not in arms:
+        return None
+    calendar = load_derived_earnings_calendar(
+        deps.market_store,
+        sample.symbols,
+        as_of=as_of,
+        lookahead_days=deps.settings.risk.earnings_lookahead_days,
+    )
+    projectable = len(calendar.projectable_symbols)
+    sys.stdout.write(
+        f"決算ゲート: 提出履歴（{'/'.join(EARNINGS_FILING_FORMS)}）から"
+        f"{projectable}/{len(sample.symbols)} 銘柄の決算日を推定します"
+        "（提出日は発表日より遅れる。docs/reference.md 参照）\n"
+    )
+    return calendar.lookup
+
+
 def _run_backtest_command(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
 ) -> None:
@@ -1079,8 +1125,16 @@ def _run_backtest_command(
         # One stream, one frame, N arms: the whole point of the A/B is that
         # nothing but the gates differs between the columns (Issue #184).
         arms = _policy_arms(args)
+        earnings_guard_fn = _earnings_guard_fn(deps, sample, arms, as_of=args.end)
         policies = [
-            build_entry_policy(arm, settings, deps.universe, frame.bars) for arm in arms
+            build_entry_policy(
+                arm,
+                settings,
+                deps.universe,
+                frame.bars,
+                earnings_guard_fn=earnings_guard_fn,
+            )
+            for arm in arms
         ]
         if args.pessimistic:
             normal_result = run_backtest(

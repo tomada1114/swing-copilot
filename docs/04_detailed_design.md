@@ -1282,6 +1282,13 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **CLI**: `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
 
+**Issue #201実装時追記（決算ゲートのpoint-in-timeカレンダー供給とCLI配線）**: 上の「決算ブロックの限界」は`earnings_guard_fn`が未配線であることの説明であり、本issueでその注入口を実データで埋めた。`copilot-backtest --policy regime+risk`は決算ゲートの実カウントを報告する。
+
+- **データソース＝収集済みの提出履歴（`fundamentals`テーブル）**。外部の決算カレンダーAdapterは追加しない。本番の`earnings_calendar`は`symbol`主キーの現在値しか持たない（履歴が無い）ので、過去を再生する用途には原理的に使えず、使えば丸ごとlook-aheadになる。一方`fundamentals`は`accession_no`主キーで1提出＝1行、`form`と`filed_at`（SECの受理時刻）を持つ——`filed_at <= as_of`はAGENTS.mdが提出物に課す可視性規律そのものである。読み出しは`storage/market_store.py::read_filing_dates(symbols, forms, as_of)`が担い、カットオフはこのクエリ自身で切る（呼び出し側では切らない）。同一`fiscal_period_end`の訂正再提出は**最も早い提出日**へ畳み、同日提出の複数期も1日として扱う（「提出行」ではなく「決算イベント」を返す）。
+- **次回決算日は推定である**。`backtest/earnings_history.py::DerivedEarningsCalendar`が、`as_of`時点で可視な提出日の**連続差の中央値**を最新提出日へ加えて次回を射影する。`EarningsLookup`の3状態は本番の外部clientと同じ意味で使い分ける: 射影が`[as_of, as_of + risk.earnings_lookahead_days]`に入れば`found`、窓より先なら`none_in_window`、**可視提出が2件未満/妥当な周期が無い/射影日を`as_of`が既に追い越した**場合は`fetch_failed`（＝「分からない」。警告のみでブロックしない）。射影日を追い越した状態を`found`のまま据え置くと、ズレが続く限りその銘柄を無期限にブロックし続けるため、あえて「不明」へ落とす。周期の妥当帯は45〜200暦日（四半期≒91日、年次報告が履歴に無いときのQ3→翌Q1≒182日を覆う）で、帯の外の差分は中央値から除外する。
+- **前提と限界**（`docs/reference.md`にも運用者向けに再掲）: (1) `filed_at`は**提出日**であって発表日ではない。発表（8-K Item 2.02）は10-Qの受理より数日早いのが通例なので、提出日ベースの射影はブロック窓ごと**系統的に後ろへずれる**。周期も射影も提出日で測るため内部整合はしているが、真の決算カレンダーと同じ窓ではない。(2) 被覆率は`pipeline/daily.py`のfundamentals収集が触れた銘柄・期間に等しく、過去全期間のパネルではない。(3) `fundamentals`が正規化する`10-K`/`10-Q`だけが決算イベントである（`EARNINGS_FILING_FORMS`は完全一致なので`10-Q/A`は入らない）。Q4の発表は10-K提出の数週間前に起きるので、観測ではなく射影でしか覆われない。
+- **正直に縮退する**: 提出履歴が無い銘柄は`fetch_failed`を返し、日付を作らない。0カウントの意味を運用者が読み違えないよう、CLIは実行時に「提出履歴（10-K/10-Q）から N/M 銘柄の決算日を推定します」の1行を標準出力へ出す（Nは`DerivedEarningsCalendar.projectable_symbols`＝提出2件以上で周期を測れる銘柄数。日ごとの可視件数はこれ以下なので上限値である）。この行と`fundamentals`の読み出しは`regime+risk`を含むrunにだけ発生する（`none`/`regime`は決算ゲートを適用しないので、答えを捨てるクエリを走らせない）。
+
 **Issue #216実装時追記（多アームレポートのセクション構成）**: `render_policy_comparison_terminal`/`render_policy_comparison_markdown`は`## Metrics` → `## Exit breakdown` → `## Entry blocks` → `## Equity curve summary` → `## Data quality` → `## Warnings` → `## Survivorship bias`の順に出力する。従来はexit内訳とequity curve要約が単一アームのレンダラにしか無く、A/Bレポートからは「どのアームがどう手仕舞ったか」も「ドローダウンがいつ起きたか」も読めなかった（値はすべて`BacktestResult`に載っており、埋めるには同一設定の単一アームを1本走らせ直す＝実測40〜56分しかなかった。#200 / PR #215で実際に踏んだ）。両セクションとも向きは`## Metrics`に揃える——**行=指標、列=アーム**であって、アームごとのブロックを縦に並べない（アーム間の差はそもそも横並びでしか読めない）。
 
 - `## Exit breakdown`の行は単一アームと同一で、exit理由の件数（`exit_reason_counts`）＋`max_hold binding rate`＋`holding days (median)`＋`holding days (p25 / p75)`。アームによって出現する理由が違う（ゲートがそもそも建玉させない）ため、行集合は全アームの和（初出順）を取り、そのアームに無い理由は欠落ではなく明示的な`0`にする。この整列は`_exit_breakdown_comparison_rows(results)`がN列版として担い、`--pessimistic`の2列比較も同じ関数を通る（分岐を2つ持たない）。
@@ -1841,7 +1848,7 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 
 決済側の計器として`Trade.days_held`と`BacktestResult`の3フィールド（決済理由内訳・`max_hold`バインド率・保有日数の中央値/四分位）を追加し、感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(40, 70, 100, 140, 200)%`へ広げた。ATR軸が±50%を探索するのに時間軸だけ±20%では、「そのパラメータが効かない」のか「一度も発火していない」のかを区別できないためである。
 
-なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない。
+なお決算日エントリー回避は**このフェーズの対象外で、既にrisk層に実装済み**である（`RiskChecker._apply_earnings_guard`、3.13）。バックテスト経路は`RiskChecker`を通らず、`earnings_calendar`がsymbol主キー上書きで履歴を持たないため、決算ルールの効果をバックテストで測ることは現状できない（**この最後の一文はIssue #184で前半が、Issue #201で後半が解消された**——バックテストは`backtest/policy.py`経由で`RiskChecker`を通るようになり、決算日は`earnings_calendar`ではなく`fundamentals`の提出履歴から`filed_at <= as_of`で推定する。3.19の該当追記を参照）。
 
 ---
 

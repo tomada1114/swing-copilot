@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `copilot-backtest --policy regime+risk` の決算ゲートに point-in-time な決算日を
+  供給し、実カウントを報告するようにした（Issue #201、#184 の follow-up）。#184 が
+  用意した注入口 `build_entry_policy(..., earnings_guard_fn=...)` は、シミュレータに
+  過去の決算カレンダーが無いため CLI から未配線のままで、ゲートは日付を捏造せず
+  0 を報告していた。本番の `earnings_calendar` は `symbol` 主キーの現在値だけで
+  履歴を持たないため過去再生には使えず（使えば丸ごと look-ahead になる）、外部の
+  決算カレンダー API を足すのもバックテストのためだけには重い。代わりに、唯一の
+  point-in-time な提出履歴である `fundamentals`（`accession_no` 主キー、`form` と
+  SEC 受理時刻 `filed_at` を持つ）から導出する。新規
+  `storage/market_store.py::read_filing_dates()` が `filed_at <= as_of` を自身の
+  クエリで切って `10-K`/`10-Q` の提出日を返し（同一 `fiscal_period_end` の訂正
+  再提出は最初の提出日へ畳む）、新規 `backtest/earnings_history.py::
+  DerivedEarningsCalendar` が可視提出日の連続差の中央値から次回決算日を**射影**
+  する。射影が `risk.earnings_lookahead_days` の窓に入れば `found`、窓より先なら
+  `none_in_window`、可視提出が2件未満・妥当な周期が無い・`as_of` が射影日を既に
+  追い越した場合は `fetch_failed`（警告のみでブロックしない）——推定できない
+  ときに日付を作らない点は従来どおりである。0 カウントの意味を読み違えないよう、
+  CLI は「提出履歴（10-K/10-Q）から N/M 銘柄の決算日を推定します」の1行を出す。
+  **提出日は発表日（8-K Item 2.02）より遅いため、この推定に基づくブロック窓は
+  真の決算日より系統的に後ろへずれる**。この前提と、被覆率が収集履歴に等しい
+  こと・Q4 は射影でしか覆えないことは `docs/reference.md` と
+  `docs/04_detailed_design.md` 3.19 に記載した
+
 ### Fixed
 
 - `compute_forward_return()` が**非有限の終値を素通し**していた問題を修正した

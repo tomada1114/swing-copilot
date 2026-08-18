@@ -96,7 +96,14 @@ class EvaluationSettings(_StrictModel):
 
 
 class MetricEntry(_StrictModel):
-    """One horizon's (or the weighted headline's) value for a metric."""
+    """One horizon's (or the weighted headline's) value for a metric.
+
+    The dispersion fields arrived with Issue #190 and default to `None`, so a
+    dossier archived before them parses unchanged and keeps its digest. A
+    `None` there means "no spread is defined for this value" (fewer than two
+    observations, or the weight-composed headline, whose horizons are not
+    independent samples) -- never "the estimate is exact".
+    """
 
     metric_id: NonBlankText
     #: `None` marks the weight-composed headline rather than one horizon.
@@ -105,10 +112,23 @@ class MetricEntry(_StrictModel):
     value: float | None
     sample_size: int = Field(ge=0)
     is_preliminary: bool
+    stderr: float | None = None
+    #: Two-sided 95% interval. An interval spanning 0 means the window cannot
+    #: tell the effect's sign, which the L1 evidence gate now requires.
+    ci_low: float | None = None
+    ci_high: float | None = None
+    #: Paired metrics only: run days dropped for carrying just one verdict
+    #: side, so a difference averaged over 3 of 20 days cannot pass as one
+    #: averaged over 20.
+    excluded_day_count: int | None = Field(default=None, ge=0)
 
 
 class RateMetricEntry(_StrictModel):
-    """A rate metric with the same-period baseline it is judged against."""
+    """A rate metric with the same-period baseline it is judged against.
+
+    `ci_low`/`ci_high` are a Wilson score interval (Issue #190), absent on
+    dossiers archived before it and on the weight-composed headline.
+    """
 
     metric_id: NonBlankText
     horizon_days: int | None
@@ -117,6 +137,8 @@ class RateMetricEntry(_StrictModel):
     is_flagged: bool
     sample_size: int = Field(ge=0)
     is_preliminary: bool
+    ci_low: float | None = None
+    ci_high: float | None = None
 
 
 class VerdictMixEntry(_StrictModel):
@@ -170,14 +192,58 @@ class NewsSupplySummaryEntry(_StrictModel):
     cells: list[NewsSupplyCellEntry]
 
 
+class ExitReasonCountEntry(_StrictModel):
+    """How many of a stratum's closed shadow positions ended a given way."""
+
+    reason: NonBlankText
+    count: int = Field(ge=0)
+
+
+class TrackedPerformanceEntry(_StrictModel):
+    """One verdict side's realized record in the shadow-tracking ledger (#190).
+
+    The counterfactual the retrospective was missing: `proceed` and `skip`
+    positions carried under identical exit rules, plus the pooled `all` arm.
+    Every monetary figure is a percentage point rather than a dollar -- a
+    shadow position never had a share count decided for it.
+    """
+
+    metric_id: NonBlankText
+    #: `proceed`, `skip`, or `all` for the pooled arm.
+    recommendation: NonBlankText
+    closed_count: int = Field(ge=0)
+    open_count: int = Field(ge=0)
+    #: `None` when the stratum has no closed position yet, never `0.0`.
+    win_rate: float | None
+    profit_factor: float | None
+    expectancy_pct: float | None
+    avg_r_multiple: float | None
+    avg_holding_days: float | None
+    exit_reason_counts: list[ExitReasonCountEntry]
+
+
 class AggregateMetrics(_StrictModel):
-    """Design §3.4's headline measures of the qualitative layer."""
+    """Design §3.4's headline measures of the qualitative layer.
+
+    The three optional lists arrived with Issue #190 and default to `None` so
+    an archived dossier keeps parsing and keeps its digest. `separation` is
+    kept unchanged beside them rather than replaced: its metric IDs are cited
+    by proposals already in the ledger, and the point of publishing the paired
+    and excess versions is that a reader can see whether the three agree.
+    """
 
     separation: list[MetricEntry]
     proceed_severe_miss_rate: list[RateMetricEntry]
     skip_hit_rate: list[RateMetricEntry]
     verdict_mix: VerdictMixEntry
     news_supply: NewsSupplySummaryEntry | None = None
+    #: Separation differenced inside each run day, so the market's own move
+    #: cancels instead of confounding the comparison.
+    separation_paired: list[MetricEntry] | None = None
+    #: The same pairing over benchmark-relative returns.
+    separation_paired_excess: list[MetricEntry] | None = None
+    #: The tracking ledger's realized record, stratified by verdict side.
+    tracked_performance: list[TrackedPerformanceEntry] | None = None
 
 
 class SignalPerformanceEntry(_StrictModel):
@@ -391,6 +457,23 @@ def retro_input_digest(payload: dict[str, object]) -> str:
     return canonical_json_digest(normalized, excluded_field="input_digest")
 
 
+#: Keys whose `None` is the "this export did not measure it" form of a field
+#: added by Issue #190. Dropping them keeps an archived dossier's digest
+#: reproducible: the document that never carried the field must hash exactly
+#: as it did before the field existed.
+_ISSUE_190_OPTIONAL_KEYS = frozenset(
+    {
+        "stderr",
+        "ci_low",
+        "ci_high",
+        "excluded_day_count",
+        "separation_paired",
+        "separation_paired_excess",
+        "tracked_performance",
+    }
+)
+
+
 def _drop_legacy_defaults(value: object) -> object:
     """Omit defaults introduced after the original retro-input-v1 contract.
 
@@ -406,6 +489,9 @@ def _drop_legacy_defaults(value: object) -> object:
                 (key == "input_coverage" and child is None)
                 or (key == "input_filing_coverage" and child == [])
                 or (key == "news_supply" and child is None)
+                # Issue #190: dispersion fields on every metric entry, and the
+                # three aggregate blocks added with them.
+                or (key in _ISSUE_190_OPTIONAL_KEYS and child is None)
             )
         }
     if isinstance(value, list):

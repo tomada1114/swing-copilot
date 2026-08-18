@@ -7,6 +7,7 @@ number rather than silently agreeing with itself.
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import date
 from uuid import UUID, uuid4
@@ -21,9 +22,17 @@ from swing_copilot.retro.aggregate import (
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
+    compute_separation_paired,
+    compute_separation_paired_excess,
     compute_skip_hit_rate,
     compute_source_contribution,
+    compute_tracked_performance,
     compute_verdict_mix,
+    wilson_interval,
+)
+from swing_copilot.storage.tracking_records import (
+    VerdictPosition,
+    VerdictPositionMark,
 )
 from swing_copilot.storage.verdict_records import (
     NewsSupplyRecord,
@@ -629,3 +638,387 @@ class TestNewsSupplyMix:
         )
 
         assert compute_news_supply_mix(verdicts).cells[0].verdict_count == 2
+
+
+DAY_A = date(2027, 3, 10)
+DAY_B = date(2027, 3, 11)
+
+
+def _dated(  # noqa: PLR0913 - one outcome row's own columns
+    symbol: str,
+    recommendation: str,
+    forward_return_pct: float,
+    maturity: date,
+    *,
+    benchmark_return_pct: float | None = None,
+    horizon_days: int = 5,
+) -> VerdictOutcomeRecord:
+    return VerdictOutcomeRecord(
+        run_id=RUN_A,
+        symbol=symbol,
+        horizon_days=horizon_days,
+        as_of=maturity,
+        recommendation=recommendation,
+        forward_return_pct=forward_return_pct,
+        benchmark_return_pct=benchmark_return_pct,
+        classification="HIT",
+    )
+
+
+class TestPairedSeparation:
+    """Issue #190: difference inside each run day, then average the days."""
+
+    def test_each_run_days_gap_is_averaged_rather_than_the_pooled_means(self) -> None:
+        # Day A: proceed +10, skip +8 -> +2. Day B: proceed -4, skip -5 -> +1.
+        # Mean of the daily gaps is +1.5. The pooled version would answer
+        # (10 - 4)/2 - (8 - 5)/2 = +1.5 here only because both days are
+        # balanced; the next test breaks that.
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A),
+            _dated("B", "skip", 8.0, DAY_A),
+            _dated("C", "proceed", -4.0, DAY_B),
+            _dated("D", "skip", -5.0, DAY_B),
+        )
+
+        summary = _five_day(compute_separation_paired(rows, THRESHOLDS))
+
+        assert summary.value == pytest.approx(1.5)
+        assert summary.sample_size == 4
+        assert summary.excluded_day_count == 0
+
+    def test_a_strong_day_full_of_proceeds_no_longer_inflates_the_gap(self) -> None:
+        # Day A (a strong day): proceed +10, skip +9 -> +1.
+        # Day B (a weak day): proceed -10, skip -11 -> +1.
+        # Paired: +1. Pooled: mean(proceed +10, +10, -10) - mean(skip +9, -11)
+        # = 3.333 - (-1.0) = +4.333, which is mostly the day effect.
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A),
+            _dated("B", "proceed", 10.0, DAY_A),
+            _dated("C", "skip", 9.0, DAY_A),
+            _dated("D", "proceed", -10.0, DAY_B),
+            _dated("E", "skip", -11.0, DAY_B),
+        )
+
+        assert _five_day(compute_separation_paired(rows, THRESHOLDS)).value == (
+            pytest.approx(1.0)
+        )
+        assert _five_day(compute_separation(rows, THRESHOLDS)).value == pytest.approx(
+            10.0 / 3 + 1.0
+        )
+
+    def test_a_day_with_only_one_side_is_excluded_and_counted(self) -> None:
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A),
+            _dated("B", "skip", 8.0, DAY_A),
+            _dated("C", "proceed", 99.0, DAY_B),
+        )
+
+        summary = _five_day(compute_separation_paired(rows, THRESHOLDS))
+
+        assert summary.value == pytest.approx(2.0)
+        assert summary.excluded_day_count == 1
+
+    def test_a_window_with_no_two_sided_day_states_no_value(self) -> None:
+        rows = (_dated("A", "proceed", 10.0, DAY_A),)
+
+        summary = _five_day(compute_separation_paired(rows, THRESHOLDS))
+
+        assert summary.value is None
+        assert summary.stderr is None
+        assert (summary.ci_low, summary.ci_high) == (None, None)
+
+
+class TestPairedSeparationExcess:
+    def test_the_benchmarks_own_move_is_removed_from_both_sides(self) -> None:
+        # Day A: proceed +10 vs benchmark +6 -> +4; skip +8 vs +6 -> +2.
+        # Gap +2, identical to the raw pairing (a common benchmark cancels),
+        # which is exactly why disagreement between the two is informative.
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A, benchmark_return_pct=6.0),
+            _dated("B", "skip", 8.0, DAY_A, benchmark_return_pct=6.0),
+        )
+
+        assert _five_day(compute_separation_paired_excess(rows, THRESHOLDS)).value == (
+            pytest.approx(2.0)
+        )
+
+    def test_a_row_without_a_measured_benchmark_contributes_nothing(self) -> None:
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A, benchmark_return_pct=6.0),
+            _dated("B", "skip", 8.0, DAY_A, benchmark_return_pct=6.0),
+            _dated("C", "proceed", 99.0, DAY_B),
+            _dated("D", "skip", -99.0, DAY_B),
+        )
+
+        summary = _five_day(compute_separation_paired_excess(rows, THRESHOLDS))
+
+        assert summary.value == pytest.approx(2.0)
+        assert summary.sample_size == 2
+        # Day B lost both its rows, so it is a day that stated no difference.
+        assert summary.excluded_day_count == 1
+
+    def test_an_archive_with_no_benchmark_column_is_not_measurable(self) -> None:
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A),
+            _dated("B", "skip", 8.0, DAY_A),
+        )
+
+        assert _five_day(compute_separation_paired_excess(rows, THRESHOLDS)).value is (
+            None
+        )
+
+
+class TestDispersion:
+    def test_pooled_separation_carries_a_welch_interval(self) -> None:
+        # proceed {2, 4}: mean 3, variance 2. skip {0, 2}: mean 1, variance 2.
+        # diff +2; stderr sqrt(2/2 + 2/2) = sqrt(2).
+        rows = (
+            _dated("A", "proceed", 2.0, DAY_A),
+            _dated("B", "proceed", 4.0, DAY_A),
+            _dated("C", "skip", 0.0, DAY_A),
+            _dated("D", "skip", 2.0, DAY_A),
+        )
+
+        summary = _five_day(compute_separation(rows, THRESHOLDS))
+
+        assert summary.value == pytest.approx(2.0)
+        assert summary.stderr == pytest.approx(math.sqrt(2.0))
+        assert summary.ci_low == pytest.approx(2.0 - 1.959963984540054 * math.sqrt(2))
+        assert summary.ci_high == pytest.approx(2.0 + 1.959963984540054 * math.sqrt(2))
+
+    def test_a_single_observation_per_side_has_no_defined_spread(self) -> None:
+        rows = (
+            _dated("A", "proceed", 2.0, DAY_A),
+            _dated("C", "skip", 0.0, DAY_A),
+        )
+
+        summary = _five_day(compute_separation(rows, THRESHOLDS))
+
+        assert summary.value == pytest.approx(2.0)
+        assert summary.stderr is None
+        assert (summary.ci_low, summary.ci_high) == (None, None)
+
+    def test_the_weight_composed_headline_publishes_no_interval(self) -> None:
+        # The two horizons measure the same runs, so an interval across them
+        # would claim independence the data does not have.
+        composed = next(
+            row
+            for row in compute_separation(_mixed_outcomes(), THRESHOLDS)
+            if row.horizon_days is None
+        )
+
+        assert composed.value is not None
+        assert (composed.stderr, composed.ci_low, composed.ci_high) == (
+            None,
+            None,
+            None,
+        )
+
+    def test_a_rate_carries_a_wilson_interval_that_stays_inside_zero_and_one(
+        self,
+    ) -> None:
+        # 0 severe misses out of 3 proceeds: a Wald interval would collapse to
+        # the point [0, 0]; Wilson keeps a real upper bound.
+        rows = tuple(
+            _dated(symbol, "proceed", 1.0, DAY_A) for symbol in ("A", "B", "C")
+        )
+
+        summary = _five_day(compute_proceed_severe_miss_rate(rows, THRESHOLDS))
+
+        assert summary.value == 0.0
+        assert summary.ci_low == pytest.approx(0.0, abs=1e-12)
+        assert 0.0 < summary.ci_high < 1.0
+
+    def test_a_rates_composed_headline_publishes_no_interval(self) -> None:
+        composed = next(
+            row
+            for row in compute_proceed_severe_miss_rate(_mixed_outcomes(), THRESHOLDS)
+            if row.horizon_days is None
+        )
+
+        assert (composed.ci_low, composed.ci_high) == (None, None)
+
+    def test_wilson_needs_at_least_one_trial(self) -> None:
+        assert wilson_interval(0, 0) == (None, None)
+
+
+def _five_day(summaries):
+    return next(row for row in summaries if row.horizon_days == 5)
+
+
+ENTRY_DATE = date(2027, 3, 1)
+
+
+def _tracked(  # noqa: PLR0913 - one shadow position's own columns
+    symbol: str,
+    recommendation: str,
+    *,
+    exit_price: float | None = None,
+    exit_reason: str | None = "stop",
+    days_held: int = 4,
+    entry_price: float = 100.0,
+) -> VerdictPosition:
+    """Build one shadow position, closed unless `exit_price` is omitted."""
+    is_closed = exit_price is not None
+    return VerdictPosition(
+        run_id=RUN_A,
+        symbol=symbol,
+        strategy_key="default",
+        recommendation=recommendation,
+        no_trade=False,
+        entry_date=ENTRY_DATE,
+        entry_price=entry_price,
+        stop_price=95.0,
+        days_held=days_held,
+        status="closed" if is_closed else "open",
+        exit_date=date(2027, 3, 8) if is_closed else None,
+        exit_price=exit_price,
+        exit_reason=exit_reason if is_closed else None,
+        realized_return_pct=(
+            None
+            if exit_price is None
+            else (exit_price - entry_price) / entry_price * 100
+        ),
+        last_marked_date=ENTRY_DATE,
+    )
+
+
+def _entry_marks(
+    *positions: VerdictPosition, stop_price: float | None = 90.0
+) -> dict[tuple[UUID, str], VerdictPositionMark]:
+    return {
+        (position.run_id, position.symbol): VerdictPositionMark(
+            run_id=position.run_id,
+            symbol=position.symbol,
+            as_of_date=ENTRY_DATE,
+            close=position.entry_price,
+            stop_price=stop_price,
+            unrealized_return_pct=0.0,
+        )
+        for position in positions
+    }
+
+
+class TestTrackedPerformance:
+    """Issue #190: proceed vs skip under identical exit rules, plus the pool."""
+
+    def test_reports_the_two_sides_and_the_pooled_arm_in_a_fixed_order(self) -> None:
+        rows = compute_tracked_performance((), {})
+
+        assert [row.recommendation for row in rows] == ["proceed", "skip", "all"]
+        assert [row.metric_id for row in rows] == [
+            "metric:tracked_performance:proceed",
+            "metric:tracked_performance:skip",
+            "metric:tracked_performance:all",
+        ]
+
+    def test_an_empty_stratum_states_no_rate_rather_than_zero(self) -> None:
+        rows = {row.recommendation: row for row in compute_tracked_performance((), {})}
+
+        assert rows["skip"].closed_count == 0
+        assert rows["skip"].win_rate is None
+        assert rows["skip"].profit_factor is None
+        assert rows["skip"].expectancy_pct is None
+        assert rows["skip"].avg_holding_days is None
+
+    def test_each_side_is_measured_only_against_its_own_positions(self) -> None:
+        # proceed: +10% and -5% -> win rate 1/2, expectancy +2.5%,
+        # profit factor 10/5 = 2.0. skip: -20% alone -> win rate 0.
+        positions = (
+            _tracked("A", "proceed", exit_price=110.0),
+            _tracked("B", "proceed", exit_price=95.0),
+            _tracked("C", "skip", exit_price=80.0),
+        )
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance(positions, _entry_marks(*positions))
+        }
+
+        assert rows["proceed"].win_rate == pytest.approx(0.5)
+        assert rows["proceed"].expectancy_pct == pytest.approx(2.5)
+        assert rows["proceed"].profit_factor == pytest.approx(2.0)
+        assert rows["skip"].win_rate == 0.0
+        assert rows["skip"].expectancy_pct == pytest.approx(-20.0)
+        # The pooled arm is every screened candidate: (10 - 5 - 20) / 3.
+        assert rows["all"].expectancy_pct == pytest.approx(-5.0)
+
+    def test_profit_and_loss_is_scale_free_across_differently_priced_symbols(
+        self,
+    ) -> None:
+        # A $400 stock and a $20 stock each gaining 10% must contribute
+        # equally; a share-count-based P&L would let the expensive one
+        # dominate purely because of its price.
+        positions = (
+            _tracked("RICH", "proceed", entry_price=400.0, exit_price=440.0),
+            _tracked("CHEAP", "proceed", entry_price=20.0, exit_price=22.0),
+        )
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance(positions, _entry_marks(*positions))
+        }
+
+        assert rows["proceed"].expectancy_pct == pytest.approx(10.0)
+
+    def test_the_r_multiple_reads_the_entry_session_stop_not_the_trailed_one(
+        self,
+    ) -> None:
+        # Entry 100, stop *at entry* 90 (from the mark), exit 110: R = +1.0.
+        # The position row's own stop_price has since ratcheted to 95, which
+        # would report +2.0 and overstate the edge.
+        position = _tracked("A", "proceed", exit_price=110.0)
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance((position,), _entry_marks(position))
+        }
+
+        assert rows["proceed"].avg_r_multiple == pytest.approx(1.0)
+
+    def test_a_position_without_any_mark_contributes_no_r_multiple(self) -> None:
+        position = _tracked("A", "proceed", exit_price=110.0)
+
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance((position,), {})
+        }
+
+        assert rows["proceed"].closed_count == 1
+        assert rows["proceed"].avg_r_multiple is None
+
+    def test_open_positions_are_counted_but_never_rated(self) -> None:
+        positions = (
+            _tracked("A", "proceed", exit_price=110.0),
+            _tracked("B", "proceed"),
+        )
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance(positions, _entry_marks(*positions))
+        }
+
+        assert (rows["proceed"].closed_count, rows["proceed"].open_count) == (1, 1)
+        assert rows["proceed"].win_rate == 1.0
+
+    def test_exit_reasons_are_zero_filled_from_the_trackers_own_vocabulary(
+        self,
+    ) -> None:
+        position = _tracked("A", "proceed", exit_price=110.0, exit_reason="manual")
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance((position,), _entry_marks(position))
+        }
+
+        assert [
+            (cell.reason, cell.count) for cell in rows["proceed"].exit_reason_counts
+        ] == [("manual", 1), ("max_hold", 0), ("stop", 0)]
+
+    def test_reports_the_median_holding_period_in_sessions(self) -> None:
+        positions = (
+            _tracked("A", "proceed", exit_price=110.0, days_held=2),
+            _tracked("B", "proceed", exit_price=110.0, days_held=4),
+            _tracked("C", "proceed", exit_price=110.0, days_held=12),
+        )
+        rows = {
+            row.recommendation: row
+            for row in compute_tracked_performance(positions, _entry_marks(*positions))
+        }
+
+        assert rows["proceed"].avg_holding_days == pytest.approx(4.0)

@@ -46,7 +46,7 @@ bars = research.bars(["AAPL", "MSFT"])
 |---|---|---|
 | `scorecard()` | verdict × 当否 × スコア内訳 × リスク制約 × レジーム × 追跡 × セクター | `v_verdict_scorecard` |
 | `candidates()` | 候補とスコア内訳（JSON から型付き列へ展開済み） | `v_candidates` |
-| `tracked_positions()` | verdict 追跡台帳の仮想ポジション + recommendation | `v_tracked_positions` |
+| `tracked_positions()` | verdict 追跡台帳の仮想ポジション + recommendation（Issue #190 以降は `skip` のシャドウ建玉も含む） | `v_tracked_positions` |
 | `runs()` / `verdicts()` / `verdict_outcomes()` / `screening_rejections()` / `regime_snapshots()` | 各テーブルそのまま | 実テーブル |
 | `bars(symbols)` | 日足 OHLCV（in-memory DuckDB で Parquet を直読） | `data/parquet/` |
 | `query(sql, params)` | 任意 SQL の結果 | — |
@@ -66,12 +66,24 @@ bars = research.bars(["AAPL", "MSFT"])
 | `rank` / `score` / `score_*` / `rsi14` / `atr14` / `close` / `avg_volume` | スクリーニングのランキング内訳と生値 | 該当 run の candidates に無い、または成分導入前の行 |
 | `risk_status` / `binding_constraint` | リスク評価と、株数を決めた制約 | リスク評価が無い |
 | `gate_verdict` / `dd_level` / `dd_count_*` | 市場レジームゲートの状態 | レジーム snapshot が無い run |
-| `position_status` / `exit_reason` / `realized_return_pct` / `days_held` | 追跡台帳（2.5×ATR トレーリング / 25 セッション）の結果 | 追跡対象外（skip 等） |
+| `position_status` / `exit_reason` / `realized_return_pct` / `days_held` | 追跡台帳（2.5×ATR トレーリング / 25 セッション）の結果 | まだ追跡が始まっていない（Issue #190 以降、`skip` も同じルールで追跡されるので「skip だから NULL」ではなくなった） |
 | `gics_sector` | run 日時点で有効なユニバース snapshot のセクター（as-of inclusive） | snapshot が run 日以前に無い |
 
 セクターの as-of 解決（`snapshot_date <= run_date` の最新）は
 `v_symbol_sector_asof` に一元化してある。**ノートブック側で universe_membership を
 自前 JOIN しないこと**（look-ahead 混入の典型源）。
+
+## Issue #190 で増えた列
+
+| 列 | 意味 | NULL の意味 |
+|---|---|---|
+| `verdict_positions.recommendation` | そのシャドウ建玉がどちら側の verdict を追っているか（`proceed` / `skip`） | 列の導入前に書かれた行。`proceed` と読む（`v_tracked_positions` は `COALESCE` 済み） |
+| `verdict_outcomes.benchmark_return_pct` | 同一区間のベンチマーク（既定 SPY）リターン。超過リターンで separation を見るための材料 | **未計測**。0 ではない。列の導入前に分類された行か、ベンチマークのバーが揃わなかった行 |
+
+`skip` 群は**同一の出口ルールで仮想追跡した反実仮想**であって、実際に提案された建玉では
+ない。`tracked_positions()` を集計するときは `recommendation` で層別するか、
+`proceed` へ絞ること。層別せずに平均を取ると「proceed だけ買った場合」でも
+「候補を全部買った場合」でもない、解釈できない数字になる。
 
 ## 安全上の規約
 

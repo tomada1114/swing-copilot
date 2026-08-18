@@ -1,15 +1,24 @@
 """`copilot-track`: the verdict-tracking ledger's command line.
 
-Five subcommands, in the order a morning review uses them:
+Six subcommands, in the order a morning review uses them:
 
-* `update` opens a virtual position for every new `proceed` verdict and
-  carries the open ones forward to `--as-of`.
+* `update` opens a virtual position for every new verdict and carries the open
+  ones forward to `--as-of`.
 * `list` shows the ledger: unrealized P&L, the stop that would close each
   position, how many sessions are left before max-hold, and realized results.
 * `show` pairs one position with the verdict's reasons, its daily marks, and
   its notes.
+* `stats` reports the realized record -- win rate, profit factor, expectancy,
+  average R, holding period, exit-reason mix -- stratified by verdict side.
 * `close` records a human overriding the mechanical exit rules.
 * `note` records a dated judgement memo.
+
+Since Issue #190 the ledger also shadow-tracks `skip` verdicts, so that
+`stats` can put "buy only the proceeds" next to "buy every screened
+candidate" under identical exit rules. `list` and `show` therefore default to
+`--recommendation proceed`: the skip side is a research population, and a
+morning review that suddenly listed every rejected candidate as a position
+would read as a suggestion to buy them.
 
 `close` and `note` are the only writes a skill may make here. Nothing in this
 CLI rewrites configuration, code, or any deterministic screening/sizing value,
@@ -32,10 +41,14 @@ from rich.table import Table
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import Settings, load_settings
 from swing_copilot.exceptions import ConfigError
+from swing_copilot.retro.aggregate import (
+    ALL_RECOMMENDATIONS,
+    compute_tracked_performance,
+)
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
-from swing_copilot.storage.tracking_records import CLOSED, OPEN
+from swing_copilot.storage.tracking_records import CLOSED, OPEN, PROCEED, SKIP
 from swing_copilot.tracking.update import (
     TrackingError,
     close_manually,
@@ -44,7 +57,7 @@ from swing_copilot.tracking.update import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
 
     from swing_copilot.storage.tracking_records import VerdictPosition
 
@@ -54,6 +67,26 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # UUID or a price because of the invoking terminal's actual size.
 _CONSOLE_WIDTH = 200
 _NOT_AVAILABLE = "—"
+
+
+def _add_recommendation_argument(parser: argparse.ArgumentParser) -> None:
+    """Attach the display filter that keeps `skip` shadows out of the default view.
+
+    Defaulting to `proceed` is deliberate (Issue #190): the skip side exists
+    to be measured, not to be read as a list of positions someone might act
+    on, so seeing it has to be an explicit request.
+    """
+    parser.add_argument(
+        "--recommendation",
+        choices=(PROCEED, SKIP, ALL_RECOMMENDATIONS),
+        default=PROCEED,
+        help=f"表示する verdict 区分（既定 {PROCEED}）",
+    )
+
+
+def _selected_recommendations(value: str) -> Sequence[str] | None:
+    """Translate the CLI's filter into the repository's `recommendations` argument."""
+    return None if value == ALL_RECOMMENDATIONS else (value,)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -77,6 +110,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     list_parser.add_argument(
         "--status", choices=("open", "closed", "all"), default="all"
     )
+    _add_recommendation_argument(list_parser)
     list_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     list_parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
 
@@ -85,7 +119,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     show_parser.add_argument("--symbol", required=True)
     show_parser.add_argument("--run-id", type=UUID)
+    _add_recommendation_argument(show_parser)
     show_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+
+    stats_parser = subparsers.add_parser(
+        "stats", help="勝率・PF・期待値などを verdict 区分別に集計する"
+    )
+    stats_parser.add_argument(
+        "--recommendation",
+        choices=(PROCEED, SKIP, ALL_RECOMMENDATIONS),
+        default=None,
+        help=f"1区分だけを表示する（既定は {PROCEED}/{SKIP}/{ALL_RECOMMENDATIONS} 全て）",
+    )
+    stats_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
     close_parser = subparsers.add_parser("close", help="手動で手仕舞いを記録する")
     close_parser.add_argument("--run-id", type=UUID, required=True)
@@ -187,7 +233,9 @@ def _run_list(
     settings = _load_settings(args.settings)
     max_hold_days = settings.backtest.max_hold_days
     status = None if args.status == "all" else args.status
-    positions = state_store.get_verdict_positions(status)
+    positions = state_store.get_verdict_positions(
+        status, _selected_recommendations(args.recommendation)
+    )
     if not positions:
         console.print("追跡中の仮想ポジションはない")
         return
@@ -196,6 +244,7 @@ def _run_list(
     table = Table(title="verdict 追跡台帳")
     for column in (
         "symbol",
+        "区分",
         "⚠",
         "run_id",
         "entry_date",
@@ -216,6 +265,7 @@ def _run_list(
         is_open = position.status == OPEN
         table.add_row(
             position.symbol,
+            position.recommendation,
             "no_trade" if position.no_trade else "",
             str(position.run_id),
             position.entry_date.isoformat(),
@@ -243,7 +293,9 @@ def _run_show(
 ) -> None:
     positions = [
         position
-        for position in state_store.get_verdict_positions()
+        for position in state_store.get_verdict_positions(
+            None, _selected_recommendations(args.recommendation)
+        )
         if position.symbol == args.symbol
         and (args.run_id is None or position.run_id == args.run_id)
     ]
@@ -252,6 +304,61 @@ def _run_show(
         return
     for position in positions:
         _print_position_detail(state_store, position, console)
+
+
+def _fmt_ratio(value: float | None) -> str:
+    return _NOT_AVAILABLE if value is None else f"{value:.2f}"
+
+
+def _run_stats(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    """Report the ledger's realized record per verdict side (Issue #190).
+
+    Reads the whole ledger rather than a window: `copilot-retro export` owns
+    the windowed version of this same computation, and a hand-run `stats` is
+    asking "what has the layer done so far", not "what did it do in the last
+    90 days".
+    """
+    rows = compute_tracked_performance(
+        state_store.get_verdict_positions(),
+        state_store.get_earliest_verdict_position_marks(),
+    )
+    if args.recommendation is not None:
+        rows = tuple(row for row in rows if row.recommendation == args.recommendation)
+
+    table = Table(title="verdict 追跡台帳 成績（損益は % 単位）")
+    for column in (
+        "区分",
+        "手仕舞い",
+        "保有中",
+        "勝率",
+        "PF",
+        "期待値",
+        "平均R",
+        "保有日数(中央値)",
+        "手仕舞い理由",
+    ):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            row.recommendation,
+            str(row.closed_count),
+            str(row.open_count),
+            _fmt_pct(None if row.win_rate is None else row.win_rate * 100),
+            _fmt_ratio(row.profit_factor),
+            _fmt_pct(row.expectancy_pct),
+            _fmt_ratio(row.avg_r_multiple),
+            _fmt_ratio(row.avg_holding_days),
+            " / ".join(
+                f"{cell.reason}={cell.count}" for cell in row.exit_reason_counts
+            ),
+        )
+    console.print(table)
+    console.print(
+        "[dim]skip 群は同一の出口ルールで仮想追跡した反実仮想であり、"
+        "実際に提案された建玉ではない[/dim]"
+    )
 
 
 def _print_position_detail(
@@ -345,7 +452,7 @@ def _run_note(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: dispatch to one of the five subcommands.
+    """CLI entry point: dispatch to one of the six subcommands.
 
     Args:
         argv: Argument vector, defaulting to `sys.argv[1:]`.
@@ -365,6 +472,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_list(state_store, args, console)
     elif args.command == "show":
         _run_show(state_store, args, console)
+    elif args.command == "stats":
+        _run_stats(state_store, args, console)
     elif args.command == "close":
         _run_close(state_store, args, console)
     else:

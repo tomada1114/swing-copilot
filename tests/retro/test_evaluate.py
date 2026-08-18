@@ -211,6 +211,54 @@ class TestEvaluateHappyPath:
         ]
 
 
+class TestEvaluateBenchmarkReturn:
+    """Issue #190: each classification records the market's own move too."""
+
+    def test_records_the_benchmarks_return_over_the_identical_span(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        # Benchmark 100 -> 102 over the same 5 sessions: +2.0%. The symbol
+        # gains 1.5%, so it actually *lagged* -- the reading the raw
+        # forward return alone cannot give.
+        market_store.write_bars(bars(BENCHMARK, {MATURITY_5D: 102.0}))
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _benchmark_returns(state_store) == [pytest.approx(2.0)]
+
+    def test_a_missing_benchmark_close_is_recorded_as_unmeasured_not_zero(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The trading calendar comes from the benchmark, so its maturity bar
+        # exists; what is missing here is the *run day's* close, which is what
+        # a return needs. NULL must not be read later as "the market was flat".
+        run_id = uuid4()
+        market_store.write_bars(
+            bars(BENCHMARK, dict.fromkeys(CALENDAR, 100.0) | {RUN_DATE: float("nan")})
+        )
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _benchmark_returns(state_store) == [None]
+
+
+def _benchmark_returns(state_store: StateStore) -> list[float | None]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT benchmark_return_pct FROM verdict_outcomes "
+                "WHERE horizon_days = 5 ORDER BY symbol"
+            ).fetchall()
+        ]
+
+
 class TestEvaluateMaturityCutoff:
     def test_a_horizon_maturing_exactly_at_as_of_is_evaluated(
         self, market_store: MarketStore, state_store: StateStore

@@ -303,7 +303,7 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 
 ## `copilot-track`とverdict追跡台帳
 
-`tracking/cli.py`（`copilot-track`）は、`proceed`と判定された銘柄を「そのrunの
+`tracking/cli.py`（`copilot-track`）は、verdictの出た銘柄を「そのrunの
 終値で仮想的に買った」とみなして日次追跡する台帳のCLIである。手仕舞いルールは
 `backtest/exits.py`の純関数（ATRトレーリングストップ + 最大保有日数）を
 **バックテストと共有**しており、台帳が示す「いくらになったら手仕舞いか」は
@@ -313,12 +313,15 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 ```bash
 copilot-track update --as-of 2027-03-21          # 建玉と日次前進
 copilot-track list --status open                 # 含み損益・stop・残営業日
+copilot-track list --recommendation all          # skip のシャドウ建玉も含める
 copilot-track show --symbol AAPL                 # verdict理由・日次マーク・ノート
+copilot-track stats                              # 勝率・PF・期待値をverdict区分別に
+copilot-track stats --recommendation skip        # 1区分だけ
 copilot-track close --run-id <UUID> --symbol AAPL --note "決算をまたがない"
 copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 ```
 
-`update`は`verdicts`の`recommendation='proceed'`のうち未追跡のものを建玉し、
+`update`は`verdicts`の`proceed`と`skip`のうち未追跡のものを建玉し、
 保有中を`--as-of`まで1取引日ずつ前進させる。`no_trade`（そのrun全体が当日
 エントリー非推奨だった判断）は**除外しない**——実運用ではレジームが
 `CASH_PRIORITY`のrunで全verdictが`no_trade=true`になることがあり、除外すると
@@ -334,14 +337,37 @@ NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit
 日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
 省略したときだけ、CLI境界で`SystemClock().today()`を使う。
 
-`update`は建玉の前に、**verdictを失った建玉を削除する**。`copilot-ingest-analysis`の
+`update`は建玉の前に、**verdict行を失った建玉を削除する**。`copilot-ingest-analysis`の
 再取り込みはrunのverdictを丸ごと置き換えるため（`replace_run_verdicts`）、
-`proceed`から`skip`へ訂正された銘柄の仮想建玉が孤児として残り、取り消された判断の
-損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、対応する`proceed`が
+分析対象から外れた銘柄の仮想建玉が孤児として残り、取り消された判断の
+損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、対応するverdictが
 消えたポジションはマーク・ノートごと1トランザクションで削除し、削除した銘柄を
-noteに出す。
+noteに出す。`proceed`↔`skip`の訂正は孤児ではない——両側を同じ出口ルールで追跡して
+いるのでリプレイは依然正しく、`recommendation`列だけをverdict側へ追随させて
+その旨をnoteに出す。
 
-`list`は`⚠`列で`no_trade`を示し、フラグが立つ行は`no_trade`と表示する
+### skip のシャドウ追跡と `stats`
+
+`skip`のシャドウ建玉（Issue #190）は、**proceedと完全に同じ出口ルール**で運ぶ。
+「verdictレイヤに価値があるか」は突き詰めれば「proceedだけ買った場合 vs
+screening通過を全部買った場合」の差であり、片側しか追跡していない台帳では
+その反実仮想が作れないためである。副産物としてサンプル母数が採用少数派から
+候補全体へ広がる。
+
+`skip`群は計測用の母集団であって提案された建玉ではないので、`list`と`show`の
+既定は`--recommendation proceed`のままで、日常の朝の確認の見え方は変わらない。
+`--recommendation skip` / `all`で明示的に開く。
+
+`stats`は勝率・プロフィットファクタ・期待値・平均R倍数・保有日数中央値・
+手仕舞い理由内訳を`proceed` / `skip` / `all`の3層で出す（`--recommendation`で
+1層に絞れる）。勝率などのレート定義は`backtest/metrics.py`の共通関数を通るので、
+バックテスト・紙トレ台帳・追跡台帳の3者で「勝ち」の意味が一致する。損益は
+すべて**%単位**である——シャドウ建玉には株数が決まっていないため、各建玉を
+$100 notionalへ正規化して測る（$400の株1株と$20の株1株が同列に並ぶのを防ぐ）。
+R倍数はエントリー日のマークに残る**当時の**stopから計算する（ポジション行の
+`stop_price`はトレーリングで切り上がっているため、それを使うとRを過大評価する）。
+
+`list`は`区分`列でverdictの側を、`⚠`列で`no_trade`を示し、フラグが立つ行は`no_trade`と表示する
 （立たない行は空欄）。`show`はさらに一文で「銘柄単体は`proceed`だが、run全体は
 当日エントリー非推奨だった（実際に提案された買いとは区別して読む）」と明示する。
 いずれも判定の質を測る材料として台帳に残す一方、実際に提案された買いではない
@@ -358,14 +384,16 @@ noteに出す。
 即時反映のためのものになる。
 
 台帳のオープン建玉は、`copilot-daily`の「保有銘柄」のもう一方の供給源でもある。
-日次runは実オープンポジション（`positions`）と台帳の`status='open'`の**和集合**を
-保有銘柄として扱い、ニュース・開示の収集と分析の対象に優先的に含める
+日次runは実オープンポジション（`positions`）と台帳の`status='open'`**かつ
+`proceed`**の**和集合**を保有銘柄として扱い、ニュース・開示の収集と分析の対象に優先的に含める
 （`docs/04_detailed_design.md` 3.14）。実売買を始める前は`positions`が空なので、
 台帳を読まなければ保有銘柄のニュース収集が一度も発火せず、遡及取得できない
 `company-news`が恒久的に欠ける。ただしこれは収集・分析の対象集合にだけ効き、
 リスク計算（サイジング・集中度・相関）へ渡すポートフォリオは実ポジションのみで、
-仮想建玉は混ざらない。`--as-of`指定の再現runは台帳を読まない（現在状態であり
-時点再現性が無いため）。台帳の読み取り失敗はfail-softで、警告を出して
+仮想建玉は混ざらない。`skip`のシャドウ建玉は保有銘柄に**含めない**——そこには
+notionalにも何も保有されておらず、含めると開示・ニュースの「保有優先」予算が
+定性レイヤが落とした銘柄すべてへ向いてしまう。`--as-of`指定の再現runは台帳を
+読まない（現在状態であり時点再現性が無いため）。台帳の読み取り失敗はfail-softで、警告を出して
 仮想側を空としてrunを続行する。
 
 スキルからの書き込みは`close`（`exit_reason='manual'`で確定）と`note`

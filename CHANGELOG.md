@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように
+  なった（Issue #190、2026-08 アーキテクチャレビューの R7）。「verdict
+  レイヤに価値があるか」は本質的に「proceed だけ買った場合 vs screening
+  通過を全部買った場合」の差であり、片側しか追跡していない台帳では
+  その反実仮想が作れなかった。`verdict_positions.recommendation`
+  （nullable、NULL = `proceed`）が区分を持ち、両群が同じトレーリング
+  ストップと最大保有日数で運ばれる。サンプル母数が採用少数派から候補
+  全体へ広がる。`list` / `show` の既定表示は `proceed` のみ
+  （`--recommendation` で明示的に開く）なので、日常操作の見え方は
+  変わらない
+- `copilot-track stats`: 勝率・プロフィットファクタ・期待値・平均 R 倍数・
+  保有日数中央値・手仕舞い理由内訳を `proceed` / `skip` / `all` で層別して
+  出す。損益はすべて % 単位（シャドウ建玉に株数の決定は存在しないため、
+  各建玉を $100 notional へ正規化して測る）
+- `retro_input.json` に `aggregates.tracked_performance` を追加
+  （`metric:tracked_performance:{proceed,skip,all}`）。追跡台帳の実現損益が
+  振り返りの証拠に入るようになった（従来 `retro/export.py` は台帳を一切
+  参照していなかった）
+- separation のペアード版と超過リターン版
+  （`metric:separation_paired:*` / `metric:separation_paired_excess:*`）。
+  従来の窓全体プール平均差は地合いと交絡しうるため、run 日ごとに
+  proceed−skip を取ってから日次差を平均する版を併記する。片群しか無い日は
+  除外し、除外日数を `excluded_day_count` に出す。超過版のために
+  `verdict_outcomes.benchmark_return_pct`（nullable、backfill しない）を
+  追加した
+- 集約指標に散らばりの指標を追加した。`MetricEntry` に `stderr` /
+  `ci_low` / `ci_high`、`RateMetricEntry` に Wilson スコア区間の
+  `ci_low` / `ci_high`（いずれも両側 95%）。重み合成のヘッドラインには
+  区間を出さない——5 日と 20 日は同じ run を測り直した非独立な 2 窓であり、
+  そこから作った区間は実際より狭くなる。これに合わせて `swing-retro` の
+  L1 証拠ゲートを「n≥20 かつ CI が 0 を跨がない」へ強化した
+
+### Changed
+
+- 勝率・プロフィットファクタ・期待値・R 倍数・保有日数・手仕舞い理由内訳の
+  定義を `backtest/metrics.py` に一本化した（Issue #190）。同モジュールは
+  `engine.Trade` ではなく `ClosedTrade` Protocol を受け取るようになり、
+  バックテスト・紙トレ台帳（`paper/journal.py`）・verdict 追跡台帳の 3 者が
+  同じ関数を通る。`PaperJournal._win_rate` などの private な二重実装は削除
+  （`PerformanceSummary` の外形は不変）
+- `copilot-daily` の「保有銘柄」（開示・ニュース収集の優先対象、設計 3.14）が
+  読む仮想建玉を `proceed` に限定した。`skip` のシャドウ建玉には notional にも
+  何も保有されておらず、含めると保有優先のテキスト予算が定性レイヤの落とした
+  銘柄すべてへ向いてしまう
+- `proceed` から `skip` へ訂正された verdict の追跡ポジションを**削除しなく
+  なった**。両側を同じ出口ルールで追跡している以上リプレイは依然正しく、
+  削除すると訂正のたびに skip 側の標本が痩せる。`recommendation` 列だけを
+  verdict 側へ追随させ、その旨を note に出す。verdict 行そのものが消えた
+  場合（銘柄が分析対象から外れた場合）は従来どおり削除する
+
 - バックテストが本番と同じ系を測るようになった（Issue #184、2026-08
   アーキテクチャレビューの P1）。本番は候補と建玉の間にレジーム
   （`CASH_PRIORITY` / `REDUCE_ONLY`）・portfolio heat・決算・サーキット

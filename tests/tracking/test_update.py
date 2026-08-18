@@ -139,12 +139,14 @@ class TestOpening:
             (ENTRY_DATE, 0.0)
         ]
 
-    def test_a_skip_verdict_is_never_tracked(
+    def test_a_skip_verdict_is_shadow_tracked_under_the_same_rules(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: BacktestConfig,
     ) -> None:
+        # Issue #190: the counterfactual only exists if the rejected
+        # candidates are carried exactly the way the accepted ones are.
         seed_verdict(state_store, symbol="SKP", recommendation="skip")
         write_bars(market_store, flat_prelude(symbol="SKP"))
 
@@ -152,8 +154,25 @@ class TestOpening:
             state_store, market_store, backtest_config, as_of=ENTRY_DATE
         )
 
-        assert result.opened_count == 0
-        assert state_store.get_verdict_positions() == ()
+        assert result.opened_count == 1
+        position = state_store.get_verdict_position(RUN_ID, "SKP")
+        assert position is not None
+        assert position.recommendation == "skip"
+        assert position.entry_date == ENTRY_DATE
+        assert position.status == "open"
+
+    def test_the_skip_side_is_absent_from_the_default_display_filter(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        seed_verdict(state_store, symbol="SKP", recommendation="skip")
+        write_bars(market_store, flat_prelude(symbol="SKP"))
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        assert state_store.get_verdict_positions(None, ("proceed",)) == ()
+        assert len(state_store.get_verdict_positions(None, ("skip",))) == 1
 
     def test_a_no_trade_proceed_verdict_is_tracked_with_the_flag_carried_through(
         self,
@@ -812,7 +831,7 @@ class TestManualWrites:
 
 
 class TestVerdictReconciliation:
-    def test_a_retracted_proceed_verdict_removes_what_it_opened(
+    def test_a_verdict_deleted_outright_removes_what_it_opened(
         self,
         state_store: StateStore,
         market_store: MarketStore,
@@ -828,8 +847,9 @@ class TestVerdictReconciliation:
         )
 
         # Re-ingesting a corrected analysis_result.json replaces the run's
-        # verdicts wholesale; AAA is demoted from proceed to skip.
-        seed_verdict(state_store, recommendation="skip")
+        # verdicts wholesale; AAA is no longer analyzed at all, so nothing
+        # explains the position any more.
+        state_store.replace_run_verdicts(RUN_ID, [], [])
         result = update_tracking(
             state_store, market_store, backtest_config, as_of=DAY_2
         )
@@ -837,7 +857,34 @@ class TestVerdictReconciliation:
         assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
         assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
         assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
-        assert any("取り消された" in note for note in result.notes)
+        assert any("verdict 行が消えた" in note for note in result.notes)
+        assert result.opened_count == 0
+
+    def test_a_demoted_proceed_verdict_keeps_its_position_and_is_realigned(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        # Issue #190: skip is tracked too, so the replay stays valid and the
+        # row moves strata instead of being destroyed (which would also shrink
+        # the skip sample every time an analysis was corrected).
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        write_bars(market_store, [_rise(DAY_1, 102.0)])
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+
+        seed_verdict(state_store, recommendation="skip")
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_1
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.recommendation == "skip"
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) != ()
+        assert any("区分を追随" in note for note in result.notes)
         assert result.opened_count == 0
 
     def test_a_standing_proceed_verdict_keeps_its_position(
@@ -1131,6 +1178,7 @@ class TestSplitRebase:
                 run_id=RUN_ID,
                 symbol=SYMBOL,
                 strategy_key="default",
+                recommendation="proceed",
                 no_trade=False,
                 entry_date=ENTRY_DATE,
                 entry_price=0.0,

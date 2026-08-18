@@ -29,6 +29,7 @@ from swing_copilot.retro.schemas import RETRO_INPUT_SCHEMA_VERSION, RetroInput
 from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.paper_records import TradeDecisionRecord
+from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
     NewsSupplyRecord,
@@ -261,6 +262,98 @@ class TestBuildRetroInput:
         separation = {row.metric_id: row for row in document.aggregates.separation}
         assert separation["metric:separation:5d"].value == pytest.approx(-7.0)
         assert separation["metric:separation:5d"].is_preliminary is True
+
+    def test_publishes_the_paired_and_excess_separation_beside_the_pooled_one(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # Issue #190: the pooled metric keeps its ID (proposals in the ledger
+        # cite it) and the two new readings are published alongside it, so the
+        # skill can see whether all three agree.
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        paired = document.aggregates.separation_paired
+        excess = document.aggregates.separation_paired_excess
+        assert paired is not None
+        assert excess is not None
+        assert {row.metric_id for row in paired} >= {"metric:separation_paired:5d"}
+        assert {row.metric_id for row in excess} >= {
+            "metric:separation_paired_excess:5d"
+        }
+        # One run day with both sides: the paired gap equals the pooled one.
+        by_id = {row.metric_id: row for row in paired}
+        assert by_id["metric:separation_paired:5d"].value == pytest.approx(-7.0)
+        assert by_id["metric:separation_paired:5d"].excluded_day_count == 0
+
+    def test_publishes_the_tracking_ledgers_record_per_verdict_side(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        populated_store.upsert_verdict_position(
+            VerdictPosition(
+                run_id=RUN_ID,
+                symbol="AAPL",
+                strategy_key="default",
+                recommendation="proceed",
+                no_trade=False,
+                entry_date=RUN_DATE,
+                entry_price=100.0,
+                stop_price=95.0,
+                days_held=5,
+                status="closed",
+                exit_date=MATURITY_5D,
+                exit_price=110.0,
+                exit_reason="stop",
+                realized_return_pct=10.0,
+                last_marked_date=MATURITY_5D,
+            )
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        tracked = document.aggregates.tracked_performance
+        assert tracked is not None
+        rows = {row.recommendation: row for row in tracked}
+        assert rows["proceed"].closed_count == 1
+        assert rows["proceed"].win_rate == 1.0
+        assert rows["proceed"].expectancy_pct == pytest.approx(10.0)
+        assert rows["skip"].closed_count == 0
+
+    def test_a_position_realized_outside_the_window_is_left_out(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        # The window is matched on the exit date, the same "matured in this
+        # period" rule `verdict_outcomes` uses, so both aggregate blocks
+        # describe the same stretch of time.
+        populated_store.upsert_verdict_position(
+            VerdictPosition(
+                run_id=RUN_ID,
+                symbol="OLD",
+                strategy_key="default",
+                recommendation="proceed",
+                no_trade=False,
+                entry_date=date(2026, 1, 5),
+                entry_price=100.0,
+                stop_price=95.0,
+                days_held=5,
+                status="closed",
+                exit_date=date(2026, 1, 12),
+                exit_price=110.0,
+                exit_reason="stop",
+                realized_return_pct=10.0,
+                last_marked_date=date(2026, 1, 12),
+            )
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        tracked = document.aggregates.tracked_performance
+        assert tracked is not None
+        assert {row.recommendation: row.closed_count for row in tracked}["all"] == 0
 
     def test_verdict_mix_reflects_the_windows_verdicts(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

@@ -74,8 +74,9 @@ class TestScorecard:
         _insert_verdict(state_store, run_id)
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
-                "INSERT INTO verdict_outcomes VALUES (?, 'AAPL', 5, "
-                "'2027-02-08', 'proceed', 3.2, 'HIT')",
+                "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
+                "as_of, recommendation, forward_return_pct, classification) "
+                "VALUES (?, 'AAPL', 5, '2027-02-08', 'proceed', 3.2, 'HIT')",
                 [str(run_id)],
             )
             conn.execute(
@@ -187,8 +188,10 @@ class TestTableAccessors:
         _insert_verdict(state_store, run_id)
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
-                "INSERT INTO verdict_outcomes VALUES (?, 'AAPL', 20, "
-                "'2027-03-01', 'proceed', -6.0, 'MISS_SEVERE')",
+                "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
+                "as_of, recommendation, forward_return_pct, classification) "
+                "VALUES (?, 'AAPL', 20, '2027-03-01', 'proceed', -6.0, "
+                "'MISS_SEVERE')",
                 [str(run_id)],
             )
             conn.execute(
@@ -221,8 +224,11 @@ class TestTableAccessors:
         _insert_verdict(state_store, run_id)
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
-                "INSERT INTO verdict_positions VALUES (?, 'AAPL', 'default', "
-                "FALSE, ?, 190.0, 182.0, 3, 'open', NULL, NULL, NULL, NULL, ?)",
+                "INSERT INTO verdict_positions (run_id, symbol, strategy_key, "
+                "no_trade, entry_date, entry_price, stop_price, days_held, "
+                "status, last_marked_date) "
+                "VALUES (?, 'AAPL', 'default', FALSE, ?, 190.0, 182.0, 3, "
+                "'open', ?)",
                 [str(run_id), RUN_DATE, date(2027, 2, 4)],
             )
 

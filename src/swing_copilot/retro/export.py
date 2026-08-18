@@ -44,8 +44,11 @@ from swing_copilot.retro.aggregate import (
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
+    compute_separation_paired,
+    compute_separation_paired_excess,
     compute_skip_hit_rate,
     compute_source_contribution,
+    compute_tracked_performance,
     compute_verdict_mix,
 )
 from swing_copilot.retro.evaluate import MISS_SEVERE
@@ -57,6 +60,7 @@ from swing_copilot.retro.schemas import (
     ArchivedFilingCoverage,
     ConfigSnapshot,
     EvaluationSettings,
+    ExitReasonCountEntry,
     FreshnessEntry,
     InputCoverageSummary,
     MetricEntry,
@@ -70,6 +74,7 @@ from swing_copilot.retro.schemas import (
     SurpriseBundle,
     SurpriseDossier,
     SurpriseOutcomeEntry,
+    TrackedPerformanceEntry,
     VerdictMixEntry,
     VerdictReasonEntry,
     retro_input_digest,
@@ -82,7 +87,7 @@ from swing_copilot.retro.surprises import (
 from swing_copilot.storage.history_queries import get_signal_outcomes
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date
     from pathlib import Path
     from uuid import UUID
@@ -90,9 +95,14 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
     from swing_copilot.config import Settings
     from swing_copilot.report.daily_brief import SignalPerformanceRow
+    from swing_copilot.retro.aggregate import TrackedPerformance
     from swing_copilot.retro.surprises import SurpriseCandidate
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
+    from swing_copilot.storage.tracking_records import (
+        VerdictPosition,
+        VerdictPositionMark,
+    )
     from swing_copilot.storage.verdict_records import (
         AnalysisSourceCoverageRecord,
         VerdictCitationRow,
@@ -287,9 +297,12 @@ def build_retro_input(
         "generated_at": deps.clock.now().isoformat(),
         "window_start": window_start.isoformat(),
         "evaluation": _evaluation_settings(deps.settings).model_dump(mode="json"),
-        "aggregates": _aggregates(verdicts, outcomes, deps.settings).model_dump(
-            mode="json"
-        ),
+        "aggregates": _aggregates(
+            verdicts,
+            outcomes,
+            deps.settings,
+            _tracked_ledger_window(store, window_start, as_of),
+        ).model_dump(mode="json"),
         "signal_performance": _signal_entries(signals),
         "human_alignment": [
             AlignmentEntry(**asdict(cell)).model_dump(mode="json")
@@ -361,16 +374,76 @@ def _evaluation_settings(settings: Settings) -> EvaluationSettings:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TrackedLedgerWindow:
+    """The shadow-tracking ledger's slice of one retrospective window (#190).
+
+    Two reads bundled into one value: the positions themselves and each one's
+    entry-session mark, which is the only place the stop actually in force at
+    entry survives (the position row's `stop_price` ratchets with the trailing
+    stop). Carried together so `_aggregates` stays inside the project's
+    parameter-count guideline.
+    """
+
+    positions: tuple[VerdictPosition, ...]
+    initial_marks: Mapping[tuple[UUID, str], VerdictPositionMark]
+
+
+def _tracked_ledger_window(
+    store: StateStore, window_start: date, as_of: date
+) -> TrackedLedgerWindow:
+    """Read the ledger slice this window's performance row describes."""
+    return TrackedLedgerWindow(
+        positions=_tracked_positions_in_window(store, window_start, as_of),
+        initial_marks=store.get_earliest_verdict_position_marks(),
+    )
+
+
+def _tracked_positions_in_window(
+    store: StateStore, window_start: date, as_of: date
+) -> tuple[VerdictPosition, ...]:
+    """Select the shadow positions this window's performance row describes.
+
+    A closed position belongs to the window when it *realized* inside it,
+    which is the same "matured in this period" rule `verdict_outcomes` uses,
+    so the two aggregate blocks describe the same stretch of time. Open
+    positions are included when they were entered by `as_of`: they contribute
+    only to `open_count`, and reporting them is what stops a window of nothing
+    but unrealized positions from looking like a window of no activity.
+    """
+    return tuple(
+        position
+        for position in store.get_verdict_positions()
+        if position.entry_date <= as_of
+        and (position.exit_date is None or window_start <= position.exit_date <= as_of)
+    )
+
+
 def _aggregates(
     verdicts: Sequence[VerdictRow],
     outcomes: Sequence[VerdictOutcomeRecord],
     settings: Settings,
+    tracked: TrackedLedgerWindow,
 ) -> AggregateMetrics:
     thresholds = settings.postmortem
     return AggregateMetrics(
         separation=[
             MetricEntry(**asdict(row))
             for row in compute_separation(outcomes, thresholds)
+        ],
+        separation_paired=[
+            MetricEntry(**asdict(row))
+            for row in compute_separation_paired(outcomes, thresholds)
+        ],
+        separation_paired_excess=[
+            MetricEntry(**asdict(row))
+            for row in compute_separation_paired_excess(outcomes, thresholds)
+        ],
+        tracked_performance=[
+            _tracked_performance_entry(row)
+            for row in compute_tracked_performance(
+                tracked.positions, tracked.initial_marks
+            )
         ],
         proceed_severe_miss_rate=[
             RateMetricEntry(**asdict(row))
@@ -382,6 +455,30 @@ def _aggregates(
         ],
         verdict_mix=VerdictMixEntry(**asdict(compute_verdict_mix(verdicts))),
         news_supply=_news_supply_entry(verdicts),
+    )
+
+
+def _tracked_performance_entry(row: TrackedPerformance) -> TrackedPerformanceEntry:
+    """Carry one stratum across, field for field (Issue #190).
+
+    Spelled out rather than `asdict`-ed for the same reason as
+    `_signal_entries`: a field added to the aggregate should fail here loudly
+    instead of silently widening the exported contract.
+    """
+    return TrackedPerformanceEntry(
+        metric_id=row.metric_id,
+        recommendation=row.recommendation,
+        closed_count=row.closed_count,
+        open_count=row.open_count,
+        win_rate=row.win_rate,
+        profit_factor=row.profit_factor,
+        expectancy_pct=row.expectancy_pct,
+        avg_r_multiple=row.avg_r_multiple,
+        avg_holding_days=row.avg_holding_days,
+        exit_reason_counts=[
+            ExitReasonCountEntry(reason=cell.reason, count=cell.count)
+            for cell in row.exit_reason_counts
+        ],
     )
 
 

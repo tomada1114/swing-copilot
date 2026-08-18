@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from swing_copilot.screening.indicators import (
+    SymbolWindow,
     _symbol_index_cache,
     percentile_ranks,
     sma,
     symbol_bars,
+    symbol_window,
     wilder_atr,
     wilder_rsi,
 )
@@ -204,3 +208,235 @@ class TestSymbolBarsMatchesTheNaiveImplementation:
         empty = pd.DataFrame(columns=["symbol", "date", "close"])
 
         assert symbol_bars(empty, "AAA", date(2026, 1, 1)) is None
+
+
+_RSI_PERIOD = 14
+_ATR_PERIOD = 14
+_VOLUME_WINDOW = 20
+_SMA_SHORT = 50
+_SMA_LONG = 200
+_WINDOW_START = date(2025, 1, 1)
+_WINDOW_DAYS = 320
+
+
+def _varied_bars(symbol: str, *, days: int = _WINDOW_DAYS, seed: int) -> pd.DataFrame:
+    """Bars whose closes and volumes both actually move, unlike `make_bars`.
+
+    A constant volume would let a broken trailing mean pass, and a monotone
+    close would hide RSI/ATR smoothing differences.
+    """
+    rng = np.random.default_rng(seed)
+    closes = 100.0 * np.exp(np.cumsum(rng.normal(0.0004, 0.02, days)))
+    frame = make_bars(symbol, [float(close) for close in closes], start=_WINDOW_START)
+    frame["volume"] = rng.integers(500_000, 5_000_000, days)
+    return frame
+
+
+def _naive_indicators(
+    bars: pd.DataFrame, symbol: str, as_of: date
+) -> dict[str, float] | None:
+    """The pre-#214 per-day computation, kept as the equivalence oracle.
+
+    Every screening call site used to build these six full-history rolling
+    series from the `as_of` prefix and keep only their last point. The
+    `avg_volume` guard is part of that oracle: no call site ever took
+    `tail(w).mean()` of a shorter history -- each one skipped the symbol
+    first -- and `SymbolWindow.mean_volume` folds that guard into the column
+    by requiring a full window.
+    """
+    series = symbol_bars(bars, symbol, as_of)
+    if series is None:
+        return None
+    return {
+        "close": float(series["close"].iloc[-1]),
+        "rsi": float(wilder_rsi(series["close"], _RSI_PERIOD).iloc[-1]),
+        "atr": float(
+            wilder_atr(
+                series["high"], series["low"], series["close"], _ATR_PERIOD
+            ).iloc[-1]
+        ),
+        "mean_volume": float(series["volume"].tail(_VOLUME_WINDOW).mean())
+        if len(series) >= _VOLUME_WINDOW
+        else float("nan"),
+        "sma_short": float(sma(series["close"], _SMA_SHORT).iloc[-1]),
+        "sma_long": float(sma(series["close"], _SMA_LONG).iloc[-1]),
+    }
+
+
+def _window_indicators(window: SymbolWindow) -> dict[str, float]:
+    return {
+        "close": window.close,
+        "rsi": window.rsi(_RSI_PERIOD),
+        "atr": window.atr(_ATR_PERIOD),
+        "mean_volume": window.mean_volume(_VOLUME_WINDOW),
+        "sma_short": window.sma(_SMA_SHORT),
+        "sma_long": window.sma(_SMA_LONG),
+    }
+
+
+def _comparable(values: dict[str, float]) -> dict[str, object]:
+    """Make NaN compare equal to NaN so `==` can assert bit-for-bit equality."""
+    return {key: "nan" if math.isnan(value) else value for key, value in values.items()}
+
+
+class TestSymbolWindowMatchesThePerDayComputation:
+    """Issue #214's equivalence contract, and its no-look-ahead proof.
+
+    `SymbolWindow` reads indicator columns computed once over a symbol's
+    *whole* history, including rows dated after `as_of`. That is safe only
+    because every one of those indicators is causal, so the value at a row is
+    a function of that row and earlier rows alone. This asserts exactly that,
+    for every simulated day: the value read from the full-history column must
+    equal -- bit for bit, not within a tolerance, because the backtest's
+    equity curve must not move by a cent -- the value the old code computed
+    from the `as_of` prefix on its own.
+    """
+
+    @pytest.fixture
+    def bars(self) -> pd.DataFrame:
+        return pd.concat(
+            [_varied_bars("AAA", seed=214), _varied_bars("BBB", seed=1114)],
+            ignore_index=True,
+        )
+
+    @pytest.mark.parametrize("symbol", ["AAA", "BBB", "MISSING"])
+    def test_every_day_matches_the_naive_computation(self, bars, symbol):
+        for offset in range(_WINDOW_DAYS):
+            as_of = _WINDOW_START + timedelta(days=offset)
+
+            window = symbol_window(bars, symbol, as_of)
+            expected = _naive_indicators(bars, symbol, as_of)
+
+            if expected is None:
+                assert window is None, f"{symbol} @ {as_of}"
+                continue
+            assert window is not None
+            assert _comparable(_window_indicators(window)) == _comparable(expected), (
+                f"{symbol} @ {as_of}"
+            )
+
+    def test_a_frame_extending_past_as_of_matches_a_truncated_frame(self, bars):
+        # A truncated copy is a *different* frame, so its columns are computed
+        # from scratch over data at or before `as_of` and cannot have seen a
+        # later row at all.
+        as_of = _WINDOW_START + timedelta(days=_WINDOW_DAYS - 40)
+        truncated = bars[bars["date"] <= as_of].copy()
+
+        from_full = symbol_window(bars, "AAA", as_of)
+        from_truncated = symbol_window(truncated, "AAA", as_of)
+
+        assert from_full is not None
+        assert from_truncated is not None
+        assert _window_indicators(from_full) == _window_indicators(from_truncated)
+        assert bars["date"].max() > as_of  # the frame really did extend past as_of
+
+    def test_the_as_of_boundary_is_inclusive_immediately_around_a_bar(self, bars):
+        # AAA's 250th bar dates to _WINDOW_START + 249 days: read the day
+        # before it, the day itself, and the day after.
+        boundary = _WINDOW_START + timedelta(days=249)
+        closes = bars.loc[bars["symbol"] == "AAA", "close"].tolist()
+
+        before = symbol_window(bars, "AAA", boundary - timedelta(days=1))
+        at = symbol_window(bars, "AAA", boundary)
+        after = symbol_window(bars, "AAA", boundary + timedelta(days=1))
+
+        assert before is not None
+        assert at is not None
+        assert after is not None
+        assert (before.bar_count, at.bar_count, after.bar_count) == (249, 250, 251)
+        assert (before.close, at.close, after.close) == (
+            closes[248],
+            closes[249],
+            closes[250],
+        )
+
+    def test_a_symbol_with_no_bars_before_the_cutoff_has_no_window(self, bars):
+        assert symbol_window(bars, "AAA", _WINDOW_START - timedelta(days=1)) is None
+
+
+class TestMeanVolumeMatchesTailMean:
+    """`Series.rolling(w).mean()` is *not* an acceptable substitute here.
+
+    pandas' rolling mean is a streaming add/remove with Kahan compensation;
+    `Series.mean()` pairwise-sums one window. The two disagree in the last
+    bits for a large fraction of float windows, and every replaced call site
+    computed `tail(w).mean()`.
+    """
+
+    def _volume_bars(self, volumes: list[float]) -> pd.DataFrame:
+        frame = make_bars(
+            "VOL", [100.0 + index for index in range(len(volumes))], start=_WINDOW_START
+        )
+        frame["volume"] = volumes
+        return frame
+
+    def test_float_volumes_match_pandas_tail_mean_bit_for_bit(self):
+        rng = np.random.default_rng(7)
+        volumes = (rng.uniform(1e6, 9e6, 120) * rng.uniform(0.3, 3.0, 120)).tolist()
+        bars = self._volume_bars(volumes)
+
+        for offset in range(_VOLUME_WINDOW - 1, 120):
+            as_of = _WINDOW_START + timedelta(days=offset)
+            window = symbol_window(bars, "VOL", as_of)
+
+            assert window is not None
+            expected = pd.Series(volumes[: offset + 1]).tail(_VOLUME_WINDOW).mean()
+            assert window.mean_volume(_VOLUME_WINDOW) == expected, f"@ {as_of}"
+
+    def test_missing_volumes_are_skipped_exactly_like_series_mean(self):
+        volumes = [float(1_000_000 + index * 1_000) for index in range(40)]
+        volumes[25] = float("nan")
+        bars = self._volume_bars(volumes)
+        as_of = _WINDOW_START + timedelta(days=29)
+
+        window = symbol_window(bars, "VOL", as_of)
+
+        assert window is not None
+        assert (
+            window.mean_volume(_VOLUME_WINDOW)
+            == pd.Series(volumes[:30]).tail(_VOLUME_WINDOW).mean()
+        )
+
+    def test_a_window_of_only_missing_volumes_is_nan(self):
+        volumes = [float("nan")] * 25
+        bars = self._volume_bars(volumes)
+        as_of = _WINDOW_START + timedelta(days=24)
+
+        window = symbol_window(bars, "VOL", as_of)
+
+        assert window is not None
+        assert math.isnan(window.mean_volume(_VOLUME_WINDOW))
+
+    def test_a_history_shorter_than_the_window_is_nan(self):
+        bars = self._volume_bars([1_000_000.0] * (_VOLUME_WINDOW - 1))
+        as_of = _WINDOW_START + timedelta(days=_VOLUME_WINDOW - 2)
+
+        window = symbol_window(bars, "VOL", as_of)
+
+        assert window is not None
+        assert math.isnan(window.mean_volume(_VOLUME_WINDOW))
+
+
+class TestSymbolWindowExposesTheRawRows:
+    def test_bars_are_the_rows_at_or_before_as_of(self):
+        bars = _varied_bars("AAA", days=30, seed=3)
+        as_of = _WINDOW_START + timedelta(days=9)
+
+        window = symbol_window(bars, "AAA", as_of)
+        expected = symbol_bars(bars, "AAA", as_of)
+
+        assert window is not None
+        assert expected is not None
+        pd.testing.assert_frame_equal(window.bars, expected)
+
+    def test_sma_history_is_the_prefix_of_the_full_column(self):
+        bars = _varied_bars("AAA", days=120, seed=4)
+        as_of = _WINDOW_START + timedelta(days=79)
+        series = symbol_bars(bars, "AAA", as_of)
+
+        window = symbol_window(bars, "AAA", as_of)
+
+        assert window is not None
+        assert series is not None
+        expected = sma(series["close"], _SMA_SHORT).to_numpy()
+        np.testing.assert_array_equal(window.sma_history(_SMA_SHORT), expected)

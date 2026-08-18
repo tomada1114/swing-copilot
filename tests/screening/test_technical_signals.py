@@ -8,7 +8,7 @@ from datetime import date
 import pandas as pd
 
 from swing_copilot.screening.base import ScreeningInput
-from swing_copilot.screening.indicators import wilder_atr
+from swing_copilot.screening.indicators import SymbolWindow, wilder_atr
 from swing_copilot.screening.technical_signals import (
     MinAverageVolumeFilter,
     PullbackRSISignal,
@@ -299,18 +299,8 @@ def test_boundary_rsi_exactly_at_threshold_does_not_hit(settings, monkeypatch):
     bars = make_bars("FLAT", _uptrend_closes(60), start=date(2026, 1, 1))
     data = _screening_input(bars)
 
-    monkeypatch.setattr(
-        "swing_copilot.screening.technical_signals.wilder_rsi",
-        lambda series, _period: pd.Series(
-            [threshold] * len(series), index=series.index
-        ),
-    )
-    monkeypatch.setattr(
-        "swing_copilot.screening.technical_signals.sma",
-        lambda series, _window: pd.Series(
-            [float(series.iloc[-1])] * len(series), index=series.index
-        ),
-    )
+    monkeypatch.setattr(SymbolWindow, "rsi", lambda _self, _period: threshold)
+    monkeypatch.setattr(SymbolWindow, "sma", lambda self, _window: self.close)
 
     hits = PullbackRSISignal(settings).evaluate(data, {"FLAT"})
 

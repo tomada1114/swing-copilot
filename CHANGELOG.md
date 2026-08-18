@@ -81,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- スクリーニングが読むローリング指標（SMA・Wilder RSI・Wilder ATR・出来高
+  トレーリング平均）を、銘柄ごとに**全履歴で 1 回だけ**計算して日付で引く
+  ようにした（Issue #214）。従来はバックテストの日次ループが銘柄ごとに
+  全履歴の系列を組み直し、最後の 1 点だけ取って捨てていたため、計算量が
+  `O(days × symbols × history_len)` になり、候補ストリーム生成が 1 変種の
+  実行時間の 93%（2020-01-02〜2026-07-30・S&P 500 で 52 分／全 55.9 分）を
+  占めていた。`screening/indicators.py` に `SymbolWindow` /
+  `symbol_window()` を追加し、`ranking_metrics`・`trend_sma`・`pullback_rsi`・
+  `volume_min`・`minervini_stage2` の SMA をこの経路へ移した。合成
+  ユニバース（300 銘柄 × 2050 本 × 250 日）で 105 秒 → 2.5 秒。指標は
+  すべて因果的なので `as_of` までの前置きはビット単位で一致し、
+  バックテストの equity/trade は 1 セントも動かない（純粋な高速化）
 - 勝率・プロフィットファクタ・期待値・R 倍数・保有日数・手仕舞い理由内訳の
   定義を `backtest/metrics.py` に一本化した（Issue #190）。同モジュールは
   `engine.Trade` ではなく `ClosedTrade` Protocol を受け取るようになり、

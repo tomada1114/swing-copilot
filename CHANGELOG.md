@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `analysis_input.json` の `<prior_verdicts>` が直近 2 営業日分を含んで
+  いなかった問題を修正した（Issue #207）。`verdicts` 表へ書く唯一の経路で
+  ある `retro_collect` ステップが、その表を読むステップ 6 の**後**に走って
+  いたため、D 日のエクスポートに載る過去 verdict は D-2 日までだった。
+  同一銘柄が数日おきに再候補化するスイングでは、直近 2 営業日こそ最も
+  参照したい区間であり、そこだけが黙って空白になっていた。
+  `retro_collect` をステップ 6 の直前へ移し、エクスポートの時間予算判定は
+  収集の開始**前**に確定させる（エクスポートはスキルへの唯一の受け渡し口
+  なので、後段の帳簿作業がそのスキップ理由になってはならない）。
+  `as_of < run_date` の厳密不等号と同日 run の採用規則（`_adopted_runs`）は
+  従来どおり
+
 ### Added
 
 - verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように

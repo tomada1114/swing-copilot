@@ -358,14 +358,18 @@ class RiskChecker:
             assessment = replace(
                 assessment, sizing_warnings=(*assessment.sizing_warnings, warning)
             )
-        elif (
-            proximity.status == "unknown"
-            and lookup is not None
-            and lookup.status == "fetch_failed"
+        elif proximity.status == "unknown" and (
+            event is not None
+            or (lookup is not None and lookup.status == "fetch_failed")
         ):
             # `none_in_window` also reaches "unknown" here (no event date to
             # classify), but only a genuine fetch failure is unknown enough
             # to warn on -- an empty window already covers the hold period.
+            # `event is not None` under "unknown" can only mean a stale event
+            # date (`earnings_date < as_of`, Issue #231): the supplier claimed
+            # `found`, but what it found is behind the point-in-time cutoff, so
+            # the next earnings date is just as unknown as after a fetch
+            # failure and gets the same warning instead of silence.
             assessment = replace(
                 assessment,
                 sizing_warnings=(

@@ -22,7 +22,7 @@ class EarningsProximity:
 
 def _business_days_until(as_of: date, event_date: date) -> int:
     if event_date <= as_of:
-        return 0
+        return 0  # only `event_date == as_of` reaches here (Issue #231)
     cursor = as_of + timedelta(days=1)
     count = 0
     while cursor <= event_date:
@@ -56,8 +56,34 @@ def evaluate_earnings_proximity(
     block_business_days: int,
     warn_business_days: int,
 ) -> EarningsProximity:
-    """Classify an earnings date using inclusive weekday-only boundaries."""
+    """Classify an earnings date using inclusive weekday-only boundaries.
+
+    An `earnings_date` strictly before `as_of` is stale rather than imminent:
+    the supplier handed back an estimate the point-in-time cutoff has already
+    overtaken. Classifying it by business-day distance would yield `0` and
+    therefore `block`, which would keep the symbol blocked indefinitely until
+    some later run happened to supply a fresh event (Issue #231). "Stale" is
+    measured only against the caller's explicit `as_of`; no wall clock is
+    consulted here.
+
+    Args:
+        as_of: Point-in-time cutoff for this classification.
+        earnings_date: The next known earnings date, or `None` if unknown.
+        block_business_days: Inclusive business-day distance that blocks entry.
+        warn_business_days: Inclusive business-day distance that warns.
+
+    Returns:
+        The classification, with `business_days` `None` whenever the date is
+        unusable (absent or stale).
+    """
     if earnings_date is None:
+        return EarningsProximity("unknown", None)
+    if earnings_date < as_of:
+        # Consumer-side defense layer: fail toward "we don't know" rather than
+        # the fail-closed `block`, matching how the supplier-side calendars
+        # already demote a projection `as_of` has overtaken. The `== as_of`
+        # boundary is deliberately *not* stale -- reporting today is exactly
+        # the event the guard exists to keep entries away from.
         return EarningsProximity("unknown", None)
     business_days = _business_days_until(as_of, earnings_date)
     if business_days <= block_business_days:

@@ -739,8 +739,9 @@ Finnhubは「指定した過去日に公表済みだった予定」ではなく�
 `EARNINGS_PROXIMITY_WARN`、予定不明を`EARNINGS_DATE_UNKNOWN`とする。
 米国市場祝日を考慮しない簡易カレンダーは、休日を営業日として多めに数える既知の乖離である。
 閾値は`risk.earnings_block_business_days`/`earnings_warn_business_days`で管理し、
-前者が後者を超える設定は起動前に拒否する。決算日が`as_of`以前（営業日数0）の場合も
-`EARNINGS_PROXIMITY_BLOCK`として扱う。
+前者が後者を超える設定は起動前に拒否する。決算日が`as_of`当日（営業日数0）の場合も
+`EARNINGS_PROXIMITY_BLOCK`として扱う（`as_of`より前の決算日の扱いは
+Issue #231の追記を参照）。
 
 `binding_constraint`は「最終株数を決定した制約」（REQ-004）であり、**最初に候補を
 rejectした段が保持する**。`check()`は sizing/regime → 決算ガード → サーキットブレーカ
@@ -766,6 +767,25 @@ rejectした段が保持する**。`check()`は sizing/regime → 決算ガー�
 `sizing_warnings`へ追記する。`recent_event`は`fetch_next_earnings`の成否と独立に
 毎回`get_earnings_event`から読むため、直前runがfetch失敗でも直近実績の警告は失われない。
 ガード無効時（APIキー未設定・ヒストリカル再生）はいずれの警告も追加しない。
+
+**Issue #231実装時追記（stale イベントの消費側防御層）**: `evaluate_earnings_proximity()`は
+`earnings_date < as_of`を`unknown`（`business_days`は`None`）へ降格し、`block`にしない。
+`_business_days_until()`は`event_date <= as_of`で`0`を返すため、過去日付のイベントは
+「当日発表」と区別が付かず`EARNINGS_PROXIMITY_BLOCK`になっていた。供給側が一度でも過去日付を
+渡すと、その銘柄は新しいイベントが供給されるまで**無期限にentry blockされ続ける**。
+**境界は`< as_of`だけがstaleで、`== as_of`は従来どおりblock**である——当日発表こそ
+このガードがエントリーを遠ざける対象そのものであり、staleに含めると本来のブロックが消える。
+「stale」は呼び出し側が渡す明示的な`as_of`に対してのみ定義され、この判定はwall clockを
+参照しない（`date.today()`/`datetime.now()`はドメインロジックに持ち込まない）。
+
+不変条件は消費側（`risk/earnings.py`）に置く。現行2供給者は構成上たまたま過去日付を
+渡さない（liveクライアントは`[as_of, end]`窓で検索し、`DerivedEarningsCalendar`は
+射影を`as_of`が追い越した場合に`fetch_failed`へ明示的に降格する）が、それは供給側の作法で
+あって不変条件ではなく、3つ目の供給者が暗黙に継承しなければならない状態だった。よって
+現行2供給者の下での分類結果は変わらない（過去日付は到達しない）。降格後は
+`RiskChecker._apply_earnings_guard`が`EARNINGS_DATE_UNKNOWN`を`sizing_warnings`へ
+追記する——`status='found'`のまま使えない日付が返った状態はfetch失敗と同程度に
+「次回決算日が分からない」であり、無言で落とすとオペレータから見えなくなるためである。
 
 **P4-19（roadmap §5、Issue #28）**:
 `risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、

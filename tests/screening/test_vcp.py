@@ -17,6 +17,7 @@ from swing_copilot.screening.vcp import (
     VcpThresholds,
     classify_dry_up,
     detect_atr_zigzag,
+    evaluate_vcp,
     extract_pattern,
     is_chasing_pivot,
     validate_contractions,
@@ -207,12 +208,15 @@ def test_vcp_signal_records_pattern_metrics_and_rejects_chasing(
         dry_up_ratio=0.25,
         dry_up_class="ideal",
     )
+    # Patched on `vcp` rather than `technical_signals`: Issue #188 moved the
+    # zigzag -> pattern -> validate -> chase sequence into `evaluate_vcp`, so
+    # the signal and the rejection classifier decide with the same code.
     monkeypatch.setattr(
-        "swing_copilot.screening.technical_signals.detect_atr_zigzag",
+        "swing_copilot.screening.vcp.detect_atr_zigzag",
         lambda *_args: (),
     )
     monkeypatch.setattr(
-        "swing_copilot.screening.technical_signals.extract_pattern",
+        "swing_copilot.screening.vcp.extract_pattern",
         lambda *_args: pattern,
     )
 
@@ -221,6 +225,75 @@ def test_vcp_signal_records_pattern_metrics_and_rejects_chasing(
     assert len(hits) == 1
     assert hits[0].metrics["vcp_contraction_count"] == 2.0
     assert hits[0].metrics["vcp_depth_2"] == 0.13
+
+
+@pytest.mark.parametrize(
+    ("dry_up_ratio", "expected_reason"),
+    [
+        pytest.param(None, "DRY_UP_UNAVAILABLE", id="no-volume-baseline"),
+        pytest.param(0.25, None, id="valid-setup"),
+    ],
+)
+def test_evaluate_vcp_reports_the_stage_a_setup_stopped_at(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_up_ratio: float | None,
+    expected_reason: str | None,
+) -> None:
+    # Issue #188: `miss_reason` is the single verdict both the signal and the
+    # rejection classifier read, so every stage must be nameable -- including
+    # the one where the dry-up baseline could not be measured at all.
+    bars = make_bars(
+        "VCP",
+        [100.0 + index * 0.1 for index in range(60)],
+        start=pd.Timestamp("2026-01-01").date(),
+    )
+    pattern = VcpPattern(
+        depths=(0.18, 0.13),
+        pattern_days=60,
+        pivot=200.0,
+        pivot_index=55,
+        dry_up_ratio=dry_up_ratio,
+        dry_up_class=None if dry_up_ratio is None else "ideal",
+    )
+    monkeypatch.setattr(
+        "swing_copilot.screening.vcp.extract_pattern", lambda *_args: pattern
+    )
+
+    evaluation = evaluate_vcp(
+        bars, VcpThresholds(**settings.technical_signals.vcp.model_dump())
+    )
+
+    assert evaluation.miss_reason == expected_reason
+    assert evaluation.is_hit is (expected_reason is None)
+    assert evaluation.close == pytest.approx(105.9)
+
+
+def test_vcp_signal_emits_no_hit_for_a_symbol_it_has_no_bars_for(
+    settings: Settings,
+) -> None:
+    data = ScreeningInput(
+        as_of=pd.Timestamp("2026-12-31").date(),
+        universe=(),
+        fundamentals=pd.DataFrame(),
+        bars=make_bars("OTHER", [100.0] * 60, start=pd.Timestamp("2026-01-01").date()),
+    )
+
+    assert VcpBreakoutSignal(settings).evaluate(data, {"VCP"}) == []
+
+
+def test_vcp_signal_emits_no_hit_when_the_evaluation_is_a_miss(
+    settings: Settings,
+) -> None:
+    # A flat series produces no admissible contraction sequence at all.
+    data = ScreeningInput(
+        as_of=pd.Timestamp("2026-12-31").date(),
+        universe=(),
+        fundamentals=pd.DataFrame(),
+        bars=make_bars("VCP", [100.0] * 60, start=pd.Timestamp("2026-01-01").date()),
+    )
+
+    assert VcpBreakoutSignal(settings).evaluate(data, {"VCP"}) == []
 
 
 def test_vcp_pipeline_classifies_a_non_hit_without_an_exception(

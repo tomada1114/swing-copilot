@@ -11,6 +11,15 @@ This module deliberately mirrors the currently registered strategy building
 blocks rather than generalizing arbitrary future Filters/Signals. Adding a
 new configured component requires extending this classifier too.
 
+**Issue #188 qualification**: "mirror, don't reuse" means not calling
+`Filter.apply()` / `Signal.evaluate()` -- those return only the symbols that
+passed, which is exactly the information a rejection needs and never has.
+It does *not* mean re-deriving a signal's condition arithmetic a second time:
+`minervini_template` and `evaluate_vcp` are pure per-symbol functions the
+signals themselves call, so sharing them keeps the ledger's stated cause and
+the screen's actual decision from drifting apart, while still explaining a
+symbol no signal ever emitted a hit for.
+
 `classify_rejections` applies those mirrors in first-failure-wins priority
 order. `classify_filter_rejection`/`classify_signal_rejection` expose the same
 per-check question in isolation, which is what `filter_matrix.py` needs to tell
@@ -33,9 +42,12 @@ from swing_copilot.screening.base import (
 from swing_copilot.screening.indicators import (
     sma,
     symbol_bars,
+    symbol_window,
     wilder_atr,
     wilder_rsi,
 )
+from swing_copilot.screening.technical_signals import minervini_template
+from swing_copilot.screening.vcp import VcpThresholds, evaluate_vcp
 
 if TYPE_CHECKING:
     from swing_copilot.config import Settings
@@ -46,6 +58,16 @@ if TYPE_CHECKING:
 # module boundary, matching this module's "mirror, don't reuse" contract.
 _PULLBACK_SMA_WINDOW = 50
 _RANKING_SMA_LONG_WINDOW = 200
+#: `MinerviniStage2Signal`'s own 52-week data-quality floor, mirrored here
+#: under this module's "mirror, don't import private state" contract.
+_MINERVINI_MIN_52_WEEK_BARS = 200
+#: Which of the seven trend-template conditions is the universe-relative RS
+#: percentile. It is the one condition a per-symbol classification cannot
+#: reconstruct, so it is reported as unknown rather than as failed.
+_MINERVINI_RS_CONDITION_NUMBER = 7
+#: `vcp.extract_pattern`'s dry-up volume baseline window: below it no VCP
+#: verdict is computable at all, which is a data gap, not a pattern miss.
+_VCP_MIN_BASELINE_BARS = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,9 +371,9 @@ def classify_signal_rejection(
             )
         return _classify_pullback_rsi(symbol, series, settings)
     if signal_name == "minervini_stage2":
-        return _classify_minervini_stage2(symbol, data)
+        return _classify_minervini_stage2(symbol, data, settings)
     if signal_name == "vcp_breakout":
-        return _classify_vcp_breakout(symbol, data)
+        return _classify_vcp_breakout(symbol, data, settings)
     # Any other configured signal key has no mirrored logic here (module
     # docstring: hardcoded to the current two signals, not generalized).
     msg = f"rejection_classifier has no mirrored logic for signal {signal_name!r}"
@@ -439,7 +461,9 @@ def _pullback_band_rejection(
     )
 
 
-def _classify_minervini_stage2(symbol: str, data: ScreeningInput) -> RejectionRecord:
+def _classify_minervini_stage2(
+    symbol: str, data: ScreeningInput, settings: Settings
+) -> RejectionRecord:
     """Classify Minervini history failures before its ordinary non-hit path.
 
     The Stage 2 signal evaluates the 52-week high/low over a 252-bar window
@@ -447,40 +471,96 @@ def _classify_minervini_stage2(symbol: str, data: ScreeningInput) -> RejectionRe
     Remaining misses can be ordinary conditions (including RS). The existing
     constrained rejection ledger has no generic technical code, so they use
     `SIGNAL_TREND_NOT_MET` with the precise signal name in the detail.
+
+    Issue #188 adds the per-condition breakdown, computed through the
+    signal's own `minervini_template` so it cannot drift from what the
+    signal decided. Condition seven is the exception and is reported as
+    `None`: RS is a percentile *relative to the symbols the signal was run
+    over*, which this per-symbol entry point does not know, and reporting a
+    reconstructed `0` would assert a failure that may not have happened.
     """
-    series = symbol_bars(data.bars, symbol, data.as_of)
-    available = len(series) if series is not None else 0
-    required = 200
-    if available < required:
+    window = symbol_window(data.bars, symbol, data.as_of)
+    available = 0 if window is None else len(window.bars)
+    required = _MINERVINI_MIN_52_WEEK_BARS
+    if window is None or available < required:
         return _insufficient_history(symbol, available, required)
+
+    template = minervini_template(window, None, settings.technical_signals.minervini)
+    locally_evaluated = template.conditions[: _MINERVINI_RS_CONDITION_NUMBER - 1]
+    detail: dict[str, float | int | str | None] = {
+        "signal": "minervini_stage2",
+        "available_bars": available,
+        "required_52_week_bars": required,
+        "criteria_met_excluding_rs": sum(locally_evaluated),
+        "criteria_evaluated": len(locally_evaluated),
+        "failed_conditions": ",".join(
+            str(number)
+            for number, met in enumerate(locally_evaluated, start=1)
+            if not met
+        ),
+        "sma200_rising_days": template.sma200_rising_days,
+        f"minervini_condition_{_MINERVINI_RS_CONDITION_NUMBER}": None,
+    }
+    detail.update(
+        {
+            f"minervini_condition_{number}": int(met)
+            for number, met in enumerate(locally_evaluated, start=1)
+        }
+    )
     return RejectionRecord(
         symbol,
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-        {
-            "signal": "minervini_stage2",
-            "available_bars": available,
-            "required_52_week_bars": required,
-        },
+        detail,
     )
 
 
-def _classify_vcp_breakout(symbol: str, data: ScreeningInput) -> RejectionRecord:
+def _classify_vcp_breakout(
+    symbol: str, data: ScreeningInput, settings: Settings
+) -> RejectionRecord:
     """Classify VCP's 50-bar volume-baseline prerequisite without crashing.
 
     The ledger's fixed reason-code set predates VCP. Keep its established
     generic technical code while preserving the real signal key in detail.
+
+    Issue #188 attaches the actual cause -- `evaluate_vcp`'s `miss_reason`,
+    which is either a `ContractionValidation.reason` or one of the `MISS_*`
+    stages around it -- plus the pattern evidence the verdict was reached
+    on. This is the same call the signal makes, so the ledger's story and
+    the screen's decision cannot diverge.
     """
     series = symbol_bars(data.bars, symbol, data.as_of)
     available = len(series) if series is not None else 0
-    required = 50
-    if available < required:
+    required = _VCP_MIN_BASELINE_BARS
+    if series is None or available < required:
         return _insufficient_history(symbol, available, required)
+
+    evaluation = evaluate_vcp(
+        series, VcpThresholds(**settings.technical_signals.vcp.model_dump())
+    )
+    pattern = evaluation.pattern
+    detail: dict[str, float | int | str | None] = {
+        "signal": "vcp_breakout",
+        "available_bars": available,
+        "vcp_reason": evaluation.miss_reason,
+        "close": evaluation.close,
+    }
+    if pattern is not None:
+        detail.update(
+            {
+                "vcp_contraction_count": len(pattern.depths),
+                "vcp_pattern_days": pattern.pattern_days,
+                "vcp_first_depth": pattern.depths[0],
+                "vcp_last_depth": pattern.depths[-1],
+                "vcp_dry_up_ratio": pattern.dry_up_ratio,
+                "vcp_pivot": pattern.pivot,
+            }
+        )
     return RejectionRecord(
         symbol,
         RejectionStage.TECHNICAL_SIGNAL,
         RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-        {"signal": "vcp_breakout", "available_bars": available},
+        detail,
     )
 
 

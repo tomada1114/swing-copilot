@@ -18,6 +18,7 @@ from swing_copilot.screening.rejection_classifier import (
     RejectionPlan,
     classify_rejections,
 )
+from swing_copilot.screening.vcp import VcpPattern
 from swing_copilot.universe import UniverseMember
 from tests.screening.conftest import FundamentalsSpec, make_bars, make_fundamentals_row
 
@@ -504,6 +505,136 @@ class TestSignalReasons:
         assert rejection.stage is RejectionStage.DATA_QUALITY
         assert rejection.reason_code is RejectionReasonCode.DATA_INSUFFICIENT_HISTORY
         assert rejection.detail == {"available_bars": 30, "required_bars": 50}
+
+
+class TestSignalRejectionDetail:
+    """Issue #188: a signal miss records *which* condition failed, not just that one did."""
+
+    def test_minervini_names_the_failed_conditions_it_could_evaluate(self, settings):
+        # A clean uptrend meets six of the seven conditions; SMA200 has only
+        # 11 defined values here, so the 22-rising-day condition (3) is the
+        # one that fails, and it must be named rather than averaged away.
+        rows = _healthy_fundamentals("XYZ")
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(
+            data, settings, signal_order=("minervini_stage2",), hits_by_signal=[[]]
+        )
+
+        assert rejection.reason_code is RejectionReasonCode.SIGNAL_TREND_NOT_MET
+        assert rejection.detail["signal"] == "minervini_stage2"
+        assert rejection.detail["failed_conditions"] == "3"
+        assert rejection.detail["criteria_met_excluding_rs"] == 5
+        assert rejection.detail["criteria_evaluated"] == 6
+        assert rejection.detail["minervini_condition_3"] == 0
+        assert rejection.detail["minervini_condition_1"] == 1
+
+    def test_minervini_reports_the_rs_condition_as_unknown_not_failed(self, settings):
+        # Condition 7 is a percentile relative to the symbols the signal ran
+        # over, which a per-symbol classification cannot reconstruct. `None`
+        # says "not measured"; a reconstructed 0 would assert a failure that
+        # may never have happened.
+        rows = _healthy_fundamentals("XYZ")
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(
+            data, settings, signal_order=("minervini_stage2",), hits_by_signal=[[]]
+        )
+
+        assert rejection.detail["minervini_condition_7"] is None
+        assert "7" not in str(rejection.detail["failed_conditions"])
+
+    def test_minervini_downtrend_lists_every_condition_it_failed(self, settings):
+        rows = _healthy_fundamentals("XYZ")
+        closes = list(reversed(_uptrend_closes(210)))
+        bars = make_bars("XYZ", closes, start=date(2026, 1, 1), volume=2_000_000)
+        data = _input((_member("XYZ"),), rows, bars)
+
+        [rejection] = _classify(
+            data, settings, signal_order=("minervini_stage2",), hits_by_signal=[[]]
+        )
+
+        assert rejection.detail["failed_conditions"] == "1,2,3,4,5,6"
+        assert rejection.detail["criteria_met_excluding_rs"] == 0
+
+    def test_minervini_short_history_stays_a_data_quality_rejection(self, settings):
+        rows = _healthy_fundamentals("XYZ")
+        bars = make_bars(
+            "XYZ", _uptrend_closes(199), start=date(2026, 1, 1), volume=2_000_000
+        )
+        data = _input((_member("XYZ"),), rows, bars)
+
+        [rejection] = _classify(
+            data, settings, signal_order=("minervini_stage2",), hits_by_signal=[[]]
+        )
+
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.detail == {"available_bars": 199, "required_bars": 200}
+
+    def test_vcp_records_that_no_contraction_pattern_existed(self, settings):
+        rows = _healthy_fundamentals("XYZ")
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(
+            data, settings, signal_order=("vcp_breakout",), hits_by_signal=[[]]
+        )
+
+        assert rejection.reason_code is RejectionReasonCode.SIGNAL_TREND_NOT_MET
+        assert rejection.detail["signal"] == "vcp_breakout"
+        assert rejection.detail["vcp_reason"] == "NO_PATTERN"
+        assert "vcp_contraction_count" not in rejection.detail
+
+    @pytest.mark.parametrize(
+        ("depths", "pivot", "expected_reason"),
+        [
+            pytest.param(
+                (0.10, 0.09), 500.0, "CONTRACTIONS_NOT_DECREASING", id="validation"
+            ),
+            pytest.param((0.18, 0.13), 100.0, "CHASING_PIVOT", id="chase"),
+        ],
+    )
+    def test_vcp_carries_the_real_miss_reason_and_its_evidence(
+        self, settings, monkeypatch, depths, pivot, expected_reason
+    ):
+        # The reason is `evaluate_vcp`'s own -- either a
+        # `ContractionValidation.reason` or a stage around it -- so the ledger
+        # cannot disagree with what the signal decided.
+        rows = _healthy_fundamentals("XYZ")
+        pattern = VcpPattern(
+            depths=depths,
+            pattern_days=60,
+            pivot=pivot,
+            pivot_index=55,
+            dry_up_ratio=0.25,
+            dry_up_class="ideal",
+        )
+        monkeypatch.setattr(
+            "swing_copilot.screening.vcp.extract_pattern", lambda *_args: pattern
+        )
+        data = _input((_member("XYZ"),), rows, _liquid_bars("XYZ"))
+
+        [rejection] = _classify(
+            data, settings, signal_order=("vcp_breakout",), hits_by_signal=[[]]
+        )
+
+        assert rejection.detail["vcp_reason"] == expected_reason
+        assert rejection.detail["vcp_contraction_count"] == 2
+        assert rejection.detail["vcp_first_depth"] == depths[0]
+        assert rejection.detail["vcp_dry_up_ratio"] == 0.25
+
+    def test_vcp_short_history_stays_a_data_quality_rejection(self, settings):
+        rows = _healthy_fundamentals("XYZ")
+        bars = make_bars(
+            "XYZ", _uptrend_closes(49), start=date(2026, 1, 1), volume=2_000_000
+        )
+        data = _input((_member("XYZ"),), rows, bars)
+
+        [rejection] = _classify(
+            data, settings, signal_order=("vcp_breakout",), hits_by_signal=[[]]
+        )
+
+        assert rejection.stage is RejectionStage.DATA_QUALITY
+        assert rejection.detail == {"available_bars": 49, "required_bars": 50}
 
 
 class TestPriorityOrder:

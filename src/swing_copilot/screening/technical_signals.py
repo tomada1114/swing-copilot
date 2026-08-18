@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,18 +19,15 @@ from swing_copilot.screening.indicators import (
     percentile_ranks,
     symbol_bars,
     symbol_window,
-    wilder_atr,
 )
 from swing_copilot.screening.vcp import (
+    VCP_WARMUP_BARS,
     VcpThresholds,
-    detect_atr_zigzag,
-    extract_pattern,
-    is_chasing_pivot,
-    validate_contractions,
+    evaluate_vcp,
 )
 
 if TYPE_CHECKING:
-    from swing_copilot.config import Settings
+    from swing_copilot.config import MinerviniSignalConfig, Settings
 
 _PULLBACK_SMA_WINDOW = 50
 #: ATR period of `pullback.band_atr_multiple`'s band. Was `wilder_atr`'s
@@ -42,10 +40,6 @@ _MINERVINI_SMA200_WINDOW = 200
 _MINERVINI_52_WEEK_WINDOW = 252
 _MINERVINI_MIN_52_WEEK_BARS = 200
 _MINERVINI_RS_PERIODS = (63, 126, 189, 252)
-#: Bars kept ahead of the longest admissible VCP pattern so the zigzag ATR
-#: and the 50-bar dry-up volume baseline are warmed up before the earliest
-#: bar a pattern may start on.
-_VCP_WARMUP_BARS = 60
 
 
 @register_signal("vcp_breakout")
@@ -58,40 +52,28 @@ class VcpBreakoutSignal:
         """Create the signal from explicitly configurable P5-24 thresholds."""
         config = settings.technical_signals.vcp
         self._thresholds = VcpThresholds(**config.model_dump())
-        self.required_bars = self._thresholds.pattern_days_max + _VCP_WARMUP_BARS
+        self.required_bars = self._thresholds.pattern_days_max + VCP_WARMUP_BARS
 
     def evaluate(self, data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
-        """Return non-chasing valid VCP setups with quantitative evidence."""
+        """Return non-chasing valid VCP setups with quantitative evidence.
+
+        The verdict itself lives in `vcp.evaluate_vcp` (including the
+        fixed-width window that keeps the daily and backtest callers'
+        different lookbacks from flipping it, Issue #186), so the rejection
+        classifier explains a miss with the very same computation instead of
+        a second copy that can drift (Issue #188).
+        """
         hits: list[SignalHit] = []
         for symbol in sorted(symbols):
             series = symbol_bars(data.bars, symbol, data.as_of)
             if series is None:
                 continue
-            # Evaluate a fixed-width recent window: ATR and the zigzag it
-            # gates are computed over whatever history arrives, so without
-            # this cut the same symbol/as_of flips verdicts between the
-            # daily and backtest callers' different lookbacks (Issue #186).
-            series = series.tail(self.required_bars)
-            atr = wilder_atr(series["high"], series["low"], series["close"])
-            swings = detect_atr_zigzag(
-                series["close"], atr, self._thresholds.zigzag_atr_multiplier
-            )
-            pattern = extract_pattern(swings, series["volume"], self._thresholds)
-            if pattern is None or pattern.dry_up_ratio is None:
-                continue
-            validation = validate_contractions(
-                list(pattern.depths),
-                pattern.pattern_days,
-                is_small_cap=False,
-                thresholds=self._thresholds,
-            )
-            close = float(series["close"].iloc[-1])
-            if not validation.is_valid or is_chasing_pivot(
-                close, pattern.pivot, self._thresholds
-            ):
+            evaluation = evaluate_vcp(series, self._thresholds)
+            pattern = evaluation.pattern
+            if not evaluation.is_hit or pattern is None or pattern.dry_up_ratio is None:
                 continue
             metrics = {
-                "close": close,
+                "close": evaluation.close,
                 "vcp_contraction_count": float(len(pattern.depths)),
                 "vcp_pattern_days": float(pattern.pattern_days),
                 "vcp_dry_up_ratio": pattern.dry_up_ratio,
@@ -201,42 +183,15 @@ class MinerviniStage2Signal:
     def _metrics(
         self, window: SymbolWindow, rs_percentile: float | None
     ) -> dict[str, float]:
-        latest_close = window.close
-        latest_sma50 = window.sma(_MINERVINI_SMA50_WINDOW)
-        latest_sma150 = window.sma(_MINERVINI_SMA150_WINDOW)
-        latest_sma200 = window.sma(_MINERVINI_SMA200_WINDOW)
-        has_moving_averages = not any(
-            math.isnan(value) for value in (latest_sma50, latest_sma150, latest_sma200)
-        )
-        rising_days = _consecutive_rising_days(
-            window.sma_history(_MINERVINI_SMA200_WINDOW)
-        )
-        price_window = window.bars["close"].tail(_MINERVINI_52_WEEK_WINDOW)
-        has_52_week_window = len(price_window) >= _MINERVINI_MIN_52_WEEK_BARS
-        low_52w = float(price_window.min()) if has_52_week_window else float("nan")
-        high_52w = float(price_window.max()) if has_52_week_window else float("nan")
-        condition_values = (
-            has_moving_averages
-            and latest_close > latest_sma150
-            and latest_close > latest_sma200,
-            has_moving_averages and latest_sma150 > latest_sma200,
-            rising_days >= self._config.sma200_rising_days,
-            has_moving_averages and latest_close > latest_sma50,
-            has_52_week_window
-            and latest_close >= low_52w * self._config.min_low_multiple,
-            has_52_week_window
-            and latest_close >= high_52w * self._config.min_high_multiple,
-            rs_percentile is not None
-            and rs_percentile >= self._config.min_rs_percentile,
-        )
-        criteria_met = sum(condition_values)
+        template = minervini_template(window, rs_percentile, self._config)
+        criteria_met = sum(template.conditions)
         metrics = {
-            "close": latest_close,
-            "minervini_sma200_rising_days": float(rising_days),
+            "close": template.close,
+            "minervini_sma200_rising_days": float(template.sma200_rising_days),
             "minervini_criteria_met": float(criteria_met),
             **{
                 f"minervini_condition_{number}": float(value)
-                for number, value in enumerate(condition_values, start=1)
+                for number, value in enumerate(template.conditions, start=1)
             },
         }
         # Candidate metrics are persisted as strict JSON. An unavailable RS
@@ -246,19 +201,97 @@ class MinerviniStage2Signal:
             {
                 name: value
                 for name, value in (
-                    ("sma50", latest_sma50),
-                    ("sma150", latest_sma150),
-                    ("sma200", latest_sma200),
+                    ("sma50", template.sma50),
+                    ("sma150", template.sma150),
+                    ("sma200", template.sma200),
                 )
                 if not math.isnan(value)
             }
         )
-        if has_52_week_window:
-            metrics["minervini_52_week_low"] = low_52w
-            metrics["minervini_52_week_high"] = high_52w
+        if template.low_52_week is not None and template.high_52_week is not None:
+            metrics["minervini_52_week_low"] = template.low_52_week
+            metrics["minervini_52_week_high"] = template.high_52_week
         if rs_percentile is not None:
             metrics["minervini_rs_percentile"] = rs_percentile
         return metrics
+
+
+@dataclass(frozen=True, slots=True)
+class MinerviniTemplate:
+    """One symbol's Stage 2 trend-template evaluation, condition by condition.
+
+    Extracted as a shared value by Issue #188: the signal keeps only the
+    aggregate `criteria_met`, so a rejected symbol used to reach the ledger
+    as a bare `SIGNAL_TREND_NOT_MET` even though *which* of the seven
+    conditions failed had just been computed. Both the signal and the
+    rejection classifier now read the same evaluation.
+
+    `conditions` is indexed 0-based but numbered 1..7 in the template's own
+    terms. `low_52_week`/`high_52_week` are `None` when the window is too
+    short to define them, which is distinct from a computed extreme.
+    """
+
+    close: float
+    sma50: float
+    sma150: float
+    sma200: float
+    sma200_rising_days: int
+    low_52_week: float | None
+    high_52_week: float | None
+    conditions: tuple[bool, ...]
+
+
+def minervini_template(
+    window: SymbolWindow,
+    rs_percentile: float | None,
+    config: MinerviniSignalConfig,
+) -> MinerviniTemplate:
+    """Evaluate the seven Stage 2 conditions over one symbol's window.
+
+    Args:
+        window: The symbol's point-in-time bars and cached indicators.
+        rs_percentile: The universe-relative RS percentile, or `None` when
+            history is too short to compute one. `None` fails condition
+            seven -- it is an unmet condition, not a missing measurement, in
+            the signal's own terms.
+        config: The configured thresholds (rising days, high/low multiples,
+            minimum RS percentile).
+
+    Returns:
+        The condition results plus the inputs they were decided on.
+    """
+    latest_close = window.close
+    latest_sma50 = window.sma(_MINERVINI_SMA50_WINDOW)
+    latest_sma150 = window.sma(_MINERVINI_SMA150_WINDOW)
+    latest_sma200 = window.sma(_MINERVINI_SMA200_WINDOW)
+    has_moving_averages = not any(
+        math.isnan(value) for value in (latest_sma50, latest_sma150, latest_sma200)
+    )
+    rising_days = _consecutive_rising_days(window.sma_history(_MINERVINI_SMA200_WINDOW))
+    price_window = window.bars["close"].tail(_MINERVINI_52_WEEK_WINDOW)
+    has_52_week_window = len(price_window) >= _MINERVINI_MIN_52_WEEK_BARS
+    low_52w = float(price_window.min()) if has_52_week_window else float("nan")
+    high_52w = float(price_window.max()) if has_52_week_window else float("nan")
+    return MinerviniTemplate(
+        close=latest_close,
+        sma50=latest_sma50,
+        sma150=latest_sma150,
+        sma200=latest_sma200,
+        sma200_rising_days=rising_days,
+        low_52_week=low_52w if has_52_week_window else None,
+        high_52_week=high_52w if has_52_week_window else None,
+        conditions=(
+            has_moving_averages
+            and latest_close > latest_sma150
+            and latest_close > latest_sma200,
+            has_moving_averages and latest_sma150 > latest_sma200,
+            rising_days >= config.sma200_rising_days,
+            has_moving_averages and latest_close > latest_sma50,
+            has_52_week_window and latest_close >= low_52w * config.min_low_multiple,
+            has_52_week_window and latest_close >= high_52w * config.min_high_multiple,
+            rs_percentile is not None and rs_percentile >= config.min_rs_percentile,
+        ),
+    )
 
 
 def _consecutive_rising_days(values: np.ndarray) -> int:

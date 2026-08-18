@@ -78,6 +78,9 @@ class TestUpdateCommand:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         path = tmp_path / "bare.duckdb"
+        # An *existing but empty* bars root: "this symbol has no bar" stays
+        # fail-soft, only a missing root is fatal (Issue #221).
+        (tmp_path / "bars").mkdir()
         state_store = StateStore(Database(path))
         state_store.init_schema()
         seed_verdict(state_store)
@@ -95,6 +98,30 @@ class TestUpdateCommand:
             main(["update", "--db", str(db_path), "--settings", str(missing)])
 
         assert str(missing) in str(excinfo.value)
+
+    def test_a_db_without_its_sibling_bars_root_fails_before_touching_the_ledger(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A DuckDB copy whose `bars/` was left behind is fatal (Issue #221).
+
+        Without the guard the run reads no price at all and reports
+        "新規 0 件 / 更新 0 件 / 手仕舞い 0 件" as if the ledger were quiet.
+        """
+        copied = tmp_path / "copy"
+        copied.mkdir()
+        path = copied / "copilot.duckdb"
+        state_store = StateStore(Database(path))
+        state_store.init_schema()
+        seed_verdict(state_store)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["update", "--as-of", ENTRY_DATE.isoformat(), "--db", str(path)])
+
+        message = str(excinfo.value)
+        assert "Parquetディレクトリが見つかりません" in message
+        assert str(copied / "bars") in message
+        assert "新規" not in capsys.readouterr().out
+        assert _store(path).get_verdict_position(RUN_ID, SYMBOL) is None
 
 
 class TestListCommand:

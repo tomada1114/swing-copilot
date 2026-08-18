@@ -10,8 +10,14 @@ import pandas as pd
 import pytest
 from duckdb import ConstraintException
 
-from swing_copilot.storage.database import Database
-from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
+from swing_copilot.storage.market_store import (
+    DEFAULT_PARQUET_ROOT,
+    FundamentalsRecord,
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 
 
 def _bars(rows: list[tuple[str, str, float, float, float, float, int]]) -> pd.DataFrame:
@@ -684,3 +690,102 @@ class TestReadFilingDates:
 
         assert market_store.read_filing_dates([], self._FORMS, date(2026, 12, 31)) == {}
         assert market_store.read_filing_dates(["AAPL"], (), date(2026, 12, 31)) == {}
+
+
+class TestResolveParquetRoot:
+    """`<db>/../bars` resolution and its fail-fast guard (Issue #217 / #221).
+
+    The shared implementation the `--db`-taking CLIs call: `copilot-backtest`,
+    `copilot-track`, `copilot-retro`, `copilot-dd-forward`, and
+    `copilot-filter-matrix`.
+    """
+
+    _CONSEQUENCE = "このまま実行すると空振りする。"
+
+    def test_the_default_db_path_pairs_with_the_default_parquet_root(self) -> None:
+        # `--db` 未指定の既定経路が指す先が、この対応規約そのものである。
+        assert DEFAULT_DB_PATH.parent / "bars" == DEFAULT_PARQUET_ROOT
+
+    def test_an_existing_sibling_directory_is_returned(self, tmp_path: Path) -> None:
+        (tmp_path / "bars").mkdir()
+
+        assert (
+            resolve_parquet_root(
+                tmp_path / "copilot.duckdb", consequence=self._CONSEQUENCE
+            )
+            == tmp_path / "bars"
+        )
+
+    def test_an_empty_existing_root_is_accepted(self, tmp_path: Path) -> None:
+        """A present root with no partition yet stays fail-soft; only absence is fatal."""
+        root = tmp_path / "bars"
+        root.mkdir()
+
+        assert (
+            resolve_parquet_root(
+                tmp_path / "copilot.duckdb", consequence=self._CONSEQUENCE
+            )
+            == root
+        )
+        assert not any(root.iterdir())
+
+    def test_a_string_db_path_resolves_the_same_way(self, tmp_path: Path) -> None:
+        (tmp_path / "bars").mkdir()
+
+        assert (
+            resolve_parquet_root(
+                str(tmp_path / "copilot.duckdb"), consequence=self._CONSEQUENCE
+            )
+            == tmp_path / "bars"
+        )
+
+    def test_a_missing_root_raises_naming_the_resolved_path(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ParquetRootNotFoundError) as exc_info:
+            resolve_parquet_root(
+                tmp_path / "copilot.duckdb", consequence=self._CONSEQUENCE
+            )
+
+        message = str(exc_info.value)
+        assert "Parquetディレクトリが見つかりません" in message
+        assert str(tmp_path / "bars") in message
+
+    def test_the_callers_consequence_is_appended_to_the_shared_explanation(
+        self, tmp_path: Path
+    ) -> None:
+        """One implementation, one layout explanation, per-command damage."""
+        with pytest.raises(ParquetRootNotFoundError) as exc_info:
+            resolve_parquet_root(
+                tmp_path / "copilot.duckdb", consequence="固有の被害を述べる。"
+            )
+
+        message = str(exc_info.value)
+        assert "同ディレクトリの bars/ として解決する" in message
+        assert message.endswith("固有の被害を述べる。")
+
+    def test_a_sibling_bars_file_is_not_accepted_as_a_root(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "bars").write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(
+            ParquetRootNotFoundError, match="Parquetディレクトリが見つかりません"
+        ):
+            resolve_parquet_root(
+                tmp_path / "copilot.duckdb", consequence=self._CONSEQUENCE
+            )
+
+    def test_market_store_itself_never_validates_the_root(self, tmp_path: Path) -> None:
+        """The daily/backfill path creates the root lazily on first write.
+
+        `MarketStore.__init__` must therefore stay silent about an absent
+        root -- the guard belongs to the CLIs that take `--db` (Issue #221).
+        """
+        absent = tmp_path / "never-created"
+        store = MarketStore(Database(tmp_path / "copilot.duckdb"), parquet_root=absent)
+
+        assert store.read_bars(
+            ["AAPL"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 7, 20)
+        ).empty
+        assert not absent.exists()

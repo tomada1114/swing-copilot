@@ -46,7 +46,11 @@ from swing_copilot.retro.ingest import RetroIngestRequest, ingest_retro_result
 from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.retro.validate import RetroIngestError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import (
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.text.news_finnhub import FinnhubNewsClient
 
@@ -62,6 +66,13 @@ _CONSOLE_WIDTH = 200
 #: message itself is the exit status (printed to stderr, exit 1).
 _CONFIG_EXIT = ExitPolicy(errors=(ConfigError,))
 _INGEST_EXIT = ExitPolicy(errors=(RetroIngestError,))
+_BARS_EXIT = ExitPolicy(errors=(ParquetRootNotFoundError,))
+
+#: What a bars-root-less evaluation produced instead of failing (Issue #221).
+_MISSING_BARS_CONSEQUENCE = (
+    "このまま実行してもバー0件から forward return を計算することになり、"
+    "満期スライスが1件も評価されないまま正常終了してしまう。"
+)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -141,9 +152,16 @@ def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
     """Bars source for `--db`.
 
     Parquet bars live alongside the DuckDB file, mirroring the
-    DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing -- `--db` moves both.
+    DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing -- `--db` moves both. The
+    root's absence is fatal here (Issue #221): `evaluate` would compute every
+    forward return from zero bars, mature nothing, and report "評価 0 slice"
+    as though the window simply held no matured verdict.
     """
-    return MarketStore(state_store.database, parquet_root=Path(db_path).parent / "bars")
+    parquet_root = run_cli(
+        lambda: resolve_parquet_root(db_path, consequence=_MISSING_BARS_CONSEQUENCE),
+        _BARS_EXIT,
+    )
+    return MarketStore(state_store.database, parquet_root=parquet_root)
 
 
 def _run_evaluate(

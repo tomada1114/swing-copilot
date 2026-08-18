@@ -280,7 +280,10 @@ run数を並べて表示する。どちらかの文書を書き換えれば—�
 扱う。閾値は`settings.postmortem`の既存値を流用し、新しい閾値体系を作らない。
 このコマンドは窓内の満期スライスを**全件**再分類するので、株価が訂正された
 場合の分類の更新もここで起きる（日次ステップ側は未記録のスライスだけを評価
-する。Issue #209）。
+する。Issue #209）。`--db`の兄弟`bars/`がディレクトリごと無い場合、`evaluate`
+と`export`は評価を始める前にエラーで落ちる（Issue #221）。バー0件から
+forward returnを計算しても1件も満期にならず、「評価0 slice」が正常終了として
+返ってしまうためである。
 
 `export`は満期日が`[as_of - lookback_window_days, as_of]`に入る当否行を集約し、
 `reports/retro/<as_of>/retro_input.json`をstrictスキーマ`retro-input-v1`で
@@ -357,6 +360,12 @@ NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit
 手動`close`以外に台帳から消える経路が無いことを利用者に知らせるためである。
 日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
 省略したときだけ、CLI境界で`SystemClock().today()`を使う。
+
+「バーが1本も無い」がfail-softなのは**銘柄単位**の話であり、`--db`の兄弟
+`bars/`が**ディレクトリごと無い**場合は台帳に触れる前にエラーで落ちる
+（Issue #221）。DuckDBファイルだけをコピーして`bars/`を並置し忘れると、
+価格が1本も読めないまま「新規0件／更新0件／手仕舞い0件」を正常終了として
+返してしまうためである。
 
 `update`は建玉の前に、**verdict行を失った建玉を削除する**。`copilot-ingest-analysis`の
 再取り込みはrunのverdictを丸ごと置き換えるため（`replace_run_verdicts`）、
@@ -515,7 +524,7 @@ copilot-filter-matrix --as-of 2026-07-29 --json reports/filter_matrix.json
 | --- | --- | --- |
 | `--as-of` | 必須 | 可視性の基準日。バー・ファンダ・スナップショットの全てに効く |
 | `--strategy` | `default` | `strategies.yaml`のキー |
-| `--db` | `data/copilot.duckdb` | Parquetバーの根（`<db>/../bars`）も一緒に決まる |
+| `--db` | `data/copilot.duckdb` | Parquetバーの根（`<db>/../bars`）も一緒に決まる。根がディレクトリとして存在しなければ、DuckDBを開く前にエラーで落ちる（Issue #221） |
 | `--settings` / `--strategies` | `config/*.yaml` | 設定を書き換えずに閾値バリアントを試すため |
 | `--json` | なし | 機械可読な集計の書き出し先（同ディレクトリの一時ファイル＋`os.replace`） |
 
@@ -573,7 +582,12 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 （`snapshot_date <= as_of`）だけを使い、無ければWikipediaを取りに行かずに
 エラーで落ちる。`--as-of`当時のmembershipでないものを測っても意味がない
 からである。スクリーニング結果の行は1行も書かず、スキーママイグレーションも
-実行せず、`--db`が存在しなければ作らずにエラーにする。ただし`MarketStore`は
+実行せず、`--db`が存在しなければ作らずにエラーにする。`--db`の兄弟`bars/`が
+無い場合も同様にエラーで、こちらはDuckDBを開く前に落ちる——DuckDBファイル
+だけをコピーして`bars/`を並置し忘れると、バー系チェックが全銘柄データ不足に
+なり、設定した閾値ではなく手元の欠測を測った表が出てしまうからである
+（Issue #221。`copilot-track` / `copilot-retro` / `copilot-dd-forward` /
+`copilot-backtest`も同じ検証を共有する）。ただし`MarketStore`は
 共有DuckDBファイルを読み書きモードで開いて自分の`fundamentals`テーブルと
 `bars`ビューを用意するため、DuckDBの単一ライターロックはかかる。
 `copilot-daily`の実行中には走らせないこと。
@@ -648,7 +662,9 @@ copilot-dd-forward --as-of 2026-08-06 --settings /tmp/variant/settings.yaml
 自体は out-of-sample の検証ではない。
 
 `copilot-filter-matrix`と同じくオフラインかつ読み取り専用で、スキーマ
-マイグレーションを実行せず、`--db`が無ければ作らずにエラーにする。
+マイグレーションを実行せず、`--db`が無ければ作らずにエラーにする。`--db`の
+兄弟`bars/`が無い場合も同じくエラーである（Issue #221。放置すると全銘柄が
+`NO_DATA`の、本物の結果と同じ体裁の診断が出てしまう）。
 `MarketStore`が共有DuckDBを読み書きで開く点も同じなので、`copilot-daily`の
 実行中には走らせないこと。
 

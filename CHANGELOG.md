@@ -117,6 +117,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--db` の兄弟 `bars/` を暗黙に解決する CLI のうち、`copilot-backtest` 以外の4本に
+  検証が無かった穴を塞いだ（Issue #221）。Issue #217 / PR #220 が `backtest/cli.py` に
+  入れた fail-fast を `storage/market_store.py` の `resolve_parquet_root()` と
+  `ParquetRootNotFoundError` へ切り出し、`copilot-track` / `copilot-retro` /
+  `copilot-dd-forward` / `copilot-filter-matrix` も同じ1実装を呼ぶ。DuckDB ファイル
+  だけをコピーして `bars/` を並置し忘れた `--db` は、これまで4本とも**価格を1本も
+  読めないまま exit 0** を返していた——台帳を1件も mark/advance しない `update`、
+  バー0件から forward return を計算して何も満期にしない `evaluate`、全銘柄 `NO_DATA`
+  の dd-forward 診断、閾値ではなく手元の欠測を測った filter-matrix の表。いずれも
+  正常終了・短時間・体裁の整った出力が揃うため気づけない。共通なのはレイアウト規約の
+  説明と根の存否判定だけで、`consequence` 引数がコマンド固有の被害をメッセージ末尾に
+  足す。例外は CLI ごとの終了規約へ変換する（自前の CLI エラー型を持つ3本は包み直し、
+  持たない2本は `ExitPolicy` で `run_cli()` に渡す）。`copilot-backtest` の終了コード・
+  メッセージは従来と同一。fail-soft の境界も従来どおりで、「数銘柄だけバー0件」も
+  「根はあるが空」も落とさず、`MarketStore.__init__` は引き続き根を検証しない
+  （日次/backfill が初回書き込み時に `mkdir` で作る経路を壊さないため）
+
 - テストスイートがリポジトリの実 `data/` 配下の DuckDB を開いてしまう問題を修正した
   （Issue #233）。`tests/pipeline/test_cli.py::TestComposeDependencies` の3件が
   `monkeypatch.chdir(tmp_path)` なしに `_compose_dependencies()` を呼んでおり、

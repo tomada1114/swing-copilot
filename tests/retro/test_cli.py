@@ -184,6 +184,9 @@ class TestEvaluateCommand:
     def test_a_fresh_database_evaluates_nothing_without_raising(
         self, tmp_path: Path
     ) -> None:
+        # An *existing but empty* bars root: zero matured slices stays
+        # fail-soft, only a missing root is fatal (Issue #221).
+        (tmp_path / "bars").mkdir()
         main(
             [
                 "evaluate",
@@ -211,6 +214,31 @@ class TestEvaluateCommand:
                     str(tmp_path / "absent.yaml"),
                 ]
             )
+
+    def test_a_db_without_its_sibling_bars_root_fails_instead_of_evaluating(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A DuckDB copy whose `bars/` was left behind is fatal (Issue #221).
+
+        Without the guard every forward return is computed from zero bars, so
+        nothing matures and the run reports "評価 0 slice" as though the
+        window simply held no verdict worth classifying.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "evaluate",
+                    "--as-of",
+                    CALENDAR[10].isoformat(),
+                    "--db",
+                    str(tmp_path / "retro.duckdb"),
+                ]
+            )
+
+        message = str(excinfo.value)
+        assert "Parquetディレクトリが見つかりません" in message
+        assert str(tmp_path / "bars") in message
+        assert "評価" not in capsys.readouterr().out
 
 
 class TestCollectThenEvaluate:
@@ -399,6 +427,7 @@ class TestExportCommand:
         self, tmp_path: Path, reports_root: Path
     ) -> None:
         db_path = tmp_path / "retro.duckdb"
+        (tmp_path / "bars").mkdir()
 
         main(
             [
@@ -428,6 +457,7 @@ class TestExportCommand:
             "| RP-ID | status |\n|---|---|\n| RP-007 | rejected |\n",
             encoding="utf-8",
         )
+        (tmp_path / "bars").mkdir()
 
         main(
             [

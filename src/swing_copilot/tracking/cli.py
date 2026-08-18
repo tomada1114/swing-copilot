@@ -47,7 +47,11 @@ from swing_copilot.retro.aggregate import (
     compute_tracked_performance,
 )
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import (
+    MarketStore,
+    ParquetRootNotFoundError,
+    resolve_parquet_root,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.tracking_records import CLOSED, OPEN, PROCEED, SKIP
 from swing_copilot.tracking.update import (
@@ -73,6 +77,13 @@ _NOT_AVAILABLE = "—"
 #: message itself is the exit status (printed to stderr, exit 1).
 _CONFIG_EXIT = ExitPolicy(errors=(ConfigError,))
 _TRACKING_EXIT = ExitPolicy(errors=(TrackingError,))
+_BARS_EXIT = ExitPolicy(errors=(ParquetRootNotFoundError,))
+
+#: What a bars-root-less ledger run produced instead of failing (Issue #221).
+_MISSING_BARS_CONSEQUENCE = (
+    "このまま実行しても価格が1本も読めず、"
+    "1件も mark/advance しないまま正常終了してしまう。"
+)
 
 
 def _add_recommendation_argument(parser: argparse.ArgumentParser) -> None:
@@ -161,8 +172,18 @@ def _load_settings(path: str) -> Settings:
 
 
 def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
-    """Bars source for `--db`, pairing the DuckDB file with its Parquet root."""
-    return MarketStore(state_store.database, parquet_root=db_path.parent / "bars")
+    """Bars source for `--db`, pairing the DuckDB file with its Parquet root.
+
+    The root's absence is fatal here (Issue #221): with no bars at all,
+    `update` marks nothing and advances nothing, then reports "新規 0 / 更新 0
+    / 手仕舞い 0" as if the ledger were simply quiet -- and `close` would
+    record a manual exit at a price it could not read.
+    """
+    parquet_root = run_cli(
+        lambda: resolve_parquet_root(db_path, consequence=_MISSING_BARS_CONSEQUENCE),
+        _BARS_EXIT,
+    )
+    return MarketStore(state_store.database, parquet_root=parquet_root)
 
 
 def _resolve_as_of(value: date | None) -> date:

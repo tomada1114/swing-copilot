@@ -74,6 +74,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `copilot-backtest --policy a,b,c` の多アーム A/B レポートに `## Exit
+  breakdown` と `## Equity curve summary` が出るようになった（Issue #216）。
+  単一アームのレポートは stop / max_hold / end_of_backtest の内訳・max_hold
+  binding rate・保有日数分位・equity curve の first/peak/trough を出して
+  いたのに、A/B のレンダラだけがこれらを落としており、「どのアームがどう
+  手仕舞ったか」も「ドローダウンがいつ起きたか」も読めなかった。値は
+  すべて既に `BacktestResult` に載っていたので純粋なレンダリングの
+  取りこぼしで、埋めるには同一設定の単一アームを1本（実測40〜56分）
+  走らせ直すしかなかった（#200 / PR #215 で実際に踏んだ）。並びは
+  `## Metrics` と同じ「行=指標、列=アーム」で、あるアームにだけ現れた
+  exit 理由は欠落ではなく明示的な `0` として行を占める。取引日が1日も
+  無いアームの equity 行は `N/A` になる。terminal 側にも同じ2表を出す。
+  単一アーム・`--pessimistic` の出力は1文字も変わらない（回帰テストで
+  レポート全文を固定した）
 - verdict 追跡台帳が `skip` も**同一の出口ルール**でシャドウ追跡するように
   なった（Issue #190、2026-08 アーキテクチャレビューの R7）。「verdict
   レイヤに価値があるか」は本質的に「proceed だけ買った場合 vs screening

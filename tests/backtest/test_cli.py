@@ -1062,6 +1062,112 @@ class TestExitBreakdownRendering:
         assert "| max_hold | 1 | 0 |" in markdown
 
 
+class TestSingleArmMarkdownIsPinned:
+    """Issue #216 extended the multi-arm renderer only.
+
+    `reports/backtests/*.md` are tracked records read long after the run --
+    `2026-08-17-policy-ab-equity-basis.md` is Issue #200's canonical one -- so
+    the single-arm report is pinned character-for-character rather than by
+    section name: a reordered section or a re-worded label would silently make
+    the archive inconsistent with what the tool now emits.
+    """
+
+    _EXPECTED = """\
+# Backtest: default (2027-01-01 .. 2027-01-02)
+
+ユニバース: 全 1 銘柄（--limit 指定なし）
+セクター構成: Information Technology 1
+
+## Metrics
+
+| Metric | Value |
+|---|---:|
+| trade_count | 4 |
+| sharpe | 1.234 |
+| max_drawdown_pct | 5.00% |
+| win_rate | 60.00% |
+| profit_factor | 1.800 |
+| expectancy_per_trade | $80.00 |
+| avg_r_multiple | 0.500 |
+| avg_invested_pct | 42.00% |
+| max_concurrent_reached | 3 |
+| final_equity | $101,000.00 |
+| benchmark_final_equity | $100,500.00 |
+
+## Exit breakdown
+
+| Exit | Value |
+|---|---:|
+| stop | 2 |
+| max_hold | 1 |
+| end_of_backtest | 1 |
+| max_hold binding rate | 25.00% |
+| holding days (median) | 6.0 |
+| holding days (p25 / p75) | 4.5 / 11.5 |
+
+## Entry blocks
+
+候補件数（発動セッション数）
+
+| Reason | Value |
+|---|---:|
+| regime | 4 (1d) |
+| circuit_breaker | 0 (0d) |
+| portfolio_heat | 0 (0d) |
+| earnings | 0 (0d) |
+| sector | 0 (0d) |
+| not_calculable | 0 (0d) |
+| max_concurrent | 0 (0d) |
+| already_held | 0 (0d) |
+| missing_data | 0 (0d) |
+| invalid_stop | 0 (0d) |
+| zero_shares | 0 (0d) |
+| insufficient_cash | 0 (0d) |
+
+## Warnings
+
+- 低サンプル
+
+## Data quality
+
+データ不足のためスキップ: BBB
+
+## Equity curve summary
+
+Equity curve: 2027-01-01=100,000.00 -> 2027-01-02=101,000.00
+  Peak: 2027-01-02=101,000.00
+  Trough: 2027-01-01=100,000.00
+
+## Trades
+
+| Symbol | Entry date | Entry | Exit date | Exit | Shares | PnL | Reason |
+|---|---|---:|---|---:|---:|---:|---|
+| AAA | 2027-01-01 | 100.00 | 2027-01-02 | 104.00 | 10 | 40.00 | stop |
+| AAA | 2027-01-01 | 100.00 | 2027-01-02 | 104.00 | 10 | 40.00 | stop |
+| AAA | 2027-01-01 | 100.00 | 2027-01-02 | 104.00 | 10 | 40.00 | max_hold |
+| AAA | 2027-01-01 | 100.00 | 2027-01-02 | 104.00 | 10 | 40.00 | end_of_backtest |
+
+## Survivorship bias
+
+This backtest applies one S&P 500 constituent snapshot to the entire period. It does not reconstruct day-by-day index membership; when historical membership is unavailable, the current universe is used. Removed or delisted symbols may be absent, overstating historical performance (survivorship bias).
+"""
+
+    def test_markdown_is_unchanged_character_for_character(self):
+        result = _result(
+            trades=(
+                _exit_trade("stop", 3),
+                _exit_trade("stop", 5),
+                _exit_trade("max_hold", 25),
+                _exit_trade("end_of_backtest", 7),
+            ),
+            warnings=("低サンプル",),
+        )
+
+        markdown = render_markdown(result, _meta(missing_data_symbols=["BBB"]))
+
+        assert markdown == self._EXPECTED
+
+
 @pytest.mark.usefixtures("two_symbol_universe")
 class TestSettingsOverride:
     def test_settings_flag_defaults_to_the_repository_settings_path(self):
@@ -1551,6 +1657,84 @@ class TestRenderPolicyComparison:
 
         assert "## Warnings" not in text
         assert "## Data quality" not in text
+
+
+class TestPolicyComparisonExitAndEquitySections:
+    """Issue #216: the A/B must say how each arm exited and when it drew down.
+
+    Without these sections both questions are answerable only by a 40-56 minute
+    single-arm rerun of the same configuration, which is exactly what Issue
+    #200 / PR #215 had to leave unanswered.
+    """
+
+    _TRADES = (
+        _exit_trade("stop", 3),
+        _exit_trade("stop", 5),
+        _exit_trade("max_hold", 25),
+        _exit_trade("end_of_backtest", 7),
+    )
+    _D2 = date(2027, 1, 3)
+
+    @classmethod
+    def _arms(cls) -> list[tuple[str, BacktestResult]]:
+        # The regime arm gets its own curve: the whole point of the section is
+        # that two arms can peak and trough on different dates.
+        regime = dataclasses.replace(
+            _result(trades=(_exit_trade("stop", 3),)),
+            equity_curve=((_D0, 100_000.0), (_D1, 90_000.0), (cls._D2, 105_000.0)),
+        )
+        return [("none", _result(trades=cls._TRADES)), ("regime", regime)]
+
+    def test_markdown_breaks_the_exits_down_per_arm(self):
+        text = render_policy_comparison_markdown(self._arms(), _meta())
+
+        assert "## Exit breakdown" in text
+        assert "| Exit | none | regime |" in text
+        assert "| stop | 2 | 1 |" in text
+        assert "| end_of_backtest | 1 | 0 |" in text
+        assert "| max_hold binding rate | 25.00% | 0.00% |" in text
+
+    def test_markdown_keeps_a_reason_only_one_arm_produced_as_an_explicit_zero(self):
+        # A gate that never lets a position reach `max_hold` must read as 0,
+        # not as a missing row indistinguishable from "not reported".
+        text = render_policy_comparison_markdown(self._arms(), _meta())
+
+        assert "| max_hold | 1 | 0 |" in text
+
+    def test_markdown_reports_holding_day_quantiles_per_arm(self):
+        text = render_policy_comparison_markdown(self._arms(), _meta())
+
+        assert "| holding days (median) | 6.0 | 3.0 |" in text
+        assert "| holding days (p25 / p75) | 4.5 / 11.5 | 3.0 / 3.0 |" in text
+
+    def test_markdown_summarizes_each_arms_equity_curve(self):
+        text = render_policy_comparison_markdown(self._arms(), _meta())
+
+        assert "## Equity curve summary" in text
+        assert "| Point | none | regime |" in text
+        assert "| first | 2027-01-01=100,000.00 | 2027-01-01=100,000.00 |" in text
+        assert "| peak | 2027-01-02=101,000.00 | 2027-01-03=105,000.00 |" in text
+        assert "| trough | 2027-01-01=100,000.00 | 2027-01-02=90,000.00 |" in text
+
+    def test_markdown_marks_an_arm_without_trading_days_as_unavailable(self):
+        arms = [
+            ("none", _result()),
+            ("regime", dataclasses.replace(_result(), equity_curve=())),
+        ]
+
+        text = render_policy_comparison_markdown(arms, _meta())
+
+        assert "| first | 2027-01-01=100,000.00 | N/A |" in text
+        assert "| peak | 2027-01-02=101,000.00 | N/A |" in text
+        assert "| trough | 2027-01-01=100,000.00 | N/A |" in text
+
+    def test_terminal_renders_both_sections_as_tables(self):
+        text = render_policy_comparison_terminal(self._arms(), _meta())
+
+        assert "Exit breakdown by policy" in text
+        assert "max_hold binding rate" in text
+        assert "Equity curve summary by policy" in text
+        assert "trough" in text
 
 
 @pytest.mark.usefixtures("two_symbol_universe")

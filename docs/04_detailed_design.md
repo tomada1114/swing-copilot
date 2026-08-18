@@ -1282,6 +1282,12 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **CLI**: `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
 
+**Issue #216実装時追記（多アームレポートのセクション構成）**: `render_policy_comparison_terminal`/`render_policy_comparison_markdown`は`## Metrics` → `## Exit breakdown` → `## Entry blocks` → `## Equity curve summary` → `## Data quality` → `## Warnings` → `## Survivorship bias`の順に出力する。従来はexit内訳とequity curve要約が単一アームのレンダラにしか無く、A/Bレポートからは「どのアームがどう手仕舞ったか」も「ドローダウンがいつ起きたか」も読めなかった（値はすべて`BacktestResult`に載っており、埋めるには同一設定の単一アームを1本走らせ直す＝実測40〜56分しかなかった。#200 / PR #215で実際に踏んだ）。両セクションとも向きは`## Metrics`に揃える——**行=指標、列=アーム**であって、アームごとのブロックを縦に並べない（アーム間の差はそもそも横並びでしか読めない）。
+
+- `## Exit breakdown`の行は単一アームと同一で、exit理由の件数（`exit_reason_counts`）＋`max_hold binding rate`＋`holding days (median)`＋`holding days (p25 / p75)`。アームによって出現する理由が違う（ゲートがそもそも建玉させない）ため、行集合は全アームの和（初出順）を取り、そのアームに無い理由は欠落ではなく明示的な`0`にする。この整列は`_exit_breakdown_comparison_rows(results)`がN列版として担い、`--pessimistic`の2列比較も同じ関数を通る（分岐を2つ持たない）。
+- `## Equity curve summary`の行は`first` / `peak` / `trough`の3点で、セルは`<date>=<equity>`。`last`は出さない（`final_equity`が`## Metrics`に、終端日が見出しにすでにある）。取引日が0日のアームは3行とも`N/A`。単一アームの散文3行（`_equity_curve_summary_lines`）は**そのまま**であり、テーブル化は多アーム側だけの変更である。
+- 単一アームおよび`--pessimistic`のレポートは1文字も変わらない。`reports/backtests/*.md`は後から読まれる記録（`2026-08-17-policy-ab-equity-basis.md`が#200の正本）なので、`tests/backtest/test_cli.py::TestSingleArmMarkdownIsPinned`がレポート全文を文字単位で固定する。
+
 **永続化**: `--candidate-cache PATH`でストリームをParquetへ保存し、CLI実行をまたいで再利用する。列は`as_of`/`symbol`/`rank`/`signal_names_json`/`metrics_json`/`execution_state`/`execution_distance`で、行は`(as_of, rank)`昇順、`cache_key`はpyarrowのschema metadataへ格納する。JSON列は`storage/json_guard.dumps_safe`を通すのでNaN/Infは書き込み前に拒否され、`float`はJSONの往復でビット一致する。書き込みは同一ディレクトリの一時ファイル＋`os.replace`（REQ-008、`market_store._write_partition`と同型）で、失敗時は旧キャッシュを保持し一時ファイルを消す。読めないキャッシュは`CandidateStreamError`だが、CLIはこれをミス扱いにして再生成する（キャッシュ破損でバックテストを落とさない）。保存→読込→注入した結果が素通しの`run_backtest`と`BacktestResult`レベルで完全一致することをテストで保証している。
 
 ### 3.20 `paper/journal.py`（FR-11, CON-04）

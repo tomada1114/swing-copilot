@@ -18,6 +18,7 @@ succeeded rolls the whole write back and leaves the previous state intact.
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -692,13 +693,33 @@ def replace_verdict_outcomes(
 
     Raises:
         ValueError: A record's `run_id`/`horizon_days` disagrees with the
-            replacement scope.
+            replacement scope, or a return is not a finite number.
     """
     if any(
         outcome.run_id != run_id or outcome.horizon_days != horizon_days
         for outcome in outcomes
     ):
         msg = "all outcomes must match the replacement run_id and horizon_days"
+        raise ValueError(msg)
+
+    # `forward_return_pct DOUBLE NOT NULL` cannot express "a measured, finite
+    # return": DuckDB's NaN is not NULL, so a non-finite value would persist
+    # as a row that is neither a win nor a loss and would silently skew every
+    # aggregate over it (Issue #206, defense layer added by Issue #227). The
+    # producers already return `None` instead of a non-finite return, so this
+    # states the intent the column cannot -- and does so before the
+    # transaction opens, leaving the previous slice untouched.
+    non_finite = [
+        f"{outcome.symbol}@{outcome.as_of}"
+        for outcome in outcomes
+        if not math.isfinite(outcome.forward_return_pct)
+        or (
+            outcome.benchmark_return_pct is not None
+            and not math.isfinite(outcome.benchmark_return_pct)
+        )
+    ]
+    if non_finite:
+        msg = f"verdict outcome returns must be finite: {', '.join(non_finite)}"
         raise ValueError(msg)
 
     with database.connect() as conn:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import duckdb
+import pandas as pd
 import pytest
 
 from swing_copilot.config import Settings, load_settings
@@ -17,6 +18,8 @@ from swing_copilot.storage.state_store import StateStore
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import Any, NoReturn
+
+    from swing_copilot.storage.market_store import MarketStore
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -144,6 +147,26 @@ def _block_repo_data_connections(monkeypatch: pytest.MonkeyPatch) -> None:
         return _REAL_DUCKDB_CONNECT(*args, **kwargs)
 
     monkeypatch.setattr(duckdb, "connect", blocked_connect)
+
+
+def plant_non_finite_bars(market_store: MarketStore, df: pd.DataFrame) -> None:
+    """Write bars straight into Parquet, past `write_bars`' finite guard.
+
+    `MarketStore.write_bars` rejects NaN/±inf OHLCV outright (Issue #227), so
+    the only way a *stored* bar can still be non-finite is a partition written
+    before that guard existed — which is exactly the state the reader-side
+    defenses (`compute_forward_return`, `tracking.update`, `retro.evaluate`)
+    exist for. Tests of those readers therefore have to plant the row the way
+    that history did: bypassing validation, but through the real partition
+    writer, so the on-disk layout stays identical.
+    """
+    working = df.copy()
+    working["date"] = pd.to_datetime(working["date"]).dt.date
+    years = working["date"].map(lambda bar_date: bar_date.year)
+    for year in sorted(years.unique()):
+        # Deliberately the unvalidated half of `write_bars`: re-implementing
+        # partition merge/replace here would drift from the real writer.
+        market_store._write_partition(int(year), working[years == year])  # noqa: SLF001
 
 
 @pytest.fixture

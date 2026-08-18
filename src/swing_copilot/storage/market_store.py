@@ -14,6 +14,7 @@ which loosely paraphrases the key as `(symbol, fiscal_period)`).
 
 from __future__ import annotations
 
+import math
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -45,6 +46,10 @@ BARS_COLUMNS = (
     "provider",
     "fetched_at",
 )
+#: The bar columns whose values must be finite numbers to be storable.
+_NUMERIC_BAR_COLUMNS = ("open", "high", "low", "close", "volume")
+#: How many offending bars a rejection message names before summarizing.
+_MAX_REPORTED_NON_FINITE_BARS = 5
 
 
 class ParquetRootNotFoundError(SwingCopilotError):
@@ -98,6 +103,26 @@ def resolve_parquet_root(db_path: Path | str, *, consequence: str) -> Path:
         )
         raise ParquetRootNotFoundError(msg)
     return parquet_root
+
+
+class NonFiniteBarsError(SwingCopilotError):
+    """Raised when `write_bars` is handed a NaN/±inf OHLCV value (Issue #227).
+
+    *Fail-fast on the whole batch*, deliberately, and not a per-row drop:
+    silently persisting a non-finite price is the failure mode this closes,
+    and silently discarding a row would only move the silence one layer over.
+    It matches how this package's other write boundary treats the same value
+    -- `storage/json_guard.dumps_safe` raises before serializing rather than
+    coercing -- whereas the fail-soft, "record it and carry on" treatment
+    (`risk/checks.check_correlation`'s `data_quality` warning,
+    `risk/earnings`' demotion to `unknown`, `pipeline/forward_returns.
+    compute_forward_return`'s `None`) belongs to *readers* deciding what to do
+    about data that is already stored.
+
+    Rejecting the batch as a whole is also what keeps a multi-year write
+    atomic: validation runs before the first partition is touched, so a bad
+    row in 2025 cannot leave a half-written 2024.
+    """
 
 
 _CREATE_FUNDAMENTALS_TABLE = """
@@ -162,6 +187,53 @@ def _empty_bars_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(BARS_COLUMNS))
 
 
+def _reject_non_finite_bars(df: pd.DataFrame) -> None:
+    """Reject the whole frame if any OHLCV cell is NaN/±inf or non-numeric.
+
+    Runs before the first partition is touched, so a rejected write leaves
+    every previous partition byte-identical and creates no temporary file.
+
+    Args:
+        df: Bars whose `date` column has already been normalized.
+
+    Raises:
+        NonFiniteBarsError: At least one OHLCV value is non-finite. The
+            message names the first `_MAX_REPORTED_NON_FINITE_BARS` offending
+            `(symbol, date)` pairs with the columns at fault, plus the total.
+    """
+    # Intersected rather than assumed, so a frame missing a column is left to
+    # the Parquet writer's own failure instead of a `KeyError` from here.
+    columns = [name for name in _NUMERIC_BAR_COLUMNS if name in df.columns]
+    # `to_numeric(errors="coerce")` maps a non-numeric cell to NaN, so a
+    # string price is rejected by the same check rather than reaching Parquet
+    # as an object column. `abs() < inf` is False for NaN and for either
+    # infinity, and stays vectorized over a backfill-sized frame.
+    numeric = df[columns].apply(pd.to_numeric, errors="coerce")
+    offending = ~numeric.abs().lt(math.inf)
+    total = int(offending.to_numpy().sum())
+    if total == 0:
+        return
+
+    # Positional, not label-based: a caller may hand over a concatenated frame
+    # whose index repeats, and the rejection message must not depend on that.
+    positions = [
+        position for position, is_bad in enumerate(offending.any(axis=1)) if is_bad
+    ][:_MAX_REPORTED_NON_FINITE_BARS]
+    samples: list[str] = []
+    for position in positions:
+        row = df.iloc[position]
+        flags = offending.iloc[position]
+        detail = ", ".join(f"{name}={row[name]}" for name in columns if flags[name])
+        samples.append(f"{row['symbol']} {row['date']}: {detail}")
+    msg = (
+        f"非有限のOHLCV値が{total}件含まれるためバー書き込みを拒否した"
+        f"（該当行の例: {' / '.join(samples)}）。"
+        "NaN/±infの価格は保存後の集計を黙って歪めるので、バッチ全体を拒否して"
+        "呼び出し側（provider の正規化）で落とすこと。"
+    )
+    raise NonFiniteBarsError(msg)
+
+
 def _as_date(value: object) -> date:
     """Normalize a DuckDB date scalar (date or timestamp) to `datetime.date`."""
     return pd.Timestamp(value).date()  # type: ignore[arg-type] # pandas accepts any date-like scalar
@@ -210,12 +282,19 @@ class MarketStore:
         Args:
             df: Rows matching `BARS_COLUMNS` (the Parquet schema, including
                 `provider` and `fetched_at` — already stamped by the caller).
+
+        Raises:
+            NonFiniteBarsError: Any OHLCV value is NaN/±inf. The batch is
+                rejected whole, before any partition file is touched
+                (Issue #227); normalization stays each provider's job
+                (`data/base.py`), and this is the layer under it.
         """
         if df.empty:
             return
 
         working = df.copy()
         working["date"] = pd.to_datetime(working["date"]).dt.date
+        _reject_non_finite_bars(working)
         years = working["date"].map(lambda d: d.year)
         for year in sorted(years.unique()):
             self._write_partition(int(year), working[years == year])

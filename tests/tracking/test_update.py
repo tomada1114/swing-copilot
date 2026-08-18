@@ -34,6 +34,7 @@ from tests.tracking.conftest import (
     SYMBOL,
     bar,
     flat_prelude,
+    plant_broken_bars,
     seed_risk,
     seed_verdict,
     write_bars,
@@ -234,7 +235,7 @@ class TestOpening:
         # No risk assessment, and the run day's own bar has no close.
         seed_verdict(state_store)
         write_bars(market_store, flat_prelude(sessions=19))
-        write_bars(
+        plant_broken_bars(
             market_store,
             [
                 bar(
@@ -418,7 +419,7 @@ class TestDailyAdvance:
         seed_verdict(state_store)
         seed_risk(state_store)
         write_bars(market_store, flat_prelude())
-        write_bars(
+        plant_broken_bars(
             market_store,
             [
                 bar(
@@ -941,7 +942,7 @@ class TestDataQuality:
         # An infinite close passes `<= 0` but would poison every later return.
         seed_verdict(state_store)
         write_bars(market_store, flat_prelude(sessions=19))
-        write_bars(
+        plant_broken_bars(
             market_store,
             [
                 bar(

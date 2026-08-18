@@ -732,6 +732,57 @@ class TestReplaceVerdictOutcomes:
                 run_id, 5, [_outcome(run_id, "AAPL", classification="MAYBE")]
             )
 
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="inf"),
+            pytest.param(float("-inf"), id="-inf"),
+        ],
+    )
+    def test_rejects_a_non_finite_forward_return(
+        self, state_store: StateStore, bad_value: float
+    ) -> None:
+        """Issue #227: `DOUBLE NOT NULL` cannot say "a measured, finite return".
+
+        DuckDB's NaN is not NULL, so without this the row would persist as
+        neither a win nor a loss and skew every aggregate over it.
+        """
+        run_id = uuid4()
+
+        with pytest.raises(ValueError, match="must be finite"):
+            state_store.replace_verdict_outcomes(
+                run_id, 5, [_outcome(run_id, "AAPL", forward_return_pct=bad_value)]
+            )
+
+    def test_rejects_a_non_finite_benchmark_return(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        outcome = replace(_outcome(run_id, "AAPL"), benchmark_return_pct=float("inf"))
+
+        with pytest.raises(ValueError, match="must be finite"):
+            state_store.replace_verdict_outcomes(run_id, 5, [outcome])
+
+    def test_a_non_finite_record_leaves_the_previous_slice_intact(
+        self, state_store: StateStore
+    ) -> None:
+        """The check runs before the transaction, so the DELETE never fires."""
+        run_id = uuid4()
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "KEPT")])
+
+        with pytest.raises(ValueError, match="must be finite"):
+            state_store.replace_verdict_outcomes(
+                run_id,
+                5,
+                [
+                    _outcome(run_id, "AAPL"),
+                    _outcome(run_id, "MSFT", forward_return_pct=float("nan")),
+                ],
+            )
+
+        assert _rows(state_store, "SELECT symbol FROM verdict_outcomes") == [("KEPT",)]
+
     def test_a_failure_after_an_earlier_insert_rolls_the_whole_write_back(
         self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:

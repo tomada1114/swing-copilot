@@ -15,6 +15,7 @@ from swing_copilot.storage.market_store import (
     DEFAULT_PARQUET_ROOT,
     FundamentalsRecord,
     MarketStore,
+    NonFiniteBarsError,
     ParquetRootNotFoundError,
     resolve_parquet_root,
 )
@@ -169,6 +170,149 @@ class TestWriteAndReadBars:
             ["AAPL"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 7, 20)
         )
         assert result.empty
+
+
+class TestWriteBarsRejectsNonFiniteValues:
+    """Issue #227: the store's own NaN/±inf defense layer, under the providers.
+
+    Fail-fast on the whole batch, matching `storage/json_guard.dumps_safe`
+    (the package's other write boundary for the same value) rather than the
+    reader-side fail-soft treatments. Dropping the offending row instead
+    would only move the silence from "a NaN was stored" to "a bar vanished".
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="inf"),
+            pytest.param(float("-inf"), id="-inf"),
+        ],
+    )
+    @pytest.mark.parametrize("column", ["open", "high", "low", "close", "volume"])
+    def test_a_non_finite_ohlcv_value_is_rejected(
+        self, market_store: MarketStore, column: str, bad_value: float
+    ) -> None:
+        bars = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        bars[column] = bad_value
+
+        with pytest.raises(NonFiniteBarsError, match="非有限"):
+            market_store.write_bars(bars)
+
+        assert not market_store.parquet_root.exists()
+
+    def test_one_bad_row_rejects_the_whole_batch_rather_than_dropping_it(
+        self, market_store: MarketStore
+    ) -> None:
+        """Fail-fast, pinned: the good rows of a bad batch are not written."""
+        bars = _bars(
+            [
+                ("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000),
+                ("MSFT", "2026-07-15", 20, 20.5, 19.5, 20.2, 2000),
+            ]
+        )
+        bars.loc[1, "close"] = float("nan")
+
+        with pytest.raises(NonFiniteBarsError):
+            market_store.write_bars(bars)
+
+        assert not market_store.parquet_root.exists()
+
+    def test_a_bad_row_in_a_later_year_leaves_the_earlier_year_unwritten(
+        self, market_store: MarketStore
+    ) -> None:
+        """Validation precedes the first partition write, so it stays atomic."""
+        bars = _bars(
+            [
+                ("AAPL", "2025-12-30", 9, 9.5, 8.5, 9.2, 900),
+                ("AAPL", "2026-01-02", 10, 10.5, 9.5, 10.2, 1000),
+            ]
+        )
+        bars.loc[1, "low"] = float("-inf")
+
+        with pytest.raises(NonFiniteBarsError):
+            market_store.write_bars(bars)
+
+        assert not (market_store.parquet_root / "year=2025").exists()
+        assert not (market_store.parquet_root / "year=2026").exists()
+
+    def test_a_rejected_write_preserves_the_previous_partition_and_leaves_no_temp(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        partition_dir = market_store.parquet_root / "year=2026"
+        partition_file = partition_dir / "data.parquet"
+        previous_bytes = partition_file.read_bytes()
+        corrupt = _bars([("AAPL", "2026-07-16", 10, 10.5, 9.5, 10.4, 1100)])
+        corrupt["close"] = float("nan")
+
+        with pytest.raises(NonFiniteBarsError):
+            market_store.write_bars(corrupt)
+
+        assert partition_file.read_bytes() == previous_bytes
+        assert list(partition_dir.iterdir()) == [partition_file]
+
+    def test_the_rejection_names_the_offending_bars_and_their_total(
+        self, market_store: MarketStore
+    ) -> None:
+        bars = _bars(
+            [
+                ("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000),
+                ("MSFT", "2026-07-15", 20, 20.5, 19.5, 20.2, 2000),
+            ]
+        )
+        bars.loc[1, "high"] = float("inf")
+        bars.loc[1, "close"] = float("nan")
+
+        with pytest.raises(NonFiniteBarsError) as excinfo:
+            market_store.write_bars(bars)
+
+        message = str(excinfo.value)
+        assert "2件" in message
+        assert "MSFT 2026-07-15" in message
+        assert "high=" in message
+        assert "close=" in message
+        assert "AAPL" not in message
+
+    def test_a_repeated_index_still_yields_the_rejection_not_a_lookup_error(
+        self, market_store: MarketStore
+    ) -> None:
+        """Callers concatenate provider chunks; the index need not be unique."""
+        first = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        second = _bars([("MSFT", "2026-07-16", 20, 20.5, 19.5, 20.2, 2000)])
+        second["close"] = float("nan")
+        duplicated = pd.concat([first, second])
+        assert not duplicated.index.is_unique
+
+        with pytest.raises(NonFiniteBarsError, match="MSFT 2026-07-16"):
+            market_store.write_bars(duplicated)
+
+    def test_a_non_numeric_price_is_rejected_by_the_same_guard(
+        self, market_store: MarketStore
+    ) -> None:
+        """Coercion makes junk indistinguishable from NaN, so it is refused too."""
+        bars = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        bars["close"] = bars["close"].astype(object)
+        bars.loc[0, "close"] = "n/a"
+
+        with pytest.raises(NonFiniteBarsError):
+            market_store.write_bars(bars)
+
+    def test_finite_edge_values_still_write_unchanged(
+        self, market_store: MarketStore
+    ) -> None:
+        """The guard targets non-finite values only, not zero or negatives."""
+        market_store.write_bars(_bars([("FLAT", "2026-07-15", 0.0, 0.0, -1.5, 0.0, 0)]))
+
+        result = market_store.read_bars(
+            ["FLAT"], date(2026, 7, 1), date(2026, 7, 31), as_of=date(2026, 7, 20)
+        )
+
+        assert len(result) == 1
+        assert result.iloc[0]["low"] == pytest.approx(-1.5)
+        assert result.iloc[0]["volume"] == 0
 
 
 class TestUpsertFundamentals:

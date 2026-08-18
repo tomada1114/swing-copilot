@@ -21,7 +21,11 @@ from swing_copilot.pipeline.backfill import (
 from swing_copilot.pipeline.backfill import main as backfill_main
 from swing_copilot.pipeline.daily import _select_symbols
 from swing_copilot.storage.database import Database
-from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
+from swing_copilot.storage.market_store import (
+    FundamentalsRecord,
+    MarketStore,
+    NonFiniteBarsError,
+)
 from swing_copilot.universe import UniverseMember
 from swing_copilot.universe_sampling import select_universe_sample
 
@@ -73,16 +77,34 @@ def _bar_row(symbol: str, day: date) -> dict[str, object]:
 class _RecordingProvider:
     """Fake `DataProvider` recording every batch it was asked to fetch."""
 
-    def __init__(self, *, failing_symbols: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        failing_symbols: frozenset[str] = frozenset(),
+        non_finite_symbols: frozenset[str] = frozenset(),
+    ) -> None:
         self.calls: list[tuple[list[str], date, date]] = []
         self._failing_symbols = failing_symbols
+        #: Symbols returned with a NaN close, standing in for a provider whose
+        #: own normalization does not drop them (`data/base.py`'s contract).
+        self._non_finite_symbols = non_finite_symbols
 
     def get_daily_bars(
         self, symbols: list[str], start: date, end: date
     ) -> BarFetchResult:
         self.calls.append((list(symbols), start, end))
         succeeded = [s for s in symbols if s not in self._failing_symbols]
-        bars = pd.DataFrame([_bar_row(symbol, _START) for symbol in succeeded])
+        bars = pd.DataFrame(
+            [
+                _bar_row(symbol, _START)
+                | (
+                    {"close": float("nan")}
+                    if symbol in self._non_finite_symbols
+                    else {}
+                )
+                for symbol in succeeded
+            ]
+        )
         failures = tuple(
             FetchFailure(symbol=symbol, reason="no data returned", retryable=True)
             for symbol in symbols
@@ -185,6 +207,24 @@ class TestBackfillBarsChunking:
         written = counting.write_calls[0]
         assert written["provider"].tolist() == ["yfinance"]
         assert written["fetched_at"].tolist() == [_NOW]
+
+    def test_a_non_finite_bar_rejects_the_whole_backfill_write(
+        self, market_store: MarketStore
+    ) -> None:
+        """The single `write_bars` call makes the store's fail-fast batch-wide.
+
+        Issue #227: one symbol's NaN close aborts the backfill instead of
+        being persisted, and nothing from the batch reaches Parquet — the
+        operator reruns after the provider's normalization is fixed.
+        """
+        provider = _RecordingProvider(non_finite_symbols=frozenset({"BBB"}))
+
+        with pytest.raises(NonFiniteBarsError):
+            backfill_bars(
+                _deps(provider, market_store, []), ["AAA", "BBB"], _START, _END
+            )
+
+        assert not market_store.parquet_root.exists()
 
     def test_skips_the_write_entirely_when_nothing_was_fetched(
         self, market_store: MarketStore

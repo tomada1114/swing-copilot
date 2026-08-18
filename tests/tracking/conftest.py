@@ -18,6 +18,7 @@ import pytest
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
+from tests.conftest import plant_non_finite_bars
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,6 +98,16 @@ def flat_prelude(
 def write_bars(market_store: MarketStore, rows: list[dict[str, Any]]) -> None:
     """Persist bar rows through the real Parquet writer."""
     market_store.write_bars(pd.DataFrame(rows))
+
+
+def plant_broken_bars(market_store: MarketStore, rows: list[dict[str, Any]]) -> None:
+    """Persist bar rows carrying a non-finite price, past `write_bars`' guard.
+
+    `write_bars` rejects such a batch outright since Issue #227, so a stored
+    non-finite close is now only reachable as pre-guard history -- which is
+    the state `tracking.update`'s own guard has to keep surviving.
+    """
+    plant_non_finite_bars(market_store, pd.DataFrame(rows))
 
 
 def seed_verdict(  # noqa: PLR0913 - a verdict row's own columns

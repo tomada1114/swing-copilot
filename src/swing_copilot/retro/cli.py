@@ -29,6 +29,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import Settings, load_secrets, load_settings
 from swing_copilot.data.edgar import EdgarClient
@@ -56,6 +57,11 @@ DEFAULT_REPORTS_DIR = Path("reports")
 DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 
 _CONSOLE_WIDTH = 200
+
+#: Every failure this command converts follows the argparse convention: the
+#: message itself is the exit status (printed to stderr, exit 1).
+_CONFIG_EXIT = ExitPolicy(errors=(ConfigError,))
+_INGEST_EXIT = ExitPolicy(errors=(RetroIngestError,))
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -128,10 +134,7 @@ def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -
 
 
 def _load_settings(path: str) -> Settings:
-    try:
-        return load_settings(path)
-    except ConfigError as exc:
-        raise SystemExit(str(exc)) from exc
+    return run_cli(lambda: load_settings(path), _CONFIG_EXIT)
 
 
 def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
@@ -172,8 +175,11 @@ def _run_export(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
     settings = _load_settings(args.settings)
-    try:
-        summary = export_retro_input(
+    # `export` reads the proposal ledger to name the closed proposals a
+    # re-proposal must justify. An unreadable ledger is an operator-facing
+    # message here, exactly as it is in `ingest`.
+    summary = run_cli(
+        lambda: export_retro_input(
             RetroExportDependencies(
                 market_store=_market_store(state_store, args.db),
                 state_store=state_store,
@@ -184,12 +190,9 @@ def _run_export(
             RetroExportRequest(
                 as_of=args.as_of, reports_root=args.reports_dir, ledger_path=args.ledger
             ),
-        )
-    except RetroIngestError as exc:
-        # `export` reads the proposal ledger to name the closed proposals a
-        # re-proposal must justify. An unreadable ledger is an operator-facing
-        # message here, exactly as it is in `ingest`.
-        raise SystemExit(str(exc)) from exc
+        ),
+        _INGEST_EXIT,
+    )
     console.print(
         f"評価 {summary.outcome_count} 行 / "
         f"サプライズ {summary.surprise_count} 件（上限超過 "
@@ -229,12 +232,12 @@ def _run_prepare(
 
 def _run_ingest(args: argparse.Namespace, console: Console) -> None:
     """Verify the skill's answer and record it (no database is touched)."""
-    try:
-        summary = ingest_retro_result(
+    summary = run_cli(
+        lambda: ingest_retro_result(
             RetroIngestRequest(retro_dir=args.retro_dir, ledger_path=args.ledger)
-        )
-    except RetroIngestError as exc:
-        raise SystemExit(str(exc)) from exc
+        ),
+        _INGEST_EXIT,
+    )
     console.print(
         f"提案 {len(summary.recorded)} 件を台帳（{summary.ledger_path}）へ記録 / "
         f"非表示 {len(summary.withheld)} 件 / "

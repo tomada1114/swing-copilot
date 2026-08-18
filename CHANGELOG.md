@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 11 本の CLI が各自で書いていた「ドメイン Error を捕捉して `SystemExit` へ変換する」
+  定型を、新モジュール `swing_copilot/cli_support.py` の `run_cli()` と `ExitPolicy`
+  へ集約した（Issue #193、挙動不変）。**コマンドの統合はしていない** — 各 `copilot-*`
+  はスキルから直接呼ばれる安定契約であり、共通化したのは終了コード変換だけである。
+  終了コードとメッセージ本文はすべて従来どおりで、とくに `copilot-daily` の
+  `PREFLIGHT_ABORT[<reason>]:` タグ付き exit 2（`swing-daily` スキルが分岐に使う
+  機械可読契約）は、stderr 第1行の書式を固定する回帰テストを追加した。12 本目の
+  `copilot-*` が定型を再び手書きしないよう、`tests/test_quality_contracts.py` が
+  `[project.scripts]` の各コマンドと変換モジュールの対応を検査する。
+  `copilot-backtest` の内部2箇所だけは複数の局所変数を跨ぐ `try` なので、捕捉範囲を
+  広げないためインライン維持（理由をコメントに明記）
+
 - 原子的書き込み `write_json_atomically()` / `write_text_atomically()` を、依存
   ゼロの新モジュール `swing_copilot/io_atomic.py` へ移した（Issue #193、挙動不変）。
   「宛先と同じディレクトリの一時ファイル＋`os.replace`」は AGENTS.md の

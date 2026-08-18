@@ -22,6 +22,7 @@ from uuid import UUID
 from rich.console import Console
 from rich.table import Table
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.paper.journal import PaperJournal
@@ -74,6 +75,10 @@ _CONSOLE_WIDTH = 200
 
 class HistoryCommandError(SwingCopilotError):
     """Raised when a subcommand's `--run-id` doesn't identify a recorded run."""
+
+
+#: The argparse convention: the message itself is the exit status (stderr, 1).
+_EXIT_POLICY = ExitPolicy(errors=(HistoryCommandError,))
 
 
 def _parse_run_id(value: str) -> UUID:
@@ -428,7 +433,8 @@ def main(argv: list[str] | None = None) -> None:
     state_store = StateStore(database)
     state_store.init_schema()
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
-    try:
+
+    def _dispatch() -> None:
         if args.command == "runs":
             _run_runs(database, console, args.limit)
         elif args.command == "run":
@@ -441,8 +447,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_incomplete(database, console, args.reports_dir, args.since)
         else:
             _run_performance(database, state_store, console)
-    except HistoryCommandError as exc:
-        raise SystemExit(str(exc)) from exc
+
+    run_cli(_dispatch, _EXIT_POLICY)
 
 
 if __name__ == "__main__":  # pragma: no cover

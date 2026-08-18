@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import Secrets, load_settings
 from swing_copilot.data.edgar import EdgarClient
@@ -74,6 +75,10 @@ logger = logging.getLogger(__name__)
 
 class BackfillError(SwingCopilotError):
     """Raised for fail-fast argument/configuration errors, before any I/O."""
+
+
+#: One line on stderr, exit 1 — a bad argument or an unusable settings file.
+_EXIT_POLICY = ExitPolicy(errors=(BackfillError, ConfigError), code=1)
 
 
 class _EdgarClientLike(Protocol):
@@ -370,20 +375,20 @@ def _run_fundamentals(args: argparse.Namespace, end: date, symbols: list[str]) -
         sys.stdout.write(f"失敗した銘柄: {', '.join(result.failed_symbols)}\n")
 
 
+def _backfill(args: argparse.Namespace) -> None:
+    end = args.end if args.end is not None else SystemClock().today()
+    _validate(args, end)
+    symbols = _resolve_symbols(args, end)
+    if args.command == "bars":
+        _run_bars(args, end, symbols)
+    else:
+        _run_fundamentals(args, end, symbols)
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: resolve the universe, then backfill bars or fundamentals."""
     args = _parse_args(argv)
-    try:
-        end = args.end if args.end is not None else SystemClock().today()
-        _validate(args, end)
-        symbols = _resolve_symbols(args, end)
-        if args.command == "bars":
-            _run_bars(args, end, symbols)
-        else:
-            _run_fundamentals(args, end, symbols)
-    except (BackfillError, ConfigError) as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
+    run_cli(lambda: _backfill(args), _EXIT_POLICY)
 
 
 if __name__ == "__main__":  # pragma: no cover

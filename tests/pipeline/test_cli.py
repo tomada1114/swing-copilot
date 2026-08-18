@@ -708,3 +708,45 @@ class TestConfigureLoggingRedactsSecrets:
 
         assert "ordinary message with no secrets in it" in caplog.text
         assert "[REDACTED]" not in caplog.text
+
+
+class TestPreflightAbortStderrContract:
+    """The tag `swing-daily` branches on must survive refactors (Issue #193).
+
+    Both abort causes exit `2`, so the reason has to be readable from stderr's
+    first line without parsing prose. `_preflight` raises for the
+    account-equity trap and `run_daily` raises for the same-day rerun guard;
+    the rendered line must be identical either way.
+    """
+
+    @staticmethod
+    def _stub_composition(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
+        monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
+        monkeypatch.setattr(
+            daily_module, "_compose_dependencies", lambda *_args: "fake-deps"
+        )
+        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(daily_module, "run_daily", lambda *_args, **_kwargs: None)
+
+    @pytest.mark.parametrize("aborting_step", ["_preflight", "run_daily"])
+    @pytest.mark.parametrize("reason", ["account_equity_unset", "same_day_rerun"])
+    def test_the_first_stderr_line_carries_the_tagged_reason(
+        self, monkeypatch, capsys, aborting_step, reason
+    ):
+        self._stub_composition(monkeypatch)
+
+        message = "中止した理由の説明"
+
+        def _abort(*_args, **_kwargs):
+            raise PreflightAbort(message, reason=reason)
+
+        monkeypatch.setattr(daily_module, aborting_step, _abort)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+        assert exc_info.value.code == 2
+        first_line = capsys.readouterr().err.splitlines()[0]
+        assert first_line == f"PREFLIGHT_ABORT[{reason}]: 中止した理由の説明"

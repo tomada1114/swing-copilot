@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,22 @@ REQUIREMENTS = tuple(
 )
 REVIEW_ISSUES = ("#54", "#55", "#56", "#57", "#58", "#59")
 TEST_NODE_PATTERN = re.compile(r"`(tests/[\w/]+\.py(?:::[A-Za-z_]\w*)+)`")
+#: Which module owns each console script's domain-error -> `SystemExit`
+#: conversion. `copilot-daily`'s entry point is a compatibility facade over
+#: `pipeline/daily_composition.py`, which is where its `main()` actually lives.
+CLI_ERROR_CONVERSION_MODULES = {
+    "copilot-daily": "src/swing_copilot/pipeline/daily_composition.py",
+    "copilot-backfill": "src/swing_copilot/pipeline/backfill.py",
+    "copilot-decision": "src/swing_copilot/paper/cli.py",
+    "copilot-history": "src/swing_copilot/report/history_cli.py",
+    "copilot-backtest": "src/swing_copilot/backtest/cli.py",
+    "copilot-filter-matrix": "src/swing_copilot/screening/filter_matrix_cli.py",
+    "copilot-dd-forward": "src/swing_copilot/regime/dd_forward_cli.py",
+    "copilot-ingest-analysis": "src/swing_copilot/analysis/cli.py",
+    "copilot-verify-analysis": "src/swing_copilot/analysis/verify_cli.py",
+    "copilot-retro": "src/swing_copilot/retro/cli.py",
+    "copilot-track": "src/swing_copilot/tracking/cli.py",
+}
 
 
 def test_invariant_matrix_maps_every_requirement_and_review_fix_to_real_tests():
@@ -108,6 +125,29 @@ def test_daily_console_script_facade_delegates_to_composition(
     daily.main(["--dry-run"])
 
     assert received == [["--dry-run"]]
+
+
+def test_every_console_script_converts_its_errors_through_cli_support():
+    """Issue #193: one owner for "domain error -> SystemExit", not eleven.
+
+    The commands stay separate — each is a stable, skill-facing entry point —
+    so this pins the conversion, not the entry points. Adding a twelfth
+    `copilot-*` script fails here until it is mapped, which is the moment to
+    decide whether it may hand-write the boilerplate again.
+    """
+    pyproject = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert set(pyproject["project"]["scripts"]) == set(CLI_ERROR_CONVERSION_MODULES)
+    for command, module_path in sorted(CLI_ERROR_CONVERSION_MODULES.items()):
+        tree = ast.parse((PROJECT_ROOT / module_path).read_text(encoding="utf-8"))
+        assert any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "swing_copilot.cli_support"
+            and any(alias.name == "run_cli" for alias in node.names)
+            for node in ast.walk(tree)
+        ), f"{command} must convert its errors through cli_support.run_cli()"
 
 
 def test_atomic_writers_live_in_a_dependency_zero_module():

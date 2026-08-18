@@ -34,6 +34,7 @@ import duckdb
 from rich.console import Console
 from rich.table import Table
 
+from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.io_atomic import write_json_atomically
@@ -94,6 +95,14 @@ _CONSOLE_WIDTH = 200
 
 class DdForwardCliError(SwingCopilotError):
     """Raised for argument, database, or coverage errors, before rendering."""
+
+
+#: An unusable settings file: one line on stderr, exit 1.
+_CONFIG_EXIT = ExitPolicy(errors=(ConfigError,), code=1)
+#: A bad argument: the argparse convention (message as the exit status).
+_ARGUMENT_EXIT = ExitPolicy(errors=(DdForwardCliError,))
+#: The replay also rejects an impossible window through `ValueError`.
+_SCAN_EXIT = ExitPolicy(errors=(DdForwardCliError, ValueError))
 
 
 def _parse_args(argv: list[str] | None = None) -> Namespace:
@@ -657,17 +666,13 @@ def _validate_scoring(args: Namespace, scan: ForwardScan) -> None:
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: replay the history, print the tables, optionally write JSON."""
     args = _parse_args(argv)
-    try:
-        settings = load_settings(args.settings)
-    except ConfigError as exc:
-        sys.stderr.write(f"{exc}\n")
-        raise SystemExit(1) from exc
+    settings = run_cli(lambda: load_settings(args.settings), _CONFIG_EXIT)
 
     thresholds = thresholds_from(settings.regime)
-    try:
-        horizons = _horizons(args.horizons)
-        bars, start = _read_bars(args, settings)
-        scan = scan_forward(
+    horizons = run_cli(lambda: _horizons(args.horizons), _SCAN_EXIT)
+    bars, start = run_cli(lambda: _read_bars(args, settings), _SCAN_EXIT)
+    scan = run_cli(
+        lambda: scan_forward(
             ForwardScanRequest(
                 bars=bars,
                 start=start,
@@ -675,19 +680,16 @@ def main(argv: list[str] | None = None) -> None:
                 thresholds=thresholds,
                 horizons=horizons,
             )
-        )
-    except (DdForwardCliError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
+        ),
+        _SCAN_EXIT,
+    )
     if not scan.observations:
         msg = (
             f"{start.isoformat()}〜{args.as_of.isoformat()} に"
             "分類できる観測日がありません（履歴が短すぎます）。"
         )
         raise SystemExit(msg)
-    try:
-        _validate_scoring(args, scan)
-    except DdForwardCliError as exc:
-        raise SystemExit(str(exc)) from exc
+    run_cli(lambda: _validate_scoring(args, scan), _ARGUMENT_EXIT)
 
     sys.stdout.write(render_terminal(scan, thresholds, args))
 

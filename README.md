@@ -68,6 +68,15 @@ universe[universe.outcome_class == "rejected"].groupby("reason_code")[
 ].mean()
 ```
 
+To browse the same history in a browser instead, `copilot-dashboard` serves a
+read-only local viewer — one run's overview, one symbol's reasoning, and the
+history of both. It binds `127.0.0.1` only, never writes, and renders its
+charts as server-side inline SVG, so it works with the machine offline:
+
+```bash
+uv run copilot-dashboard              # http://127.0.0.1:8787
+```
+
 Backtest a strategy over a historical window, with risk-adjusted metrics
 (Sharpe, max drawdown, win rate, profit factor, expectancy, R-multiple):
 

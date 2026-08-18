@@ -31,6 +31,9 @@ dependencies = [
     "edgartools>=3.0",
     "httpx>=0.27",
     "rich>=14.0",
+    "fastapi>=0.115",
+    "jinja2>=3.1",
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]
@@ -45,6 +48,7 @@ copilot-ingest-analysis = "swing_copilot.analysis.cli:main"
 copilot-verify-analysis = "swing_copilot.analysis.verify_cli:main"
 copilot-retro = "swing_copilot.retro.cli:main"
 copilot-track = "swing_copilot.tracking.cli:main"
+copilot-dashboard = "swing_copilot.dashboard.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/tomada1114/swing-copilot"

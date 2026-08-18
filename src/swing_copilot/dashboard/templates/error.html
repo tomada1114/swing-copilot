@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · swing-copilot{% endblock %}
+
+{% block main %}
+<section class="panel errorbox">
+  <h1>{{ title }}</h1>
+  <p class="error-detail">{{ detail }}</p>
+  {% if hint %}
+  <p class="error-hint-label">別シェルで一度だけ実行する:</p>
+  <pre class="error-hint mono">{{ hint }}</pre>
+  {% endif %}
+  <p><a class="backlink" href="/">最新 run へ戻る</a></p>
+</section>
+{% endblock %}

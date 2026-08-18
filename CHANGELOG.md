@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   書くよりも前に、解決したパスと期待するレイアウトを添えて終了コード 1 で
   落ちる。「数銘柄だけバーが無い」（新規上場など）は従来どおり警告のみの
   fail-soft のままで、潰したのは両者が区別できないことだけである
+- `<prior_verdicts>` の当否ラベルが 1 run 古かった問題を修正した
+  （Issue #209）。`verdict_outcomes` へ書く唯一の経路である `retro_evaluate`
+  ステップが、その表を読むステップ 6 の**後**に走っていたため、D 日に満期を
+  迎えた当否がスキルへ届くのは D+1 の run だった——エントリは出るのに
+  `HIT`/`MISS_*` 欄だけが空、という状態が毎日発生していた。`retro_collect`
+  → `retro_evaluate` → `6_analysis_export` の順へ並べ替え、エクスポートの
+  時間予算判定は両ステップの開始**前**に一度だけ確定させる（#207 と同じ
+  先例。前段の帳簿作業が長引いたことが、スキルへの唯一の受け渡し口を
+  スキップする理由になってはならない）。満期判定は従来どおり注入された
+  `run_date` 基準で、壁時計には寄せない。`track_update` はエクスポートが
+  その出力を読まないため後段に残る
 - `--limit` を渡さない**本番経路**でだけ、保有銘柄が価格取得の対象集合へ
   合流していなかった問題を修正した（Issue #212）。`_select_symbols()` の
   `limit is None` 分岐だけが `held_symbols` を union しておらず、しかも
@@ -44,6 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   なので、後段の帳簿作業がそのスキップ理由になってはならない）。
   `as_of < run_date` の厳密不等号と同日 run の採用規則（`_adopted_runs`）は
   従来どおり
+
+### Performance
+
+- `copilot-retro collect` と日次の `retro_collect` ステップが、毎回すべての
+  過去 run ディレクトリを再パース・再書き込みしていた問題を解消した
+  （Issue #209）。ディレクトリの列挙は従来どおり全件（日付窓で切ると古い
+  訂正を永久に拾えなくなるため）だが、`analysis_input.json` と
+  `analysis_result.json` の内容ハッシュが前回取り込み時の値と一致する run
+  は、パースも DELETE-then-INSERT も行わない。digest は新表
+  `verdict_collections` へ行と同一トランザクションで書く。mtime やサイズ
+  ではなく**内容**を根拠にするので、サイズが同じで更新時刻を復元した訂正で
+  あっても必ず取り込み直される。`retro_evaluate` も日次実行時だけは記録済み
+  スライスを飛ばす（verdict が訂正された場合と bar 欠損で欠けた銘柄がある
+  場合は再分類される。株価訂正による再分類は従来どおり手動の
+  `copilot-retro evaluate` / `prepare` が担う）。あわせて `collect` の出力に
+  「解析 / 無変更」の run 数が加わった
 
 ### Added
 

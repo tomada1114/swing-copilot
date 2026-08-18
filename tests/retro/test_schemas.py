@@ -219,6 +219,47 @@ class TestRetroInput:
         assert rehydrated["aggregates"]["tracked_performance"] is None
         assert retro_input_digest(rehydrated) == archived_digest
 
+    def test_a_dossier_written_before_issue_189_keeps_its_digest(self) -> None:
+        # Same regression, for the two ledger blocks: an archived dossier has
+        # no `failure_class_history` and no `aggregates_by_config`, and its
+        # absent form must hash exactly as it did before the fields existed.
+        payload = _unsigned_payload()
+        archived_digest = canonical_json_digest(payload, excluded_field="input_digest")
+
+        rehydrated = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        ).model_dump(mode="json")
+
+        assert rehydrated["failure_class_history"] is None
+        assert rehydrated["aggregates_by_config"] == []
+        assert retro_input_digest(rehydrated) == archived_digest
+
+    def test_a_recorded_gate_cross_tab_changes_a_fresh_documents_digest(self) -> None:
+        payload = _unsigned_payload()
+        with_history = deepcopy(payload)
+        with_history["failure_class_history"] = {
+            "gate_window_sessions": 3,
+            "gate_min_count": 5,
+            "sessions": ["2027-02-01"],
+            "counts": [
+                {
+                    "count_id": "failure_class_exogenous",
+                    "failure_class": "exogenous",
+                    "count": 2,
+                    "session_count": 1,
+                    "meets_l2_gate": False,
+                }
+            ],
+        }
+
+        assert retro_input_digest(with_history) != retro_input_digest(payload)
+        assert (
+            RetroInput.model_validate(
+                {**with_history, "input_digest": retro_input_digest(with_history)}
+            ).failure_class_history
+            is not None
+        )
+
     def test_a_measured_dispersion_does_change_a_fresh_documents_digest(self) -> None:
         # The other half of the contract: only the *absent* form is ignored.
         # A window that actually produced an interval must hash differently

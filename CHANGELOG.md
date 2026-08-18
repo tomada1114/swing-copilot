@@ -34,6 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 振り返りの敗因分類と、`config_hash` が指していた設定値を DB へ蓄積するように
+  した（Issue #189 の設計案 1・2 のみ。効果測定 CLI・実験定義・台帳 status CLI は
+  サンプル数ゲート待ちで本 PR のスコープ外）。どちらも「いま記録しなければ後から
+  遡れない」値で、指標のように後で再計算できない。
+  - 新テーブル `retro_sessions` / `retro_narrations`。`failure_class` はこれまで
+    gitignore 対象の `reports/retro/<as_of>/retro_report.md` にしか残らず、設計
+    §8.1 の L2 定性ゲート（同一分類が直近 3 回で累計 5 件）を数える材料がどこにも
+    無かった。`copilot-retro ingest` が `--db`（既定 `data/copilot.duckdb`）へ、
+    検証を通った narration を当該 `retro_as_of` ごと 1 トランザクションで置換
+    書き込みする。`run_id` / `symbol` はスキルの回答ではなくエクスポート済み
+    dossier から解決する
+  - 新テーブル `config_versions`。主キーは `runs.config_hash` そのもので、
+    `sections_json` に提案対象になりうる 8 セクション、`snapshot_hash` にその
+    ダイジェストを持つ。`copilot-daily` が `start_run` の直前に upsert し、
+    `first_seen_run_date` は `least()` で前方向にしか動かない
+  - `retro_input.json` に `failure_class_history`（直近 3 回のクロス集計と、
+    決定論コードが判定した `meets_l2_gate`。**スキルは数えるのではなく読む**）と
+    `aggregates_by_config`（設定別の separation 内訳）を追加。どちらも旧 dossier
+    では `null` / `[]` で、`input_digest` は変わらない
+  - 分析ビュー `v_retro_narrations` / `v_run_configs` を追加。3 テーブルとも新規
+    なので `CREATE TABLE IF NOT EXISTS` だけでマイグレーションは足り、本番 DB では
+    空で始まる（保持すべき履歴がどこにも書かれていなかったため）
+
 - JSON 列に埋没していた値を実列へ昇格し、`signals` を `run_id` キーへ載せ替えた
   （Issue #192）。読み出し側はビューで抽出できていたが、書き込み側のスキーマ負債は
   残っており、消費者（#187 の score-lift 等）が `json_extract` ベースで実装されると

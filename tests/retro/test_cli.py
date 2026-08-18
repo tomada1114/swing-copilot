@@ -1,8 +1,8 @@
 """P8-30..P8-32: `copilot-retro` CLI surface.
 
-`collect`, `evaluate`, `export`, the `prepare` umbrella, and `ingest`. Only
-`ingest` runs without a database, which is what keeps the verification step
-free of storage concerns.
+`collect`, `evaluate`, `export`, the `prepare` umbrella, and `ingest`. Since
+Issue #189 every subcommand touches the database: `ingest` accumulates the
+verified narrations there so the L2 qualitative gate has something to count.
 """
 
 from __future__ import annotations
@@ -509,11 +509,21 @@ class TestIngest:
         )
         return directory
 
+    def _ingest_argv(self, directory: Path, tmp_path: Path) -> list[str]:
+        return [
+            "ingest",
+            str(directory),
+            "--ledger",
+            str(tmp_path / "docs" / "retro" / "proposals.md"),
+            "--db",
+            str(tmp_path / "copilot.duckdb"),
+        ]
+
     def test_writes_the_report_and_generates_the_ledger(self, tmp_path: Path) -> None:
         directory = self._retro_dir(tmp_path)
         ledger = tmp_path / "docs" / "retro" / "proposals.md"
 
-        main(["ingest", str(directory), "--ledger", str(ledger)])
+        main(self._ingest_argv(directory, tmp_path))
 
         assert (directory / "retro_report.md").is_file()
         assert "| RP-001 |" in ledger.read_text(encoding="utf-8")
@@ -523,28 +533,31 @@ class TestIngest:
     ) -> None:
         directory = self._retro_dir(tmp_path)
 
-        main(
-            [
-                "ingest",
-                str(directory),
-                "--ledger",
-                str(tmp_path / "docs" / "retro" / "proposals.md"),
-            ]
-        )
+        main(self._ingest_argv(directory, tmp_path))
 
         assert "RP-001" in capsys.readouterr().out
+
+    def test_accumulates_the_verified_narrations_in_the_database(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #189: the failure_class must outlive the gitignored report."""
+        directory = self._retro_dir(tmp_path)
+        db_path = tmp_path / "copilot.duckdb"
+
+        main(self._ingest_argv(directory, tmp_path))
+
+        store = StateStore(Database(db_path))
+        narrations = store.get_retro_narrations(date(2027, 3, 29))
+        assert [(row.symbol, row.failure_class) for row in narrations] == [
+            ("AAPL", "information_absent")
+        ]
 
     def test_exits_when_the_result_answers_another_export(self, tmp_path: Path) -> None:
         directory = self._retro_dir(tmp_path, as_of="2027-04-30")
 
         with pytest.raises(SystemExit, match="as_of"):
-            main(
-                [
-                    "ingest",
-                    str(directory),
-                    "--ledger",
-                    str(tmp_path / "proposals.md"),
-                ]
-            )
+            main(self._ingest_argv(directory, tmp_path))
 
         assert not (directory / "retro_report.md").exists()
+        store = StateStore(Database(tmp_path / "copilot.duckdb"))
+        assert store.get_retro_narrations(date(2027, 3, 29)) == ()

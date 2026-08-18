@@ -10,8 +10,9 @@ Five subcommands, in the order one retrospective uses them:
 * `prepare` runs those three in order -- the one command the skill's preflight
   invokes (E31.4).
 * `ingest` verifies the skill's `retro_result.json`, renders `retro_report.md`,
-  and appends the surviving proposals to the ledger. It is the only subcommand
-  that needs no database at all.
+  appends the surviving proposals to the ledger, and accumulates the verified
+  narrations in DuckDB (Issue #189, so the L2 qualitative gate has something
+  to count).
 
 Like every other entry point here, this one only observes: it writes
 observation tables, a report, and a ledger entry, and never rewrites
@@ -117,6 +118,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="retro_input.json と retro_result.json を置いた reports/retro/<as_of>/",
     )
     ingest_parser.add_argument("--ledger", type=Path, default=Path(DEFAULT_LEDGER_PATH))
+    ingest_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
     return parser.parse_args(argv)
 
@@ -248,18 +250,25 @@ def _run_prepare(
     _run_export(state_store, args, console)
 
 
-def _run_ingest(args: argparse.Namespace, console: Console) -> None:
-    """Verify the skill's answer and record it (no database is touched)."""
+def _run_ingest(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    """Verify the skill's answer, record it, and accumulate its narrations."""
     summary = run_cli(
         lambda: ingest_retro_result(
-            RetroIngestRequest(retro_dir=args.retro_dir, ledger_path=args.ledger)
+            RetroIngestRequest(
+                retro_dir=args.retro_dir,
+                ledger_path=args.ledger,
+                state_store=state_store,
+            )
         ),
         _INGEST_EXIT,
     )
+    accumulated = f"へ蓄積（{args.db}）" if summary.are_narrations_persisted else ""
     console.print(
         f"提案 {len(summary.recorded)} 件を台帳（{summary.ledger_path}）へ記録 / "
         f"非表示 {len(summary.withheld)} 件 / "
-        f"叙述 {summary.narration_count} 件 → {summary.report_path}"
+        f"叙述 {summary.narration_count} 件{accumulated} → {summary.report_path}"
     )
     for item in summary.recorded:
         console.print(f"  {item.rp_id} [{item.proposal.level}] {item.proposal.title}")
@@ -290,10 +299,6 @@ def main(argv: list[str] | None = None) -> None:
     """
     args = _parse_args(argv)
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
-    if args.command == "ingest":
-        # The only subcommand with no database side: two files in, two out.
-        _run_ingest(args, console)
-        return
     state_store = StateStore(Database(args.db))
     state_store.init_schema()
     if args.command == "collect":
@@ -302,6 +307,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_evaluate(state_store, args, console)
     elif args.command == "export":
         _run_export(state_store, args, console)
+    elif args.command == "ingest":
+        _run_ingest(state_store, args, console)
     else:
         _run_prepare(state_store, args, console)
 

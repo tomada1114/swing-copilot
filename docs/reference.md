@@ -27,7 +27,8 @@ research.ensure_views(path)     # ビュー未作成の古い DB を修復
 ```
 
 結合済みビュー（`v_verdict_scorecard` / `v_candidates` / `v_truncated_candidates` /
-`v_universe_forward_returns` / `v_tracked_positions` / `v_symbol_sector_asof`）は `storage/schema.py` が定義し、`StateStore.init_schema()`
+`v_universe_forward_returns` / `v_tracked_positions` / `v_symbol_sector_asof` /
+`v_retro_narrations` / `v_run_configs`）は `storage/schema.py` が定義し、`StateStore.init_schema()`
 （毎日次実行）が `CREATE OR REPLACE` で自己移行する。セクターの as-of 解決
 （`snapshot_date <= run_date` の inclusive 境界）は `v_symbol_sector_asof` に
 一元化されており、分析側で universe_membership を自前 JOIN してはならない。
@@ -258,7 +259,7 @@ copilot-retro collect --reports-dir reports          # verdictをDuckDBへ取り
 copilot-retro evaluate --as-of 2027-03-11            # 満期を迎えた当否を分類する
 copilot-retro export --as-of 2027-03-11              # 証拠一式をJSONへ書き出す
 copilot-retro prepare --as-of 2027-03-11             # 上記3つをまとめて実行する
-copilot-retro ingest reports/retro/2027-03-11        # スキルの回答を検証して記録する
+copilot-retro ingest reports/retro/2027-03-11        # 回答を検証し記録＋narrationを蓄積
 ```
 
 `collect`は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の
@@ -302,7 +303,21 @@ APIキー未設定や取得失敗は当該欄を空にしてnoteを残す（fail
 `ingest`は`retro_result.json`（strictスキーマ`retro-result-v1`）を検証し、
 `retro_report.md`を同ディレクトリへ原子的に描画したうえで、通過した提案を
 提案台帳（既定`docs/retro/proposals.md`、`--ledger`で変更可）へ
-status=proposedで追記する。5つのサブコマンドで唯一DBに触れない。
+status=proposedで追記する。さらに検証を通った narration を`--db`
+（既定`data/copilot.duckdb`）の`retro_sessions` / `retro_narrations`へ、
+当該`retro_as_of`ごと1トランザクションで置換書き込みする（Issue #189）。
+それまで`failure_class`はgitignore対象の`reports/retro/`にしか残らず、
+設計§8.1のL2定性ゲート（同一分類が直近3回で累計5件）を数える材料が
+どこにも無かった。`run_id`/`symbol`はスキルの回答ではなくエクスポート済み
+dossierから解決する。次回以降の`export`はここから`failure_class_history`
+（直近3回のクロス集計と、決定論コードが判定した`meets_l2_gate`）を作るので、
+ingestを飛ばすとその材料が失われる。
+
+`export`にはあわせて`aggregates_by_config`（`runs.config_hash`別のseparation
+内訳）が加わる。設定値そのものは`copilot-daily`が`config_versions`台帳へ
+upsertしており（`config_hash`が指す8セクションと、その`snapshot_hash`）、
+`first_seen_run_date`は`least()`で前方向にしか動かない。台帳導入前のrunは
+`snapshot_hash`/`sections_json`がNULL＝未記録である。
 
 検証は`analysis/`の境界と同型である。`as_of`と`input_digest`の不一致は
 retro全体のhard fail（何も書かずに非0終了）。個別の提案・叙述については、

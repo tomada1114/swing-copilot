@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Any, Final, Self
 
 import yaml
 from pydantic import (
@@ -23,8 +23,12 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.documents import read_text_document
 from swing_copilot.exceptions import ConfigError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 FEATURE_SECRET_ATTRS: dict[str, str] = {
     "finnhub": "finnhub_api_key",
@@ -482,6 +486,59 @@ class Settings(_StrictModel):
     postmortem: PostmortemConfig = PostmortemConfig()
     regime: RegimeConfig = RegimeConfig()
     retro: RetroConfig = RetroConfig()
+
+
+#: Settings a retrospective proposal could plausibly target. Delivery and
+#: scheduling plumbing (`notification`, `schedule`) and the universe source are
+#: excluded: they are not analysis parameters, and a snapshot that included
+#: everything would make the snapshot hash churn for unrelated edits.
+#:
+#: Lives here rather than in `retro/export.py` (Issue #189) because two callers
+#: now need the same eight sections: the dossier's `config_snapshot`, and
+#: `pipeline/daily_runner.py`'s `config_versions` ledger row. Two lists would
+#: drift, and a drifted snapshot silently splits a comparison window.
+CONFIG_SNAPSHOT_SECTIONS: Final = (
+    "risk",
+    "fundamental_filters",
+    "technical_signals",
+    "backtest",
+    "analysis",
+    "postmortem",
+    "regime",
+    "retro",
+)
+
+
+def config_snapshot_sections(settings: Settings) -> dict[str, Any]:
+    """Return the proposal-relevant settings sections, JSON-ready.
+
+    Args:
+        settings: The validated settings a run or an export observed.
+
+    Returns:
+        `CONFIG_SNAPSHOT_SECTIONS` mapped to their dumped values, in the order
+        the constant declares.
+    """
+    # Any: `model_dump` is untyped per-section, and the values are handed
+    # straight to a JSON serializer / a `JsonValue` pydantic field.
+    dumped: dict[str, Any] = settings.model_dump(mode="json")
+    return {name: dumped[name] for name in CONFIG_SNAPSHOT_SECTIONS}
+
+
+def config_snapshot_hash(sections: Mapping[str, Any]) -> str:
+    """Return the SHA-256 fingerprint of one snapshot's sections.
+
+    Distinct from `runs.config_hash`, which fingerprints the *whole* effective
+    configuration plus the selected strategy: this one moves only when a
+    setting a proposal could target moves.
+
+    Args:
+        sections: The mapping `config_snapshot_sections` returned.
+
+    Returns:
+        The full hex SHA-256 of the sections' canonical JSON.
+    """
+    return canonical_json_digest(dict(sections), excluded_field="config_hash")
 
 
 _SCORE_WEIGHT_SUM_TOLERANCE = 1e-9

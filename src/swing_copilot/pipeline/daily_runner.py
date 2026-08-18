@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
+from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
 from swing_copilot.pipeline.daily import (
@@ -50,6 +51,7 @@ from swing_copilot.pipeline.daily import (
     _warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
+from swing_copilot.storage.config_records import ConfigVersionRecord
 from swing_copilot.storage.tracking_records import OPEN, PROCEED
 
 logger = logging.getLogger(__name__)
@@ -185,6 +187,19 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
             raise PreflightAbort(msg, reason="same_day_rerun")
 
     config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
+    # Issue #189: record what that hash stands for before anything reads it.
+    # `config_hash` alone is one-way, so a settings edit made every earlier
+    # run's parameters unrecoverable -- unlike a metric, a value that was never
+    # written down cannot be recomputed from history later.
+    sections = config_snapshot_sections(deps.settings)
+    deps.state_store.upsert_config_version(
+        ConfigVersionRecord(
+            config_hash=config_hash,
+            first_seen_run_date=run_date,
+            snapshot_hash=config_snapshot_hash(sections),
+            sections=sections,
+        )
+    )
     run_id = deps.state_store.start_run(
         run_date,
         mode,

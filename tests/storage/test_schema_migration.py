@@ -15,6 +15,7 @@ which is exactly the trap `ALTER_SCHEMA_STATEMENTS` exists to cover).
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -22,6 +23,10 @@ import duckdb
 import pytest
 
 from swing_copilot.storage.database import Database
+from swing_copilot.storage.retro_records import (
+    RetroNarrationRecord,
+    RetroSessionRecord,
+)
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.verdict_records import backfill_verdict_reasons
 
@@ -320,6 +325,76 @@ class TestBackfillAtomicity:
             assert conn.execute("SELECT count(*) FROM verdict_reasons").fetchone() == (
                 2,
             )
+
+
+class TestIssue189LedgersOnAnExistingDatabase:
+    """New tables, not new columns: `CREATE TABLE IF NOT EXISTS` is the migration.
+
+    They start empty on the production file because the history they would
+    hold (`failure_class`, what a `config_hash` stood for) was never written
+    anywhere -- which is precisely why the tables had to exist before more
+    days accumulate.
+    """
+
+    def test_the_new_tables_exist_and_start_empty(self, tmp_path: Path) -> None:
+        store = _migrated(tmp_path)
+
+        with store.database.connect() as conn:
+            counts = conn.execute(
+                "SELECT (SELECT count(*) FROM retro_sessions), "
+                "(SELECT count(*) FROM retro_narrations), "
+                "(SELECT count(*) FROM config_versions)"
+            ).fetchone()
+
+        assert counts == (0, 0, 0)
+
+    def test_an_existing_run_reads_as_configuration_not_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        """NULL means "never written down", never "the configuration was empty"."""
+        store = _migrated(tmp_path)
+
+        with store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT config_hash, snapshot_hash, sections_json FROM v_run_configs"
+            ).fetchone()
+
+        assert row == ("cfg", None, None)
+
+    def test_a_narration_recorded_after_the_migration_joins_its_existing_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        store = _migrated(tmp_path)
+        as_of = date(2026, 8, 18)
+        store.replace_retro_session(
+            RetroSessionRecord(
+                retro_as_of=as_of,
+                window_start=date(2026, 7, 21),
+                input_digest="d" * 64,
+                generated_at=datetime(2026, 8, 18, tzinfo=UTC),
+                outcome_count=4,
+                proposal_count=0,
+            ),
+            [
+                RetroNarrationRecord(
+                    retro_as_of=as_of,
+                    surprise_id="s-1",
+                    run_id=_RUN_ID,
+                    symbol="AAPL",
+                    failure_class="information_absent",
+                    narrative="当時の入力に材料が無かった",
+                    evidence_refs=("s-1",),
+                )
+            ],
+        )
+
+        with store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT symbol, failure_class, run_date, recommendation "
+                "FROM v_retro_narrations"
+            ).fetchone()
+
+        assert row == ("AAPL", "information_absent", date(2026, 7, 21), "proceed")
 
 
 class TestMigratedRowsStayReadable:

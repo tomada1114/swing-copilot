@@ -14,6 +14,7 @@ from uuid import uuid4
 import pandas as pd
 import pytest
 
+from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
@@ -335,6 +336,31 @@ class TestRunFingerprintAndMetadata:
         assert canonical != _config_hash(
             deps.settings, TWO_STRATEGIES_CONFIG, "growth_v2"
         )
+
+    def test_run_records_what_its_config_hash_stood_for(self, deps, state_store):
+        """Issue #189: the hash alone is one-way, so the values are written too."""
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        (version,) = state_store.get_config_versions()
+        assert (
+            version.config_hash
+            == state_store.get_run_config_hashes(AS_OF)[result.run_id]
+        )
+        assert version.sections == config_snapshot_sections(deps.settings)
+        assert version.snapshot_hash == config_snapshot_hash(version.sections)
+
+    def test_the_ledger_keeps_the_first_run_date_a_configuration_was_seen_on(
+        self, deps, state_store
+    ):
+        run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
+
+        (version,) = state_store.get_config_versions()
+        assert version.first_seen_run_date == AS_OF
 
     def test_run_persists_reconstructable_metadata(self, deps, state_store):
         tracked_deps = replace(

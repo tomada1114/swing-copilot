@@ -416,6 +416,69 @@ class ConfigSnapshot(_StrictModel):
     config_hash: Sha256Digest
 
 
+class FailureClassCountEntry(_StrictModel):
+    """How often one `failure_class` recurred, and whether that clears L2.
+
+    `meets_l2_gate` is computed by deterministic code, not counted by the
+    skill (Issue #189): a gate the reader tallies by hand is a gate that
+    quietly drifts, and the counting inputs -- past retrospectives' narrations
+    -- now live in the database instead of in gitignored reports.
+    """
+
+    #: Citable identifier, so an L2 proposal can name the gate row it rests
+    #: on instead of restating the count in prose.
+    count_id: NonBlankText
+    failure_class: FailureClass
+    #: Narrations carrying this class across `FailureClassHistory.sessions`.
+    count: int = Field(ge=0)
+    #: How many of those sessions contributed at least one.
+    session_count: int = Field(ge=0)
+    meets_l2_gate: bool
+
+
+class FailureClassHistoryEntry(_StrictModel):
+    """The trailing cross-tab design §8.1's L2 qualitative gate reads.
+
+    Counted over *ingested* retrospectives only. The current one is not among
+    them -- its narrations do not exist until `copilot-retro ingest` accepts
+    them -- so `count` is a floor: today's reading can only add to it. That is
+    deliberate, and it is the only definition that makes the number
+    reproducible for a given `as_of`.
+    """
+
+    gate_window_sessions: int = Field(ge=1)
+    gate_min_count: int = Field(ge=1)
+    #: The `retro_as_of` of each session counted, newest first.
+    sessions: list[date]
+    counts: list[FailureClassCountEntry]
+
+
+class ConfigVersionAggregateEntry(_StrictModel):
+    """One configuration's own slice of the window's separation (Issue #189).
+
+    Exists so "did the numbers move because the configuration moved" stops
+    being unanswerable. Reading it needs the same care as any subgroup: the
+    split can only shrink the sample, so `separation`'s `is_preliminary` and
+    `sample_size` govern, and a difference between two configurations is a
+    hypothesis to verify, never a finding on its own.
+    """
+
+    #: `runs.config_hash` verbatim: the full effective-run fingerprint.
+    #: Deliberately not typed as `Sha256Digest` -- that column is a free
+    #: VARCHAR, and refusing to build the whole dossier because some archived
+    #: run recorded a non-digest there would fail hard on an archive's shape.
+    config_hash: NonBlankText
+    #: Digest of the proposal-relevant sections alone. Two entries sharing it
+    #: differ only in settings no proposal targets (delivery, scheduling).
+    #: `None` when the configuration predates the `config_versions` ledger.
+    snapshot_hash: Sha256Digest | None
+    #: `None` for the same reason: never recorded, not "first run today".
+    first_seen_run_date: date | None
+    run_count: int = Field(ge=0)
+    outcome_count: int = Field(ge=0)
+    separation: list[MetricEntry]
+
+
 class ProposalsLedger(_StrictModel):
     """Where the proposal ledger lives and which proposals are closed.
 
@@ -453,6 +516,15 @@ class RetroInput(_StrictModel):
     #: empty there means "not computed", not "no verdict cited anything".
     basis_contribution: list[BasisContributionEntry] = []
     input_coverage: InputCoverageSummary | None = None
+    #: Issue #189: the L2 qualitative gate's inputs and verdict, computed from
+    #: the persisted narrations of earlier retrospectives. `None` means no
+    #: retrospective has been ingested at or before `as_of` -- including every
+    #: dossier archived before the table existed.
+    failure_class_history: FailureClassHistoryEntry | None = None
+    #: Issue #189: the window's separation split by the configuration each run
+    #: executed under. Empty means "not computed" (a dossier from before the
+    #: field, or a window with no run at all), never "one configuration".
+    aggregates_by_config: list[ConfigVersionAggregateEntry] = []
     surprises: SurpriseBundle
     config_snapshot: ConfigSnapshot
     proposals_ledger: ProposalsLedger
@@ -515,6 +587,11 @@ def _drop_legacy_defaults(value: object) -> object:
                 or (key in _ISSUE_190_OPTIONAL_KEYS and child is None)
                 # Issue #191: per-basis hit rates, absent before the field.
                 or (key == "basis_contribution" and child == [])
+                # Issue #189: the L2 gate cross-tab and the per-config split,
+                # absent on every dossier written before the two ledgers
+                # existed -- and on any window that still has neither.
+                or (key == "failure_class_history" and child is None)
+                or (key == "aggregates_by_config" and child == [])
             )
         }
     if isinstance(value, list):

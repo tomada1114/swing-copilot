@@ -29,7 +29,12 @@ from swing_copilot.retro.schemas import RETRO_INPUT_SCHEMA_VERSION, RetroInput
 from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.retro.validate import evidence_id_space
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
+from swing_copilot.storage.config_records import ConfigVersionRecord
 from swing_copilot.storage.paper_records import TradeDecisionRecord
+from swing_copilot.storage.retro_records import (
+    RetroNarrationRecord,
+    RetroSessionRecord,
+)
 from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
@@ -859,6 +864,168 @@ def _signal_outcome(
         forward_return_pct=forward_return_pct,
         classification=classification,
     )
+
+
+def _record_retro_session(
+    store: StateStore, retro_as_of: date, classes: tuple[str, ...]
+) -> None:
+    """Ingest one past retrospective's narrations, as `copilot-retro ingest` does."""
+    store.replace_retro_session(
+        RetroSessionRecord(
+            retro_as_of=retro_as_of,
+            window_start=retro_as_of - timedelta(days=90),
+            input_digest="a" * 64,
+            generated_at=datetime(2027, 3, 1, tzinfo=UTC),
+            outcome_count=4,
+            proposal_count=0,
+        ),
+        [
+            RetroNarrationRecord(
+                retro_as_of=retro_as_of,
+                surprise_id=f"{retro_as_of.isoformat()}-{index}",
+                run_id=RUN_ID,
+                symbol="AAPL",
+                failure_class=failure_class,
+                narrative="当時の入力に材料が無かった",
+                evidence_refs=("finnhub:1",),
+            )
+            for index, failure_class in enumerate(classes)
+        ],
+    )
+
+
+class TestFailureClassHistory:
+    """Issue #189: the L2 qualitative gate is read, not counted by the skill."""
+
+    def test_absent_before_any_retrospective_has_been_ingested(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.failure_class_history is None
+
+    def test_carries_the_trailing_counts_and_the_gate_verdict(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        _record_retro_session(
+            populated_store, date(2027, 1, 1), ("information_absent",) * 2
+        )
+        _record_retro_session(
+            populated_store,
+            date(2027, 2, 1),
+            ("information_absent",) * 3 + ("exogenous",),
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        history = document.failure_class_history
+        assert history is not None
+        assert (history.gate_window_sessions, history.gate_min_count) == (3, 5)
+        assert [
+            (row.failure_class, row.count, row.meets_l2_gate) for row in history.counts
+        ] == [("information_absent", 5, True), ("exogenous", 1, False)]
+
+    def test_a_session_after_the_cutoff_is_not_counted(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """Point-in-time: re-exporting an old retrospective reproduces its number."""
+        _record_retro_session(
+            populated_store, AS_OF + timedelta(days=1), ("exogenous",)
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.failure_class_history is None
+
+    def test_the_gate_rows_are_citable(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        _record_retro_session(populated_store, date(2027, 2, 1), ("exogenous",))
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert "failure_class_exogenous" in evidence_id_space(document)
+
+
+class TestAggregatesByConfig:
+    """Issue #189: separation split by the configuration each run executed under."""
+
+    def test_an_outcome_whose_run_is_unknown_is_dropped(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """Pooling it would mix populations, which is what the split exists to stop."""
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        assert document.aggregates_by_config == []
+
+    def test_splits_the_window_by_the_configuration_behind_each_outcome(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        _insert_run(
+            populated_store, RUN_ID, RUN_DATE, datetime(2027, 3, 1, 18, tzinfo=UTC)
+        )
+        populated_store.upsert_config_version(
+            ConfigVersionRecord(
+                config_hash="cfg",
+                first_seen_run_date=RUN_DATE,
+                snapshot_hash="b" * 64,
+                sections={"retro": {"max_surprises": 5}},
+            )
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        (entry,) = document.aggregates_by_config
+        assert (entry.config_hash, entry.snapshot_hash) == ("cfg", "b" * 64)
+        assert (entry.first_seen_run_date, entry.run_count, entry.outcome_count) == (
+            RUN_DATE,
+            1,
+            2,
+        )
+
+    def test_a_configuration_the_ledger_never_saw_reads_as_unrecorded(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """A run from before the ledger existed: NULL, never a guessed value."""
+        _insert_run(
+            populated_store, RUN_ID, RUN_DATE, datetime(2027, 3, 1, 18, tzinfo=UTC)
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        (entry,) = document.aggregates_by_config
+        assert (entry.snapshot_hash, entry.first_seen_run_date) == (None, None)
+
+    def test_the_per_config_metrics_are_citable_and_distinct(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        _insert_run(
+            populated_store, RUN_ID, RUN_DATE, datetime(2027, 3, 1, 18, tzinfo=UTC)
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        (entry,) = document.aggregates_by_config
+        window_wide = {row.metric_id for row in document.aggregates.separation}
+        per_config = {row.metric_id for row in entry.separation}
+        assert per_config.isdisjoint(window_wide)
+        assert per_config <= evidence_id_space(document)
 
 
 class TestReadProposalsLedger:

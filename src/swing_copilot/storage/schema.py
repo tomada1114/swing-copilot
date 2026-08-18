@@ -28,6 +28,13 @@ every later start. A value that was never persisted at all — `candidates`'
 `execution_state`/`execution_distance` — is explicitly *not* backfilled and
 stays NULL, meaning "not recorded".
 
+An entirely new table (Issue #189's `retro_sessions` / `retro_narrations` /
+`config_versions`) needs no `ALTER_SCHEMA_STATEMENTS` entry at all: `CREATE
+TABLE IF NOT EXISTS` creates it on a fresh database and on the production one
+alike, and it starts empty in both cases because the history it would hold was
+never written anywhere. Only a change to an *existing* table's shape needs the
+ALTER path.
+
 `verdict_reasons`/`verdict_reason_sources` are backfilled the same way but in
 Python (`verdict_records.backfill_verdict_reasons`), because normalizing
 `reasons_json` reuses that module's own parsing rather than duplicating it as
@@ -541,6 +548,65 @@ INIT_SCHEMA_STATEMENTS = (
         reduce_only_risk_multiplier  DOUBLE
     )
     """,
+    # Issue #189: the retrospective's own record. Until now a `failure_class`
+    # lived only in `reports/retro/<as_of>/retro_report.md`, which is
+    # gitignored -- so the L2 qualitative gate ("the same failure_class five
+    # times across the last three retrospectives") could never be evaluated
+    # from anything but a human's memory. One row per ingested retrospective;
+    # `input_digest` binds the session to the dossier it answered, so a session
+    # can be traced back to the exact evidence set it read.
+    """
+    CREATE TABLE IF NOT EXISTS retro_sessions (
+        retro_as_of     DATE PRIMARY KEY,
+        window_start    DATE NOT NULL,
+        input_digest    VARCHAR NOT NULL,
+        generated_at    TIMESTAMPTZ NOT NULL,
+        outcome_count   INTEGER NOT NULL,
+        proposal_count  INTEGER NOT NULL
+    )
+    """,
+    # Issue #189: one verified narration per surprise symbol. `run_id`/`symbol`
+    # are resolved from the *exported* dossier rather than echoed back from the
+    # skill's answer (AGENTS.md: code-owned metadata is never taken from an
+    # untrusted result), which is also what makes this table joinable to
+    # `verdicts`/`verdict_outcomes`. `failure_class` carries no CHECK
+    # constraint even though the vocabulary is closed: `retro/schemas.py`'s
+    # `FailureClass` literal is the enforcement point, and pinning a five-value
+    # enum into DDL would make an added class a schema migration.
+    """
+    CREATE TABLE IF NOT EXISTS retro_narrations (
+        retro_as_of        DATE NOT NULL,
+        surprise_id        VARCHAR NOT NULL,
+        run_id             UUID NOT NULL,
+        symbol             VARCHAR NOT NULL,
+        failure_class      VARCHAR NOT NULL,
+        narrative          VARCHAR NOT NULL,
+        evidence_refs_json JSON NOT NULL,
+        PRIMARY KEY (retro_as_of, surprise_id)
+    )
+    """,
+    # Issue #189: what a `runs.config_hash` actually stood for. The hash alone
+    # is a one-way fingerprint -- "did the numbers move because the config
+    # moved" was unanswerable the moment `config/settings.yaml` was edited,
+    # and no amount of later analysis can recover a value that was never
+    # written down.
+    #
+    # `config_hash` is `runs.config_hash` verbatim (the full effective-run
+    # fingerprint, settings + selected strategy), so the join to `runs` needs
+    # no new column there. `sections_json` holds only the eight
+    # proposal-relevant settings sections (`config.CONFIG_SNAPSHOT_SECTIONS`),
+    # and `snapshot_hash` is their digest: two runs whose only difference is a
+    # notification or schedule edit share a `snapshot_hash` while their
+    # `config_hash` differs, which is what stops an unrelated edit from
+    # splitting a comparison window in two.
+    """
+    CREATE TABLE IF NOT EXISTS config_versions (
+        config_hash         VARCHAR PRIMARY KEY,
+        first_seen_run_date DATE NOT NULL,
+        snapshot_hash       VARCHAR NOT NULL,
+        sections_json       JSON NOT NULL
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS ftd_state_history (
         run_id        UUID NOT NULL,
@@ -1002,5 +1068,48 @@ ANALYSIS_VIEW_STATEMENTS = (
       ON p.run_id = v.run_id AND p.symbol = v.symbol
     LEFT JOIN v_symbol_sector_asof s
       ON s.run_id = v.run_id AND s.symbol = v.symbol
+    """,
+    # Issue #189: one verified narration per row, joined to the run it re-read
+    # and to that run's verdict, so "which failure_class keeps repeating, and
+    # on which side of the verdict" is a GROUP BY rather than a walk through
+    # gitignored markdown. Every join but `retro_narrations` itself is LEFT:
+    # a narration must stay readable even if its run's verdict was later
+    # replaced by a re-`collect` that no longer analyzes the symbol.
+    """
+    CREATE OR REPLACE VIEW v_retro_narrations AS
+    SELECT
+        n.retro_as_of,
+        s.window_start,
+        n.surprise_id,
+        n.run_id,
+        r.run_date,
+        n.symbol,
+        n.failure_class,
+        n.narrative,
+        n.evidence_refs_json,
+        v.recommendation,
+        v.no_trade
+    FROM retro_narrations n
+    LEFT JOIN retro_sessions s ON s.retro_as_of = n.retro_as_of
+    LEFT JOIN runs r ON r.run_id = n.run_id
+    LEFT JOIN verdicts v ON v.run_id = n.run_id AND v.symbol = n.symbol
+    """,
+    # Issue #189: every run with the settings it actually ran under. A LEFT
+    # join on purpose -- runs written before `config_versions` existed have no
+    # ledger row, and NULL there means "the values were never recorded", which
+    # readers must not confuse with "the configuration was empty".
+    """
+    CREATE OR REPLACE VIEW v_run_configs AS
+    SELECT
+        r.run_id,
+        r.run_date,
+        r.mode,
+        r.status AS run_status,
+        r.config_hash,
+        c.snapshot_hash,
+        c.first_seen_run_date,
+        c.sections_json
+    FROM runs r
+    LEFT JOIN config_versions c ON c.config_hash = r.config_hash
     """,
 )

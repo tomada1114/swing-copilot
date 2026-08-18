@@ -1635,7 +1635,7 @@ run固有ディレクトリ`reports/<run_date>/<run_id>/`に`rejections.json`（
 
 定性verdict（`proceed`/`skip`）の当否を決定論的に計測し、その証拠から改善提案を生成・適用する振り返り機構。このうちオフラインで冪等な`collect`と`evaluate`だけは、日次フロー（`copilot-daily` → `swing-daily`スキル → `copilot-ingest-analysis`）のfail-softステップ（`retro_collect`／`retro_evaluate`）として毎日走る。`retro_collect`（`_run_retro_collect_soft_step`）と`retro_evaluate`（`_run_retro_evaluate_soft_step`）はどちらもステップ6のエクスポート**直前**に、この順で走る。エクスポートの`<prior_verdicts>`が`verdicts`と`verdict_outcomes`を対にして読むからで、`evaluate`が`collect`の後なのは、いま取り込んだverdictをそのまま分類するためである（Issue #207 / #209、3.16節）。`track_update`だけは`postmortem`の後に残る（`_run_track_update_soft_step`）——エクスポートはその出力を読まないので、受け渡し口の手前の作業を増やす理由がない。未評価のrunが評価窓から抜け落ちるのを防ぎ、DuckDBに入らない唯一の原本である`reports/<date>/<run_id>/analysis_result.json`を恒久化するためで、いずれも冪等なので日次の反復で結果は変わらない。外部APIを叩く`export`と`swing-retro`スキル、そして`ingest`は従来どおり独立したループとして人間が数日おきに手動起動する（`prepare`は3つの直列呼び出しのままで、日次ステップと重複して走っても害はない）。本節は`docs/goal-prompts/swing-copilot-retrospective/design.md`（実装前の設計シード）を、実装確定後の正本として昇格したものであり、シードと実装が食い違う箇所は**実装を正として記述し、乖離を明記する**。
 
-`analysis/`に同居させず新パッケージにした理由は、`analysis/`が「ネットワークもDBも触らない検証専用境界」という憲章を持つのに対し、retroはDuckDBを読み書きし（`collect`/`evaluate`/`export`）、鮮度データ取得で外部APIも叩くため（決定D8）。`copilot-ingest-analysis`がDBに触れない不変条件はそのまま維持される。エントリポイントは`copilot-retro = "swing_copilot.retro.cli:main"`の1行追加。CLIの操作面は`docs/reference.md`が正本。
+`analysis/`に同居させず新パッケージにした理由は、`analysis/`が「ネットワークもDBも触らない検証専用境界」という憲章を持つのに対し、retroはDuckDBを読み書きし（`collect`/`evaluate`/`export`、Issue #189以降は`ingest`も）、鮮度データ取得で外部APIも叩くため（決定D8）。`copilot-ingest-analysis`がDBに触れない不変条件はそのまま維持される。エントリポイントは`copilot-retro = "swing_copilot.retro.cli:main"`の1行追加。CLIの操作面は`docs/reference.md`が正本。
 
 ```text
 src/swing_copilot/retro/
@@ -1670,6 +1670,22 @@ src/swing_copilot/retro/
 **P8-124実装時追記（Issue #124）**: 上の「既に書き込まれた行を消しに行かない」契約は、同日重複排除を**読み出し側の義務**にもする。不採用runの行が`verdicts` / `verdict_outcomes`に残り続ける以上、`get_verdicts_in_window()` / `get_verdict_outcomes_in_window()`のような素の日付範囲クエリはその日を二重に数えるためである。#124の統合runで実際に発生した——`collect`が「2026-07-29: run a8584328... は同日の重複のため収集をスキップ」と記録した一方で、`verdict_mix`は10 run / 78 verdictを報告し、敗者runのverdict 4件とoutcome 4件が窓の集計に入っていた（collect自身の報告は9 run / 74 verdict）。採用規則そのものを`retro/adoption.py`へ切り出し、`collect._adopted_runs()`と、窓を読む`export.build_retro_input()` / `evaluate.evaluate_verdicts()`が同じ`adopt_one_run_per_date()`を共有する（規則を2箇所に書けば必ず乖離するため。#150と同じ方針）。`keep_adopted_rows()`は**同日に複数runがある日付が1つも無ければ`runs`テーブルを引かない**ので、通常の窓では追加クエリのコストが発生しない。`evaluate`側に適用する理由は、敗者runを分類すると`verdict_outcomes`へ行が書かれ、以降すべての窓集計がそれを二重計上するためである。
 
 **Issue #209実装時追記（増分走査）**: `collect`は毎日の run で全過去 run ディレクトリを再パース・再書き込みしており、コストが履歴長に線形で増えていた。エクスポートの手前に置く帳簿ステップとしてはこれが時間予算を圧迫するため、**パースと書き込みだけを省く**増分化を入れる。ディレクトリの列挙は従来どおり全件のまま（日付窓では古い訂正を永久に拾えなくなるため。`CollectSummary.scanned_run_count`の意味も「列挙したrunディレクトリ数」のまま変えない）。スキップの根拠は**内容ハッシュ**である: `analysis_input.json`と`analysis_result.json`をsha256で個別にハッシュし、その組を再ハッシュした値を、収集時に`verdict_collections`表（`run_id` PK / `document_digest`、Issue #209の新テーブル）へ**同一トランザクションで**書く。次回の走査はこのdigestと一致した run だけをスキップする。mtime・サイズを根拠にしないのは、「訂正が無いこと」を根拠にせよという不変条件を、サイズ据え置き・タイムスタンプ復元の訂正に対しても満たすためである（該当する回帰テストが`tests/retro/test_collect.py`にある）。P8-119の同日重複排除はスキップ対象の run も候補として扱う——バイト同一である以上、前回パースして収集可能と判定した事実がそのまま根拠になる。digestを伴わない`replace_run_verdicts`（`retro collect`以外の書き手・テスト）は既存digestを**削除**するので、素性の分からない行が次回のスキップ根拠になることはない。`CollectSummary`には`parsed_run_count`（今回パースを試みたrun）と`unchanged_run_count`（digest一致でスキップしたrun）を追加する。noteが出るのは前者だけになる——解決できなかった`source_id`のnoteは、そのrunを取り込んだ回に記録され、以後毎日繰り返されない。
+
+**Issue #189実装時追記（敗因分類とconfig台帳の永続化）**: 上の3テーブルに、蓄積されないと後から遡れない2系統を追加する。どちらも「計測値」ではなく「記録しなければ永久に失われる値」であり、日が経つほど取り返しがつかない性質のものだけを対象にしている（効果測定CLI・実験定義・台帳status CLIはサンプル数ゲート待ちのため本追記のスコープ外）。
+
+| テーブル | 主キー | 役割 |
+|---|---|---|
+| `retro_sessions` | `retro_as_of` | 取り込んだ振り返り1回。`window_start` / `input_digest`（どの dossier に答えたか）/ `generated_at` / `outcome_count` / `proposal_count` |
+| `retro_narrations` | `(retro_as_of, surprise_id)` | 検証済み narration 1件。`run_id` / `symbol` / `failure_class` / `narrative` / `evidence_refs_json` |
+| `config_versions` | `config_hash` | `runs.config_hash`が指していた設定値。`first_seen_run_date` / `snapshot_hash` / `sections_json` |
+
+`copilot-retro ingest`は`--db`（既定`data/copilot.duckdb`）を取り、検証を通った narration を**1トランザクションで当該`retro_as_of`ごと置換**して書く（`storage/retro_records.py::replace_retro_session`）。訂正した`retro_result.json`で銘柄が1つ落ちた場合、古い読みが残ってはならないためである。`run_id` / `symbol`はスキルの回答からではなく**エクスポート済み dossier の`surprises.items[]`から解決する**——コード所有メタデータをuntrustedな文書からエコーバックしない既存の契約（3.16節）と同じ扱いで、これが`verdicts`／`verdict_outcomes`とJOINできる根拠にもなる。CON-03や証拠参照で非表示（fail-closed）になった narration はレポートにも台帳にも到達しないので、DBにも入らない。DB書き込みはレポート描画と提案台帳追記の**後**に置く: 前二者が ingest の人間向け成果物で、この書き込みはその背後の蓄積だからである。
+
+`build_retro_input`は`failure_class_history`を追加する。直近`L2_GATE_SESSION_WINDOW`（=3）回の**取り込み済み**振り返りを`retro_as_of <= as_of`（境界含む）で選び、`failure_class`別の件数・出現セッション数と、`count >= L2_GATE_MIN_COUNT`（=5）の`meets_l2_gate`を決定論コードが計算する。**スキルは数えるのではなく読むだけになる**（設計§8.1のL2定性ゲート）。今回の振り返り自身の narration はまだ ingest されていないので集計対象に入らない——つまりこの件数は**下限**であり、今日の読みは加算しかしない。これは意図的で、ある`as_of`に対して再現可能な唯一の定義でもある。ゲートの窓幅と件数を設定値にせず定数に置くのは、提案が自分の越えるべきバーを下げられてはならないためである。
+
+`config_versions`は`pipeline/daily_runner.py`が`start_run`の直前にupsertする。キーは`runs.config_hash`そのもの（設定全体＋選択戦略の完全指紋）なので`runs`側に列を足さずにJOINでき、`sections_json`には`config.CONFIG_SNAPSHOT_SECTIONS`の8セクションだけを、`snapshot_hash`にはそのダイジェストを入れる。通知やスケジュールだけが違う2つの設定は`config_hash`が割れても`snapshot_hash`が一致するので、無関係な編集で比較窓が2つに割れない。セクション定義と digest 関数は`retro/export.py`の`config_snapshot`と共有するため`config.py`へ移した（2箇所に書けば必ず乖離する）。`first_seen_run_date`は`least()`で**前方向にしか動かない**——同じ設定を今日また見たことは「いつ始まったか」の訂正ではないが、より古い`run_date`をバックフィルしたことは訂正だからで、`DO NOTHING`にすると誤った初出日が残る。`retro_input.json`には`aggregates_by_config`（run が実行された設定ごとに窓の separation を割った内訳。`metric_id`は`<元のID>@<config_hash>`で衝突を避け、`evidence_id_space`にも入るので提案から引用できる）が加わる。分割は必ずサンプルを小さくするので、読み手は`is_preliminary`と`sample_size`に従うこと——設定間の差は検証すべき仮説であって、それ自体は結論ではない。
+
+3テーブルとも**新規テーブル**なので`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけでマイグレーションは足りる（`ALTER_SCHEMA_STATEMENTS`への追加は不要）。本番DBでは空で始まるが、それは保持すべき履歴がどこにも書かれていなかったからであり、テーブルを先に用意する理由そのものである。分析ビューは`v_retro_narrations`（narration × run × verdict）と`v_run_configs`（run × 設定値。台帳導入前の run は`snapshot_hash`/`sections_json`が NULL＝「未記録」であって「設定が空」ではない）を追加する。
 
 `evaluate`は`(run_id, horizon_days)`単位の完全置換で、`replace_signal_outcomes`と同じパターン。株価訂正後の再実行で分類が更新される。複数行書き込みは全コミットか全ロールバック。`--db`から`bars/`を解決する際は`resolve_parquet_root()`のfail-fast検証を通す（3.19節のIssue #221追記）——根ごと無いDBコピーへ向けると、forward returnをバー0件から計算して1件も満期にならず、「評価0 slice」を正常終了として返すためである。`export`も同じ`_market_store()`を通る。
 
@@ -2222,6 +2238,44 @@ CREATE TABLE IF NOT EXISTS verdict_position_notes (
     note_date  DATE NOT NULL,
     note       VARCHAR NOT NULL,
     PRIMARY KEY (run_id, symbol, note_date)
+);
+
+-- Issue #189: 振り返り自身の記録。それまで failure_class は gitignore 対象の
+-- reports/retro/<as_of>/retro_report.md にしか残らず、L2 定性ゲートが原理的に
+-- 数えられなかった。
+CREATE TABLE IF NOT EXISTS retro_sessions (
+    retro_as_of     DATE PRIMARY KEY,
+    window_start    DATE NOT NULL,
+    input_digest    VARCHAR NOT NULL,
+    generated_at    TIMESTAMPTZ NOT NULL,
+    outcome_count   INTEGER NOT NULL,
+    proposal_count  INTEGER NOT NULL
+);
+
+-- run_id / symbol は「エクスポートした dossier」から解決する（スキルの回答を
+-- そのまま信用しない）。failure_class に CHECK を付けないのは、閉じた5値の
+-- 強制点が retro/schemas.py の FailureClass リテラルであり、分類の追加を
+-- スキーマ移行にしないためである。
+CREATE TABLE IF NOT EXISTS retro_narrations (
+    retro_as_of        DATE NOT NULL,
+    surprise_id        VARCHAR NOT NULL,
+    run_id             UUID NOT NULL,
+    symbol             VARCHAR NOT NULL,
+    failure_class      VARCHAR NOT NULL,
+    narrative          VARCHAR NOT NULL,
+    evidence_refs_json JSON NOT NULL,
+    PRIMARY KEY (retro_as_of, surprise_id)
+);
+
+-- Issue #189: runs.config_hash が何を指していたか。config_hash は一方向
+-- なので、settings.yaml を編集した時点で過去 run の設定値は復元不能になる。
+-- sections_json は提案対象になりうる8セクション（config.CONFIG_SNAPSHOT_SECTIONS）
+-- のみ、snapshot_hash はそのダイジェスト。
+CREATE TABLE IF NOT EXISTS config_versions (
+    config_hash         VARCHAR PRIMARY KEY,
+    first_seen_run_date DATE NOT NULL,
+    snapshot_hash       VARCHAR NOT NULL,
+    sections_json       JSON NOT NULL
 );
 ```
 

@@ -151,6 +151,39 @@ research.signal_hits().groupby("signal_name")["symbol"].nunique()
 2026-08 以前の run には `signal_hits` の行が無い（一方向の切断であり、
 `signals` に残っている行も run に紐付けられない）。
 
+## Issue #189 で増えた 2 つの台帳
+
+「記録しなければ後から復元できない」値の蓄積。専用アクセサは置いていないので
+`research.query()` から下の 2 ビュー（または実テーブル）を読む。
+
+| ビュー / テーブル | 何が入るか | NULL の意味 |
+|---|---|---|
+| `v_retro_narrations` | 振り返り 1 回 × サプライズ 1 銘柄の敗因分類と叙述。当時の run・verdict を結合済み | `run_date` / `recommendation` が NULL＝その run の verdict 行が再 `collect` で消えた |
+| `retro_sessions` | 取り込んだ振り返りそのもの（`window_start` / `input_digest` / `outcome_count` / `proposal_count`） | — |
+| `v_run_configs` | run と、その run が実行された設定値（提案対象の 8 セクション） | `snapshot_hash` / `sections_json` が NULL＝**未記録**。台帳導入（2026-08）前の run であって「設定が空」ではない |
+
+```python
+# 同じ敗因分類が何回繰り返しているか（L2 定性ゲートの素材）
+research.query(
+    "SELECT failure_class, count(*) AS n, count(DISTINCT retro_as_of) AS sessions "
+    "FROM v_retro_narrations GROUP BY 1 ORDER BY n DESC"
+)
+
+# 設定変更の前後で candidate の成績は動いたか
+research.query(
+    "SELECT c.config_hash, c.first_seen_run_date, avg(s.forward_return_pct) "
+    "FROM v_verdict_scorecard s JOIN v_run_configs c USING (run_id) "
+    "WHERE s.horizon_days = 20 GROUP BY 1, 2 ORDER BY 2"
+)
+```
+
+`config_versions` の主キーは `runs.config_hash`（設定全体＋戦略の完全指紋）で、
+`snapshot_hash` は提案対象になりうる 8 セクションだけのダイジェスト。通知や
+スケジュールしか違わない 2 設定は `config_hash` が割れても `snapshot_hash` は
+一致するので、比較窓を割るかどうかの判断には `snapshot_hash` を使うこと。
+なお設定で層別すると必ずサンプルが小さくなる。差が出ても点推定であって、
+`docs/08_architecture_review_2026-08.md` のとおり設定変更の根拠にはならない。
+
 ## 安全上の規約
 
 - **接続は関数呼び出しの内側だけ**: 各関数はクエリごとに read-only 接続を開いて

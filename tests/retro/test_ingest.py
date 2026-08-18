@@ -8,7 +8,9 @@ RP-ID numbering, and atomic replacement of both artifacts.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import pytest
 
@@ -21,6 +23,7 @@ from swing_copilot.retro.ingest import (
 )
 from swing_copilot.retro.validate import RetroIngestError
 from tests.retro.conftest import (
+    RETRO_RUN_ID,
     SURPRISE_ID,
     narration_payload,
     proposal_payload,
@@ -30,6 +33,8 @@ from tests.retro.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from swing_copilot.storage.state_store import StateStore
 
 FORBIDDEN_TEXT = "この銘柄は今すぐ買うべき"
 
@@ -51,9 +56,13 @@ def _write_result(retro_dir: Path, **overrides: Any) -> None:
     )
 
 
-def _request(retro_dir: Path, tmp_path: Path) -> RetroIngestRequest:
+def _request(
+    retro_dir: Path, tmp_path: Path, state_store: StateStore | None = None
+) -> RetroIngestRequest:
     return RetroIngestRequest(
-        retro_dir=retro_dir, ledger_path=tmp_path / "docs" / "retro" / "proposals.md"
+        retro_dir=retro_dir,
+        ledger_path=tmp_path / "docs" / "retro" / "proposals.md",
+        state_store=state_store,
     )
 
 
@@ -363,6 +372,68 @@ class TestEarlyOperation:
         ingest_retro_result(_request(directory, tmp_path))
 
         assert "| separation | 5日 | -0.90 | - | 45 | いいえ |" in _report(directory)
+
+
+class TestNarrationPersistence:
+    """Issue #189: the failure_class must outlive the gitignored report."""
+
+    def test_records_the_verified_narrations_in_the_database(
+        self, retro_dir: Path, tmp_path: Path, state_store: StateStore
+    ) -> None:
+        _write_result(retro_dir)
+
+        summary = ingest_retro_result(_request(retro_dir, tmp_path, state_store))
+
+        assert summary.are_narrations_persisted
+        rows = state_store.get_retro_narrations(date(2027, 3, 29))
+        assert [(row.symbol, row.failure_class, row.run_id) for row in rows] == [
+            ("AAPL", "information_absent", UUID(RETRO_RUN_ID))
+        ]
+
+    def test_the_run_and_symbol_come_from_the_dossier_not_the_result(
+        self, retro_dir: Path, tmp_path: Path, state_store: StateStore
+    ) -> None:
+        """`retro-result-v1` names only a `surprise_id`; the rest is code-owned."""
+        _write_result(retro_dir)
+
+        ingest_retro_result(_request(retro_dir, tmp_path, state_store))
+
+        (row,) = state_store.get_retro_narrations(date(2027, 3, 29))
+        assert (row.run_id, row.symbol) == (UUID(RETRO_RUN_ID), "AAPL")
+
+    def test_records_the_session_the_narrations_belong_to(
+        self, retro_dir: Path, tmp_path: Path, state_store: StateStore
+    ) -> None:
+        _write_result(retro_dir)
+
+        ingest_retro_result(_request(retro_dir, tmp_path, state_store))
+
+        with state_store.database.connect() as conn:
+            assert conn.execute(
+                "SELECT window_start, outcome_count, proposal_count FROM retro_sessions"
+            ).fetchone() == (date(2026, 12, 29), 0, 1)
+
+    def test_a_withheld_narration_never_reaches_the_database(
+        self, retro_dir: Path, tmp_path: Path, state_store: StateStore
+    ) -> None:
+        """Fail-closed at the report is fail-closed at the ledger too."""
+        _write_result(
+            retro_dir, narrations=[narration_payload(narrative=FORBIDDEN_TEXT)]
+        )
+
+        ingest_retro_result(_request(retro_dir, tmp_path, state_store))
+
+        assert state_store.get_retro_narrations(date(2027, 3, 29)) == ()
+
+    def test_the_core_still_runs_without_a_database(
+        self, retro_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_result(retro_dir)
+
+        summary = ingest_retro_result(_request(retro_dir, tmp_path))
+
+        assert not summary.are_narrations_persisted
+        assert (retro_dir / RETRO_REPORT_FILENAME).is_file()
 
 
 def _digest_of(directory: Path) -> str:

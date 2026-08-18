@@ -16,6 +16,22 @@ so altered columns are unconstrained at the database level even where the
 matching `CREATE TABLE` column has a `CHECK`/`NOT NULL` — application code
 is the sole enforcement point for rows added to a pre-P1-03 database via this
 path.
+
+A promoted column (Issue #192: a value that used to live only inside a JSON
+column) additionally carries a backfill `UPDATE` in the same tuple, right
+after its `ADD COLUMN`. That is deliberate and distinct from the "not
+recorded, do not guess" columns above: the value is already present in the
+existing rows, just in the wrong shape, so restating it in a column is not an
+invention. Each backfill is guarded by `WHERE <column> IS NULL` on a column
+the writer always populates, which makes it idempotent and a no-op scan on
+every later start. A value that was never persisted at all — `candidates`'
+`execution_state`/`execution_distance` — is explicitly *not* backfilled and
+stays NULL, meaning "not recorded".
+
+`verdict_reasons`/`verdict_reason_sources` are backfilled the same way but in
+Python (`verdict_records.backfill_verdict_reasons`), because normalizing
+`reasons_json` reuses that module's own parsing rather than duplicating it as
+nested JSON SQL.
 """
 
 from __future__ import annotations
@@ -57,6 +73,11 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, step)
     )
     """,
+    # Legacy (Issue #192): keyed by `run_date`, so a `dry_run` and a `live`
+    # run of the same date overwrite each other's rows, and nothing can join
+    # them to the `run_id`-keyed tables. Kept read-only for the history it
+    # already holds; `signal_hits` below is the keyed successor every writer
+    # now uses.
     """
     CREATE TABLE IF NOT EXISTS signals (
         run_date      DATE NOT NULL,
@@ -68,14 +89,48 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_date, symbol, strategy_key, signal_name)
     )
     """,
+    # Issue #192: `signals`, re-keyed by `run_id`. DuckDB cannot change a
+    # primary key in place, so this is a new table rather than an ALTER; the
+    # old one keeps its rows and is never written again. Written inside
+    # `record_screening_results`' transaction, because a run's hits and the
+    # ranking built from them are one logical write -- a committed candidate
+    # set whose hits are missing would misstate which signals fired.
+    """
+    CREATE TABLE IF NOT EXISTS signal_hits (
+        run_id        UUID NOT NULL,
+        symbol        VARCHAR NOT NULL,
+        strategy_key  VARCHAR NOT NULL,
+        signal_name   VARCHAR NOT NULL,
+        strength      DOUBLE NOT NULL,
+        metrics_json  JSON NOT NULL,
+        PRIMARY KEY (run_id, symbol, strategy_key, signal_name)
+    )
+    """,
+    # Issue #192: the ranking key and its components are real columns, not
+    # `metrics_json` extractions. `score`/`score_*` were always *in*
+    # `metrics_json` (so a database created before this change is backfilled
+    # from it, see `ALTER_SCHEMA_STATEMENTS`), but `execution_state` /
+    # `execution_distance` were `Candidate` fields that reached no column at
+    # all -- recovering them for an old row would mean replaying that day's
+    # config thresholds, so they stay NULL there. NULL therefore means "not
+    # recorded", which readers must not read as the `UNKNOWN` state (a
+    # measured "distance not computable"). `metrics_json` is preserved as the
+    # full raw indicator set.
     """
     CREATE TABLE IF NOT EXISTS candidates (
-        run_id         UUID NOT NULL,
-        symbol         VARCHAR NOT NULL,
-        strategy_key   VARCHAR NOT NULL,
-        rank           INTEGER NOT NULL,
-        signal_names   VARCHAR[] NOT NULL,
-        metrics_json   JSON NOT NULL,
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        rank                INTEGER NOT NULL,
+        signal_names        VARCHAR[] NOT NULL,
+        metrics_json        JSON NOT NULL,
+        score               DOUBLE,
+        score_rsi_pullback  DOUBLE,
+        score_trend_quality DOUBLE,
+        score_liquidity     DOUBLE,
+        score_atr_pct       DOUBLE,
+        execution_state     VARCHAR,
+        execution_distance  DOUBLE,
         PRIMARY KEY (run_id, symbol, strategy_key),
         UNIQUE (run_id, strategy_key, rank)
     )
@@ -285,6 +340,43 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol)
     )
     """,
+    # Issue #192: `verdicts.reasons_json` normalized, so questions about the
+    # reasons themselves ("how did symbols whose only reason cited no source
+    # perform?") are a GROUP BY instead of a JSON walk in Python.
+    # `reasons_json` stays the record of truth and is still written -- these
+    # rows are a derived projection of it, which is why a database created
+    # before this change can be (and is) backfilled from it rather than
+    # losing the history.
+    #
+    # `source_id_count` is denormalized from `verdict_reason_sources` on
+    # purpose: "reasons resting on no source at all" is the question this
+    # table exists for, and a count column answers it without a LEFT JOIN
+    # whose zero rows would have to be distinguished from a missing reason.
+    """
+    CREATE TABLE IF NOT EXISTS verdict_reasons (
+        run_id          UUID NOT NULL,
+        symbol          VARCHAR NOT NULL,
+        reason_index    INTEGER NOT NULL,
+        text            VARCHAR NOT NULL,
+        basis           VARCHAR,
+        source_id_count INTEGER NOT NULL,
+        PRIMARY KEY (run_id, symbol, reason_index)
+    )
+    """,
+    # Issue #192: which `source_id`s each individual reason cited. Distinct
+    # from `verdict_sources`, which is per (run, symbol): that table answers
+    # "what did this symbol's analysis cite", this one answers "what did
+    # *this reason* rest on", which is what Issue #191's `basis` tag is
+    # checked against.
+    """
+    CREATE TABLE IF NOT EXISTS verdict_reason_sources (
+        run_id       UUID NOT NULL,
+        symbol       VARCHAR NOT NULL,
+        reason_index INTEGER NOT NULL,
+        source_id    VARCHAR NOT NULL,
+        PRIMARY KEY (run_id, symbol, reason_index, source_id)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS verdict_sources (
         run_id      UUID NOT NULL,
@@ -407,6 +499,13 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, note_date)
     )
     """,
+    # Issue #192: the shorter distribution windows and the gate's own inputs
+    # are columns, not `detail_json` extractions -- every threshold review
+    # reads exactly these, e.g. "would 4 distribution days in 15 sessions have
+    # been the better cut". `dd_count_spy`/`dd_count_qqq` remain the 25-session
+    # counts they always were. The gate inputs are nullable by design, not
+    # merely by ALTER limitation: an unavailable SPY/VIX bar is what produces
+    # an `UNKNOWN` gate verdict.
     """
     CREATE TABLE IF NOT EXISTS regime_snapshots (
         run_id          UUID PRIMARY KEY,
@@ -416,15 +515,30 @@ INIT_SCHEMA_STATEMENTS = (
         dd_count_qqq    DOUBLE NOT NULL,
         dd_level        VARCHAR NOT NULL,
         data_quality    VARCHAR NOT NULL,
-        detail_json     JSON NOT NULL
+        detail_json     JSON NOT NULL,
+        dd15_spy        DOUBLE,
+        dd5_spy         DOUBLE,
+        dd15_qqq        DOUBLE,
+        dd5_qqq         DOUBLE,
+        spy_close       DOUBLE,
+        spy_ema         DOUBLE,
+        vix_close       DOUBLE
     )
     """,
+    # Issue #192: the inputs the exposure ceiling was derived from, promoted
+    # out of `detail_json` for the same reason as `regime_snapshots` above --
+    # `reduce_only_risk_multiplier` in particular is a config value under
+    # active review, and reviewing it should not require a JSON walk.
     """
     CREATE TABLE IF NOT EXISTS exposure_decisions (
         run_id       UUID PRIMARY KEY,
         verdict      VARCHAR NOT NULL,
         data_quality VARCHAR NOT NULL,
-        detail_json  JSON NOT NULL
+        detail_json  JSON NOT NULL,
+        gate_verdict VARCHAR,
+        dd_level     VARCHAR,
+        is_conservatively_downgraded BOOLEAN,
+        reduce_only_risk_multiplier  DOUBLE
     )
     """,
     """
@@ -526,6 +640,83 @@ ALTER_SCHEMA_STATEMENTS = (
     # fills it in, because `replace_verdict_outcomes` replaces the slice
     # wholesale.
     "ALTER TABLE verdict_outcomes ADD COLUMN IF NOT EXISTS benchmark_return_pct DOUBLE",
+    # Issue #192: the ranking key and its components as real columns. The
+    # score side IS backfilled, unlike most entries above: `metrics_json`
+    # already holds `score`/`score_*` for every row ever written, so the
+    # UPDATE restates a fact those rows carry rather than inventing one --
+    # the same reasoning as `positions.exit_reason`, applied to a value that
+    # was merely in the wrong shape. `execution_state`/`execution_distance`
+    # are NOT backfilled and cannot be: they were never persisted anywhere,
+    # and recomputing them would mean replaying that day's execution config
+    # against that day's bars. NULL there is a documented one-way cut,
+    # meaning "not recorded" -- never the `UNKNOWN` state, which is a
+    # measured "distance not computable".
+    #
+    # The backfill's `WHERE score IS NULL` is both the idempotence guard and
+    # the correct predicate: `_score_rows` writes the composite and its four
+    # components together, so a row missing one is missing all five, and a
+    # row written after this change always has them. It stays a cheap no-op
+    # scan on every subsequent start.
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_rsi_pullback DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_trend_quality DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_liquidity DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_atr_pct DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS execution_state VARCHAR",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS execution_distance DOUBLE",
+    """
+    UPDATE candidates SET
+        score               = CAST(metrics_json->>'score' AS DOUBLE),
+        score_rsi_pullback  = CAST(metrics_json->>'score_rsi_pullback' AS DOUBLE),
+        score_trend_quality = CAST(metrics_json->>'score_trend_quality' AS DOUBLE),
+        score_liquidity     = CAST(metrics_json->>'score_liquidity' AS DOUBLE),
+        score_atr_pct       = CAST(metrics_json->>'score_atr_pct' AS DOUBLE)
+    WHERE score IS NULL
+    """,
+    # Issue #192: the distribution sub-windows and gate inputs, backfilled
+    # from `detail_json` on the same "restating a recorded fact" reasoning as
+    # the candidate scores above. The guard is `dd15_spy IS NULL` rather than
+    # one of the gate inputs: `spy_close`/`spy_ema`/`vix_close` are legitimately
+    # NULL whenever the gate could not be evaluated, so guarding on them would
+    # re-run the UPDATE forever, whereas `d15` is always present in a
+    # `DistributionResult`.
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS dd15_spy DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS dd5_spy DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS dd15_qqq DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS dd5_qqq DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_close DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_ema DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS vix_close DOUBLE",
+    """
+    UPDATE regime_snapshots SET
+        dd15_spy  = CAST(detail_json->'spy'->>'d15' AS DOUBLE),
+        dd5_spy   = CAST(detail_json->'spy'->>'d5' AS DOUBLE),
+        dd15_qqq  = CAST(detail_json->'qqq'->>'d15' AS DOUBLE),
+        dd5_qqq   = CAST(detail_json->'qqq'->>'d5' AS DOUBLE),
+        spy_close = CAST(detail_json->'gate_inputs'->>'spy_close' AS DOUBLE),
+        spy_ema   = CAST(detail_json->'gate_inputs'->>'spy_ema' AS DOUBLE),
+        vix_close = CAST(detail_json->'gate_inputs'->>'vix_close' AS DOUBLE)
+    WHERE dd15_spy IS NULL
+    """,
+    # Issue #192: the exposure decision's inputs, same backfill reasoning.
+    # Guarded on `reduce_only_risk_multiplier`, which `determine_exposure`
+    # always records.
+    "ALTER TABLE exposure_decisions ADD COLUMN IF NOT EXISTS gate_verdict VARCHAR",
+    "ALTER TABLE exposure_decisions ADD COLUMN IF NOT EXISTS dd_level VARCHAR",
+    "ALTER TABLE exposure_decisions "
+    "ADD COLUMN IF NOT EXISTS is_conservatively_downgraded BOOLEAN",
+    "ALTER TABLE exposure_decisions "
+    "ADD COLUMN IF NOT EXISTS reduce_only_risk_multiplier DOUBLE",
+    """
+    UPDATE exposure_decisions SET
+        gate_verdict = detail_json->>'gate',
+        dd_level     = detail_json->>'dd_level',
+        is_conservatively_downgraded =
+            CAST(detail_json->>'conservatively_downgraded' AS BOOLEAN),
+        reduce_only_risk_multiplier =
+            CAST(detail_json->>'reduce_only_risk_multiplier' AS DOUBLE)
+    WHERE reduce_only_risk_multiplier IS NULL
+    """,
 )
 
 # Read-only analysis views for `swing_copilot.research` and ad-hoc SQL
@@ -570,11 +761,34 @@ ANALYSIS_VIEW_STATEMENTS = (
         c.strategy_key,
         c.rank,
         c.signal_names,
-        CAST(c.metrics_json->>'score' AS DOUBLE)               AS score,
-        CAST(c.metrics_json->>'score_rsi_pullback' AS DOUBLE)  AS score_rsi_pullback,
-        CAST(c.metrics_json->>'score_trend_quality' AS DOUBLE) AS score_trend_quality,
-        CAST(c.metrics_json->>'score_liquidity' AS DOUBLE)     AS score_liquidity,
-        CAST(c.metrics_json->>'score_atr_pct' AS DOUBLE)       AS score_atr_pct,
+        -- Issue #192: the promoted column first, the JSON extraction as the
+        -- fallback. The `ALTER_SCHEMA_STATEMENTS` backfill normally fills the
+        -- columns in, so the fallback matters for a database whose migration
+        -- has not run yet (a `read_only=True` research connection cannot run
+        -- DDL, so it reads whatever shape the file is in) and for any row
+        -- whose `metrics_json` predates a component.
+        COALESCE(c.score, CAST(c.metrics_json->>'score' AS DOUBLE))            AS score,
+        COALESCE(
+            c.score_rsi_pullback,
+            CAST(c.metrics_json->>'score_rsi_pullback' AS DOUBLE)
+        ) AS score_rsi_pullback,
+        COALESCE(
+            c.score_trend_quality,
+            CAST(c.metrics_json->>'score_trend_quality' AS DOUBLE)
+        ) AS score_trend_quality,
+        COALESCE(
+            c.score_liquidity,
+            CAST(c.metrics_json->>'score_liquidity' AS DOUBLE)
+        ) AS score_liquidity,
+        COALESCE(
+            c.score_atr_pct,
+            CAST(c.metrics_json->>'score_atr_pct' AS DOUBLE)
+        ) AS score_atr_pct,
+        -- No JSON fallback: these never reached `metrics_json` either, so a
+        -- row from before the columns existed has NULL and must read as
+        -- "not recorded" rather than as the `UNKNOWN` execution state.
+        c.execution_state,
+        c.execution_distance,
         CAST(c.metrics_json->>'rsi14' AS DOUBLE)               AS rsi14,
         CAST(c.metrics_json->>'sma50' AS DOUBLE)               AS sma50,
         CAST(c.metrics_json->>'sma200' AS DOUBLE)              AS sma200,
@@ -631,21 +845,75 @@ ANALYSIS_VIEW_STATEMENTS = (
         u.forward_return_pct,
         COALESCE(c.rank, t.rank)   AS rank,
         COALESCE(c.score, t.score) AS score,
+        -- Issue #192: makes "how did each execution state's symbols actually
+        -- do" a one-line groupby. `arg_min(state, rank)` takes the
+        -- best-ranked *recorded* state (it skips NULL arguments), so a
+        -- pre-#192 candidate row does not mask a strategy that does have one.
+        COALESCE(c.execution_state, t.execution_state) AS execution_state,
         s.gics_sector
     FROM universe_forward_returns u
     JOIN runs r ON r.run_id = u.run_id
     LEFT JOIN (
-        SELECT run_id, symbol, min(rank) AS rank, max(score) AS score
+        SELECT
+            run_id,
+            symbol,
+            min(rank)  AS rank,
+            max(score) AS score,
+            arg_min(execution_state, rank) AS execution_state
         FROM v_candidates
         GROUP BY run_id, symbol
     ) c ON c.run_id = u.run_id AND c.symbol = u.symbol
     LEFT JOIN (
-        SELECT run_id, symbol, min(rank) AS rank, max(score) AS score
+        SELECT
+            run_id,
+            symbol,
+            min(rank)  AS rank,
+            max(score) AS score,
+            arg_min(execution_state, rank) AS execution_state
         FROM screening_truncations
         GROUP BY run_id, symbol
     ) t ON t.run_id = u.run_id AND t.symbol = u.symbol
     LEFT JOIN v_symbol_sector_asof s
       ON s.run_id = u.run_id AND s.symbol = u.symbol
+    """,
+    # Issue #192: the read path the legacy `signals` table never had. Only
+    # `signal_hits` is read here: `signals` is keyed by `run_date`, so a
+    # `dry_run` and a `live` run of the same date collided in it and its rows
+    # cannot be attributed to a run at all.
+    """
+    CREATE OR REPLACE VIEW v_signal_hits AS
+    SELECT
+        r.run_date,
+        r.mode,
+        h.run_id,
+        h.symbol,
+        h.strategy_key,
+        h.signal_name,
+        h.strength,
+        h.metrics_json
+    FROM signal_hits h
+    JOIN runs r ON r.run_id = h.run_id
+    """,
+    # Issue #192: one row per individual verdict reason, joined to the verdict
+    # it belongs to, so "how did symbols whose reasons cited no source
+    # perform" is a filter rather than a JSON walk.
+    """
+    CREATE OR REPLACE VIEW v_verdict_reasons AS
+    SELECT
+        r.run_date,
+        r.mode,
+        vr.run_id,
+        vr.symbol,
+        v.strategy_key,
+        v.recommendation,
+        v.no_trade,
+        vr.reason_index,
+        vr.text,
+        vr.basis,
+        vr.source_id_count
+    FROM verdict_reasons vr
+    JOIN runs r ON r.run_id = vr.run_id
+    LEFT JOIN verdicts v ON v.run_id = vr.run_id AND v.symbol = vr.symbol
     """,
     """
     CREATE OR REPLACE VIEW v_tracked_positions AS
@@ -699,6 +967,8 @@ ANALYSIS_VIEW_STATEMENTS = (
         c.score_trend_quality,
         c.score_liquidity,
         c.score_atr_pct,
+        c.execution_state,
+        c.execution_distance,
         c.rsi14,
         c.atr14,
         c.close,
@@ -709,6 +979,9 @@ ANALYSIS_VIEW_STATEMENTS = (
         g.dd_level,
         g.dd_count_spy,
         g.dd_count_qqq,
+        g.dd15_spy,
+        g.dd5_spy,
+        g.vix_close,
         p.status AS position_status,
         p.exit_reason,
         p.realized_return_pct,

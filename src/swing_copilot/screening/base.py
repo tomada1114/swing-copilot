@@ -7,7 +7,7 @@ New Filters/Signals are added by writing a class decorated with
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
@@ -136,11 +136,18 @@ class ScreeningResult:
     `rejections` covers every universe symbol that failed a filter or a
     configured signal, classified by `rejection_classifier.py`; `truncated`
     covers the symbols that failed nothing and were cut by `candidate_limit`.
+
+    `signal_hits` (Issue #192) is every hit the configured signals produced,
+    flattened across signals — including symbols that hit one signal but not
+    all of them, and so never became candidates. It defaults to empty so a
+    caller constructing a result by hand (tests, fixtures) need not restate
+    it; the pipeline always fills it in.
     """
 
     candidates: list[Candidate]
     rejections: list[RejectionRecord]
     truncated: list[TruncatedCandidate]
+    signal_hits: list[SignalHit] = field(default_factory=list)
 
 
 class Filter(Protocol):

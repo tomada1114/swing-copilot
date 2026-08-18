@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import (
         Candidate,
-        RejectionRecord,
+        ScreeningResult,
         SignalHit,
         TruncatedCandidate,
     )
@@ -65,10 +65,40 @@ class ScreeningRunMeta:
     candidate_limit: int
 
 
+#: `candidates`' promoted score columns, in the order `_score_columns` and
+#: every INSERT below list them. Mirrors `screening/pipeline.py`'s
+#: `_SCORE_COMPONENT_KEYS` plus the composite it sums to; the same keys are
+#: still written inside `metrics_json`, which stays the raw indicator set.
+_CANDIDATE_SCORE_KEYS = (
+    "score",
+    "score_rsi_pullback",
+    "score_trend_quality",
+    "score_liquidity",
+    "score_atr_pct",
+)
+
+
+def _score_columns(candidate: Candidate) -> list[float | None]:
+    """Return the promoted score columns for one candidate (Issue #192).
+
+    `None` for a key the candidate's metrics do not carry, rather than a
+    substituted zero: an absent component means the run did not compute one,
+    which a reader aggregating score contributions must be able to tell from
+    a computed contribution of nothing.
+    """
+    return [candidate.metrics.get(key) for key in _CANDIDATE_SCORE_KEYS]
+
+
 def record_signals(
     database: Database, signals: Sequence[SignalHit], run_date: date, strategy_key: str
 ) -> None:
-    """Upsert signal hits so same-date reruns can incorporate corrected input."""
+    """Upsert signal hits so same-date reruns can incorporate corrected input.
+
+    Legacy (Issue #192): writes the `run_date`-keyed `signals` table, where a
+    same-date `dry_run` and `live` run overwrite each other. The daily
+    pipeline now writes `signal_hits` through `record_screening_results`
+    instead; this entry point is kept for the existing rows' shape only.
+    """
     with database.connect() as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
@@ -104,25 +134,55 @@ def record_candidates(
     """Record one run's ranked candidates, keyed by `(run_id, symbol, strategy_key)`."""
     with database.connect() as conn:
         for candidate in candidates:
-            conn.execute(
-                """
-                INSERT INTO candidates (
-                    run_id, symbol, strategy_key, rank, signal_names, metrics_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (run_id, symbol, strategy_key) DO UPDATE SET
-                    rank = EXCLUDED.rank,
-                    signal_names = EXCLUDED.signal_names,
-                    metrics_json = EXCLUDED.metrics_json
-                """,
-                [
-                    str(run_id),
-                    candidate.symbol,
-                    strategy_key,
-                    candidate.rank,
-                    list(candidate.signal_names),
-                    dumps_safe(dict(candidate.metrics)),
-                ],
-            )
+            _insert_candidate(conn, candidate, str(run_id), strategy_key)
+
+
+_INSERT_CANDIDATE = """
+INSERT INTO candidates (
+    run_id, symbol, strategy_key, rank, signal_names, metrics_json,
+    score, score_rsi_pullback, score_trend_quality, score_liquidity,
+    score_atr_pct, execution_state, execution_distance
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (run_id, symbol, strategy_key) DO UPDATE SET
+    rank = EXCLUDED.rank,
+    signal_names = EXCLUDED.signal_names,
+    metrics_json = EXCLUDED.metrics_json,
+    score = EXCLUDED.score,
+    score_rsi_pullback = EXCLUDED.score_rsi_pullback,
+    score_trend_quality = EXCLUDED.score_trend_quality,
+    score_liquidity = EXCLUDED.score_liquidity,
+    score_atr_pct = EXCLUDED.score_atr_pct,
+    execution_state = EXCLUDED.execution_state,
+    execution_distance = EXCLUDED.execution_distance
+"""
+
+
+def _insert_candidate(
+    conn: duckdb.DuckDBPyConnection,
+    candidate: Candidate,
+    run_id: str,
+    strategy_key: str,
+) -> None:
+    """Correction-upsert one candidate row inside the caller's connection.
+
+    Every promoted column is in the `DO UPDATE SET` list: a rerun whose
+    ranking moved must overwrite the previous run's score and execution
+    state, not leave a stale pair of them beside a corrected `metrics_json`.
+    """
+    conn.execute(
+        _INSERT_CANDIDATE,
+        [
+            run_id,
+            candidate.symbol,
+            strategy_key,
+            candidate.rank,
+            list(candidate.signal_names),
+            dumps_safe(dict(candidate.metrics)),
+            *_score_columns(candidate),
+            candidate.execution_state,
+            candidate.execution_distance,
+        ],
+    )
 
 
 def select_persisted_truncations(
@@ -150,18 +210,16 @@ def select_persisted_truncations(
 
 def record_screening_results(
     database: Database,
-    candidates: Sequence[Candidate],
-    rejections: Sequence[RejectionRecord],
-    truncations: Sequence[TruncatedCandidate],
+    result: ScreeningResult,
     meta: ScreeningRunMeta,
 ) -> None:
-    """Record one run's candidates, rejections, and truncations atomically.
+    """Record one run's candidates, rejections, truncations, and hits atomically.
 
-    REQ-004/REQ-020 plus Issue #188: all three writes share one transaction,
-    so a failure partway through (any table) leaves none of this run's rows
-    committed. Mirrors `record_signals`'s explicit transaction pattern above
-    -- the pre-P1-02 `record_candidates` below has no such wrapper, which is
-    the actual gap this function closes for the production
+    REQ-004/REQ-020 plus Issues #188/#192: all four writes share one
+    transaction, so a failure partway through (any table) leaves none of this
+    run's rows committed. Mirrors `record_signals`'s explicit transaction
+    pattern above -- the pre-P1-02 `record_candidates` below has no such
+    wrapper, which is the actual gap this function closes for the production
     `_run_step_screening` call site.
 
     Candidates and truncations are the two halves of one ranking, which is
@@ -170,42 +228,27 @@ def record_screening_results(
     The truncated tail is therefore written as a *replacement* -- this
     strategy's existing rows for the run are deleted first -- rather than
     upserted row by row, so a rerun whose ranking moved a symbol above the
-    cut does not leave it behind as a phantom near-miss.
+    cut does not leave it behind as a phantom near-miss. `signal_hits` is
+    replaced on the same reasoning: a rerun on corrected bars where a signal
+    stopped firing on a symbol must not leave that hit behind.
 
     Args:
         database: Shared DuckDB connection owner.
-        candidates: Ranked candidates that survived `candidate_limit`.
-        rejections: Classified rejection records for the rest of the universe.
-        truncations: The ranking's truncated tail; retained down to
-            `select_persisted_truncations`' cap.
+        result: The screening run's four outcomes -- ranked candidates, the
+            classified rejections for the rest of the universe, the truncated
+            tail (retained down to `select_persisted_truncations`' cap), and
+            every signal hit the run produced. Taken as one value rather than
+            four sequences precisely because they must be written together.
         meta: `(run_id, strategy_key, as_of, candidate_limit)` shared by
             every row.
     """
-    retained = select_persisted_truncations(truncations, meta.candidate_limit)
+    retained = select_persisted_truncations(result.truncated, meta.candidate_limit)
     with database.connect() as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
-            for candidate in candidates:
-                conn.execute(
-                    """
-                    INSERT INTO candidates (
-                        run_id, symbol, strategy_key, rank, signal_names, metrics_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (run_id, symbol, strategy_key) DO UPDATE SET
-                        rank = EXCLUDED.rank,
-                        signal_names = EXCLUDED.signal_names,
-                        metrics_json = EXCLUDED.metrics_json
-                    """,
-                    [
-                        str(meta.run_id),
-                        candidate.symbol,
-                        meta.strategy_key,
-                        candidate.rank,
-                        list(candidate.signal_names),
-                        dumps_safe(dict(candidate.metrics)),
-                    ],
-                )
-            for rejection in rejections:
+            for candidate in result.candidates:
+                _insert_candidate(conn, candidate, str(meta.run_id), meta.strategy_key)
+            for rejection in result.rejections:
                 conn.execute(
                     """
                     INSERT INTO screening_rejections (
@@ -227,11 +270,46 @@ def record_screening_results(
                     ],
                 )
             _replace_truncations(conn, retained, meta)
+            _replace_signal_hits(conn, result.signal_hits, meta)
         except Exception:
             conn.execute("ROLLBACK")
             raise
         else:
             conn.execute("COMMIT")
+
+
+def _replace_signal_hits(
+    conn: duckdb.DuckDBPyConnection,
+    hits: Sequence[SignalHit],
+    meta: ScreeningRunMeta,
+) -> None:
+    """Replace this run/strategy's signal hits inside the caller's transaction.
+
+    DELETE-then-INSERT rather than a row-by-row upsert (Issue #192, and the
+    same reasoning as `_replace_truncations`): a rerun on corrected bars where
+    a signal stopped firing on a symbol must drop that hit, not leave it
+    behind next to the corrected ones.
+    """
+    conn.execute(
+        "DELETE FROM signal_hits WHERE run_id = ? AND strategy_key = ?",
+        [str(meta.run_id), meta.strategy_key],
+    )
+    for hit in hits:
+        conn.execute(
+            """
+            INSERT INTO signal_hits (
+                run_id, symbol, strategy_key, signal_name, strength, metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                str(meta.run_id),
+                hit.symbol,
+                meta.strategy_key,
+                hit.signal_name,
+                hit.strength,
+                dumps_safe(dict(hit.metrics)),
+            ],
+        )
 
 
 def _replace_truncations(

@@ -24,6 +24,7 @@ from swing_copilot.screening.base import (
     RejectionReasonCode,
     RejectionRecord,
     RejectionStage,
+    ScreeningResult,
     TruncatedCandidate,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
@@ -243,9 +244,11 @@ class TestRunPostmortemStepHappyPath:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("AAPL", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("AAPL", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # 100 -> 101.5: +1.5% -> TRUE_POSITIVE (> 0.5% neutral threshold).
@@ -274,9 +277,11 @@ class TestRunPostmortemStepRerunCorrection:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("AAPL", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("AAPL", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(_bars("AAPL", {run_date_5d: 100.0, AS_OF: 101.5}))
@@ -336,9 +341,11 @@ class TestRunPostmortemStepMissingPriceData:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("MISSING", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("MISSING", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # No bars written for "MISSING" at all -- a genuine data-quality gap.
@@ -363,9 +370,11 @@ class TestRunPostmortemStepMissingPriceData:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("GAP", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("GAP", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A bar exists in the read window, but not on either date actually
@@ -383,9 +392,11 @@ class TestRunPostmortemStepMissingPriceData:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("ZERO", run_date_5d, 0.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("ZERO", run_date_5d, 0.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A zero entry close would divide-by-zero if not guarded.
@@ -402,9 +413,11 @@ class TestRunPostmortemStepMissingPriceData:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("GAPPY", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("GAPPY", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         # A bar exists inside [run_date, as_of], but neither endpoint has one
@@ -430,9 +443,11 @@ class TestFindTargetTradingDayInsufficientHistory:
         run_date_5d = short_as_of - timedelta(days=5)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("AAPL", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("AAPL", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(_bars("AAPL", {run_date_5d: 100.0, short_as_of: 101.5}))
@@ -456,9 +471,11 @@ class TestRunPostmortemStepLookAheadPrevention:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [_candidate("AAPL", run_date_5d, 100.0)],
-            [],
-            [],
+            ScreeningResult(
+                candidates=[_candidate("AAPL", run_date_5d, 100.0)],
+                rejections=[],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
         market_store.write_bars(
@@ -499,25 +516,27 @@ def _seed_control_group_run(
     """One past run holding a candidate, a near-miss, and a rejection."""
     run_id = state_store.start_run(run_date, RunMode.LIVE, "cfg")
     state_store.record_screening_results(
-        [_candidate("CAND", run_date, 100.0)],
-        [
-            RejectionRecord(
-                symbol="GONE",
-                stage=RejectionStage.FUNDAMENTAL_FILTER,
-                reason_code=RejectionReasonCode.FILTER_NEGATIVE_FCF,
-                detail={"fcf": -1.0, "threshold": 0},
-            )
-        ],
-        [
-            TruncatedCandidate(
-                symbol="NEAR",
-                rank=6,
-                score=0.4,
-                score_breakdown={"score_liquidity": 0.5},
-                execution_state="READY",
-                execution_distance=None,
-            )
-        ],
+        ScreeningResult(
+            candidates=[_candidate("CAND", run_date, 100.0)],
+            rejections=[
+                RejectionRecord(
+                    symbol="GONE",
+                    stage=RejectionStage.FUNDAMENTAL_FILTER,
+                    reason_code=RejectionReasonCode.FILTER_NEGATIVE_FCF,
+                    detail={"fcf": -1.0, "threshold": 0},
+                )
+            ],
+            truncated=[
+                TruncatedCandidate(
+                    symbol="NEAR",
+                    rank=6,
+                    score=0.4,
+                    score_breakdown={"score_liquidity": 0.5},
+                    execution_state="READY",
+                    execution_distance=None,
+                )
+            ],
+        ),
         ScreeningRunMeta(run_id, "default", run_date, 5),
     )
     market_store.write_bars(_bars("CAND", {run_date: 100.0, AS_OF: 101.5}))
@@ -588,16 +607,18 @@ class TestRunPostmortemStepControlGroups:
         _seed_benchmark(market_store, AS_OF)
         run_id = state_store.start_run(run_date_5d, RunMode.LIVE, "cfg")
         state_store.record_screening_results(
-            [],
-            [
-                RejectionRecord(
-                    symbol="NOBARS",
-                    stage=RejectionStage.DATA_QUALITY,
-                    reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
-                    detail={"available_bars": 0, "required_bars": 200},
-                )
-            ],
-            [],
+            ScreeningResult(
+                candidates=[],
+                rejections=[
+                    RejectionRecord(
+                        symbol="NOBARS",
+                        stage=RejectionStage.DATA_QUALITY,
+                        reason_code=RejectionReasonCode.DATA_INSUFFICIENT_HISTORY,
+                        detail={"available_bars": 0, "required_bars": 200},
+                    )
+                ],
+                truncated=[],
+            ),
             ScreeningRunMeta(run_id, "default", run_date_5d, 5),
         )
 

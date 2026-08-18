@@ -748,9 +748,7 @@ def _run_step_screening(
     )
     result = pipeline.run_with_rejections(data)
     deps.state_store.record_screening_results(
-        result.candidates,
-        result.rejections,
-        result.truncated,
+        result,
         ScreeningRunMeta(
             run_id, pipeline.strategy_key, as_of, pipeline.candidate_limit
         ),

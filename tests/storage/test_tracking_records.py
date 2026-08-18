@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import duckdb
 import pytest
 
-from swing_copilot.screening.base import TruncatedCandidate
+from swing_copilot.screening.base import ScreeningResult, TruncatedCandidate
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.tracking_records import (
     VerdictPosition,
@@ -354,18 +354,20 @@ def _seed_truncation(
     state_store: StateStore, symbol: str = SYMBOL, as_of: date = ENTRY_DATE
 ) -> None:
     state_store.record_screening_results(
-        [],
-        [],
-        [
-            TruncatedCandidate(
-                symbol=symbol,
-                rank=6,
-                score=0.4,
-                score_breakdown={"score_liquidity": 0.5},
-                execution_state="READY",
-                execution_distance=None,
-            )
-        ],
+        ScreeningResult(
+            candidates=[],
+            rejections=[],
+            truncated=[
+                TruncatedCandidate(
+                    symbol=symbol,
+                    rank=6,
+                    score=0.4,
+                    score_breakdown={"score_liquidity": 0.5},
+                    execution_state="READY",
+                    execution_distance=None,
+                )
+            ],
+        ),
         ScreeningRunMeta(RUN_ID, "default", as_of, 5),
     )
 
@@ -414,18 +416,20 @@ class TestUntrackedTruncations:
         # rankings must not open the same virtual position twice.
         _seed_truncation(state_store)
         state_store.record_screening_results(
-            [],
-            [],
-            [
-                TruncatedCandidate(
-                    symbol=SYMBOL,
-                    rank=8,
-                    score=0.2,
-                    score_breakdown={},
-                    execution_state="READY",
-                    execution_distance=None,
-                )
-            ],
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[
+                    TruncatedCandidate(
+                        symbol=SYMBOL,
+                        rank=8,
+                        score=0.2,
+                        score_breakdown={},
+                        execution_state="READY",
+                        execution_distance=None,
+                    )
+                ],
+            ),
             ScreeningRunMeta(RUN_ID, "vcp", ENTRY_DATE, 5),
         )
 

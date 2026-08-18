@@ -19,6 +19,8 @@ research.tracked_positions()    # 追跡台帳 + recommendation
 research.screening_rejections() # 落選理由
 research.truncated_candidates()   # candidate_limit で順位落ちした near-miss
 research.universe_forward_returns()  # 候補 ∪ 順位落ち ∪ 落選の forward return
+research.signal_hits()          # run_id キーのシグナル発火
+research.verdict_reasons()      # verdict の理由 1 件 1 行（basis / source_id_count）
 research.bars(["AAPL"])        # Parquet 直読の日足（DBファイルに触れない）
 research.query("SELECT ...")   # 任意の read-only SQL
 research.ensure_views(path)     # ビュー未作成の古い DB を修復

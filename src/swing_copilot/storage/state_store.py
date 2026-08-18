@@ -11,7 +11,6 @@ creation.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -28,6 +27,7 @@ from swing_copilot.storage import (
     tracking_records,
     verdict_records,
 )
+from swing_copilot.storage.json_guard import dumps_safe
 from swing_copilot.storage.schema import (
     ALTER_SCHEMA_STATEMENTS,
     ANALYSIS_VIEW_STATEMENTS,
@@ -49,9 +49,8 @@ if TYPE_CHECKING:
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import (
         Candidate,
-        RejectionRecord,
+        ScreeningResult,
         SignalHit,
-        TruncatedCandidate,
     )
     from swing_copilot.storage.audit_records import (
         ScreeningRunMeta,
@@ -115,6 +114,12 @@ class StateStore:
         columns) picks them up, then `ANALYSIS_VIEW_STATEMENTS` (CREATE OR
         REPLACE, so edited view definitions self-migrate); every statement
         set is safe to re-run.
+
+        Issue #192's `verdict_reasons` backfill runs last, after the tables
+        it reads and writes both exist. It is the one migration step that
+        cannot be a SQL string (it re-uses `verdict_records`' own
+        `reasons_json` parsing instead of duplicating it as nested JSON SQL),
+        and like every statement above it is idempotent.
         """
         with self._database.connect() as conn:
             for statement in INIT_SCHEMA_STATEMENTS:
@@ -123,6 +128,7 @@ class StateStore:
                 conn.execute(statement)
             for statement in ANALYSIS_VIEW_STATEMENTS:
                 conn.execute(statement)
+            verdict_records.backfill_verdict_reasons(conn)
 
     def record_regime_snapshot(self, run_id: UUID, snapshot: RegimeSnapshot) -> None:
         """Persist the deterministic regime state for one run."""
@@ -172,12 +178,12 @@ class StateStore:
                     run_date,
                     mode.value,
                     config_hash,
-                    json.dumps(
-                        metadata if metadata is not None else {},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ),
+                    # Issue #192: every JSON column under `storage/` goes
+                    # through the shared NaN/Inf guard (P1-04's contract),
+                    # this one included -- run metadata is caller-supplied,
+                    # so a non-finite value here would otherwise be the one
+                    # write that reached DuckDB as a `NaN` literal.
+                    dumps_safe(metadata if metadata is not None else {}),
                 ],
             )
         return run_id
@@ -647,28 +653,22 @@ class StateStore:
         )
 
     def record_screening_results(
-        self,
-        candidates: Sequence[Candidate],
-        rejections: Sequence[RejectionRecord],
-        truncations: Sequence[TruncatedCandidate],
-        meta: ScreeningRunMeta,
+        self, result: ScreeningResult, meta: ScreeningRunMeta
     ) -> None:
-        """Record one run's candidates, rejections, and truncations in one transaction.
+        """Record one screening run's four outcomes in one transaction.
 
-        REQ-004/REQ-020 plus Issue #188: all three tables commit or roll back
-        together, because they are one ranking's three outcomes.
+        REQ-004/REQ-020 plus Issues #188/#192: candidates, rejections,
+        truncations, and signal hits commit or roll back together, because
+        they are one screening run's outcomes.
 
         Args:
-            candidates: Ranked candidates to record.
-            rejections: Classified rejection records to record.
-            truncations: The `candidate_limit` near-misses; retained down to
+            result: The run's candidates, rejections, truncated tail, and
+                signal hits. The truncated tail is retained down to
                 `audit_records.PERSISTED_TRUNCATION_MULTIPLIER` pages.
             meta: `(run_id, strategy_key, as_of, candidate_limit)` shared by
                 every row.
         """
-        audit_records.record_screening_results(
-            self._database, candidates, rejections, truncations, meta
-        )
+        audit_records.record_screening_results(self._database, result, meta)
 
     def replace_universe_forward_returns(
         self,

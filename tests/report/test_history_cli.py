@@ -28,6 +28,7 @@ from swing_copilot.screening.base import (
     RejectionReasonCode,
     RejectionRecord,
     RejectionStage,
+    ScreeningResult,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.market_store import MarketStore
@@ -99,16 +100,18 @@ def _populate(state_store: StateStore) -> UUID:
     """Example 1's shape: 1 run with 2 candidates, 1 rejection, 1 decision."""
     run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
     state_store.record_screening_results(
-        [_candidate("AAPL", 1), _candidate("MSFT", 2)],
-        [
-            RejectionRecord(
-                symbol="JPM",
-                stage=RejectionStage.TECHNICAL_SIGNAL,
-                reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
-                detail={"rsi14": 70.0},
-            )
-        ],
-        [],
+        ScreeningResult(
+            candidates=[_candidate("AAPL", 1), _candidate("MSFT", 2)],
+            rejections=[
+                RejectionRecord(
+                    symbol="JPM",
+                    stage=RejectionStage.TECHNICAL_SIGNAL,
+                    reason_code=RejectionReasonCode.SIGNAL_TREND_NOT_MET,
+                    detail={"rsi14": 70.0},
+                )
+            ],
+            truncated=[],
+        ),
         ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
     )
     state_store.record_risk_assessments(

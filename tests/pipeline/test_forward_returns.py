@@ -296,3 +296,28 @@ class TestComputeForwardReturn:
         market_store.write_bars(_bars("ZERO", {run_date: 0.0, end: 10.0}))
 
         assert compute_forward_return(market_store, "ZERO", run_date, end) is None
+
+    @pytest.mark.parametrize(
+        "bad_close",
+        [
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="inf"),
+            pytest.param(float("-inf"), id="-inf"),
+        ],
+    )
+    @pytest.mark.parametrize("bad_endpoint", ["run_date", "as_of"])
+    def test_returns_none_when_either_close_is_not_finite(
+        self, market_store: MarketStore, bad_close: float, bad_endpoint: str
+    ) -> None:
+        """A row that *exists* with a non-finite close is a data-quality skip.
+
+        The row-presence checks pass here, so without the finite guard the
+        function returns a `NaN`/`inf` float that `verdict_outcomes`'
+        `DOUBLE NOT NULL` column happily stores (Issue #206).
+        """
+        run_date, end = date(2026, 7, 1), date(2026, 7, 10)
+        prices = {run_date: 100.0, end: 101.5}
+        prices[run_date if bad_endpoint == "run_date" else end] = bad_close
+        market_store.write_bars(_bars("BROKEN", prices))
+
+        assert compute_forward_return(market_store, "BROKEN", run_date, end) is None

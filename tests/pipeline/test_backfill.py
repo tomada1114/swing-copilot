@@ -19,9 +19,11 @@ from swing_copilot.pipeline.backfill import (
     backfill_fundamentals,
 )
 from swing_copilot.pipeline.backfill import main as backfill_main
+from swing_copilot.pipeline.daily import _select_symbols
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
 from swing_copilot.universe import UniverseMember
+from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +31,23 @@ if TYPE_CHECKING:
 _NOW = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
 _START = date(2019, 1, 1)
 _END = date(2026, 7, 30)
+#: `copilot-backfill bars` argv up to (but excluding) the `--db` value.
+_LIMIT_ARGV = ("bars", "--start", "2019-01-01", "--end", "2026-07-30", "--db")
+
+
+def _sampling_universe() -> tuple[UniverseMember, ...]:
+    """A multi-sector universe whose sample is not its alphabetical head."""
+    return tuple(
+        UniverseMember(
+            symbol=f"S{index:03d}",
+            company_name=f"S{index:03d}",
+            gics_sector=sector,
+            source_symbol=f"S{index:03d}",
+        )
+        for index, sector in enumerate(
+            ("Information Technology", "Health Care", "Financials") * 6
+        )
+    )
 
 
 class _FixedClock:
@@ -535,7 +554,58 @@ class TestBackfillCli:
                 ]
             )
 
-    def test_rejects_a_non_positive_limit(self, tmp_path: Path) -> None:
+    def test_limit_samples_the_universe_instead_of_its_alphabetical_head(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #206: the third `--limit` stops meaning "the N tickers from A".
+
+        Warming only the A-side of the cache is what decides which symbols a
+        later smoke run or backtest finds already fetched.
+        """
+        universe = _sampling_universe()
+        provider = _RecordingProvider()
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.get_sp500_universe",
+            lambda _as_of, **_kwargs: universe,
+        )
+
+        backfill_main([*_LIMIT_ARGV, str(tmp_path / "copilot.duckdb"), "--limit", "6"])
+
+        requested = provider.calls[0][0]
+        alphabetical_head = sorted(member.symbol for member in universe)[:6]
+        assert len(requested) == 6
+        assert sorted(requested) != alphabetical_head
+
+    def test_limit_covers_the_same_symbols_as_backtest_and_daily(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All three `--limit`s share one sampler, hence one salt (Issue #206)."""
+        universe = _sampling_universe()
+        provider = _RecordingProvider()
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.get_sp500_universe",
+            lambda _as_of, **_kwargs: universe,
+        )
+
+        backfill_main([*_LIMIT_ARGV, str(tmp_path / "copilot.duckdb"), "--limit", "6"])
+
+        # `copilot-backtest` takes the sampler's output directly; `copilot-daily`
+        # unions holdings into it (none here), so all three must agree.
+        expected = list(select_universe_sample(universe, 6).symbols)
+        assert sorted(provider.calls[0][0]) == expected
+        assert _select_symbols(universe, set(), 6) == expected
+
+    def test_rejects_a_non_positive_limit(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The CLI keeps its own `>= 1` contract and its own message: the shared
+        # sampler treats `0` as "select nothing" and only rejects negatives.
         with pytest.raises(SystemExit):
             backfill_main(
                 [
@@ -550,6 +620,8 @@ class TestBackfillCli:
                     "0",
                 ]
             )
+
+        assert "--limit は1以上の整数で指定してください。" in capsys.readouterr().err
 
     def test_defaults_end_to_today_when_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

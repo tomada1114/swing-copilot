@@ -452,6 +452,12 @@ copilot-backfill fundamentals --start 2019-01-01           # 10-K/10-Qの過去�
 `--end`を省略した場合だけCLI境界で`SystemClock().today()`を使う。ドメイン関数へは
 常に明示的な日付を渡す。
 
+`--symbols`を省略したときの対象はユニバース全銘柄で、`--limit N`を付けるとその
+**決定論的なNサンプル**になる（辞書順の先頭N件ではない。後述の
+「`--limit`の銘柄サンプリング」節を参照。`copilot-backtest`／`copilot-daily`と
+同じサンプラ・同じsaltなので、同じ`N`なら3つのCLIが同じ銘柄集合を扱う）。
+`--limit`は1以上の整数のみで、0以下はfail-fastで拒否する。
+
 `bars`は既存の`YFinanceProvider`を**50銘柄チャンク**で呼び、チャンク間に2秒の
 スリープを挟む。yfinance側にレート制限の実装が無いための配慮である。取得した
 バーはメモリに蓄積し、最後に`MarketStore.write_bars`を**1回だけ**呼ぶ——
@@ -679,8 +685,8 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 
 ## `--limit` の銘柄サンプリング
 
-`copilot-backtest --limit N`と`copilot-daily --limit N`は**ユニバースのサンプル**を
-測る。以前の`symbols[:limit]`は`ORDER BY symbol`の先頭N件、つまり
+`copilot-backtest --limit N`・`copilot-daily --limit N`・`copilot-backfill --limit N`は
+**ユニバースのサンプル**を対象にする。以前の`symbols[:limit]`は`ORDER BY symbol`の先頭N件、つまり
 「Aで始まるN銘柄」を返していた。セクター構成がS&P500と別物になるうえ、
 Minerviniの RSパーセンタイル（条件7）のように*渡された集合内の相対順位*で
 決まるチェックは条件の意味自体が変わってしまう。
@@ -692,12 +698,16 @@ Minerviniの RSパーセンタイル（条件7）のように*渡された集合
 問わず必ず同じ銘柄集合になる（saltは固定。変えると過去レポートとの比較可能性が
 失われる）。`N`がユニバース規模以上なら全銘柄と同義である。
 
-**両CLIは同じサンプラと同じsaltを共有する**（Issue #205）。同じユニバースと
+**3つのCLIは同じサンプラと同じsaltを共有する**（Issue #205、#206）。同じユニバースと
 同じ`N`なら`copilot-daily --dry-run --limit 20`のスモーク実行と
 `copilot-backtest --limit 20`は同じ銘柄集合を見るので、両者の結果を突き合わせ
-られる。差分は`--limit`の下限だけである。`copilot-backtest`は0以下をfail-fastで
-拒否し、`copilot-daily`は`0`を「ユニバース由来の新規候補を選ばず、開いている
-保有銘柄だけを残す」意味の有効値として受け付ける（負数はどちらも拒否）。
+られる。`copilot-backfill bars --limit 20`が暖機するのも同じ20銘柄なので、
+「Aで始まる銘柄だけキャッシュが温まっている」状態にはならない。
+差分は`--limit`の下限だけである。`copilot-backtest`と`copilot-backfill`は
+0以下をfail-fastで拒否し（`copilot-backfill`のメッセージは
+「`--limit`は1以上の整数で指定してください。」）、`copilot-daily`は`0`を
+「ユニバース由来の新規候補を選ばず、開いている保有銘柄だけを残す」意味の
+有効値として受け付ける（負数はいずれも拒否）。
 `copilot-daily`は`--limit`の値に関わらず保有銘柄を常に対象集合へ足す。
 
 採用した方式・実銘柄数・セクター構成は、`copilot-backtest`のterminal出力と

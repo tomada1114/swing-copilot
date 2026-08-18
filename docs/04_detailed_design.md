@@ -785,7 +785,9 @@ verdict追跡台帳`verdict_positions`の`status='open'`かつ`recommendation='p
 ニュース収集が一度も発火せず、Finnhubの`company-news`は遡及取得できないため欠落が
 恒久的なデータ損失になる。逆に和集合にしておけば、実売買が始まっても両方が覆われる。
 この和集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
-だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。仮想建玉を
+だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。
+`_select_symbols()`は`--limit`の有無にかかわらずこの保有集合を必ず合流させる
+（Issue #212。3.21節の実装時追記）。仮想建玉を
 サイジング・集中度・相関へ混ぜてはならない（3.24.1節の棲み分け）。台帳の読み取り失敗は
 fail-softで、警告ログを残して仮想側を空として続行する。
 
@@ -1385,6 +1387,10 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 **P8-117実装時追記（Issue #117）**: `daily_composition.py::main()`は`_compose_dependencies()`と`run_daily()`の間に**preflightフェーズ**（`_preflight(deps, options)`）を挟む。`account_equity_usd`（`config/settings.yaml`の`risk.account_equity_usd`）が未設定のとき、`RiskChecker`が全候補を`not_calculable`にする挙動自体は3.13節どおり不変だが、決済済みポジション（`state_store.get_closed_positions(is_paper=True)`）が1件以上あると`evaluate_circuit_breaker`もequity不明のまま損失規律を評価できず`HALTED`を返し、全候補が`CIRCUIT_BREAKER_HALTED`でreject される（サーキットブレーカーのfail-closed自体は正しく、`risk/circuit_breaker.py`は無変更）。この組み合わせではrunを続けても「全候補rejectのレポートとverdict」を生成するだけなので、`exceptions.PreflightAbort`を送出してrun作成前に中止する。`main()`はこれを捕捉し、メッセージをstderrへ書いたうえで**終了コード2**（0=成功、1=失敗とは別の「意図的な中止」）でプロセスを終える——`runs`への行も`reports/`ディレクトリも作られない。決済済みが0件なら`logger.warning`を1回出すだけで続行し、同じ文言を`report/markdown_report.py`の既存`## Warnings`節にも1行載せる（`pipeline/daily.py::ACCOUNT_EQUITY_UNSET_NOTICE`を`daily_composition.py`のログと`daily_runner.py`の`notices`タプルで共有）。明示`--as-of`（ヒストリカル再生）は中止判定をスキップする——3.12節のとおり現在のポジション状態を一切読まないため空ポートフォリオが保証されており、警告のみ出す。`PreflightAbort`と終了コード2の枠組みは#118が同じ箇所へ同日重複起動ガードを追加する土台になる。
 
 **P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`run_date = latest.date()`）ため、同日重複起動の判定は`main()`側のpreflightではなく**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`_preflight()`と`run_daily()`の両方を1つの`try`で包み、どちらから送出されても同じ終了コード2への変換を行う。中止メッセージには既存runの`run_id`とレポートパスを含める——`swing-daily`スキルがこれを再入シグナルとして使う（Step 1）。`failed`/`running`/`degraded`は「成功済み」に数えない（`degraded`も含めて`status='success'`のみを見る、本チケットの確定判断）。`--allow-same-day-rerun`（`DailyRunOptions.allow_same_day_rerun`）を指定した場合のみ判定をスキップする。明示`--as-of`（ヒストリカル再生）にも同じ判定を適用する——`run_date = fetch_cutoff = options.as_of`となり同じコードパスを通るため、特別扱いは不要。`swing-daily/SKILL.md`のStep 0は`<WORKDIR>/analysis_result.json`に加えて`reports/<as_of>/*/analysis_result.json`のglobも確認し、Step 1は終了コード2を受けたら既存verdictを要約して`analysis_result.json`を書かずに正常終了する。
+
+**P0-212実装時追記（Issue #212）**: `_select_symbols(universe, held_symbols, limit)`はそのrunが価格取得・スクリーニングする銘柄集合を決める唯一の入口であり（`daily_runner.py`が`price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})`として`get_daily_bars()`とステップ1へ渡す。日次経路の価格取得はこの1本だけで、`pipeline/backfill.py`は運用者が手で叩く別コマンド）、**`--limit`の有無にかかわらず3.14節の保有集合を和集合として合流させる**。`limit is None`分岐だけが合流していなかったため、S&P 500スナップショットから外れた保有銘柄はその日のbarを1本も取得されず、トレーリングストップ・max-hold・レポートのポジション文脈が古い価格の上で走っていた——`--limit`はスモーク用フラグで本番の18:30 routineは渡さないため、欠陥は本番経路だけに出る。指数からの除外直後こそ手仕舞い判定が最も要るタイミングであり、他レイヤに代替の取得経路もガードも無かった。
+
+これは**取得対象集合**への追加であって、ユニバースのas-of解決（`snapshot_date <= as_of`）を迂回するものではない。`_run_step_screening()`は`ScreeningInput.universe`を`deps.universe`との積集合に絞り続けるため、スナップショット外の保有銘柄が新規エントリー候補として再浮上することはない（P1-02の落選分類が未取得銘柄を誤分類しないための既存の絞り込みが、そのまま入口側の防波堤にもなる）。戻り値は両分岐とも`sorted()`で辞書順に揃える。`get_latest_universe_membership()`が`ORDER BY symbol`で読むため本番の並びは実質不変で、変わるのは`universe.manual_include`で末尾に足された銘柄とスナップショット外の保有銘柄の位置だけである。この順序を下流はデータとして読まない——screening側は`set`で受け取り、ユニバース順は`deps.universe`から再導出する（RSパーセンタイル・流動性パーセンタイルはいずれも`percentile_ranks()`が`(値, symbol)`でソートするため入力順に依存しない）。順序が観測できるのはステップ2のfundamentals取得順（NFR-03の時間予算で打ち切られた際にどこまで進んだか）だけである。価格取得の失敗は従来どおりfail-softで、`result.failures`がステップのdetailに載る。
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
@@ -2270,7 +2276,7 @@ notification:
 
 `settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
 
-`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
+`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。保有銘柄の合流は`--limit`未指定（本番経路）でも同じく行う（Issue #212、3.21節）。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 

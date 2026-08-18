@@ -533,6 +533,36 @@ class TestSymbolLimit:
 
         assert symbols == [member.symbol for member in universe]
 
+    def test_no_limit_keeps_holdings_that_left_the_universe(self):
+        # Issue #212: production never passes `--limit`, so this branch is the
+        # one that runs daily. A holding dropped from the S&P 500 snapshot must
+        # still reach the fetch set, or its exit checks run on stale bars.
+        universe = self._sectored_universe({"Energy": 3})
+
+        symbols = _select_symbols(universe, {"S001", "OLDCO"}, None)
+
+        assert symbols == ["OLDCO", "S000", "S001", "S002"]
+
+    def test_no_limit_returns_alphabetical_order_for_any_universe_order(self):
+        universe = self._sectored_universe({"Energy": 3})
+
+        assert _select_symbols(tuple(reversed(universe)), set(), None) == [
+            "S000",
+            "S001",
+            "S002",
+        ]
+
+    def test_holdings_do_not_change_which_symbols_the_limit_samples(self):
+        # The `--limit` branch already unioned holdings; #212 must not perturb
+        # the sample it draws, only add the holdings on top of it.
+        universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
+
+        without_holdings = _select_symbols(universe, set(), 25)
+        with_holdings = _select_symbols(universe, {"OLDCO"}, 25)
+
+        assert without_holdings[:3] == ["S003", "S011", "S013"]
+        assert with_holdings == sorted([*without_holdings, "OLDCO"])
+
     def test_limit_excludes_never_fetched_symbols_from_screening_rejections(
         self, deps, state_store
     ):
@@ -583,6 +613,43 @@ class TestSymbolLimit:
         assert result.status == RunStatus.SUCCESS
         assert "AAPL" in provider.requested_symbols[0]
         assert "MSFT" not in provider.requested_symbols[0]
+
+    def test_full_universe_run_fetches_holdings_dropped_from_the_universe(
+        self, deps, state_store
+    ):
+        # Issue #212: the production 18:30 routine never passes `--limit`, and
+        # `_select_symbols()` is the only input to the daily price fetch. A
+        # position whose symbol left the S&P 500 snapshot must still get today's
+        # bar, otherwise its trailing stop / max-hold checks read stale prices.
+        class RecordingDataProvider(FakeDataProvider):
+            def __init__(self, bars):
+                super().__init__(bars)
+                self.requested_symbols: list[tuple[str, ...]] = []
+
+            def get_daily_bars(self, symbols, start, end):
+                self.requested_symbols.append(tuple(symbols))
+                return super().get_daily_bars(symbols, start, end)
+
+        state_store.upsert_position(
+            Position(
+                position_id=uuid4(),
+                symbol="OLDCO",
+                is_paper=True,
+                entry_date=AS_OF - timedelta(days=5),
+                entry_price=100.0,
+                shares=10,
+                status="open",
+                stop_price=95.0,
+            )
+        )
+        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT", "OLDCO"], AS_OF))
+        full_universe_deps = replace(deps, data_provider=provider)
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), full_universe_deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "OLDCO" in provider.requested_symbols[0]
+        assert {"AAPL", "MSFT"} <= set(provider.requested_symbols[0])
 
     @pytest.mark.parametrize(
         "entry_offset",

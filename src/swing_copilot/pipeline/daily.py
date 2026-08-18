@@ -463,6 +463,17 @@ def _select_symbols(
     check than production does. The backtest CLI already samples instead of
     truncating (Issue #194); this path shares that sampler (Issue #205).
 
+    `held_symbols` is unioned in on *both* branches. Only the `--limit` branch
+    used to do it, so the branch production actually runs (the 18:30 routine
+    passes no `--limit`) silently dropped any holding that had left the
+    universe snapshot -- and this return value is the sole input to the daily
+    price fetch, so that symbol got no bar at all and its trailing-stop /
+    max-hold checks ran on stale prices, exactly when an index deletion makes
+    an exit decision most urgent (Issue #212). This adds symbols to the
+    *fetch* set only; `_run_step_screening()` still intersects the screening
+    universe with `deps.universe`, so a holding outside the snapshot cannot
+    re-enter as a fresh entry candidate.
+
     Args:
         universe: Resolved universe membership for the run's `as_of`.
         held_symbols: Open holdings, always screened regardless of `--limit`.
@@ -470,11 +481,17 @@ def _select_symbols(
             universe candidate at all and leaves only `held_symbols`.
 
     Returns:
-        The symbols to fetch and screen. Alphabetical whenever `--limit`
-        applies, so a truncated run's ordering stays reproducible.
+        The symbols to fetch and screen, alphabetically ordered on both
+        branches so a run's ordering stays reproducible. Sorting the full
+        universe is a no-op in practice (`get_latest_universe_membership()`
+        reads `ORDER BY symbol`); it only fixes the placement of
+        `universe.manual_include` entries and of holdings outside the
+        snapshot. Nothing downstream reads this order as data: screening
+        receives it as a `set` and re-derives its own universe order from
+        `deps.universe`.
     """
     if limit is None:
-        return [member.symbol for member in universe]
+        return sorted({member.symbol for member in universe} | held_symbols)
     sample = select_universe_sample(universe, limit)
     if sample.is_stratified_sample:
         logger.info(

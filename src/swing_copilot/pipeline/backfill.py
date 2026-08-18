@@ -49,6 +49,7 @@ from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
+from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -284,6 +285,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _resolve_symbols(args: argparse.Namespace, end: date) -> list[str]:
+    """Resolve the symbols to backfill: `--symbols`, or a `--limit` sample.
+
+    `--limit` used to be `symbols[: args.limit]` over an `ORDER BY symbol`
+    universe, i.e. "the N tickers starting with A" — the same defect class
+    already fixed for `copilot-backtest` (Issue #194) and `copilot-daily`
+    (Issue #205), left behind on the third `--limit` (Issue #206). Warming
+    only the A-side of the cache biases nothing numerically here, but it does
+    decide which symbols a later smoke run or backtest finds already cached.
+    Sharing `select_universe_sample()` — and therefore its fixed salt — makes
+    `--limit N` cover the same symbol set across all three CLIs.
+    """
     if args.symbols:
         symbols = [token.strip().upper() for token in args.symbols.split(",")]
         return [symbol for symbol in symbols if symbol]
@@ -297,8 +309,10 @@ def _resolve_symbols(args: argparse.Namespace, end: date) -> list[str]:
             manual_exclude=settings.universe.manual_exclude,
         ),
     )
-    symbols = [member.symbol for member in universe]
-    return symbols if args.limit is None else symbols[: args.limit]
+    sample = select_universe_sample(universe, args.limit)
+    if sample.is_stratified_sample:
+        logger.info("universe sampled by --limit: %s / %s", *sample.summary_lines())
+    return list(sample.symbols)
 
 
 def _validate(args: argparse.Namespace, end: date) -> None:

@@ -12,7 +12,6 @@ from swing_copilot.risk.earnings import business_days_since, evaluate_earnings_p
 @pytest.mark.parametrize(
     ("earnings_date", "expected_days", "expected_status"),
     [
-        pytest.param(date(2026, 7, 17), 0, "block", id="already-reported-before-as-of"),
         pytest.param(date(2026, 7, 21), 0, "block", id="reported-on-as-of"),
         pytest.param(date(2026, 7, 22), 1, "block", id="one-business-day"),
         pytest.param(date(2026, 7, 23), 2, "block", id="two-business-days"),
@@ -33,6 +32,48 @@ def test_one_two_three_five_six_business_day_boundaries(
 
     assert result.business_days == expected_days
     assert result.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("earnings_date", "expected_status", "expected_days"),
+    [
+        # as_of is Tuesday 2026-07-21 throughout: the day immediately before,
+        # exactly at, and immediately after the point-in-time cutoff.
+        pytest.param(
+            date(2026, 7, 20), "unknown", None, id="day-before-as-of-is-stale"
+        ),
+        pytest.param(date(2026, 7, 21), "block", 0, id="exactly-as-of-still-blocks"),
+        pytest.param(date(2026, 7, 22), "block", 1, id="day-after-as-of-blocks"),
+    ],
+)
+def test_a_date_behind_as_of_is_stale_not_a_block(
+    earnings_date, expected_status, expected_days
+):
+    # Issue #231: a supplier that hands back a past-dated event must not pin
+    # the symbol to `block` forever. Only `< as_of` is stale; `== as_of` is
+    # "reports today", which is precisely what the guard must block.
+    result = evaluate_earnings_proximity(
+        date(2026, 7, 21),
+        earnings_date,
+        block_business_days=2,
+        warn_business_days=5,
+    )
+
+    assert result.status == expected_status
+    assert result.business_days == expected_days
+
+
+def test_a_long_past_date_is_stale_rather_than_warn_or_clear():
+    # Distance alone must not rehabilitate a stale date into `warn`/`clear`.
+    result = evaluate_earnings_proximity(
+        date(2026, 7, 21),
+        date(2026, 5, 1),
+        block_business_days=2,
+        warn_business_days=5,
+    )
+
+    assert result.status == "unknown"
+    assert result.business_days is None
 
 
 def test_unknown_date_is_explicit_warning():

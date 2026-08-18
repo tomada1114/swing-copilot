@@ -431,6 +431,61 @@ class TestEarningsGuard:
         assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
         assert result.binding_constraint == "earnings"
 
+    def test_an_event_exactly_on_as_of_still_blocks(self, settings, market_store):
+        # The `== as_of` half of the Issue #231 boundary: reporting today is
+        # the event the guard exists for, so it must stay a block.
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL", AS_OF, "bmo", datetime(2027, 1, 1, tzinfo=UTC)
+                )
+            )
+        }
+
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, lookups)),
+        )
+        result = checker.check([_candidate("AAPL")], [], 100_000.0)[0]
+
+        assert result.status == "rejected"
+        assert EARNINGS_PROXIMITY_BLOCK_REASON in result.reasons
+        assert result.binding_constraint == "earnings"
+
+    def test_an_event_behind_as_of_warns_instead_of_blocking_forever(
+        self, settings, market_store
+    ):
+        # Issue #231: neither live supplier produces a past-dated event today,
+        # so this pins the missing consumer-side defense layer rather than a
+        # live bug. Without it the symbol would be rejected on every run until
+        # some later run happened to supply a fresher event.
+        lookups = {
+            "AAPL": _lookup(
+                event=EarningsEvent(
+                    "AAPL",
+                    AS_OF - timedelta(days=1),
+                    "amc",
+                    datetime(2027, 1, 1, tzinfo=UTC),
+                )
+            )
+        }
+
+        checker = RiskChecker(
+            settings,
+            (),
+            market_store,
+            RiskRunContext(earnings_guard=EarningsGuardInput(True, lookups)),
+        )
+        result = checker.check([_candidate("AAPL")], [], 100_000.0)[0]
+
+        assert result.status == "approved"
+        assert EARNINGS_PROXIMITY_BLOCK_REASON not in result.reasons
+        assert EARNINGS_PROXIMITY_BLOCK_REASON not in result.sizing_warnings
+        assert result.binding_constraint != "earnings"
+        assert EARNINGS_DATE_UNKNOWN_WARNING in result.sizing_warnings
+
     def test_five_business_days_warns_without_rejecting(self, settings, market_store):
         lookups = {
             "AAPL": _lookup(

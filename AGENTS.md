@@ -125,8 +125,12 @@ the divergence, and update the stale canonical source or request a decision.
   never part of the offline success sentinel.
 - The suite must not write operator-owned data. `output_dir` and other
   repo-relative defaults resolve to real directories, so every filesystem test
-  passes an isolated path. The autouse `reports/` guard must remain in place
-  alongside the socket guard.
+  passes an isolated path. The autouse `reports/` and `data/` guards must
+  remain in place alongside the socket guard. `data/` is guarded twice on
+  purpose: an mtime check catches writes, and a `duckdb.connect` interception
+  catches the *open* — `init_schema()` against an already initialized file
+  changes no mtime, yet still takes DuckDB's exclusive file lock and can fail
+  the operator's scheduled run.
 - Qualitative analysis runs in a Claude Code skill, never inside this process.
   The pipeline exports `analysis_input.json` and ingests `analysis_result.json`
   via `copilot-ingest-analysis`; both directions parse under strict

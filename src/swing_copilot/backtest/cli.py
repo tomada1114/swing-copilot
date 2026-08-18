@@ -839,15 +839,50 @@ def render_grid_markdown(
     return "\n".join(lines)
 
 
+def _resolve_parquet_root(db_path: Path) -> Path:
+    """Resolve `--db`'s sibling bars root, failing fast when it is absent (Issue #217).
+
+    Parquet bars live alongside the DuckDB file, mirroring the
+    `DEFAULT_DB_PATH`/`DEFAULT_PARQUET_ROOT` pairing ("data/copilot.duckdb" +
+    "data/bars") -- `--db` overrides both together, never just the DB.
+
+    A missing root is never a legitimate backtest input: `read_bars` would
+    return nothing for every symbol, so the run wrote a zero-trade report in
+    seconds and exited 0, with only a yellow "insufficient data" warning to
+    tell an operator mistake apart from a real result. "A few symbols have no
+    bars" (new listings, say) stays fail-soft; only the root being absent
+    altogether is fatal, which is exactly what makes the two distinguishable.
+
+    Args:
+        db_path: The `--db` value.
+
+    Returns:
+        The `bars/` directory next to `db_path`.
+
+    Raises:
+        BacktestCliError: The resolved `bars/` is not an existing directory.
+    """
+    parquet_root = db_path.parent / "bars"
+    if not parquet_root.is_dir():
+        msg = (
+            f"価格バーのParquetディレクトリが見つかりません: {parquet_root}\n"
+            f"--db {db_path} は価格バーの根を同ディレクトリの bars/ として解決する"
+            "（data/copilot.duckdb + data/bars と同じ対応規約）。"
+            "DuckDBファイルだけをコピーして bars/ を並置し忘れていないか確認すること。"
+            "このまま実行すると全銘柄がデータ不足となり、取引ゼロのレポートを"
+            "正常終了として書いてしまう。"
+        )
+        raise BacktestCliError(msg)
+    return parquet_root
+
+
 def _compose_dependencies(
     args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
 ) -> tuple[BacktestDependencies, UniverseSample, list[str]]:
     """Wire real collaborators (composition root); returns deps, sample, missing data."""
+    parquet_root = _resolve_parquet_root(Path(args.db))
     database = Database(args.db)
-    # Parquet bars live alongside the DuckDB file, mirroring the
-    # DEFAULT_DB_PATH/DEFAULT_PARQUET_ROOT pairing ("data/copilot.duckdb" +
-    # "data/bars") -- `--db` overrides both together, never just the DB.
-    market_store = MarketStore(database, parquet_root=Path(args.db).parent / "bars")
+    market_store = MarketStore(database, parquet_root=parquet_root)
     state_store = StateStore(database)
     state_store.init_schema()
     universe_options = UniverseFetchOptions(

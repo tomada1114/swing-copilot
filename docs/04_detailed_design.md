@@ -379,9 +379,26 @@ class MarketStore:
     def upsert_fundamentals(self, records: list["FundamentalsRecord"]) -> None:
         """fundamentalsへaccession_noで訂正可能なupsertを1transactionで行う。"""
 
+    def read_fundamentals_fetch_state(self, symbols: Sequence[str]) -> dict[str, FundamentalsFetchState]:
+        """銘柄ごとの取得日と鮮度地平を返す（未取得の銘柄はキーごと欠落）。"""
+
+    def record_fundamentals_fetches(self, symbols: Sequence[str], fetched_at: datetime, fetched_through: datetime) -> None:
+        """取得に成功した銘柄群の取得時刻と鮮度地平を1transactionでupsertする。"""
+
+    def read_latest_filing_dates(self, symbols: Sequence[str], forms: Sequence[str], as_of: date) -> dict[str, date]:
+        """銘柄ごとの取り込み済み最新提出日をSQLのMAXで返す（1銘柄1行）。"""
+
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """DuckDB接続を返す（screening/backtestからの直接SQL利用向け）。"""
 ```
+
+**fundamentals増分リフレッシュ（Issue #258）**: `fundamentals_fetch_log`（`symbol`主キー）は増分判定専用のブックキーピングである。`fundamentals.fetched_at`を転用しないのは2点の理由による。(1) 取得に成功してもXBRL factsが無い銘柄は`fundamentals`に1行も残さないため、行に紐づく時刻では「問い合わせた」事実を記録できず、その銘柄が毎run再取得され続ける。(2) `fetched_at`は1提出レコードの属性で`accession_no`訂正upsertが書き換えるものであり、「いつこの銘柄を polling したか」と混ぜると両者を独立に読めなくなる。
+
+本テーブルは**2つの別々の事実**を持つ。`last_fetched_at`＝「いつEDGARを叩いたか」（実壁時計。同日再実行スキップ＝P6-25の担当）、`fetched_through`＝「その取得がどこまでの filing を見られたか」（`min(now, as_of)`。7日バックストップの担当）。この2つは`--as-of`リプレイでのみ乖離する——リプレイは**今日**EDGARを叩いた（同日再実行では叩き直すべきでない）が、**過去日までの**filingしか得ていない（翌日の実運用runに「新鮮」と見せてはならない）。1列ではどちらか一方しか表現できず、本ブランチの初期リビジョンは実際に両方を順番に踏み抜いた（レビュー指摘2の2回分）。どちらもメタデータであって point-in-time の値ではなく、ここから導いた何物も`as_of`の代替にはならない——`fundamentals`から読める内容は従来どおり`filed_at <= as_of`だけが決める。
+
+`fetched_through`は後から足した列なので、`get_connection()`が`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`を冪等に流す（`storage/schema.py`が`StateStore`側のテーブルに定める加算的規律と同じ）。DuckDBは`NOT NULL`列を後から足せないので NULL 可であり、読み出し側は NULL を「地平不明」＝**再取得対象**として扱う（けっして「新鮮」と読まない）。判定ロジック本体は3.21節を参照。既存DBでは本テーブルは空から始まるので、導入後の初回runだけ全銘柄を1度取得し、以後は増分になる。
+
+**`read_latest_filing_dates()`と`read_filing_dates()`の使い分け**: 増分トリガーが要るのは「取り込み済みの**最新**提出日」1件だけなので、専用の`MAX(...) GROUP BY symbol`を持つ。`read_filing_dates()`はバックテストの決算日推定のために存在し、(a) 全四半期の日付を materialize し、(b) 同一`fiscal_period_end`の訂正再提出を**最も早い**提出日へ畳む。(b)は本用途では逆で、訂正の**遅い**提出日こそ「その期が着地した」証拠になる。約500銘柄の全履歴を Python 側に持ってきて`max()`を取るのも無駄なので、結合ごと外している（レビュー指摘4）。
 
 複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。ParquetとCSVはdestinationと同じdirectoryへ一意なtemp fileを書き、成功時だけ原子的に置換する。書き込み/replace失敗時は従来destinationを保持し、tempをcleanupする。
 
@@ -1569,6 +1586,11 @@ run全体は継続する。ステップ8はエクスポートに成功したrun�
 >    スキップする（ログのみ、`run_steps.detail`には含めない）。
 >    `accession_no`キーの訂正upsert自体は変更せず、翌日以降の実行は
 >    従来どおり必ず再取得・upsertする。
+>    （**Issue #258で置換**: 同日スキップだけでは3節・8.3節が定める
+>    「週1回＋新規filingのみ」の増分更新になっていなかった。下の
+>    「増分リフレッシュ実装（Issue #258）」で置き換え、
+>    `has_fundamentals_fetched_on()`は削除した。同日再実行のスキップは
+>    増分ルールの「経過0日 < 7日」ケースとして引き続き成立する。）
 > 4. **CLI `--dry-run`契約の明確化（通知抑止）**: 旧pseudocodeが
 >    記した「`dry_run=True`の場合、fixture/fake providerを必須とし、実
 >    ネットワークを禁止する」は、CLIの`--dry-run`実装が
@@ -1613,6 +1635,29 @@ def main(argv: list[str] | None = None) -> None:
     """CLI引数をDailyRunOptionsへ変換し、実アダプタ一式をcomposeして実行、
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
+
+**増分リフレッシュ実装（Issue #258）**: 3.6節・8.3節（`docs/03_basic_design.md`）が定める「ファンダメンタルズ更新は週1回、かつ前回取得以降に新規filingがある銘柄のみ」を、`_FundamentalsFreshness`として`_run_step_fundamentals()`の内側に実装した。従来は同日再実行スキップ（上記blockquote 3）しか無く、平日は毎営業日S&P500全銘柄のcompanyfacts取得（約3〜4分）が走っていた。
+
+- **判定**: 次のいずれかを満たす銘柄だけEDGARへ問い合わせる。(1) 取得記録が無い（初回）、(2) 鮮度地平（`fetched_through`）が`_FUNDAMENTALS_REFRESH_INTERVAL_DAYS = 7`日**以上**前、または不明（ちょうど7日は取得する側。6日は取得しない）、(3) **既知のfilingがまだ`fundamentals`へ取り込まれていない**（`_has_pending_filing()`。下記）。ただし**その日すでにEDGARを叩いていれば（`last_fetched_at`の日付＝今日）、上記すべてに優先してスキップする**（P6-25の同日再実行スキップ）。どれも満たさなければネットワーク取得のみをスキップする。ステップ自体と`accession_no`自然キーのupsertロジックは無条件スキップせず毎回実行するため、`docs/03_basic_design.md` 7節の冪等性原則には引き続き反しない。
+- **新規filingトリガーは「エッジ」ではなく「有界の再試行窓」（PR #272レビュー指摘1の是正）**: EDGARのbulk company-factsは、filing本体が引けるようになってからXBRLが載るまで遅れる。そのため「filing提出日 >= 前回取得日」という**一度きりのエッジ**で発火させると、トリガーで走った取得が空振りしたまま stamp され、その銘柄は7日バックストップまで落ちてしまう——「保有＋候補はトリガーで翌runに取り込まれる」という本節の約束が黙って破れる。是正後は、**収集済みfilingの提出日**と**`fundamentals`へ取り込み済みの最新`filed_at`**を比較し、後者が前者に追いつくまで毎run armされたままにする。ただし窓の上限は提出日から`_FUNDAMENTALS_REFRESH_INTERVAL_DAYS`日で、そこを過ぎると必ず disarm する。この上限が無いと、**`FundamentalsRecord`にならない8-K**が永久にトリガーを引き続け、fetch logが塞いだはずの「毎run再取得」の穴が別経路で開く。有界なので最悪でも「テキスト収集対象の最大30銘柄 × 最大7日 × 1リクエスト/日」に収まり、窓が閉じた時点ではバックストップが同じ銘柄を引き受ける（被覆の切れ目は無い）。
+- **「due か」と「叩いてよいか」を分ける（レビュー最終ラウンド指摘Aの是正）**: 判定は`_is_due()`（データが陳腐化しているか／既知filingが未着地か）と`_poll_allowed()`（前回ポーリングからの間隔）の**2段**である。分けるのが本質で、混ぜると次の逆転が起きる。10-QがD日に提出・収集され、company-factsの公開ラグでD+1〜D+6のトリガー再試行が毎回空振りしたとき、**空振りの取得が`fetched_through`を進めてしまうと**、D+7に窓が閉じた時点でバックストップから見て「1日前に取得済み」になり、その10-Qは**D+13まで取り込まれない**——トリガーが発火した銘柄の方が、一度も発火しなかった銘柄より鮮度が悪くなる。是正後は`fetched_through`を**レコードを実際に返した取得でしか進めない**（空振りは`FundamentalsFetchStamp.fetched_through=None`で送り、upsert側の`COALESCE`が既存値を保持する）。ポーリング頻度の抑制は`last_fetched_at`＋`consecutive_empty`が担う。抑制の上限が`_FUNDAMENTALS_REFRESH_INTERVAL_DAYS`そのものなので、**どの銘柄も1インターバルを超えてポーリングされないことはない**——これが固定した不変条件である（`tests/pipeline/test_daily_core.py::TestFundamentalsIncrementalRefresh::test_a_fruitless_retry_never_pushes_the_backstop_out`が31日ぶんの日次runを回して`max(gap) <= 7`を検証する）。
+- **stampの対象**: `fundamentals_fetch_log`（4.2節、3.7節）へ、取得に成功しかつ**信じられる答えが返った**銘柄だけを、`upsert_fundamentals()`のコミット後に1transactionにまとめてstampする。取得例外の銘柄と、下記の「矛盾する空応答」の銘柄はstampせず次runで再試行する。**取り込み済みfilingを1件も持たない**銘柄が0件を返した場合は**stampする**（その銘柄には本当にfactsが無い。そうしないと毎run再取得になる。この穴を塞ぐことが本テーブルの存在理由なので、後続の是正でも再び開けていない）。
+- **stampする2つの時刻（`_fetch_horizon()`。レビュー指摘2の是正、2回分）**: 取得は常に`filed_at <= as_of`しか返さないので、そのrunが買った知識は「`as_of`まで」であって「今まで」ではない。壁時計をそのまま鮮度地平にすると、**`--as-of <過去日>`のリプレイを1回流しただけで全ユニバースが「新鮮」になり、実運用の再取得が7日間抑止される**（従来の同日スキップでは影響が1日で済んでいたものが、増分化で7日に延びる回帰）。そこで`fetched_through = min(clock.now(), 当日終端のas_of)`とする。ただし**これだけでは足りない**——最初の是正では同日再実行スキップまでこのクランプ値で判定してしまい、7日より古い`as_of`のリプレイは再実行のたびに約500銘柄を取り直していた（P6-25が防ぐはずのコストそのもの）。同日再実行スキップは`last_fetched_at`（クランプしない実壁時計）で判定し、鮮度は`fetched_through`で判定する、と**2つの列に分ける**のが正解である。通常runは`as_of = options.as_of or clock.today()`なので両者は一致し、本番経路は完全に不変。
+- **矛盾する空応答は失敗として扱う（レビュー指摘3の是正）**: 「例外は出ないが0レコード」がユニバース全体に及ぶと、従来は全銘柄が「新鮮」とstampされ、SUCCESSのままファンダが7日間凍り、`run_steps.detail`にも何も残らなかった——P6-25のインシデント類型そのものである。是正後は、**取り込み済みfilingを既に持つ銘柄**が0レコードを返した場合を「provider側の異常」とみなし、(a) stampしない（翌runで再試行）、(b) detailに`no records despite stored filings: N (...)`として列挙する。閾値は導入していない。判定基準が「その銘柄について我々が既に持っている事実と矛盾するか」なので、ユニバース全体に及べば全銘柄が非stampになり、逆に「本当にfactsが無い銘柄」（取り込み履歴なし）は従来どおりstampされて毎run再取得にはならない。**残差**: 「かつてはfilingがあったが400日以上提出が途絶えた」銘柄（実質は上場廃止）は毎run再取得の対象になる。S&P500ユニバースでは実質0〜数件で、方向としても「凍結」より「叩きすぎ」の側なので許容する。
+- **新規filingの判定源**: 既に収集済みのFR-07 filingテキスト（`text_items`の`source_type='filing'`）を`StateStore.latest_filing_dates(symbols, as_of=...)`で、取り込み済みfiling日を`MarketStore.read_latest_filing_dates(symbols, _FUNDAMENTALS_INGESTED_FORMS, as_of)`でそれぞれbatch読みする。いずれもrunが既に持っているストレージへの1クエリで、**外部API呼び出しは1件も増えない**（EDGARへの追加問い合わせ・レート制限枠の追加消費なし）。被覆はテキスト収集の対象＝保有＋候補（最大30銘柄）に等しく、それ以外の銘柄は(2)の経過日数ルールが受け持つ。テキスト収集はステップ5でファンダメンタルズ（ステップ2）より後に走るため、当日提出のfilingが効くのは翌runである。
+- **10-Kとトリガー（レビュー指摘4）**: トリガーは**フォーム非依存**で、`source_type='filing'`の収集済み行なら何でも arm する。つまり`_FILING_FORM_TYPES`（`["8-K", "10-Q"]`）はトリガーの絞り込みには一切使われておらず、トリガー用の別定数を置く余地は無い（`text_items`に`form`列が無いので、そもそもフォームで絞れない）。実際の制約は「ステップ5が10-Kの**本文を収集していない**」ことであり、収集対象を広げるのはテキスト収集のスコープ変更＋EDGAR呼び出し増になるため本Issueの範囲外とした。年次サイクルは実務上、10-Kに先行する決算8-K（Item 2.02）が収集されてトリガーを arm するので拾える。仮に拾えなくても、あらゆる銘柄の鮮度上限は(2)のバックストップにより7日で、10-Kだけが特別に遅れることはない。`_FUNDAMENTALS_INGESTED_FORMS = ("10-K", "10-Q")`は「どのフォームが`FundamentalsRecord`になるか」であってトリガーの絞り込みではない。
+- **`as_of`との関係**: 経過日数は注入`Clock`の壁時計日（`deps.clock.today()`）で測る。`fundamentals_fetch_log`が持つのは実取得の地平なので、過去の`--as-of`と比較すると常識外の経過日数になり全銘柄再取得になる（P6-25と同じ理由）。一方、収集済みfiling・取り込み済みfilingの可視性はどちらも`<= as_of`で切る（point-in-time）。両者を混ぜないこと——前者はメタデータ、後者は時点整合性である。
+- **日付粒度で比較する理由**: `published_at`（=SEC提出日）はUTC 0時として保存されるので、16:30 ETに受理された10-Qは同日夕方の取得時刻より「前」になってしまう。厳密な瞬時比較だと、run後に提出されたfilingを取りこぼす。比較はすべて日付粒度・両端inclusiveで行う。
+- **ファンダ鮮度へのトレードオフ（明示）**: スクリーニングのfundamental filterは`fundamentals`を`filed_at <= as_of`で読むので、新しい10-Qが提出されてからDBに入るまでの遅れがそのまま「使う四半期が1つ古いままの期間」になる。従来は最大1日、増分化後は**最大7日**である。
+
+    新規filingトリガーがこのドリフトを縮めるのは、**トリガーの情報源である`text_items`に既にその銘柄のfilingが入っている銘柄だけ**である。`text_items`はステップ5が最後に走ったときの**保有＋候補**しかカバーせず、しかもステップ5はファンダメンタルズ（ステップ2）とスクリーニング（ステップ3）の**後**に走る。したがって**トリガーが効かない銘柄**には次が含まれる（レビュー指摘Bの訂正。旧記述は「7日ずれ得るのはその日の判断に使っていない銘柄だけ」としていたが、これは誤りだった）。
+
+    - ユニバースの大多数（保有でも候補でもない銘柄）
+    - **その日はじめて候補集合に入る銘柄**。0〜3日目は保有でも候補でもなく、3日目に10-Qを提出し、4日目に値動きでテクニカルを通過した銘柄は、filingを一度も収集されていないためトリガーが armed にならず、**fundamental filterは前四半期の売上・純利益で評価する**。新しい10-Qが否定するはずの数値で採用/却下が決まりうる、という意味でこれは実質的な影響である。
+
+    つまり7日のドリフトは「その日の判断に使っていない銘柄だけ」ではなく、「テキスト収集の保有＋候補集合にまだ入っていない銘柄」全般に及ぶ。トリガーが確実に効くのは**既に保有中／前日までに候補だった銘柄**であり、そこでは company-facts の公開ラグに負けても取り込みまで再試行し続ける。四半期報告の周期と数日〜数週間のスイング保有期間に対して、この最大7日のずれを許容できるものとして8.3節の規定どおり増分化を選んでいる。縮めたい場合の選択肢（ユニバース全体の提出周期からの決算日射影をトリガーに足す等）は本Issueの範囲外。
+- **致命判定はスキップ数ではなく「取得を試みて成功した銘柄が1件も無いか」で決める（レビュー指摘3の是正）**: 条件は`failed_symbols and not fetched_symbols and budget_detail is None`。当初は`skipped_fresh == 0`を条件に足していたが、増分化後はスキップが常態＝`skipped_fresh`がほぼ常に非0なので、**EDGARの全面障害が定常状態で永久に致命判定されず**、runはSUCCESS・exit 0のまま全銘柄が7日を過ぎるまで気づかれない、という致命的な見落としになっていた。`fetched_symbols`を鍵にすると「取得しようとした全銘柄が失敗した」という元の意味を保ったまま、スキップ数に依存しなくなる。取得を1件も試みなかったrunでは`failed_symbols`が空なので発火しない。
+- **回帰テスト**: `tests/pipeline/test_daily_core.py::TestFundamentalsFreshnessRule`（初回/7日境界/再試行窓の両端/取り込み済み判定）、`::TestFundamentalsIncrementalRefresh`（空振り後の再試行継続・10-Kトリガー・リプレイのstampクランプ・スキップ併存下の致命判定）、`tests/storage/test_market_store.py::TestFundamentalsFetchLog`、`tests/storage/test_state_store.py::TestLatestFilingDates`。
 
 ### 3.21a `pipeline/postmortem.py`（P2-11、roadmap §5 P2-11）
 
@@ -2006,6 +2051,18 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     shares             DOUBLE,
     source_url         VARCHAR NOT NULL,
     fetched_at         TIMESTAMPTZ NOT NULL
+);
+
+-- 銘柄ごとの増分リフレッシュ判定用ブックキーピング。2列は別々の事実を持つ:
+-- last_fetched_at =「いつEDGARを叩いたか」（壁時計。同日再実行スキップ用）、
+-- fetched_through =「その取得がどこまでの filing を見られたか」
+-- （min(now, as_of)。7日バックストップ用）。どちらもメタデータであり
+-- point-in-timeの値ではない（3.7、Issue #258）。fetched_throughは後から
+-- 追加した列なので NULL 可（=「地平不明」＝再取得対象）。
+CREATE TABLE IF NOT EXISTS fundamentals_fetch_log (
+    symbol           VARCHAR PRIMARY KEY,
+    last_fetched_at  TIMESTAMPTZ NOT NULL,
+    fetched_through  TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS universe_membership (

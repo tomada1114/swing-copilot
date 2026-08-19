@@ -2501,6 +2501,96 @@ def _text_item_related_symbols_and_category(
     return (row[0], row[1])
 
 
+def _dated_filing(source_id: str, symbol: str, filed_on: date) -> TextItem:
+    """A collected filing for `symbol`, filed on `filed_on`.
+
+    `published_at` is midnight UTC of the SEC filing date, exactly as
+    `data/edgar.py::_filing_text_item` stores it.
+    """
+    return replace(
+        _text_item(source_id, "https://example.com/10-Q", source_type="filing"),
+        symbol=symbol,
+        published_at=datetime.combine(filed_on, datetime.min.time(), tzinfo=UTC),
+    )
+
+
+class TestLatestFilingDates:
+    """Issue #258: the zero-extra-request "was anything filed lately?" source.
+
+    Feeds the fundamentals step's incremental refresh, so it must respect
+    the same `as_of` visibility boundary as every other filing read.
+    """
+
+    def test_returns_the_most_recent_filing_per_symbol(self, state_store):
+        state_store.record_text_items(
+            [
+                _dated_filing("edgar:1", "AAPL", date(2026, 7, 10)),
+                _dated_filing("edgar:2", "AAPL", date(2026, 7, 18)),
+                _dated_filing("edgar:3", "MSFT", date(2026, 7, 15)),
+            ]
+        )
+
+        assert state_store.latest_filing_dates(
+            ["AAPL", "MSFT"], as_of=date(2026, 7, 20)
+        ) == {"AAPL": date(2026, 7, 18), "MSFT": date(2026, 7, 15)}
+
+    def test_a_filing_accepted_exactly_on_as_of_is_visible(self, state_store):
+        state_store.record_text_items(
+            [_dated_filing("edgar:1", "AAPL", date(2026, 7, 20))]
+        )
+
+        assert state_store.latest_filing_dates(["AAPL"], as_of=date(2026, 7, 20)) == {
+            "AAPL": date(2026, 7, 20)
+        }
+
+    def test_a_filing_accepted_the_day_before_as_of_is_visible(self, state_store):
+        state_store.record_text_items(
+            [_dated_filing("edgar:1", "AAPL", date(2026, 7, 19))]
+        )
+
+        assert state_store.latest_filing_dates(["AAPL"], as_of=date(2026, 7, 20)) == {
+            "AAPL": date(2026, 7, 19)
+        }
+
+    def test_a_filing_accepted_the_day_after_as_of_is_invisible(self, state_store):
+        state_store.record_text_items(
+            [_dated_filing("edgar:1", "AAPL", date(2026, 7, 21))]
+        )
+
+        assert state_store.latest_filing_dates(["AAPL"], as_of=date(2026, 7, 20)) == {}
+
+    def test_the_cutoff_hides_only_the_filings_past_it(self, state_store):
+        state_store.record_text_items(
+            [
+                _dated_filing("edgar:1", "AAPL", date(2026, 7, 18)),
+                _dated_filing("edgar:2", "AAPL", date(2026, 7, 21)),
+            ]
+        )
+
+        assert state_store.latest_filing_dates(["AAPL"], as_of=date(2026, 7, 20)) == {
+            "AAPL": date(2026, 7, 18)
+        }
+
+    def test_news_items_are_not_filings(self, state_store):
+        state_store.record_text_items(
+            [_text_item("finnhub-1", "https://example.com/1")]
+        )
+
+        assert state_store.latest_filing_dates(["AAPL"], as_of=date(2026, 7, 20)) == {}
+
+    def test_a_symbol_with_no_collected_filing_is_omitted(self, state_store):
+        state_store.record_text_items(
+            [_dated_filing("edgar:1", "AAPL", date(2026, 7, 18))]
+        )
+
+        assert state_store.latest_filing_dates(
+            ["AAPL", "MSFT"], as_of=date(2026, 7, 20)
+        ) == {"AAPL": date(2026, 7, 18)}
+
+    def test_empty_symbols_returns_empty_mapping(self, state_store):
+        assert state_store.latest_filing_dates([], as_of=date(2026, 7, 20)) == {}
+
+
 class TestTextItems:
     def test_record_then_resolve_source_urls(self, state_store):
         state_store.record_text_items(

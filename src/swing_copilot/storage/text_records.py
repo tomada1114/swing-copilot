@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import date
 
     from swing_copilot.storage.database import Database
     from swing_copilot.text.base import TextItem
@@ -64,6 +65,66 @@ def record_text_items(database: Database, items: Sequence[TextItem]) -> None:
             raise
         else:
             conn.execute("COMMIT")
+
+
+def latest_filing_dates(
+    database: Database, symbols: Sequence[str], *, as_of: date
+) -> dict[str, date]:
+    """Read each symbol's most recent *collected* filing date, visible at `as_of`.
+
+    The filing text collected by FR-07 (`source_type = "filing"`) is filing
+    metadata this application already holds, so asking it "has anything been
+    filed lately?" costs no extra EDGAR request — which is what lets the
+    fundamentals step's incremental refresh (`docs/03_basic_design.md` 8.3,
+    Issue #258) detect a new filing without reintroducing the per-symbol
+    network call it exists to avoid.
+
+    Three properties the caller must plan around:
+
+    - Coverage is whatever text collection covered, i.e. each past run's held
+      + candidate symbols (`_TEXT_SYMBOL_LIMIT`), not the whole universe.
+      This is a *trigger* for an early refresh, never the only refresh rule;
+      the elapsed-days rule is what covers every remaining symbol. In
+      particular a symbol that becomes a candidate for the first time today
+      has never had its filings collected, so the trigger cannot help it.
+    - `text_items` persists across runs, so this is not scoped to one run's
+      30 symbols: it can return a filing for any symbol text collection has
+      *ever* touched. The caller's retry window is a week wide, so the set
+      that can still be armed on a given day is drawn from roughly a week of
+      collection sets -- on the order of 150-210 symbols, not 30 -- of which
+      the ones actually armed are those whose newest collected filing is
+      both inside that window and not yet ingested.
+    - Text collection runs after the fundamentals step within a run, so a
+      filing collected today is first acted on by tomorrow's run.
+
+    `published_at` is the filing's SEC filing date (`data/edgar.py`'s
+    `_filing_text_item`), so the `as_of` cutoff here is the same
+    point-in-time boundary the rest of the pipeline applies to filings: one
+    filed *on* `as_of` is visible, one filed the next day is not.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        symbols: Tickers to look up; an empty sequence returns `{}` without
+            touching the database.
+        as_of: Inclusive point-in-time cutoff on the filing date.
+
+    Returns:
+        `{symbol: latest visible filing date}`, omitting symbols with no
+        collected filing.
+    """
+    if not symbols:
+        return {}
+    placeholders = ",".join("?" for _ in symbols)
+    with database.connect() as conn:
+        rows = conn.execute(
+            f"SELECT symbol, MAX(CAST(published_at AS DATE)) "  # noqa: S608 - placeholders only, values are bound
+            f"FROM text_items "
+            f"WHERE source_type = 'filing' AND symbol IN ({placeholders}) "
+            f"AND CAST(published_at AS DATE) <= ? "
+            f"GROUP BY symbol",
+            [*symbols, as_of],
+        ).fetchall()
+    return dict(rows)
 
 
 def get_source_urls(database: Database, source_ids: Sequence[str]) -> dict[str, str]:

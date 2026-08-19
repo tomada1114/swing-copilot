@@ -1064,6 +1064,21 @@ class StateStore:
         """
         text_records.record_text_items(self._database, items)
 
+    def latest_filing_dates(
+        self, symbols: Sequence[str], *, as_of: date
+    ) -> dict[str, date]:
+        """Read each symbol's latest collected filing date, visible at `as_of`.
+
+        Args:
+            symbols: Tickers to look up.
+            as_of: Inclusive point-in-time cutoff on the filing date.
+
+        Returns:
+            `{symbol: latest visible filing date}`, omitting symbols with no
+            collected filing.
+        """
+        return text_records.latest_filing_dates(self._database, symbols, as_of=as_of)
+
     def get_source_urls(self, source_ids: Sequence[str]) -> dict[str, str]:
         """Resolve known `source_ids` to their `source_url`.
 

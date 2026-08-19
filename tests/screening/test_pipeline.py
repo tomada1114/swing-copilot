@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
 
+from swing_copilot.config import ScoreWeights, load_strategies
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -28,6 +30,7 @@ from swing_copilot.screening.base import (
 )
 from swing_copilot.screening.indicators import SymbolWindow
 from swing_copilot.screening.pipeline import (
+    _SCORE_COMPONENT_KEYS,
     PRICE_HISTORY_LOOKBACK_DAYS,
     ScreeningPipeline,
     price_history_lookback_days,
@@ -1081,6 +1084,9 @@ class TestCandidateLimitTruncationIsRecorded:
             "score_trend_quality",
             "score_liquidity",
             "score_atr_pct",
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
         }
         assert item.score == pytest.approx(sum(item.score_breakdown.values()))
 
@@ -1257,3 +1263,294 @@ class TestRequiredBars:
             strategy_required_bars(config, settings, "vcp")
             == ScreeningPipeline(config, None, settings, "vcp").required_bars
         )
+
+
+_STUB_SIGNAL_KEY = "stub_signal_251"
+#: Metrics a candidate would need for every strategy-specific component to
+#: reach full marks: at the pivot, top RS percentile, all seven conditions met.
+_MAXED_COMPONENT_METRICS = {
+    "vcp_pivot": 100.0,
+    "minervini_rs_percentile": 100.0,
+    "minervini_criteria_met": 7.0,
+}
+_SHIPPED_STRATEGY_KEYS = ["default", "minervini_stage2", "vcp_breakout"]
+
+
+@dataclass(frozen=True, slots=True)
+class _ComponentCase:
+    """One `_component_candidates` run: rows keyed by symbol, plus the weights."""
+
+    #: `symbol -> (ranking metrics, signal metrics)`.
+    rows: Mapping[str, tuple[Mapping[str, float], Mapping[str, float]]]
+    ranking: Mapping[str, object] | None = None
+    signal_name: str = _STUB_SIGNAL_KEY
+
+
+def _component_candidates(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, case: _ComponentCase
+) -> list[Candidate]:
+    """Rank `case.rows` with a stub signal standing in for `case.signal_name`.
+
+    The strategy-specific components read metrics only one real signal writes,
+    and `config.py` requires that signal by name for a non-zero weight, so the
+    stub is installed under the real registry key rather than a test-only one.
+    """
+
+    class _StubSignal:
+        name = case.signal_name
+        required_bars = 1
+
+        def __init__(self, _settings: object, min_criteria: int = 6) -> None:
+            pass
+
+        def evaluate(self, _data: ScreeningInput, symbols: set[str]) -> list[SignalHit]:
+            return [
+                SignalHit(
+                    symbol=symbol,
+                    signal_name=case.signal_name,
+                    direction="long",
+                    strength=1.0,
+                    metrics=dict(case.rows[symbol][1]),
+                )
+                for symbol in sorted(symbols)
+                if symbol in case.rows
+            ]
+
+    monkeypatch.setitem(SIGNAL_REGISTRY, case.signal_name, _StubSignal)
+    strategy: dict[str, object] = {
+        "filters_all": [],
+        "signals_all": [case.signal_name],
+        "candidate_limit": 10,
+    }
+    if case.ranking is not None:
+        strategy["ranking"] = case.ranking
+    pipeline = ScreeningPipeline(
+        {"strategies": {"default": strategy}}, market_store=None, settings=settings
+    )
+    monkeypatch.setattr(
+        "swing_copilot.screening.pipeline.ranking_metrics",
+        lambda _data, symbol: (
+            dict(case.rows[symbol][0]) if symbol in case.rows else None
+        ),
+    )
+    data = ScreeningInput(
+        as_of=AS_OF,
+        universe=tuple(_member(symbol) for symbol in case.rows),
+        fundamentals=pd.DataFrame(),
+        bars=pd.DataFrame(),
+    )
+    return pipeline.run(data)
+
+
+class TestStrategySpecificScoreComponentsAreOffByDefault:
+    """Issue #251 stage 1: the mechanism must not move any shipped ranking."""
+
+    def test_the_breakdown_keys_are_exactly_the_score_weights_fields(self):
+        # Pins the promoted DuckDB columns and the report rows against a
+        # stray `ScoreWeights` field, which the derived tuple would otherwise
+        # add silently.
+        assert _SCORE_COMPONENT_KEYS == (
+            "score_rsi_pullback",
+            "score_trend_quality",
+            "score_liquidity",
+            "score_atr_pct",
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
+        )
+
+    @pytest.mark.parametrize("strategy_key", _SHIPPED_STRATEGY_KEYS)
+    def test_every_shipped_strategy_leaves_the_new_weights_at_zero(self, strategy_key):
+        weights = _shipped_score_weights(strategy_key)
+
+        assert weights.pivot_proximity == 0.0
+        assert weights.rs_percentile == 0.0
+        assert weights.criteria_met == 0.0
+
+    @pytest.mark.parametrize("strategy_key", _SHIPPED_STRATEGY_KEYS)
+    def test_a_shipped_strategy_scores_exactly_as_it_did_before_the_components(
+        self, settings, monkeypatch, strategy_key
+    ):
+        # The candidate carries metrics that would max out all three new
+        # components. Under the shipped weights the composite must still be
+        # the pre-#251 four-term sum, bit for bit.
+        weights = _shipped_score_weights(strategy_key)
+        rows = {
+            "AAPL": (
+                _metrics(rsi14=30.0, sma50=110.0, atr14=3.0),
+                _MAXED_COMPONENT_METRICS,
+            )
+        }
+        candidates = _component_candidates(
+            settings,
+            monkeypatch,
+            _ComponentCase(rows=rows, ranking={"score_weights": weights.model_dump()}),
+        )
+
+        legacy_score = (
+            weights.rsi_pullback * ((45.0 - 30.0) / 45.0)
+            + weights.trend_quality * 1.0
+            + weights.liquidity * 0.5
+            + weights.atr_pct * ((3.0 / 100.0) / 0.06)
+        )
+        metrics = candidates[0].metrics
+        assert metrics["score"] == legacy_score
+        assert metrics["score_pivot_proximity"] == 0.0
+        assert metrics["score_rs_percentile"] == 0.0
+        assert metrics["score_criteria_met"] == 0.0
+
+
+def _shipped_score_weights(strategy_key: str) -> ScoreWeights:
+    """The repository's own `strategies.yaml` weights for one strategy."""
+    strategies = load_strategies("config/strategies.yaml")
+    return strategies.strategies[strategy_key].ranking.score_weights
+
+
+_PIVOT_RANKING = {
+    "score_weights": {
+        "rsi_pullback": 0.5,
+        "trend_quality": 0.2,
+        "liquidity": 0.2,
+        "pivot_proximity": 0.1,
+    }
+}
+_MINERVINI_RANKING = {
+    "score_weights": {
+        "rsi_pullback": 0.4,
+        "trend_quality": 0.2,
+        "liquidity": 0.2,
+        "rs_percentile": 0.1,
+        "criteria_met": 0.1,
+    }
+}
+
+
+class TestPivotProximityComponent:
+    """Issue #251: the component that ranks `vcp_breakout` by its own intent."""
+
+    @staticmethod
+    def _candidates(settings, monkeypatch, close, pivot):
+        signal_metrics = {} if pivot is None else {"vcp_pivot": pivot}
+        rows = {"AAPL": (_metrics(rsi14=45.0) | {"close": close}, signal_metrics)}
+        return _component_candidates(
+            settings,
+            monkeypatch,
+            _ComponentCase(
+                rows=rows, ranking=_PIVOT_RANKING, signal_name="vcp_breakout"
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        ("close", "expected"),
+        [
+            # Exactly at the pivot, then 2.5% either side of it (half of the
+            # 5% normalization width), then well past it.
+            (100.0, 1.0),
+            (102.5, 0.5),
+            (97.5, 0.5),
+            (110.0, 0.0),
+        ],
+    )
+    def test_proximity_decays_symmetrically_around_the_pivot(
+        self, settings, monkeypatch, close, expected
+    ):
+        candidates = self._candidates(settings, monkeypatch, close, pivot=100.0)
+
+        assert candidates[0].metrics["score_pivot_proximity"] == pytest.approx(
+            0.1 * expected
+        )
+
+    @pytest.mark.parametrize("pivot", [None, 0.0, -1.0])
+    def test_an_absent_or_nonpositive_pivot_scores_zero_and_keeps_the_candidate(
+        self, settings, monkeypatch, pivot
+    ):
+        # Never a division by the pivot, and never a dropped symbol: the
+        # component is a ranking input, not an eligibility gate.
+        candidates = self._candidates(settings, monkeypatch, 100.0, pivot)
+
+        assert [candidate.symbol for candidate in candidates] == ["AAPL"]
+        assert candidates[0].metrics["score_pivot_proximity"] == 0.0
+
+    def test_the_pivot_component_ranks_the_nearer_setup_first(
+        self, settings, monkeypatch
+    ):
+        # Identical in every other respect: the name sitting at its pivot must
+        # outrank the one already extended past it, which is the whole point.
+        rows = {
+            "AAPL": (_metrics(rsi14=45.0), {"vcp_pivot": 100.0}),
+            "MSFT": (_metrics(rsi14=45.0), {"vcp_pivot": 110.0}),
+        }
+        candidates = _component_candidates(
+            settings,
+            monkeypatch,
+            _ComponentCase(
+                rows=rows, ranking=_PIVOT_RANKING, signal_name="vcp_breakout"
+            ),
+        )
+
+        assert [candidate.symbol for candidate in candidates] == ["AAPL", "MSFT"]
+
+    def test_a_tie_still_breaks_on_symbol_ascending(self, settings, monkeypatch):
+        # REQ-010: a weighted new component must not introduce a
+        # non-deterministic order when two candidates score identically.
+        rows = {
+            "MSFT": (_metrics(rsi14=45.0), {"vcp_pivot": 100.0}),
+            "AAPL": (_metrics(rsi14=45.0), {"vcp_pivot": 100.0}),
+        }
+        candidates = _component_candidates(
+            settings,
+            monkeypatch,
+            _ComponentCase(
+                rows=rows, ranking=_PIVOT_RANKING, signal_name="vcp_breakout"
+            ),
+        )
+
+        assert [candidate.symbol for candidate in candidates] == ["AAPL", "MSFT"]
+        assert candidates[0].metrics["score"] == candidates[1].metrics["score"]
+
+
+class TestMinerviniScoreComponents:
+    """Issue #251: `rs_percentile` and `criteria_met` off `SignalHit.metrics`."""
+
+    @staticmethod
+    def _candidates(settings, monkeypatch, signal_metrics):
+        rows = {"AAPL": (_metrics(rsi14=45.0), signal_metrics)}
+        return _component_candidates(
+            settings,
+            monkeypatch,
+            _ComponentCase(
+                rows=rows,
+                ranking=_MINERVINI_RANKING,
+                signal_name="minervini_stage2",
+            ),
+        )
+
+    def test_both_components_normalize_against_their_own_scales(
+        self, settings, monkeypatch
+    ):
+        candidates = self._candidates(
+            settings,
+            monkeypatch,
+            {"minervini_rs_percentile": 80.0, "minervini_criteria_met": 7.0},
+        )
+
+        metrics = candidates[0].metrics
+        assert metrics["score_rs_percentile"] == pytest.approx(0.1 * 0.80)
+        assert metrics["score_criteria_met"] == pytest.approx(0.1 * 1.0)
+        # 0.4 * 0 (rsi14 sits on the threshold) + 0.2 * 0 (flat SMAs)
+        # + 0.2 * 0.5 (single-row liquidity midpoint) + the two above.
+        assert metrics["score"] == pytest.approx(0.1 + 0.08 + 0.1)
+
+    def test_a_hit_without_a_computable_rs_percentile_scores_zero_there(
+        self, settings, monkeypatch
+    ):
+        # A six-of-seven hit whose 252-day history was too short to rank RS
+        # keeps its place; only the component it cannot supply reads as zero.
+        candidates = self._candidates(
+            settings, monkeypatch, {"minervini_criteria_met": 6.0}
+        )
+
+        metrics = candidates[0].metrics
+        assert [candidate.symbol for candidate in candidates] == ["AAPL"]
+        assert metrics["score_rs_percentile"] == 0.0
+        assert metrics["score_criteria_met"] == pytest.approx(0.1 * 6.0 / 7.0)

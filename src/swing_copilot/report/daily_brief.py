@@ -304,6 +304,9 @@ class BriefCandidate:
     score_trend_quality: float | None
     score_liquidity: float | None
     score_atr_pct: float | None
+    score_pivot_proximity: float | None
+    score_rs_percentile: float | None
+    score_criteria_met: float | None
     signals: tuple[str, ...]
     fundamentals: BriefFundamentals
     risk: BriefRisk
@@ -574,6 +577,9 @@ def _candidate_brief(
         score_trend_quality=candidate.metrics.get("score_trend_quality"),
         score_liquidity=candidate.metrics.get("score_liquidity"),
         score_atr_pct=candidate.metrics.get("score_atr_pct"),
+        score_pivot_proximity=candidate.metrics.get("score_pivot_proximity"),
+        score_rs_percentile=candidate.metrics.get("score_rs_percentile"),
+        score_criteria_met=candidate.metrics.get("score_criteria_met"),
         signals=tuple(
             _signal_label(name, candidate.metrics)
             for name in candidate.signal_names

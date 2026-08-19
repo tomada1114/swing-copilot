@@ -136,6 +136,9 @@ INIT_SCHEMA_STATEMENTS = (
         score_trend_quality DOUBLE,
         score_liquidity     DOUBLE,
         score_atr_pct       DOUBLE,
+        score_pivot_proximity DOUBLE,
+        score_rs_percentile   DOUBLE,
+        score_criteria_met    DOUBLE,
         execution_state     VARCHAR,
         execution_distance  DOUBLE,
         PRIMARY KEY (run_id, symbol, strategy_key),
@@ -181,6 +184,9 @@ INIT_SCHEMA_STATEMENTS = (
         score_trend_quality DOUBLE,
         score_liquidity     DOUBLE,
         score_atr_pct       DOUBLE,
+        score_pivot_proximity DOUBLE,
+        score_rs_percentile   DOUBLE,
+        score_criteria_met    DOUBLE,
         execution_state     VARCHAR NOT NULL,
         execution_distance  DOUBLE,
         as_of               DATE NOT NULL,
@@ -739,6 +745,22 @@ ALTER_SCHEMA_STATEMENTS = (
         score_atr_pct       = CAST(metrics_json->>'score_atr_pct' AS DOUBLE)
     WHERE score IS NULL
     """,
+    # Issue #251: the strategy-specific ranking components, on both halves of
+    # one ranking. Deliberately NOT backfilled, unlike the four columns above:
+    # a row written before this change has no `score_pivot_proximity` in its
+    # `metrics_json` either, because the component did not exist when the run
+    # scored it. NULL here therefore means "not recorded" -- which is what the
+    # `v_*` views' JSON fallback already resolves to for those rows -- and a
+    # backfilled 0.0 would instead read as a measured contribution of nothing.
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_pivot_proximity DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_rs_percentile DOUBLE",
+    "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS score_criteria_met DOUBLE",
+    "ALTER TABLE screening_truncations "
+    "ADD COLUMN IF NOT EXISTS score_pivot_proximity DOUBLE",
+    "ALTER TABLE screening_truncations "
+    "ADD COLUMN IF NOT EXISTS score_rs_percentile DOUBLE",
+    "ALTER TABLE screening_truncations "
+    "ADD COLUMN IF NOT EXISTS score_criteria_met DOUBLE",
     # Issue #192: the distribution sub-windows and gate inputs, backfilled
     # from `detail_json` on the same "restating a recorded fact" reasoning as
     # the candidate scores above. The guard is `dd15_spy IS NULL` rather than
@@ -850,6 +872,18 @@ ANALYSIS_VIEW_STATEMENTS = (
             c.score_atr_pct,
             CAST(c.metrics_json->>'score_atr_pct' AS DOUBLE)
         ) AS score_atr_pct,
+        COALESCE(
+            c.score_pivot_proximity,
+            CAST(c.metrics_json->>'score_pivot_proximity' AS DOUBLE)
+        ) AS score_pivot_proximity,
+        COALESCE(
+            c.score_rs_percentile,
+            CAST(c.metrics_json->>'score_rs_percentile' AS DOUBLE)
+        ) AS score_rs_percentile,
+        COALESCE(
+            c.score_criteria_met,
+            CAST(c.metrics_json->>'score_criteria_met' AS DOUBLE)
+        ) AS score_criteria_met,
         -- No JSON fallback: these never reached `metrics_json` either, so a
         -- row from before the columns existed has NULL and must read as
         -- "not recorded" rather than as the `UNKNOWN` execution state.
@@ -883,6 +917,9 @@ ANALYSIS_VIEW_STATEMENTS = (
         t.score_trend_quality,
         t.score_liquidity,
         t.score_atr_pct,
+        t.score_pivot_proximity,
+        t.score_rs_percentile,
+        t.score_criteria_met,
         t.execution_state,
         t.execution_distance,
         t.as_of
@@ -1033,6 +1070,9 @@ ANALYSIS_VIEW_STATEMENTS = (
         c.score_trend_quality,
         c.score_liquidity,
         c.score_atr_pct,
+        c.score_pivot_proximity,
+        c.score_rs_percentile,
+        c.score_criteria_met,
         c.execution_state,
         c.execution_distance,
         c.rsi14,

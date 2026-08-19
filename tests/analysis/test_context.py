@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from swing_copilot.analysis.context import (
+    _SCORE_METRIC_KEYS,
     format_decision_history,
     format_market_regime,
     format_performance_summary,
@@ -16,6 +17,7 @@ from swing_copilot.analysis.context import (
     format_score_breakdown,
 )
 from swing_copilot.analysis.safety import check_display_texts
+from swing_copilot.config import ScoreWeights
 from swing_copilot.paper.journal import PerformanceSummary
 from swing_copilot.regime.distribution import (
     DataQuality,
@@ -53,6 +55,9 @@ def _full_score_metrics() -> dict[str, float]:
         "score_trend_quality": 0.251,
         "score_liquidity": 0.160,
         "score_atr_pct": 0.000,
+        "score_pivot_proximity": 0.000,
+        "score_rs_percentile": 0.000,
+        "score_criteria_met": 0.000,
     }
 
 
@@ -73,6 +78,16 @@ def _performance(closed: int) -> PerformanceSummary:
 
 
 class TestScoreBreakdown:
+    def test_the_rendered_keys_are_exactly_the_score_weights_fields(self):
+        # `analysis/` must not import `config` (config imports `analysis`), so
+        # the key list here is hand-maintained. Pin it against `ScoreWeights`
+        # instead: a component added there without being added here would be
+        # summed into `score` by `screening/pipeline.py` yet never rendered,
+        # leaving 合計スコア larger than the 加重後 lines beneath it.
+        expected = ("score", *(f"score_{n}" for n in ScoreWeights.model_fields))
+
+        assert expected == _SCORE_METRIC_KEYS
+
     def test_it_renders_every_weighted_component(self):
         block = format_score_breakdown(_candidate(**_full_score_metrics()))
 
@@ -82,6 +97,9 @@ class TestScoreBreakdown:
         assert "trend_quality（加重後）: 0.251" in block
         assert "liquidity（加重後）: 0.160" in block
         assert "atr_pct（加重後）: 0.000" in block
+        assert "pivot_proximity（加重後）: 0.000" in block
+        assert "rs_percentile（加重後）: 0.000" in block
+        assert "criteria_met（加重後）: 0.000" in block
 
     @pytest.mark.parametrize(
         "missing",
@@ -91,6 +109,9 @@ class TestScoreBreakdown:
             "score_trend_quality",
             "score_liquidity",
             "score_atr_pct",
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
         ],
     )
     def test_any_missing_component_degrades_to_an_empty_block(self, missing):

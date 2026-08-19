@@ -11,6 +11,14 @@ strategies:
       # Composite ranking score weights (roadmap §5 P1-01). Unvalidated
       # defaults (要検証); P2-10's sensitivity grid is the intended follow-up.
       # Must sum to 1.0.
+      #
+      # Omitted keys take their `config.ScoreWeights` default. Besides the
+      # three below that is `atr_pct: 0.0` and, since issue #251, the
+      # strategy-specific `pivot_proximity` / `rs_percentile` /
+      # `criteria_met`, all 0.0. Weighting one of those three requires the
+      # signal that produces its metric in this strategy's `signals_all`
+      # (`pivot_proximity` -> `vcp_breakout`, the other two ->
+      # `minervini_stage2`); the loader rejects the combination otherwise.
       score_weights:
         rsi_pullback: 0.5
         trend_quality: 0.3
@@ -26,6 +34,8 @@ strategies:
     minervini:
       min_criteria: 6
     ranking:
+      # issue #251: `rs_percentile` / `criteria_met` は機構だけ用意し、既定 0.0 の
+      # まま据え置いている(既定値の変更はバックテストの裏取り待ち)。
       score_weights:
         rsi_pullback: 0.5
         trend_quality: 0.3
@@ -39,6 +49,9 @@ strategies:
       - vcp_breakout
     candidate_limit: 10
     ranking:
+      # issue #251: ブレイクアウト戦略なのに押し目の深さ(rsi_pullback)で
+      # 順位付けしている。是正用の `pivot_proximity` は機構だけ用意し、既定 0.0 の
+      # まま据え置いている(既定値の変更はバックテストの裏取り待ち)。
       score_weights:
         rsi_pullback: 0.5
         trend_quality: 0.3

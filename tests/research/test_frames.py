@@ -252,7 +252,8 @@ def _insert_truncation(store, run_id, symbol="NEAR", strategy_key="default", ran
     with store._database.connect() as conn:  # noqa: SLF001
         conn.execute(
             "INSERT INTO screening_truncations VALUES "
-            "(?, ?, ?, ?, 0.42, 0.1, 0.2, 0.3, 0.4, 'READY', 0.02, ?)",
+            "(?, ?, ?, ?, 0.42, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, "
+            "'READY', 0.02, ?)",
             [str(run_id), symbol, strategy_key, rank, RUN_DATE],
         )
 

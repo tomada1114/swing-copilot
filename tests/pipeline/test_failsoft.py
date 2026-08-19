@@ -1537,6 +1537,9 @@ class TestRejectionsArtifactReachesTheRunDirectory:
             "score_trend_quality",
             "score_liquidity",
             "score_atr_pct",
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
         }
 
     def test_a_run_with_no_rejections_writes_the_artifact_with_empty_sections(

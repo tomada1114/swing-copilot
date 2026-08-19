@@ -30,6 +30,14 @@ _SCORE_METRIC_KEYS = (
     "score_trend_quality",
     "score_liquidity",
     "score_atr_pct",
+    "score_pivot_proximity",
+    "score_rs_percentile",
+    "score_criteria_met",
+)
+#: The weighted components rendered under 合計スコア, in `ScoreWeights`
+#: declaration order (`_SCORE_METRIC_KEYS` without the composite).
+_SCORE_COMPONENT_LABELS = tuple(
+    (key, key.removeprefix("score_")) for key in _SCORE_METRIC_KEYS[1:]
 )
 #: Raw indicator values behind the weighted score, rendered alongside it
 #: (Issue #191). The normalized components alone cannot tell an RSI14 of 28
@@ -180,8 +188,8 @@ def format_score_breakdown(candidate: Candidate) -> str:
 
     Args:
         candidate: The screened candidate whose `metrics` may carry the
-            `score`/`score_rsi_pullback`/`score_trend_quality`/
-            `score_liquidity` keys `screening/pipeline.py` computes.
+            `score` and per-component `score_*` keys
+            `screening/pipeline.py` computes.
 
     Returns:
         A `<score_breakdown>` block, or `""` if the components are absent.
@@ -189,15 +197,16 @@ def format_score_breakdown(candidate: Candidate) -> str:
     values = {key: candidate.metrics.get(key) for key in _SCORE_METRIC_KEYS}
     if any(value is None for value in values.values()):
         return ""
+    components = "".join(
+        f"{label}（加重後）: {values[key]:.3f}\n"
+        for key, label in _SCORE_COMPONENT_LABELS
+    )
     return (
         "以下はコード側で決定論的に計算済みの複合スコア内訳です(P1-01)。"
         "この数値はコードの計算結果であり、分析側が再計算・上書きすることはできません。\n"
         "<score_breakdown>\n"
         f"合計スコア: {values['score']:.3f}\n"
-        f"rsi_pullback（加重後）: {values['score_rsi_pullback']:.3f}\n"
-        f"trend_quality（加重後）: {values['score_trend_quality']:.3f}\n"
-        f"liquidity（加重後）: {values['score_liquidity']:.3f}\n"
-        f"atr_pct（加重後）: {values['score_atr_pct']:.3f}\n"
+        f"{components}"
         f"{_format_raw_metrics(candidate)}"
         "</score_breakdown>\n"
     )

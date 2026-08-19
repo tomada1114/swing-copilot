@@ -40,6 +40,12 @@ _MINERVINI_SMA200_WINDOW = 200
 _MINERVINI_52_WEEK_WINDOW = 252
 _MINERVINI_MIN_52_WEEK_BARS = 200
 _MINERVINI_RS_PERIODS = (63, 126, 189, 252)
+#: Conditions in the Minervini trend template (P5-21), i.e. the denominator
+#: `minervini_criteria_met` is measured against. Exported because the ranking
+#: layer normalizes its `criteria_met` component by the same count
+#: (`screening/pipeline.py`), and a second hardcoded 7 would keep scoring
+#: against a stale denominator if a condition were ever added or removed.
+MINERVINI_CRITERIA_TOTAL = 7
 
 
 @register_signal("vcp_breakout")
@@ -134,7 +140,7 @@ class MinerviniStage2Signal:
                         symbol=symbol,
                         signal_name=self.name,
                         direction="long",
-                        strength=criteria_met / 7.0,
+                        strength=criteria_met / MINERVINI_CRITERIA_TOTAL,
                         metrics=metrics,
                     )
                 )

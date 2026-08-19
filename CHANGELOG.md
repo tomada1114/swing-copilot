@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 戦略別ランキング成分の**機構**を追加した（Issue #251 段階1）。`ScoreWeights` に
+  `pivot_proximity`（`vcp_pivot` と終値の距離。ピボット丁度で 1.0、上下どちらへ 5%
+  離れると 0.0）、`rs_percentile`（`minervini_rs_percentile`/100）、`criteria_met`
+  （`minervini_criteria_met`/7）を追加し、`strategies.yaml` で戦略ごとに重みを
+  変えられるようにした。**3成分とも既定 0.0** で、出荷中3戦略のランキングは
+  1ビットも動かない（`atr_pct` と同じ安全性）。メトリクスを生む signal を
+  `signals_all` に持たない戦略で重みを 0 より大きくすると、外部 I/O の前に
+  `ConfigError` で落ちる。加重後の値は `score_pivot_proximity` /
+  `score_rs_percentile` / `score_criteria_met` として内訳（レポート・
+  `analysis_input.json`・ダッシュボード）に並び、`candidates` /
+  `screening_truncations` の実列へも昇格する（既存行は「記録なし」= NULL、
+  backfill はしない）。**段階2（既定値の変更）は未了であり、`vcp_breakout` は
+  依然として押し目の深さで順位付けされている**。既定値を動かすにはバックテストの
+  裏取りが要る
+
 ### Fixed
 
 - `retro_input.json` の `input_digest` 再検証を、その文書自身が持っていたキー集合

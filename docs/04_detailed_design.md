@@ -589,7 +589,7 @@ class ScreeningPipeline:
         """
 ```
 
-**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（rsi_pullback/trend_quality/liquidity/atr_pctの複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重みは外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
+**Strategy抽象について（NFR-07）**: `StrategySpec`は`strategies.yaml`をextra禁止で型検証した値オブジェクトで、required filters/signals、1〜10の候補上限、`ranking.score_weights`（`ScoreWeights`が宣言する全成分の複合スコア重み、合計1.0必須）を保持する。空のrequired signals、未知filter/signal、未知field、範囲外limit、重み合計≠1.0・負の重み、および**そのメトリクスを生むsignalを`signals_all`に持たない戦略で戦略別成分に0より大きい重みを付けた組み合わせ**（Issue #251）は外部I/O開始前に拒否する。日次処理とバックテストは同じ`ScreeningPipeline`へ`as_of`付き`ScreeningInput`を渡す。プラグイン登録は明示的な組み込みモジュールimportで完了させ、import順に依存しないテストを置く。
 
 **エラー処理**: `strategies.yaml`に未登録キーが指定された場合はKeyErrorを送出し、バッチ開始前の設定検証で検出する（起動時フェイルファスト）。
 
@@ -2007,7 +2007,9 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 
 いずれも**既定では無効**なスイッチとして是正手段だけを追加した。`PullbackSignalConfig.band_atr_multiple`（既定`null`）はSMA50からの距離をATR14単位で測るモードで、`sma_band_pct`とは排他である。距離をATR単位で測る発想はパイプラインに既にあり、`execution.fair_max_d: 2.0`と`screening/pipeline.py`の`_execution_distance = (close - sma50) / atr14`が同じ尺度を使っている。プルバック帯だけが無関係な絶対%を使っていた内部不整合の解消でもある。ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
 
-`ScoreWeights.atr_pct`（既定`0.0`）はATR%が高いほど高得点の成分で、`_ATR_PCT_NORMALIZATION = 0.06`を満点とする絶対正規化である。候補集合内パーセンタイルを採らないのは、候補が5件程度の集合では`liquidity`成分が既に抱える小標本ノイズを再生産するためである。`score_weights`の合計1.0検証（フィールド名直書き）にも加算する。
+`ScoreWeights.atr_pct`（既定`0.0`）はATR%が高いほど高得点の成分で、`_ATR_PCT_NORMALIZATION = 0.06`を満点とする絶対正規化である。候補集合内パーセンタイルを採らないのは、候補が5件程度の集合では`liquidity`成分が既に抱える小標本ノイズを再生産するためである。`score_weights`の合計1.0検証にも加算する（検証は`ScoreWeights.model_fields`を走査するので、成分を足せば自動的に対象になる）。
+
+**戦略別ランキング成分（Issue #251、段階1）**: 出荷中の3戦略が同一の`score_weights`を持つため、ブレイクアウト戦略`vcp_breakout`が最大重み`rsi_pullback`＝「押し目の深さ」で順位付けされていた（戦略の意図と逆）。`ScoreWeights`に`pivot_proximity`（`vcp_pivot`と`close`から算出。ピボット丁度で1.0、上下どちらへ`_PIVOT_PROXIMITY_NORMALIZATION = 0.05`離れると0.0の対称正規化）、`rs_percentile`（`minervini_rs_percentile`/100）、`criteria_met`（`minervini_criteria_met`/7）を追加した。いずれも**既定`0.0`**で、出荷中のどの戦略のランキングも動かさない（`atr_pct`と同じ安全性）。3成分は特定signalしか書き込まないメトリクスを読むので、`config.py`の`_SCORE_COMPONENT_REQUIRED_SIGNAL`が「重み>0ならそのsignalが`signals_all`にあること」を外部I/O前に強制する。強制しないと、メトリクス不在で全候補が同じ0.0を得て他成分の実効重みだけが薄まるという無言の劣化になる。signalは走っているがメトリクスが無い個別候補（RSが計算できないまま6/7条件でヒットしたMinervini銘柄など）はその成分だけ0.0とし、候補からは落とさない。**段階2（既定値の変更）は未了**であり、`vcp_breakout`の順位付けは是正されていない。既定値を動かすにはバックテストの裏取りが要る。
 
 旧モードを消さずに両方残しているのは、採用判断を比較実験の結果に基づいて人間が行うためで、先に既定を差し替えるとA/B比較そのものが不能になる。バックテスト側の`--settings` / `--strategies`は、この比較をリポジトリの設定を書き換えずに回すための入り口である（`score_weights`は`strategies.yaml`側にあるので、`--settings`だけでは重みバリアントを表現できない）。
 
@@ -2145,6 +2147,11 @@ CREATE TABLE IF NOT EXISTS candidates (
     score_trend_quality DOUBLE,
     score_liquidity     DOUBLE,
     score_atr_pct       DOUBLE,
+    -- Issue #251: 戦略別ランキング成分。既存行はバックフィルしない
+    -- （成分が存在しなかった run の metrics_json にも無いため、NULL＝未記録）。
+    score_pivot_proximity DOUBLE,
+    score_rs_percentile   DOUBLE,
+    score_criteria_met    DOUBLE,
     execution_state     VARCHAR,
     execution_distance  DOUBLE,
     PRIMARY KEY (run_id, symbol, strategy_key),
@@ -2175,6 +2182,9 @@ CREATE TABLE IF NOT EXISTS screening_truncations (
     score_trend_quality DOUBLE,
     score_liquidity     DOUBLE,
     score_atr_pct       DOUBLE,
+    score_pivot_proximity DOUBLE,
+    score_rs_percentile   DOUBLE,
+    score_criteria_met    DOUBLE,
     execution_state     VARCHAR NOT NULL,
     execution_distance  DOUBLE,
     as_of               DATE NOT NULL,

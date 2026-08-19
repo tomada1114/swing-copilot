@@ -26,6 +26,9 @@ SCORE_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("score_trend_quality", "トレンド質"),
     ("score_liquidity", "流動性"),
     ("score_atr_pct", "ATR%"),
+    ("score_pivot_proximity", "ピボット近接"),
+    ("score_rs_percentile", "RS百分位"),
+    ("score_criteria_met", "条件充足"),
 )
 
 #: The verdict badge shown when the run has no `verdicts` row at all. Not
@@ -146,7 +149,7 @@ def outcomes_fallback(entry: ScorecardEntry | None) -> fmt.Cell:
 
 
 def score_component_stats(values: Mapping[str, object] | None) -> tuple[Stat, ...]:
-    """The four ranking-score components as labelled figures.
+    """Every `SCORE_COMPONENTS` entry as a labelled figure.
 
     A `None` mapping means the symbol has no candidate row in this run at
     all, which reads as `absent` rather than as a zero contribution.

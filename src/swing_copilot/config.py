@@ -580,6 +580,11 @@ class ScoreWeights(_StrictModel):
 
     Defaults are unvalidated (要検証); P2-10's sensitivity grid is the
     intended follow-up to ground them empirically.
+
+    Every field declared here is a ranking component: the sum-to-1.0 check and
+    `screening/pipeline.py`'s per-component breakdown both enumerate
+    `model_fields` rather than repeating the names, so a component added here
+    can never be silently left out of one of them (Issue #251).
     """
 
     rsi_pullback: float = Field(default=0.5, ge=0.0)
@@ -590,6 +595,30 @@ class ScoreWeights(_StrictModel):
     # 0.0 so no shipped strategy's ranking changes; adopting it is a human
     # decision made against the comparison report.
     atr_pct: float = Field(default=0.0, ge=0.0)
+    # Issue #251: strategy-specific components. Every shipped strategy scores
+    # candidates with the same pullback-oriented weights above, so
+    # `vcp_breakout` -- a breakout strategy -- is ranked by how DEEP a
+    # candidate's pullback is, the opposite of its intent. These three read
+    # metrics only a particular signal produces, so a non-zero weight requires
+    # that signal (`_SCORE_COMPONENT_REQUIRED_SIGNAL` below). They default to
+    # 0.0 for the same reason `atr_pct` does: adding the mechanism must not
+    # move any shipped strategy's ranking. Choosing non-zero defaults is a
+    # separate, evidence-backed decision (issue #251 stage 2).
+    pivot_proximity: float = Field(default=0.0, ge=0.0)
+    rs_percentile: float = Field(default=0.0, ge=0.0)
+    criteria_met: float = Field(default=0.0, ge=0.0)
+
+
+#: The signal each strategy-specific ranking component reads its metric from.
+#: A component absent here is universal (computed from `ranking_metrics`, which
+#: every candidate has). Weighting a component whose signal the strategy does
+#: not run is rejected at parse time rather than silently scoring every
+#: candidate identically on it.
+_SCORE_COMPONENT_REQUIRED_SIGNAL: Mapping[str, str] = {
+    "pivot_proximity": "vcp_breakout",
+    "rs_percentile": "minervini_stage2",
+    "criteria_met": "minervini_stage2",
+}
 
 
 class RankingConfig(_StrictModel):
@@ -629,11 +658,8 @@ class StrategiesConfig(_StrictModel):
     def _require_score_weights_sum_to_one(self) -> StrategiesConfig:
         for key, spec in self.strategies.items():
             weights = spec.ranking.score_weights
-            total = (
-                weights.rsi_pullback
-                + weights.trend_quality
-                + weights.liquidity
-                + weights.atr_pct
+            total = math.fsum(
+                float(getattr(weights, name)) for name in ScoreWeights.model_fields
             )
             if not math.isclose(total, 1.0, abs_tol=_SCORE_WEIGHT_SUM_TOLERANCE):
                 msg = (
@@ -641,6 +667,29 @@ class StrategiesConfig(_StrictModel):
                     f"1.0, got {total}"
                 )
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _require_signal_for_weighted_component(self) -> StrategiesConfig:
+        """Reject a weighted component the strategy's signals never produce.
+
+        Fail-fast at parse time (before any external I/O) rather than at run
+        time: the metric would simply be missing for every candidate, so the
+        component would contribute a constant 0.0 and quietly shrink the
+        effective weight of the components that do work.
+        """
+        for key, spec in self.strategies.items():
+            weights = spec.ranking.score_weights
+            for component, signal_name in _SCORE_COMPONENT_REQUIRED_SIGNAL.items():
+                if getattr(weights, component) <= 0.0:
+                    continue
+                if signal_name not in spec.signals_all:
+                    msg = (
+                        f"strategy '{key}': ranking.score_weights."
+                        f"{component} needs signal '{signal_name}' in "
+                        f"signals_all, got {list(spec.signals_all)}"
+                    )
+                    raise ValueError(msg)
         return self
 
 

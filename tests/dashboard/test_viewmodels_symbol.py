@@ -11,7 +11,13 @@ from swing_copilot.dashboard.viewmodels import symbol as symbol_vm
 if TYPE_CHECKING:
     from swing_copilot.dashboard.formatting import Cell
     from swing_copilot.dashboard.models import SymbolDetail
-from tests.dashboard.conftest import RUN_ID, Builder, Fixture
+from tests.dashboard.conftest import (
+    PRIOR_RUN_DATE,
+    PRIOR_RUN_ID,
+    RUN_ID,
+    Builder,
+    Fixture,
+)
 
 
 def build_optional(fixture: Fixture, symbol: str) -> SymbolDetail | None:
@@ -205,6 +211,35 @@ class TestTracking:
         assert labels["手仕舞日"].text == "2027-03-10"
         assert labels["実現リターン"].text == "-6.25%"
         assert labels["実現リターン"].tone == "neg"
+
+    def test_the_panel_belongs_to_this_run_not_another(
+        self, builder: Builder, dashboard_db: Fixture
+    ) -> None:
+        # The ledger carries every run's positions, so the symbol alone does
+        # not identify one: an earlier run holding the same symbol would
+        # otherwise lend this page its position.
+        prior = builder.for_run(PRIOR_RUN_ID)
+        prior.run(run_date=PRIOR_RUN_DATE)
+        prior.position(
+            "AAPL",
+            status="closed",
+            exit_reason="stop",
+            realized_return_pct=-6.25,
+            entry_date=PRIOR_RUN_DATE,
+        )
+        builder.run()
+        builder.candidate("AAPL")
+        builder.verdict("AAPL")
+        builder.position("AAPL", status="open")
+
+        panel = build(dashboard_db, "AAPL").tracking
+
+        assert panel is not None
+        assert panel.status.text == "open"
+        assert panel.exit_reason.absence == "none"
+        labels = {item.label: item.value for item in panel.stats}
+        assert labels["建玉日"].text == "2027-03-01"
+        assert labels["実現リターン"].absence == "none"
 
     def test_a_skip_position_keeps_its_own_side(
         self, builder: Builder, dashboard_db: Fixture

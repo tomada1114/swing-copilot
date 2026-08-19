@@ -94,7 +94,7 @@ def build_symbol_detail(sources: SymbolSources) -> SymbolDetail | None:
         technicals=_technicals(values, scorecard_values),
         execution=_execution(values, scorecard_values),
         risk=_risk(entry),
-        tracking=_tracking(sources.positions, sources.symbol),
+        tracking=_tracking(sources.positions, sources.run.run_id, sources.symbol),
         outcomes=() if entry is None else entry.outcomes,
         outcomes_fallback=common.outcomes_fallback(entry),
         outcome_hint=guidance.OUTCOME,
@@ -207,9 +207,21 @@ def _reason_rows(frame: pd.DataFrame) -> tuple[ReasonRow, ...]:
     )
 
 
-def _tracking(frame: pd.DataFrame, symbol: str) -> TrackingPanel | None:
-    """The virtual position for this verdict, or `None` when untracked."""
-    record = _first_matching(frame, symbol)
+def _tracking(frame: pd.DataFrame, run_id: str, symbol: str) -> TrackingPanel | None:
+    """The virtual position for this verdict, or `None` when untracked.
+
+    The ledger carries every run's positions, so the run is part of the key:
+    matching on the symbol alone would show another run's verdict here.
+    """
+    record = next(
+        (
+            item
+            for item in common.to_records(frame)
+            if str(item.get("symbol", "")) == symbol
+            and str(item.get("run_id", "")) == run_id
+        ),
+        None,
+    )
     if record is None:
         return None
     recommendation = common.optional_text(record.get("recommendation"))

@@ -196,7 +196,9 @@ class Builder:
             [self._run_id, symbol, status, binding_constraint],
         )
 
-    def position(
+    # PLR0913: a row factory mirroring verdict_positions' own columns,
+    # all keyword-only past the symbol.
+    def position(  # noqa: PLR0913
         self,
         symbol: str,
         *,
@@ -204,6 +206,7 @@ class Builder:
         status: str = "open",
         realized_return_pct: float | None = None,
         exit_reason: str | None = None,
+        entry_date: date = RUN_DATE,
     ) -> None:
         self._execute(
             "INSERT INTO verdict_positions (run_id, symbol, strategy_key, "
@@ -214,7 +217,7 @@ class Builder:
                 self._run_id,
                 symbol,
                 recommendation,
-                RUN_DATE,
+                entry_date,
                 status,
                 None if status == "open" else date(2027, 3, 10),
                 exit_reason,

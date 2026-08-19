@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -13,6 +14,46 @@ from swing_copilot.io_atomic import (
     write_json_batch_atomically,
     write_text_atomically,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def partial_write_then_fail(*, on_call: int) -> Callable[..., int]:
+    """A `Path.write_text` that fills the file, then fails, on the Nth call.
+
+    ENOSPC does not spare the file it was writing: what fits is already on
+    disk when the error surfaces. A fake that raises *before* touching the
+    filesystem therefore cannot observe a temporary file leaked by the very
+    write that failed -- which is exactly the bug the batch writer had.
+
+    Shared with the analysis-slice tests so both layers are held to the same
+    failure shape.
+
+    Args:
+        on_call: Which call to `Path.write_text` fails, counting from 1.
+
+    Returns:
+        A drop-in replacement for `Path.write_text`.
+    """
+    original = Path.write_text
+    calls: list[Path] = []
+
+    def _write_text(
+        self: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        calls.append(self)
+        if len(calls) == on_call:
+            original(self, data[: len(data) // 2], encoding="utf-8")
+            msg = "disk full"
+            raise OSError(msg)
+        return original(self, data, encoding, errors, newline)
+
+    return _write_text
 
 
 class TestTemporaryFileLocation:
@@ -105,18 +146,14 @@ class TestBatchIsOneLogicalWrite:
     def test_a_failure_partway_leaves_no_destination_and_no_temp(
         self, tmp_path, monkeypatch
     ):
-        """The eighth file failing must not leave the first seven behind."""
-        original = Path.write_text
-        written: list[Path] = []
+        """The eighth file failing must not leave the first seven behind.
 
-        def _fail_on_the_third(self: Path, *args: object, **kwargs: object) -> int:
-            written.append(self)
-            if len(written) == 3:
-                msg = "disk full"
-                raise OSError(msg)
-            return original(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "write_text", _fail_on_the_third)
+        The fake fills the file before raising, the way ENOSPC actually
+        arrives: a fake that raises *before* creating anything cannot see a
+        temporary left behind by the write that failed, which is the leak this
+        test exists for.
+        """
+        monkeypatch.setattr(Path, "write_text", partial_write_then_fail(on_call=3))
 
         with pytest.raises(OSError, match="disk full"):
             write_json_batch_atomically(
@@ -130,12 +167,7 @@ class TestBatchIsOneLogicalWrite:
     ):
         destination = tmp_path / "0.json"
         destination.write_text('{"previous": true}', encoding="utf-8")
-
-        def _explode(*_args: object, **_kwargs: object) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr(Path, "write_text", _explode)
+        monkeypatch.setattr(Path, "write_text", partial_write_then_fail(on_call=1))
 
         with pytest.raises(OSError, match="disk full"):
             write_json_batch_atomically([(destination, {"next": True})])

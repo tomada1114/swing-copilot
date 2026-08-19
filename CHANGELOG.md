@@ -39,12 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `analysis_input.json` から専門家×銘柄のスライスを手で切っており、2026-08-13 の
   実走では 21 件に 5.2 分を費やしたうえ、欠落・重複ミスの温床でもあった。
   グルーピングは SKILL.md Step 2 の担当割り当てをそのまま写す（`news` は `news`
-  が非空**または `news_supply` を持つ**銘柄、`filings` は `filings` が非空の銘柄、
-  `screening` は全銘柄、run 単位の context は screening スライスのみ）。news 側を
-  `news[]` の非空だけで切らないのは `news_supply`（Issue #130）のためである——
-  `level: "none"` はニュース 0 件の銘柄にこそ付くので、非空を条件にすると
-  「抑制された」と「そもそも無かった」を分ける唯一の記録が、それを申告する当の
-  担当者へ届かなくなる。出力は
+  が非空の銘柄、`filings` は `filings` が非空の銘柄、`screening` は全銘柄、
+  run 単位の context は screening スライスのみ）。`news` が空でも `news_supply`
+  （Issue #130）を持つ銘柄へ news スライスを出さないのは、`analyze-news` と AC14 が
+  「`news` が空なら `news_summary: null` を書く」ことを求めており、エージェントを
+  立てても供給量の申告がレポートへ届かないためである（届かせるには専門家側の規約
+  変更が要り、別イシューで追う）。出力は
   `slice-<kind>-<SYMBOL>.json` で、`analysis_work/` の断片と取り違えないよう
   `slice-` を付ける。**決定論性を要件として固定した**（同一入力 → バイト同一出力。
   Issue #261 が本文ハッシュでの流用判定の前提にする）: 値は parse 済みモデルの
@@ -63,8 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slice-*.json` は run ごとに溜まる。スライス群は **1 つの論理的な書き込み**として
   書き（新設の `io_atomic.write_json_batch_atomically()`）、全件を一時ファイルへ
   書いてから `os.replace` するので、途中失敗は宛先を 1 つも変更せず一時ファイルも
-  残さない——統括は非ゼロ終了を「何も生成されなかった」と読むため、「失敗したのに
-  7 件だけ残っている」状態を作ってはならない
+  残さない（失敗した書き込み自身の一時ファイルも含む。ENOSPC は書きかけのファイルを
+  残すため、パスは書き込み前に控える）——統括は非ゼロ終了を「何も生成されなかった」と
+  読むため、「失敗したのに 7 件だけ残っている」状態を作ってはならない
 
 - 蓄積された日次分析結果を閲覧する読み取り専用ローカルダッシュボード
   `copilot-dashboard` を追加した。FastAPI + Jinja2 のサーバレンダリングで、

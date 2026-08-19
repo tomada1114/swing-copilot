@@ -16,6 +16,7 @@ from swing_copilot.analysis.slices import (
     write_slices,
 )
 from tests.analysis.conftest import FILING_ID, NEWS_ID, input_payload
+from tests.test_io_atomic import partial_write_then_fail
 
 if TYPE_CHECKING:
     from swing_copilot.analysis.slices import SliceDocument
@@ -97,7 +98,6 @@ def test_build_slices_covers_each_expert_only_where_it_has_sources() -> None:
     assert [(document.kind, document.symbol) for document in documents] == [
         ("news", "AAPL"),
         ("news", "MSFT"),
-        ("news", "NVDA"),
         ("filings", "AAPL"),
         ("screening", "AAPL"),
         ("screening", "MSFT"),
@@ -106,39 +106,28 @@ def test_build_slices_covers_each_expert_only_where_it_has_sources() -> None:
     ]
 
 
-def test_a_candidate_without_news_still_gets_the_measured_supply_record() -> None:
-    """Issue #130: "suppressed" and "never existed" must stay distinguishable.
+@pytest.mark.parametrize(
+    "supply",
+    [pytest.param(True, id="supply-measured"), pytest.param(False, id="no-supply")],
+)
+def test_a_candidate_without_news_gets_no_news_slice(supply: bool) -> None:
+    """An empty `news[]` decides it, with or without a `news_supply` record.
 
-    Gating the news slice on a non-empty `news[]` would hide `news_supply`
-    from the one expert that declares it, which is the distinction the field
-    was added to preserve.
+    A supply record says why the news is thin (Issue #130), but the expert it
+    would be handed to is required by `analyze-news/SKILL.md` and AC14 to
+    write `news_summary: null` for an empty `news[]`. Slicing for those
+    symbols would therefore buy one subagent per newsless symbol and declare
+    nothing; carrying the record through to the report is a change to the
+    expert's contract, tracked separately.
     """
-    payload = input_payload(candidates=[candidate_payload("NVDA", news=False)])
-
-    news_slice = slice_by(build_slices(payload), "news", "NVDA")
-
-    assert news_slice["candidate"] == {
-        "symbol": "NVDA",
-        "news": [],
-        "news_supply": {
-            "collected_items": 12,
-            "exported_items": 0,
-            "symbol_mention_items": 0,
-            "level": "none",
-        },
-    }
-
-
-def test_a_candidate_with_neither_news_nor_supply_gets_no_news_slice() -> None:
-    """The other side of the boundary: nothing measured, nothing to read."""
     payload = input_payload(
-        candidates=[candidate_payload("TSLA", news=False, filings=False, supply=False)]
+        candidates=[candidate_payload("NVDA", news=False, filings=False, supply=supply)]
     )
 
     documents = build_slices(payload)
 
     assert [(document.kind, document.symbol) for document in documents] == [
-        ("screening", "TSLA")
+        ("screening", "NVDA")
     ]
 
 
@@ -243,7 +232,6 @@ def test_slice_filenames_cannot_be_mistaken_for_analysis_work_fragments() -> Non
     assert [document.filename for document in documents] == [
         "slice-news-AAPL.json",
         "slice-news-MSFT.json",
-        "slice-news-NVDA.json",
         "slice-filings-AAPL.json",
         "slice-screening-AAPL.json",
         "slice-screening-MSFT.json",
@@ -315,20 +303,11 @@ def test_a_failed_write_leaves_no_slice_and_no_temporary_behind(
 
     A command that exits non-zero tells the orchestrator nothing was produced,
     and this workflow never deletes anything from the scratchpad, so a partial
-    set would sit there unnoticed.
+    set would sit there unnoticed. The fake fills the file before failing, as
+    ENOSPC does, so the temporary of the *failing* write counts too.
     """
     out_dir = tmp_path / "slices"
-    original = Path.write_text
-    calls: list[Path] = []
-
-    def _fail_on_the_third(self: Path, *args: object, **kwargs: object) -> int:
-        calls.append(self)
-        if len(calls) == 3:
-            msg = "disk full"
-            raise OSError(msg)
-        return original(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "write_text", _fail_on_the_third)
+    monkeypatch.setattr(Path, "write_text", partial_write_then_fail(on_call=3))
 
     with pytest.raises(OSError, match="disk full"):
         write_slices(build_slices(mixed_payload()), out_dir)

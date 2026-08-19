@@ -152,11 +152,11 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   `performance_summary` / `calendar_events`）だけが入る。担当外の候補や長文テキストは
   入らない
 - ニューススライスには `news_supply`（元入力にあれば）も逐語コピーされる。自社材料の
-  供給量はニュース担当が申告する対象であり、落とすと申告経路が切れる。したがって
-  **`news` が空でも `news_supply` を持つ銘柄には news スライスが作られる**（`news: []`
-  ＋供給量記録）。`news[]` の非空だけを条件にすると、「自社材料が抑制された／0 件
-  だった」という記録そのものが担当者へ届かず、「そもそも無かった」と区別できなくなる
-  （Issue #130）
+  供給量はニュース担当が申告する対象であり、落とすと申告経路が切れる。ただし
+  news スライスが作られるのは `news` が非空の銘柄だけである——`news` が空の銘柄は
+  `analyze-news` と AC14 により `news_summary: null` を書くことになっており、
+  スライスを渡しても供給量（Issue #130）の申告はレポートへ届かない。届かせるには
+  専門家側の規約変更が要り、別イシューで追う
 - スライスは `analysis_input.json` を置き換えない。digest は元入力全体に対する値なので、
   スライス単体で digest を再計算・検証しない
 - スライスは strict スキーマ（`extra="forbid"`、`analysis/slices.py` の `InputSlice`）

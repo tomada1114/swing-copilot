@@ -247,7 +247,7 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 
 | 専門家 | 参照スキル | 担当 | 対象銘柄 |
 |---|---|---|---|
-| ニュース分析 | `.claude/skills/analyze-news/SKILL.md` | `candidates[].news` / `news_supply` | `news` が非空、または `news_supply` を持つ銘柄 |
+| ニュース分析 | `.claude/skills/analyze-news/SKILL.md` | `candidates[].news` | `news` が非空の銘柄 |
 | 開示分析 | `.claude/skills/analyze-filings/SKILL.md` | `candidates[].filings` | `filings` が非空の銘柄 |
 | スクリーニング定性評価 | `.claude/skills/interpret-screening/SKILL.md` | `score_breakdown`（生値の参考情報を含む）/ `risk_constraints` / `prior_verdicts` / `context` | **全銘柄** |
 
@@ -301,14 +301,16 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   同じパス・その配下・その上位を渡した場合はコマンドが拒否して終了する（exit 1）ので、
   その場合は scratchpad のパスを渡し直す
 - 生成物は `slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` /
-  `screening`）で、1 スライス = 1 専門家 × 1 銘柄。`filings` が空の銘柄には filings
-  スライスを作らず、`screening` は全銘柄に作る。news スライスは **`news` が空でも
-  `news_supply` があれば作る**——供給量の記録（`level: "none"` や
-  `collected_items` など）は「自社材料が抑制された」と「そもそも無かった」を分ける
-  唯一の材料で、ニュース担当が申告する対象だからである（Issue #130）。news スライスが
-  無いのは `news` も `news_supply` も持たない銘柄だけである。run 単位の context
-  （`market_regime` / `performance_summary` / `calendar_events`）は screening
-  スライスにだけ入る。上表の担当割り当てと同じ規則である
+  `screening`）で、1 スライス = 1 専門家 × 1 銘柄。`news` が空の銘柄には news
+  スライスを、`filings` が空の銘柄には filings スライスを作らず、`screening` は
+  全銘柄に作る。run 単位の context（`market_regime` / `performance_summary` /
+  `calendar_events`）は screening スライスにだけ入る。上表の担当割り当てと同じ規則で
+  ある
+- `news` が空でも `news_supply` を持つ銘柄に news スライスを作らないのは、
+  `analyze-news` と AC14 が「`news` が空なら `news_summary: null` を書く」ことを
+  求めているためである。今のままエージェントを立てても null が返るだけで、
+  供給量の申告（Issue #130）はレポートへ届かない。届かせるには専門家側の規約変更が
+  要り、それはスライス生成とは別のイシューで追う
 - 標準出力に「絶対パス / kind / 銘柄 / `source_chars`（そのスライスが載せている本文の
   文字数）」がタブ区切りで 1 行ずつ出る。**この一覧が正本**で、親はここから各
   エージェントへ渡すパスを選ぶ。スライス本体を親が読む必要はない
@@ -376,10 +378,8 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   一方 `facts[].evidence_quote` は作業用メタデータではなく契約フィールドなので、
   断片の値をそのまま逐語で運ぶ（落とすと ingest でその銘柄が fail-closed になる）
 - 断片の本文は書き換えない。問題があれば Step 3.5 で再分析を依頼する
-- news スライスも news 断片も無い銘柄は `news_summary: null`、filings が空の銘柄は
-  `filing_analyses: []`。`screening_assessment` は全銘柄必須。`news` が空でも
-  `news_supply` があれば news 担当が動くので、その銘柄には断片が存在する——
-  供給量不足の申告が入った `news_summary` を、`null` へ潰さずそのまま運ぶ
+- news が空の銘柄は `news_summary: null`、filings が空の銘柄は `filing_analyses: []`。
+  `screening_assessment` は全銘柄必須
 
 ### 断片の機械検証（自前実装しない）
 

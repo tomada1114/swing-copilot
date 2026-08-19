@@ -25,10 +25,10 @@ Two properties carry the contract:
   an unchanged input cannot produce a different byte.
 
 The grouping reproduces what `.claude/skills/swing-daily/SKILL.md` Step 2
-already assigns: `news` for candidates that have news *or* a `news_supply`
-record, `filings` for those that have filings, `screening` for every candidate,
-with the run-wide context blocks going to the screening expert alone -- it is
-the only one whose skill reads them.
+already assigns: `news` for candidates that have news, `filings` for those that
+have filings, `screening` for every candidate, with the run-wide context blocks
+going to the screening expert alone -- it is the only one whose skill reads
+them.
 """
 
 from __future__ import annotations
@@ -240,10 +240,10 @@ def build_slices(payload: Mapping[str, Any]) -> tuple[SliceDocument, ...]:
 
     Returns:
         The slices, ordered by expert (news, filings, screening) and, within an
-        expert, by the input's own candidate order. A candidate with neither
-        news nor a `news_supply` record gets no news slice, and one with no
-        filings gets no filings slice; every candidate gets a screening slice,
-        because a screening assessment is required for every symbol.
+        expert, by the input's own candidate order. A candidate with no news
+        gets no news slice, and one with no filings gets no filings slice;
+        every candidate gets a screening slice, because a screening assessment
+        is required for every symbol.
 
     Raises:
         SliceExportError: The document is not a valid `analysis_input.json`, a
@@ -376,17 +376,17 @@ def _validated_input(payload: Mapping[str, Any]) -> AnalysisInput:
 def _has_work(kind: FragmentKind, candidate: CandidateInput) -> bool:
     """Whether this expert has anything to read for this candidate.
 
-    A candidate whose `news` is empty still gets a news slice whenever the run
-    measured its supply. `news_supply` is the record of *why* the news is thin
-    or absent (Issue #130) -- `level: "none"` over a non-zero
-    `collected_items` says the feed carried articles but none about this
-    company -- so withholding the slice would collapse that into "nothing was
-    collected", which is the one distinction the field exists to preserve.
-    Only a candidate with neither news nor a supply record leaves the news
-    expert with nothing to read.
+    A candidate with an empty `news[]` gets no news slice, even though its
+    `news_supply` record would say *why* the news is thin (Issue #130):
+    `analyze-news/SKILL.md` and AC14 require the expert to write
+    `news_summary: null` whenever the news is empty, so an agent launched for
+    that symbol would declare nothing and the run would pay for one subagent
+    per newsless symbol. Carrying the supply record through to the report
+    means changing the expert's contract, not the slicing, and is tracked
+    separately.
     """
     if kind == "news":
-        return bool(candidate.news) or candidate.news_supply is not None
+        return bool(candidate.news)
     if kind == "filings":
         return bool(candidate.filings)
     return True

@@ -53,19 +53,17 @@ def test_main_writes_every_slice_and_lists_them_with_their_body_size(
     assert [line.split("\t")[1:3] for line in lines[:-1]] == [
         ["news", "AAPL"],
         ["news", "MSFT"],
-        ["news", "NVDA"],
         ["filings", "AAPL"],
         ["screening", "AAPL"],
         ["screening", "MSFT"],
         ["screening", "NVDA"],
         ["screening", "TSLA"],
     ]
-    assert lines[-1] == "8 slice(s) written: news=3 filings=1 screening=4"
+    assert lines[-1] == "7 slice(s) written: news=2 filings=1 screening=4"
     assert sorted(path.name for path in out_dir.iterdir()) == [
         "slice-filings-AAPL.json",
         "slice-news-AAPL.json",
         "slice-news-MSFT.json",
-        "slice-news-NVDA.json",
         "slice-screening-AAPL.json",
         "slice-screening-MSFT.json",
         "slice-screening-NVDA.json",
@@ -82,7 +80,7 @@ def test_main_accepts_the_run_directory_instead_of_the_input_file(
         main([str(workdir), "--out-dir", str(out_dir)])
 
     assert exit_info.value.code == 0
-    assert capsys.readouterr().out.splitlines()[-1].startswith("8 slice(s) written")
+    assert capsys.readouterr().out.splitlines()[-1].startswith("7 slice(s) written")
 
 
 def test_the_listed_paths_are_absolute_and_hold_the_written_slice(
@@ -144,7 +142,7 @@ def test_two_fresh_interpreters_write_the_same_bytes(
         written.append({path.name: path.read_bytes() for path in out_dir.iterdir()})
 
     assert written[0] == written[1]
-    assert len(written[0]) == 8
+    assert len(written[0]) == 7
 
 
 def test_a_missing_input_document_fails_without_writing_anything(
@@ -252,7 +250,7 @@ def test_a_scratch_directory_beside_the_run_is_accepted(
     """The positive control: an unrelated directory is not refused."""
     exported = export_slices(workdir, tmp_path / "scratch" / "slices")
 
-    assert len(exported) == 8
+    assert len(exported) == 7
 
 
 def test_the_output_directory_is_required(workdir: Path) -> None:

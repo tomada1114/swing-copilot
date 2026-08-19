@@ -288,14 +288,14 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   `analysis_work/<kind>-<SYMBOL>.json`の断片と名前の形が似るため`slice-`を付ける——
   両者はスキーマが違い、マージされるのは断片だけである
 - グルーピングは`swing-daily`スキル Step 2 の担当割り当てをそのまま写す:
-  `news`は`news`が非空**または`news_supply`を持つ**銘柄、`filings`は`filings`が
-  非空の銘柄、`screening`は全銘柄。run単位のcontextブロックはscreeningスライスに
-  だけ入る（それを読むと規約に書かれているのは`interpret-screening`だけである）
-- news側を`news[]`の非空だけで切らないのは`news_supply`のためである（Issue #130）。
-  あれは自社材料がどれだけ供給されたかの記録で、`level: "none"`はまさにニュースが
-  0件の銘柄に付く。非空を条件にすると、その記録を申告する当の担当者へスライスが
-  1件も渡らず、「抑制された」と「そもそも無かった」が区別できなくなる。news も
-  `news_supply` も持たない銘柄にだけ news スライスが無い
+  `news`は`news`が非空の銘柄、`filings`は`filings`が非空の銘柄、`screening`は
+  全銘柄。run単位のcontextブロックはscreeningスライスにだけ入る（それを読むと
+  規約に書かれているのは`interpret-screening`だけである）
+- `news`が空でも`news_supply`を持つ銘柄にnewsスライスを出さないのは、
+  `analyze-news`とAC14が「`news`が空なら`news_summary: null`を書く」ことを
+  求めているためである。エージェントを立てても null が返るだけで、供給量の申告
+  （Issue #130）はレポートへ届かない。届かせるには専門家側の規約変更が要り、
+  スライス生成とは独立した設計判断になるので別イシューで追う
 - `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
   scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
   呼び出し側に必ず宣言させる。さらに値そのものを検査し、**runディレクトリと同一・

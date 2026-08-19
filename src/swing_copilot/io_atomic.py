@@ -55,12 +55,15 @@ def write_json_batch_atomically(items: Sequence[tuple[Path, object]]) -> None:
     caller -- which is told nothing was produced -- never learns they are
     there.
 
-    So the content is written first, into a temporary file beside each
-    destination, and only then are the temporaries renamed into place. The
-    failure a batch actually hits (running out of space, or reaching an
-    unwritable destination partway through) therefore happens in phase one,
-    where no destination has been touched and every temporary is removed
-    again.
+    So everything is serialized up front, the content is then written into a
+    temporary file beside each destination, and only then are the temporaries
+    renamed into place. The failure a batch actually hits (running out of
+    space, or reaching an unwritable destination partway through) therefore
+    happens in phase one, where no destination has been touched and every
+    temporary is removed again -- including the one being written when the
+    failure struck, which is why each path is recorded *before* it is opened
+    rather than after a successful write. ENOSPC does not spare the file it
+    was filling.
 
     The rename phase is deliberately not wrapped in a second transaction:
     `os.replace` within one directory allocates nothing and each temporary is
@@ -75,14 +78,17 @@ def write_json_batch_atomically(items: Sequence[tuple[Path, object]]) -> None:
             path would stage into the same temporary file.
 
     Raises:
-        OSError: Serialization, writing, or replacing failed.
+        OSError: Writing or replacing failed.
+        TypeError: A payload is not JSON-serializable. Raised while rendering,
+            before any file exists, so there is nothing to undo.
     """
+    rendered = [(destination, _render_json(payload)) for destination, payload in items]
     staged: list[tuple[Path, Path]] = []
     try:
-        for destination, payload in items:
+        for destination, content in rendered:
             tmp_path = _temporary_path(destination)
-            tmp_path.write_text(_render_json(payload), encoding="utf-8")
             staged.append((tmp_path, destination))
+            tmp_path.write_text(content, encoding="utf-8")
         for tmp_path, destination in staged:
             os.replace(tmp_path, destination)  # noqa: PTH105 - atomic by design
     except OSError:

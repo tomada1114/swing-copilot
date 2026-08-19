@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from itertools import pairwise
 from typing import Any
 
 import httpx
@@ -18,6 +17,7 @@ from swing_copilot.text.calendar_fred import (
     FredCalendarTiming,
     _real_http_get,
 )
+from tests.conftest import ThrottleTimeline
 
 AS_OF = date(2027, 2, 1)
 RANGE_END = date(2027, 2, 28)
@@ -45,39 +45,6 @@ class SpacedRateClock:
     def __call__(self) -> float:
         self._now += self._step
         return self._now
-
-
-class ThrottleTimeline:
-    """Monotonic clock that only sleeping and request latency advance.
-
-    Models the one timeline the rate limit is actually defined over: `sleep`
-    (throttle wait and retry backoff alike) and each request's round trip both
-    move it forward, and every issued request stamps the instant it went out.
-    That makes the *issue* interval observable, not just the sleep arguments.
-    """
-
-    def __init__(self, request_seconds: float) -> None:
-        self.now = 0.0
-        self.issued_at: list[float] = []
-        self._request_seconds = request_seconds
-
-    def clock(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
-
-    def issue_request(self) -> None:
-        self.issued_at.append(self.now)
-        self.now += self._request_seconds
-
-    @property
-    def issue_gaps(self) -> list[float]:
-        return [later - earlier for earlier, later in pairwise(self.issued_at)]
-
-    def gaps_below(self, minimum: float, tolerance: float = 1e-9) -> list[float]:
-        """Return every issue gap shorter than `minimum`, float slop aside."""
-        return [gap for gap in self.issue_gaps if gap < minimum - tolerance]
 
 
 class ScriptedRateClock:

@@ -34,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 前日の定性分析フェーズが未完のまま終わったことを、翌 run のプリフライトで検知して
+  記録するようにした（Issue #254）。`copilot-daily` の成功と、その後スキルが行う
+  `analysis_result.json` の書き出し→`copilot-ingest-analysis` の完了は別ライフサイクル
+  であり、後者が欠落しても `runs` には何も残らず誰も気づけなかった（実測: 08-14 の run
+  ディレクトリに `analysis_result.json` が無いまま `.md` が `copilot-daily` 直後の
+  6KB で止まっていた）。#118 の同日重複ガードの直後に、`run_date` より厳密に前で最新の
+  `success`/`degraded` かつ `report_path` を持つ run を1件引き（`get_prior_reported_run()`）、
+  その成果物ディレクトリに `analysis_input.json` があって `analysis_result.json` が
+  無い場合だけを欠落と判定する——エクスポートが無かった run（候補0件・テキスト0件）は
+  答えるべき分析が無いので誤検知にしない。**fail-soft** で、前日の欠落も検知処理自体の
+  失敗も当日の run を止めない。露出は stderr の機械可読タグ
+  `ANALYSIS_GAP[missing_analysis_result]: run_date=... run_id=... expected=...` と、
+  新しい run の `runs.metadata_json.prior_analysis_gap` の2経路で、**スキーマ変更は無い**。
+  書き戻す担い手として自然な `copilot-ingest-analysis` は DB・ネットワークに触れない
+  inert boundary として設計されているため、そこに DuckDB 書き込みを持ち込む案は採らず、
+  読み取り側（翌 run のプリフライト）で検知する形にした
+
 - 蓄積された日次分析結果を閲覧する読み取り専用ローカルダッシュボード
   `copilot-dashboard` を追加した。FastAPI + Jinja2 のサーバレンダリングで、
   run 概観（`/runs/{run_id}`）・銘柄詳細（`/runs/{run_id}/symbols/{symbol}`）・

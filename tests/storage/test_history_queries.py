@@ -19,6 +19,7 @@ from swing_copilot.screening.base import (
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta, SignalOutcomeRecord
 from swing_copilot.storage.history_queries import (
+    get_prior_reported_run,
     get_rejections,
     get_run_by_date,
     get_run_detail,
@@ -524,6 +525,154 @@ class TestGetSuccessfulRun:
 
         assert found is not None
         assert found.run_id == newer_id
+
+
+def _insert_reported_run(
+    state_store: StateStore,
+    run_date: date,
+    status: str,
+    started_at: datetime,
+    report_path: str | None,
+) -> UUID:
+    """Insert a `runs` row that may or may not carry an archived report path."""
+    run_id = uuid4()
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at, report_path) VALUES (?, ?, 'live', 'cfg', ?, ?, ?)",
+            [str(run_id), run_date, status, started_at, report_path],
+        )
+    return run_id
+
+
+class TestGetPriorReportedRun:
+    """#254: the previous finished run whose analysis phase can be judged."""
+
+    def test_no_earlier_run_returns_none(self, state_store: StateStore) -> None:
+        assert (
+            get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+            is None
+        )
+
+    def test_returns_the_newest_earlier_run_with_its_date_and_report(
+        self, state_store: StateStore
+    ) -> None:
+        _insert_reported_run(
+            state_store,
+            date(2026, 8, 13),
+            "success",
+            datetime(2026, 8, 13, 15, 5, tzinfo=UTC),
+            "reports/2026-08-13/old.md",
+        )
+        newer = _insert_reported_run(
+            state_store,
+            date(2026, 8, 14),
+            "success",
+            datetime(2026, 8, 14, 15, 5, tzinfo=UTC),
+            "reports/2026-08-14/new.md",
+        )
+
+        found = get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == newer
+        assert found.run_date == date(2026, 8, 14)
+        assert found.report_path == Path("reports/2026-08-14/new.md")
+
+    def test_the_run_date_itself_is_excluded(self, state_store: StateStore) -> None:
+        # The current run's own date is not history: only strictly earlier
+        # runs have a qualitative phase that is already over.
+        _insert_reported_run(
+            state_store,
+            date(2026, 8, 17),
+            "success",
+            datetime(2026, 8, 17, 15, 5, tzinfo=UTC),
+            "reports/2026-08-17/same.md",
+        )
+
+        assert (
+            get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+            is None
+        )
+
+    def test_failed_and_running_rows_are_not_candidates(
+        self, state_store: StateStore
+    ) -> None:
+        for status in ("failed", "running"):
+            _insert_reported_run(
+                state_store,
+                date(2026, 8, 14),
+                status,
+                datetime(2026, 8, 14, 15, 5, tzinfo=UTC),
+                "reports/2026-08-14/x.md",
+            )
+
+        assert (
+            get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+            is None
+        )
+
+    def test_a_degraded_run_still_counts(self, state_store: StateStore) -> None:
+        # A degraded run archives a report and exports analysis_input.json, so
+        # its qualitative phase is just as answerable as a successful run's.
+        run_id = _insert_reported_run(
+            state_store,
+            date(2026, 8, 14),
+            "degraded",
+            datetime(2026, 8, 14, 15, 5, tzinfo=UTC),
+            "reports/2026-08-14/x.md",
+        )
+
+        found = get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == run_id
+
+    def test_a_run_without_a_report_path_is_skipped(
+        self, state_store: StateStore
+    ) -> None:
+        _insert_reported_run(
+            state_store,
+            date(2026, 8, 14),
+            "success",
+            datetime(2026, 8, 14, 15, 5, tzinfo=UTC),
+            None,
+        )
+        reported = _insert_reported_run(
+            state_store,
+            date(2026, 8, 13),
+            "success",
+            datetime(2026, 8, 13, 15, 5, tzinfo=UTC),
+            "reports/2026-08-13/x.md",
+        )
+
+        found = get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == reported
+
+    def test_same_date_ties_break_on_the_latest_start(
+        self, state_store: StateStore
+    ) -> None:
+        _insert_reported_run(
+            state_store,
+            date(2026, 8, 14),
+            "success",
+            datetime(2026, 8, 14, 15, 5, tzinfo=UTC),
+            "reports/2026-08-14/first.md",
+        )
+        newer = _insert_reported_run(
+            state_store,
+            date(2026, 8, 14),
+            "success",
+            datetime(2026, 8, 14, 19, 30, tzinfo=UTC),
+            "reports/2026-08-14/second.md",
+        )
+
+        found = get_prior_reported_run(state_store._database, date(2026, 8, 17))  # noqa: SLF001
+
+        assert found is not None
+        assert found.run_id == newer
 
 
 class TestGetSignalOutcomes:

@@ -7,8 +7,10 @@ tests/test_e2e_smoke.py.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -901,6 +903,161 @@ class TestSameDayRerunGuard:
             run_daily(DailyRunOptions(is_dry_run=True), holiday_deps)
 
         assert holiday_run_date.isoformat() in str(exc_info.value)
+
+
+_PRIOR_RUN_DATE = _LIVE_RUN_DATE - timedelta(days=1)
+
+
+def _archive_prior_run(
+    deps,
+    state_store,
+    status="success",
+    *,
+    exported=True,
+    analyzed=True,
+):
+    """Recreate one finished run's `runs` row and its `reports/` artifacts."""
+    run_id = uuid4()
+    run_date = _PRIOR_RUN_DATE
+    dated_dir = Path(deps.output_dir) / run_date.isoformat()
+    run_dir = dated_dir / str(run_id)
+    run_dir.mkdir(parents=True)
+    report_path = dated_dir / f"{run_id}.md"
+    report_path.write_text("# report", encoding="utf-8")
+    if exported:
+        (run_dir / "analysis_input.json").write_text("{}", encoding="utf-8")
+    if analyzed:
+        (run_dir / "analysis_result.json").write_text("{}", encoding="utf-8")
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at, report_path) VALUES (?, ?, 'live', 'cfg', ?, ?, ?)",
+            [
+                str(run_id),
+                run_date,
+                status,
+                datetime.combine(run_date, datetime.min.time(), tzinfo=UTC),
+                str(report_path),
+            ],
+        )
+    return run_id, run_dir
+
+
+def _stored_metadata(state_store, run_id):
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
+        ).fetchone()
+    return json.loads(row[0])
+
+
+class TestPriorAnalysisGapDetection:
+    """#254: the previous run's unfinished qualitative phase must not stay silent."""
+
+    def test_a_completed_prior_analysis_is_not_reported(
+        self, deps, state_store, caplog
+    ):
+        _archive_prior_run(deps, state_store)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "prior_analysis_gap" not in _stored_metadata(state_store, result.run_id)
+        assert not any("ANALYSIS_GAP" in record.message for record in caplog.records)
+
+    def test_a_missing_analysis_result_warns_and_is_recorded(
+        self, deps, state_store, caplog
+    ):
+        prior_id, run_dir = _archive_prior_run(deps, state_store, analyzed=False)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        # Fail-soft: the gap is yesterday's fact, never today's abort.
+        assert result.status == RunStatus.SUCCESS
+        gap = _stored_metadata(state_store, result.run_id)["prior_analysis_gap"]
+        assert gap == {
+            "reason": "missing_analysis_result",
+            "run_id": str(prior_id),
+            "run_date": _PRIOR_RUN_DATE.isoformat(),
+            "expected_path": str(run_dir / "analysis_result.json"),
+        }
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("ANALYSIS_GAP[missing_analysis_result]:")
+        ]
+        assert len(warnings) == 1
+        assert str(prior_id) in warnings[0]
+        assert _PRIOR_RUN_DATE.isoformat() in warnings[0]
+
+    def test_the_first_run_ever_reports_no_gap(self, deps, state_store, caplog):
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "prior_analysis_gap" not in _stored_metadata(state_store, result.run_id)
+        assert not any("ANALYSIS_GAP" in record.message for record in caplog.records)
+
+    def test_failed_and_running_prior_runs_are_not_gaps(
+        self, deps, state_store, caplog
+    ):
+        # A failed run handed the skill nothing, and a `running` row is work
+        # that never reached its own terminal state -- neither is evidence
+        # that a qualitative analysis went missing.
+        _archive_prior_run(deps, state_store, "failed", analyzed=False)
+        _archive_prior_run(deps, state_store, "running", analyzed=False)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "prior_analysis_gap" not in _stored_metadata(state_store, result.run_id)
+        assert not any("ANALYSIS_GAP" in record.message for record in caplog.records)
+
+    def test_a_prior_run_that_exported_nothing_is_not_a_gap(
+        self, deps, state_store, caplog
+    ):
+        # No analysis_input.json means no candidates or no text to analyse:
+        # there was never an analysis owed for that day.
+        _archive_prior_run(deps, state_store, exported=False, analyzed=False)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "prior_analysis_gap" not in _stored_metadata(state_store, result.run_id)
+        assert not any("ANALYSIS_GAP" in record.message for record in caplog.records)
+
+    def test_a_degraded_prior_run_is_still_checked(self, deps, state_store):
+        prior_id, _ = _archive_prior_run(deps, state_store, "degraded", analyzed=False)
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        gap = _stored_metadata(state_store, result.run_id)["prior_analysis_gap"]
+        assert gap["run_id"] == str(prior_id)
+
+    def test_a_failing_check_never_stops_todays_run(
+        self, deps, state_store, monkeypatch, caplog
+    ):
+        _archive_prior_run(deps, state_store, analyzed=False)
+
+        def explode(_run_date):
+            msg = "runs table unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(state_store, "get_prior_reported_run", explode)
+
+        with caplog.at_level(logging.WARNING):
+            result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert "prior_analysis_gap" not in _stored_metadata(state_store, result.run_id)
+        assert any(
+            "prior-run analysis gap check failed" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 class TestFundamentalsStepSkipped:

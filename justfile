@@ -24,9 +24,9 @@ lint:
     uv run ruff format --check .
     uv run mypy src scripts tests
 
-# Run tests with coverage
+# Run tests in parallel with coverage (pytest-cov combines the workers' data)
 test:
-    uv run pytest --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
+    uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 # Run all checks: format, lint, test
 check: fmt lint test
@@ -50,8 +50,8 @@ smoke:
     uv build --wheel
     uv run python scripts/smoke_test.py
 
-# Non-mutating local release/PR gate
-verify: lint test docs-check smoke
+# Non-mutating local release/PR gate (fail-fast: cheap gates before the suite)
+verify: lint docs-check smoke test
 
 # Remove build artifacts
 clean:

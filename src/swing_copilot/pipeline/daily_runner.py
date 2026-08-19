@@ -14,9 +14,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from swing_copilot.analysis.export import HISTORICAL_REPLAY_FILENAME
 from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.exceptions import PreflightAbort
-from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
+from swing_copilot.io_atomic import write_json_atomically
+from swing_copilot.models import DailyRunOptions, DailyRunResult, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
     _TIME_BUDGET_STEP_OUTCOME,
     ACCOUNT_EQUITY_UNSET_NOTICE,
@@ -157,7 +159,7 @@ def _held_symbols(
 
 
 def _prior_analysis_gaps(
-    deps: DailyDependencies, run_date: date, *, is_historical: bool
+    deps: DailyDependencies, run_date: date, *, mode: RunMode, is_historical: bool
 ) -> list[dict[str, object]]:
     """Report earlier runs whose qualitative analysis was never completed (#254).
 
@@ -178,26 +180,42 @@ def _prior_analysis_gaps(
     `runs.status`, and `RUN_ROW_MISSING` is a database/archive divergence that
     `copilot-history incomplete` is the right place to work through.
 
-    A historical replay (`--as-of`) reports nothing. Replaying a recent date
-    writes a report and an `analysis_input.json` that no skill session will
-    ever answer, so counting replays would make the next live run record a
-    permanent, false gap for a day whose real analysis is fine.
+    Only a live, non-replay run reports anything, and only about directories
+    no replay produced. Both exclusions exist because the signal means "a day's
+    qualitative analysis is missing", and only the unattended live run is
+    followed by a skill session that owes one:
+
+    * A `--dry-run` gets its own throwaway database and `reports/dry_run` tree
+      (`_paths_for_mode`), yet step 6 still exports there. Two dry runs a few
+      days apart would otherwise make the second one report the first, inside
+      the mode the docs describe as disposable.
+    * A `--as-of` replay exports for a day whose analysis already happened or
+      never will. Suppressing the report *during* the replay is not enough:
+      the directory it leaves behind outlives it, so the next live run would
+      report that day for as long as the lookback window reaches it. Each
+      replay therefore stamps its own export with `HISTORICAL_REPLAY_FILENAME`
+      (`_mark_historical_replay`), and a stamped directory is skipped here.
 
     Fail-soft by contract: an unanswered analysis is a fact about a past day,
     never a reason to stop today's run, and neither is a failure of this check.
+    The stderr writes are inside the same guard as the scan -- a closed or
+    broken stderr (`copilot-daily 2>&1 | head`) must not kill a run before it
+    even reaches `start_run`. A failure partway through leaves whatever lines
+    were already written and records nothing, which is the harmless direction.
 
     Args:
         deps: Run dependencies; `state_store` (read only) and `output_dir`.
         run_date: The resolved run date of the run being started. Only
             strictly earlier dates are reported -- today's own analysis is
             not due yet, including for a `--allow-same-day-rerun` sibling.
+        mode: Whether this run is `live` or `dry_run`.
         is_historical: Whether this run replays an explicit `--as-of` date.
 
     Returns:
         One JSON-serializable record per gap for `runs.metadata_json`, newest
         first; empty when there is nothing to report or the check failed.
     """
-    if is_historical:
+    if mode is not RunMode.LIVE or is_historical:
         return []
     try:
         incomplete = find_incomplete_runs(
@@ -205,25 +223,54 @@ def _prior_analysis_gaps(
             Path(deps.output_dir),
             since=run_date - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS),
         )
+        gaps = [
+            run
+            for run in incomplete
+            if run.kind is IncompleteRunKind.ANALYSIS_MISSING
+            and run.run_date < run_date
+            and not (run.path / HISTORICAL_REPLAY_FILENAME).exists()
+        ]
+        for gap in gaps:
+            _emit_analysis_gap(gap)
+        return [
+            {
+                "reason": _ANALYSIS_GAP_REASON,
+                "run_id": str(gap.run_id),
+                "run_date": gap.run_date.isoformat(),
+                "run_directory": str(gap.path),
+            }
+            for gap in gaps
+        ]
     except Exception:
         logger.exception("prior-run analysis gap check failed: continuing without it")
         return []
-    gaps = [
-        run
-        for run in incomplete
-        if run.kind is IncompleteRunKind.ANALYSIS_MISSING and run.run_date < run_date
-    ]
-    for gap in gaps:
-        _emit_analysis_gap(gap)
-    return [
-        {
-            "reason": _ANALYSIS_GAP_REASON,
-            "run_id": str(gap.run_id),
-            "run_date": gap.run_date.isoformat(),
-            "run_directory": str(gap.path),
-        }
-        for gap in gaps
-    ]
+
+
+def _mark_historical_replay(analysis_input_path: Path, ctx: _RunContext) -> None:
+    """Stamp a replay's export so later live runs never read it as a gap.
+
+    Written beside the `analysis_input.json` it describes, because that file
+    is what makes a directory look like an analysis was owed for that day
+    (`find_incomplete_runs` ignores directories without one). The daily run
+    exports for a replay exactly as it does for a live run, so the stamp is
+    the only durable evidence that no skill session was ever going to answer.
+
+    Fail-soft: a replay's purpose is the report it rebuilds, so a marker that
+    cannot be written is logged and the run continues. The cost of that rare
+    case is a false gap report from the next live run -- a warning, not a
+    stopped run.
+    """
+    try:
+        write_json_atomically(
+            analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME,
+            {"run_id": str(ctx.run_id), "as_of": ctx.run_date.isoformat()},
+        )
+    except OSError:
+        logger.exception(
+            "historical replay marker write failed: a later run may report "
+            "run %s as an analysis gap",
+            ctx.run_id,
+        )
 
 
 def _emit_analysis_gap(gap: IncompleteRun) -> None:
@@ -296,7 +343,9 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     # Checked after the rerun guard so an aborted rerun never emits a warning
     # about a day it is not going to record anyway.
-    analysis_gaps = _prior_analysis_gaps(deps, run_date, is_historical=is_historical)
+    analysis_gaps = _prior_analysis_gaps(
+        deps, run_date, mode=mode, is_historical=is_historical
+    )
 
     config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
     # Issue #189: record what that hash stands for before anything reads it.
@@ -519,6 +568,10 @@ def _run_soft_steps(
         )
     _record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
     degraded = degraded or not export_outcome.success
+    if options.as_of is not None and analysis_input_path is not None:
+        # Issue #254: a replay's export is nobody's to answer, and only a
+        # stamp left next to it can still say so tomorrow.
+        _mark_historical_replay(analysis_input_path, ctx)
 
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:

@@ -45,9 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   分析が**古い方の兄弟**にあるケースを誤検知するが、`find_incomplete_runs()` はそれを
   `SAME_DAY_SUPERSEDED` として既に分類している。報告するのは `ANALYSIS_MISSING` のみで
   （`dashboard/queries.py` と同じ絞り込み）、対象は `run_date` より厳密に前かつ直近7日以内。
-  **`--as-of` のヒストリカルリプレイでは検知しない**——リプレイは誰も答えない
-  `analysis_input.json` を書くため、次の実運用 run が恒久的に誤った欠落を記録してしまう。
-  **fail-soft** で、過去日の欠落も検知処理自体の失敗も当日の run を止めない。露出は
+  検知するのは **live かつ非リプレイの run だけ**である。`--dry-run` は専用DB・専用ツリー
+  (`reports/dry_run`)を持つ使い捨てモードだがステップ6はそこにも `analysis_input.json` を
+  書くため、gate が無いと数日空けた2回目の dry run が1回目を欠落として報告してしまう。
+  `--as-of` リプレイは実行中の報告を抑止するだけでは足りず(残った run ディレクトリを次の
+  live run が見分けられない)、リプレイが自分の export に `historical_replay.json` を並べて
+  置き、プリフライトがそれを持つディレクトリを除外する。**fail-soft** で、過去日の欠落も
+  検知処理自体の失敗も当日の run を止めない——stderr への書き込みも同じ `try` の内側に置く
+  (`copilot-daily 2>&1 | head` のような閉じたパイプの `BrokenPipeError` が `start_run()`
+  以前に日次 run を丸ごと殺さないため)。露出は
   `sys.stderr` へ直接書く行頭一致のタグ
   `ANALYSIS_GAP[missing_analysis_result]: run_date=... run_id=... run_directory=...`
   （`logger.warning` ではない: フォーマッタが timestamp/level を前置するとタグが行頭から

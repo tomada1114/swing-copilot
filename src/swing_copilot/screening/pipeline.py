@@ -33,6 +33,7 @@ from swing_copilot.screening.rejection_classifier import (
     RejectionPlan,
     classify_rejections,
 )
+from swing_copilot.screening.technical_signals import MINERVINI_CRITERIA_TOTAL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -82,10 +83,16 @@ _ATR_PCT_NORMALIZATION = 0.06
 # component reaches 0. Symmetric around the pivot -- a setup coiling just under
 # it and one that has just cleared it are both "at the pivot", while a name
 # already 5% past it is the extended entry the VCP method exists to avoid.
+# Deliberately a fixed absolute width (like `_ATR_PCT_NORMALIZATION`), so the
+# same distance always earns the same value across runs. It happens to equal
+# the shipped `vcp.chase_pivot_pct`, which caps how far above the pivot a hit
+# can be: raising that setting therefore widens the admitted band beyond this
+# one, and every candidate past 5% ties at 0.0 here.
 _PIVOT_PROXIMITY_NORMALIZATION = 0.05
 #: Denominator of the `criteria_met` component: the Minervini trend template's
-#: seven conditions (P5-21).
-_MINERVINI_CRITERIA_TOTAL = 7.0
+#: conditions (P5-21), shared with the signal that counts them so the two
+#: cannot normalize against different totals.
+_MINERVINI_CRITERIA_TOTAL = float(MINERVINI_CRITERIA_TOTAL)
 #: Denominator of the `rs_percentile` component: `minervini_rs_percentile` is
 #: recorded on a 0-100 scale.
 _RS_PERCENTILE_SCALE = 100.0

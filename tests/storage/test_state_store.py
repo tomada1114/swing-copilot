@@ -12,6 +12,7 @@ import duckdb
 import pytest
 from duckdb import ConstraintException
 
+from swing_copilot.config import ScoreWeights
 from swing_copilot.models import Position, RunMode, RunStatus, StepStatus
 from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
 from swing_copilot.screening.base import (
@@ -24,6 +25,7 @@ from swing_copilot.screening.base import (
     TruncatedCandidate,
 )
 from swing_copilot.storage.audit_records import (
+    _CANDIDATE_SCORE_KEYS,
     ScreeningRunMeta,
     SignalOutcomeRecord,
     UniverseForwardReturnRecord,
@@ -1853,6 +1855,17 @@ class TestRecordSignalHits:
 
 class TestPromotedCandidateColumns:
     """Issue #192: the ranking key as columns, written straight from `Candidate`."""
+
+    def test_the_promoted_keys_are_exactly_the_score_weights_fields(self):
+        # `storage/` writes these through hand-written SQL, so the key list is
+        # hand-maintained. Pin it against `ScoreWeights`: a component added
+        # there without a column here is scored and summed into `score` but
+        # never persisted, so `score` in DuckDB stops equalling the sum of its
+        # component columns.
+        assert (
+            "score",
+            *(f"score_{name}" for name in ScoreWeights.model_fields),
+        ) == _CANDIDATE_SCORE_KEYS
 
     def _candidate(
         self,

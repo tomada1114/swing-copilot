@@ -149,7 +149,7 @@ def outcomes_fallback(entry: ScorecardEntry | None) -> fmt.Cell:
 
 
 def score_component_stats(values: Mapping[str, object] | None) -> tuple[Stat, ...]:
-    """The four ranking-score components as labelled figures.
+    """Every `SCORE_COMPONENTS` entry as a labelled figure.
 
     A `None` mapping means the symbol has no candidate row in this run at
     all, which reads as `absent` rather than as a zero contribution.

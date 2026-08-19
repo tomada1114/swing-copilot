@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from swing_copilot.analysis.context import (
+    _SCORE_METRIC_KEYS,
     format_decision_history,
     format_market_regime,
     format_performance_summary,
@@ -16,6 +17,7 @@ from swing_copilot.analysis.context import (
     format_score_breakdown,
 )
 from swing_copilot.analysis.safety import check_display_texts
+from swing_copilot.config import ScoreWeights
 from swing_copilot.paper.journal import PerformanceSummary
 from swing_copilot.regime.distribution import (
     DataQuality,
@@ -76,6 +78,16 @@ def _performance(closed: int) -> PerformanceSummary:
 
 
 class TestScoreBreakdown:
+    def test_the_rendered_keys_are_exactly_the_score_weights_fields(self):
+        # `analysis/` must not import `config` (config imports `analysis`), so
+        # the key list here is hand-maintained. Pin it against `ScoreWeights`
+        # instead: a component added there without being added here would be
+        # summed into `score` by `screening/pipeline.py` yet never rendered,
+        # leaving 合計スコア larger than the 加重後 lines beneath it.
+        expected = ("score", *(f"score_{n}" for n in ScoreWeights.model_fields))
+
+        assert expected == _SCORE_METRIC_KEYS
+
     def test_it_renders_every_weighted_component(self):
         block = format_score_breakdown(_candidate(**_full_score_metrics()))
 

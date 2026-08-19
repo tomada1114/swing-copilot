@@ -116,9 +116,14 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
 
 ## サブエージェント入力スライス【読み取り専用・作業用】
 
-`analysis_input.json` が大きい場合、統括は専門家ごと・銘柄ごとに必要な範囲だけを
+`analysis_input.json` は大きいので、専門家ごと・銘柄ごとに必要な範囲だけを
 読み取り専用ファイルへ切り出して渡す。これはコンテキスト消費を抑えるための
 **作業用の輸送形式**であり、`AnalysisInput` の JSON スキーマでも、成果物でもない。
+
+**手で切り出さず、`uv run copilot-export-slices <analysis_input.json> --out-dir
+<scratchpad>/slices` が生成する**（Issue #260）。ファイル名は
+`slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` / `screening`）で、
+`analysis_work/<kind>-<SYMBOL>.json` の断片と取り違えないよう `slice-` が付く。
 置き場所は**セッションの scratchpad ディレクトリ配下**とし、`<WORKDIR>` 配下
 （`analysis_work/` を含む）やリポジトリ配下には置かない。実行後に削除もしない
 （SKILL.md「一時ファイルと後始末」を参照）。
@@ -128,6 +133,7 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   "run_id": "11111111-2222-3333-4444-555555555555", // 元 input から逐語コピー
   "as_of": "2026-07-27",                            // 元 input から逐語コピー
   "input_digest": "<input の値を逐語コピー>",        // 元 input 全体の digest。slice の再計算値ではない
+  "kind": "news",                                   // news | filings | screening
   "context": { "...": "担当分析に必要な run-wide context のみ" },
   "candidate": {
     "symbol": "AAPL",
@@ -138,15 +144,24 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
 
 - 元入力の `run_id` / `as_of` / `input_digest` は必ず含め、専門家は断片出力の同名 3 値へ
   逐語コピーする。統括は元の `analysis_input.json` と一致を確認する
-- `source_id` と、その専門家が分析する `summary` / `text` は元入力から逐語コピーする。
+- `source_id` と、その専門家が分析する `summary` / `text` は元入力から逐語コピーされる。
   担当対象の source object を要約・再採番・省略しない
-- ニュース／開示スライスには担当銘柄の該当 source object だけを、スクリーニング
-  スライスにはその銘柄の決定論的入力と必要な run-wide context だけを入れる。担当外の
-  候補や長文テキストを入れない
-- ニューススライスには `news_supply`（あれば）も逐語コピーする。自社材料の供給量は
-  ニュース担当が申告する対象であり、落とすと申告経路が切れる
+- ニュース／開示スライスには担当銘柄の該当 source object だけが、スクリーニング
+  スライスにはその銘柄の決定論的入力（`score_breakdown` / `risk_constraints` /
+  `decision_history` / `prior_verdicts`）と run-wide context（`market_regime` /
+  `performance_summary` / `calendar_events`）だけが入る。担当外の候補や長文テキストは
+  入らない
+- ニューススライスには `news_supply`（元入力にあれば）も逐語コピーされる。自社材料の
+  供給量はニュース担当が申告する対象であり、落とすと申告経路が切れる。ただし
+  news スライスが作られるのは `news` が非空の銘柄だけである——`news` が空の銘柄は
+  `analyze-news` と AC14 により `news_summary: null` を書くことになっており、
+  スライスを渡しても供給量（Issue #130）の申告はレポートへ届かない。届かせるには
+  専門家側の規約変更が要り、別イシューで追う
 - スライスは `analysis_input.json` を置き換えない。digest は元入力全体に対する値なので、
   スライス単体で digest を再計算・検証しない
+- スライスは strict スキーマ（`extra="forbid"`、`analysis/slices.py` の `InputSlice`）
+  で検証されてから書かれ、同じ入力からは常にバイト同一になる（キー順・UTF-8・LF・
+  末尾改行 1 個を固定し、時刻やパスなど実行環境依存の値を含めない）
 
 ## analysis_input.json（Python が生成、読み取り専用）
 

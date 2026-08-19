@@ -623,41 +623,100 @@ def _fetched_record(
     )
 
 
-class TestHasFundamentalsFetchedOn:
-    def test_returns_true_when_fetched_exactly_on_day(self, market_store):
+class TestFundamentalsFetchLog:
+    """Issue #258: per-symbol EDGAR poll bookkeeping, separate from records.
+
+    The log answers "when did we last *ask* EDGAR about this symbol", which
+    `fundamentals.fetched_at` structurally cannot: a symbol with no XBRL
+    facts in the lookback window persists no row at all.
+    """
+
+    def test_records_and_reads_back_the_fetch_day(self, market_store):
+        market_store.record_fundamentals_fetches(
+            ["AAPL"], datetime(2026, 7, 20, 9, tzinfo=UTC)
+        )
+
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {
+            "AAPL": date(2026, 7, 20)
+        }
+
+    def test_omits_a_symbol_that_was_never_fetched(self, market_store):
+        market_store.record_fundamentals_fetches(
+            ["MSFT"], datetime(2026, 7, 20, 9, tzinfo=UTC)
+        )
+
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {}
+
+    def test_a_later_fetch_replaces_the_recorded_time(self, market_store):
+        market_store.record_fundamentals_fetches(
+            ["AAPL"], datetime(2026, 7, 20, 9, tzinfo=UTC)
+        )
+        market_store.record_fundamentals_fetches(
+            ["AAPL"], datetime(2026, 7, 27, 9, tzinfo=UTC)
+        )
+
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {
+            "AAPL": date(2026, 7, 27)
+        }
+
+    def test_records_a_symbol_that_yielded_no_fundamentals_row(self, market_store):
+        """The gap `fundamentals.fetched_at` cannot cover.
+
+        A successful fetch that found no facts in the window writes no
+        `fundamentals` row, so without this table the symbol would look
+        never-fetched and be re-polled on every single run forever.
+        """
+        market_store.record_fundamentals_fetches(
+            ["AAPL"], datetime(2026, 7, 20, 9, tzinfo=UTC)
+        )
+
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {
+            "AAPL": date(2026, 7, 20)
+        }
+        with market_store.get_connection() as conn:
+            assert conn.execute("SELECT count(*) FROM fundamentals").fetchone() == (0,)
+
+    def test_upserting_fundamentals_alone_records_no_fetch(self, market_store):
+        """The two are deliberately independent bookkeeping.
+
+        `upsert_fundamentals` is also reached by `copilot-backfill`, which is
+        a historical bulk load, not a freshness poll; only the daily step's
+        own successful fetch may claim the symbol was polled.
+        """
         market_store.upsert_fundamentals(
             [_fetched_record("AAPL", "acc-1", datetime(2026, 7, 20, 9, tzinfo=UTC))]
         )
 
-        assert market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {}
 
-    def test_returns_false_for_a_symbol_with_no_fundamentals(self, market_store):
-        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+    def test_reading_no_symbols_never_touches_the_database(self, market_store):
+        assert market_store.read_fundamentals_fetch_dates([]) == {}
 
-    def test_returns_false_when_fetched_one_day_before(self, market_store):
-        market_store.upsert_fundamentals(
-            [
-                _fetched_record(
-                    "AAPL", "acc-1", datetime(2026, 7, 19, 23, 59, tzinfo=UTC)
-                )
-            ]
+    def test_recording_no_symbols_is_a_no_op(self, market_store):
+        market_store.record_fundamentals_fetches(
+            [], datetime(2026, 7, 20, 9, tzinfo=UTC)
         )
 
-        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {}
 
-    def test_returns_false_when_fetched_one_day_after(self, market_store):
-        market_store.upsert_fundamentals(
-            [_fetched_record("AAPL", "acc-1", datetime(2026, 7, 21, 0, 0, tzinfo=UTC))]
+    def test_a_failing_row_rolls_the_whole_batch_back(self, market_store):
+        """One logical multi-row write, all-or-nothing (AGENTS.md storage rule).
+
+        `symbol` is the primary key, so a `None` symbol fails on the *second*
+        row -- after the first one has already been inserted successfully.
+        """
+        market_store.record_fundamentals_fetches(
+            ["AAPL"], datetime(2026, 7, 20, 9, tzinfo=UTC)
         )
 
-        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+        with pytest.raises(ConstraintException):
+            market_store.record_fundamentals_fetches(
+                ["MSFT", cast("str", None)], datetime(2026, 7, 27, 9, tzinfo=UTC)
+            )
 
-    def test_only_matches_the_requested_symbol(self, market_store):
-        market_store.upsert_fundamentals(
-            [_fetched_record("MSFT", "acc-1", datetime(2026, 7, 20, 9, tzinfo=UTC))]
-        )
-
-        assert not market_store.has_fundamentals_fetched_on("AAPL", date(2026, 7, 20))
+        assert market_store.read_fundamentals_fetch_dates(["AAPL", "MSFT"]) == {
+            "AAPL": date(2026, 7, 20)
+        }
 
 
 class TestEarliestBarDates:

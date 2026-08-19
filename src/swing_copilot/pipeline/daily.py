@@ -143,6 +143,12 @@ _FILING_FORM_TYPES = ["8-K", "10-Q"]
 _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
 )
+#: `docs/03_basic_design.md` 8.3's "weekly" fundamentals refresh, in days.
+#: Not a config knob: it is a fixed property of the NFR-03 time-budget design
+#: (S&P 500 companies report quarterly, so a weekly poll cannot miss a
+#: reporting cycle), and the new-filing trigger already handles the case a
+#: shorter interval would be reached for.
+_FUNDAMENTALS_REFRESH_INTERVAL_DAYS = 7
 _DECISION_HISTORY_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
 _RETRO_NOTE_DETAIL_LIMIT = 3
@@ -567,35 +573,101 @@ def _run_step_prices(
     return _StepOutcome(True, detail)
 
 
-def _fetch_or_skip_fundamentals(
-    market_store: MarketStore,
-    edgar_client: _EdgarClientLike,
-    symbol: str,
-    today: date,
-    as_of_cutoff: datetime,
-) -> tuple[list[FundamentalsRecord], bool, bool]:
-    """Fetch one symbol's fundamentals, or skip a same-day rerun.
+@dataclass(frozen=True, slots=True)
+class _FundamentalsFreshness:
+    """Which symbols the incremental fundamentals refresh still owes a fetch.
+
+    Implements `docs/03_basic_design.md` 8.3's rule -- "weekly, and only for
+    symbols with a new filing since the last fetch" -- as a decision made
+    once per run from two batched reads, so the per-symbol loop adds no
+    query and (crucially) no extra EDGAR request. A symbol is fetched when
+    **any** of these holds; otherwise its network fetch is skipped:
+
+    - it has never been fetched (nothing recorded, so nothing can be
+      assumed stale *or* fresh);
+    - `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` or more have elapsed since the
+      last fetch (the "weekly" half, and the universal backstop -- it is the
+      only rule that covers a symbol text collection never touched);
+    - a filing already collected by FR-07 is dated on or after the last
+      fetch day (the "new filing" half).
+
+    The new-filing comparison is deliberately at *day* granularity and
+    inclusive on both sides. A 10-Q accepted at 16:30 ET is stored as that
+    day's date at midnight UTC, i.e. earlier than the same day's fetch
+    timestamp, so a strict `filing > last_fetch` instant comparison would
+    silently drop a filing submitted after the run. Being inclusive costs at
+    most one extra fetch and is self-limiting: that fetch moves the last-fetch
+    day past the filing date, so the trigger does not repeat.
+
+    Freshness is bookkeeping only. Nothing here loosens the point-in-time
+    contract: `filed_at <= as_of` still decides what a fetch may return and
+    what any reader may see.
+    """
+
+    #: Wall-clock day (injected `Clock`), never `as_of`: the fetch log holds
+    #: real fetch timestamps, so measuring elapsed days against a past
+    #: `--as-of` would report an absurd age and refetch everything (P6-25).
+    today: date
+    last_fetched_on: dict[str, date]
+    latest_filing_on: dict[str, date]
+
+    def needs_fetch(self, symbol: str) -> bool:
+        """Return whether `symbol` still needs a network fetch this run."""
+        last_fetched_on = self.last_fetched_on.get(symbol)
+        if last_fetched_on is None:
+            return True
+        if (self.today - last_fetched_on).days >= _FUNDAMENTALS_REFRESH_INTERVAL_DAYS:
+            return True
+        latest_filing_on = self.latest_filing_on.get(symbol)
+        return latest_filing_on is not None and latest_filing_on >= last_fetched_on
+
+
+def _load_fundamentals_freshness(
+    deps: DailyDependencies, symbols: list[str], as_of: date, today: date
+) -> _FundamentalsFreshness:
+    """Batch-read the two inputs the incremental refresh rule decides from.
 
     Args:
-        market_store: Used for the same-day-fetch check and, by the caller,
-            the eventual upsert.
+        deps: Run dependencies (`market_store` fetch log, `state_store`
+            collected filing metadata).
+        symbols: The step's full symbol list.
+        as_of: Point-in-time cutoff applied to collected filing dates.
+        today: Wall-clock day used for the elapsed-days rule.
+
+    Returns:
+        The freshness decision object; see `_FundamentalsFreshness`.
+    """
+    return _FundamentalsFreshness(
+        today=today,
+        last_fetched_on=deps.market_store.read_fundamentals_fetch_dates(symbols),
+        latest_filing_on=deps.state_store.latest_filing_dates(symbols, as_of=as_of),
+    )
+
+
+def _fetch_or_skip_fundamentals(
+    freshness: _FundamentalsFreshness,
+    edgar_client: _EdgarClientLike,
+    symbol: str,
+    as_of_cutoff: datetime,
+) -> tuple[list[FundamentalsRecord], bool, bool]:
+    """Fetch one symbol's fundamentals, or skip it as still fresh.
+
+    Args:
+        freshness: This run's precomputed incremental-refresh decision.
         edgar_client: Configured EDGAR client (never `None` here).
         symbol: Ticker to fetch.
-        today: Wall-clock calendar date (from the injected `Clock`), compared
-            against `fetched_at`'s date to detect a same-day rerun. Must not
-            be `as_of` -- `fetched_at` is a real fetch timestamp, so a past
-            `--as-of` would never match it and every run would refetch (P6-25).
         as_of_cutoff: `as_of` widened to end-of-day UTC for the filing cutoff.
 
     Returns:
         `(records, failed, was_skipped)`. `failed` is `True` only if the
-        network fetch itself raised; a same-day skip is never a failure.
+        network fetch itself raised; a freshness skip is never a failure, and
+        a fetch that legitimately returned no record is neither.
     """
-    if market_store.has_fundamentals_fetched_on(symbol, today):
+    if not freshness.needs_fetch(symbol):
         logger.debug(
-            "fundamentals: %s already fetched today (%s), skipping fetch",
+            "fundamentals: %s still fresh (last fetched %s), skipping fetch",
             symbol,
-            today,
+            freshness.last_fetched_on.get(symbol),
         )
         return [], False, True
     try:
@@ -648,16 +720,19 @@ def _run_step_fundamentals(
 
     Three fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
 
-    - Same-day rerun skip: a symbol already fetched today (`fetched_at`'s
-      date == `deps.clock.today()`) is not re-fetched over the network. This
-      is deliberately the injected `Clock`'s wall-clock date, not `as_of`:
-      `fetched_at` is a real fetch timestamp, so comparing it against a
-      possibly-past `as_of` would never match and every rerun would refetch
-      over the network regardless of `--as-of` (P6-25). Point-in-time
+    - Incremental refresh (`_FundamentalsFreshness`, Issue #258): a symbol is
+      re-fetched only when it has never been fetched, when
+      `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` have elapsed since its last
+      fetch, or when an already-collected filing is dated on or after that
+      last fetch -- `docs/03_basic_design.md` 8.3's weekly/incremental rule.
+      Ages are measured against the injected `Clock`'s wall-clock date, not
+      `as_of`: the fetch log holds real fetch timestamps, so measuring
+      against a possibly-past `--as-of` would report an absurd age and
+      refetch everything regardless of `--as-of` (P6-25). Point-in-time
       correctness is unaffected -- callers still read fundamentals filtered
-      by `as_of`, never by `fetched_at`. Correction semantics are also
-      unaffected — the next day's run always re-fetches and upserts by
-      `accession_no`.
+      by `as_of`, never by fetch bookkeeping. Correction semantics are also
+      unaffected: every fetch still upserts by `accession_no`, and a new
+      filing is exactly what forces an early re-fetch.
     - NFR-03 time budget: once `deps.monotonic() >= deadline`, fetching
       stops early with whatever records were already gathered upserted, and
       the step still succeeds (not fatal) with a detail explaining the
@@ -676,11 +751,13 @@ def _run_step_fundamentals(
         )
 
     today = deps.clock.today()
+    freshness = _load_fundamentals_freshness(deps, symbols, as_of, today)
     as_of_cutoff = datetime.combine(as_of, datetime.max.time(), tzinfo=UTC)
     total = len(symbols)
     records: list[FundamentalsRecord] = []
     failed_symbols: list[str] = []
-    skipped_same_day = 0
+    fetched_symbols: list[str] = []
+    skipped_fresh = 0
     budget_detail: str | None = None
 
     for index, symbol in enumerate(_fundamentals_fetch_order(symbols, held_symbols)):
@@ -689,24 +766,38 @@ def _run_step_fundamentals(
             logger.warning("fundamentals step stopping early: %s", budget_detail)
             break
         symbol_records, failed, was_skipped = _fetch_or_skip_fundamentals(
-            deps.market_store, edgar_client, symbol, today, as_of_cutoff
+            freshness, edgar_client, symbol, as_of_cutoff
         )
         records.extend(symbol_records)
         failed_symbols.extend([symbol] if failed else [])
-        skipped_same_day += 1 if was_skipped else 0
+        if not failed and not was_skipped:
+            fetched_symbols.append(symbol)
+        skipped_fresh += 1 if was_skipped else 0
         _log_fundamentals_progress(index + 1, total)
         deps.progress.substep(index + 1, total, "fundamentals")
 
-    if skipped_same_day:
+    if skipped_fresh:
         logger.debug(
-            "fundamentals: skipped %d/%d symbol(s) already fetched today",
-            skipped_same_day,
+            "fundamentals: skipped %d/%d symbol(s) still fresh",
+            skipped_fresh,
             total,
         )
     if records:
         deps.market_store.upsert_fundamentals(records)
+    # Stamped only after the upsert commits, and only for symbols whose fetch
+    # actually succeeded: a failed fetch must be retried by the next run, and
+    # a failed upsert must not leave the symbols it lost marked as fetched.
+    # A success that yielded no record *is* stamped -- that symbol simply has
+    # no XBRL facts in the window, and not recording it would re-fetch it
+    # every single run (the gap the dedicated fetch log exists to close).
+    deps.market_store.record_fundamentals_fetches(fetched_symbols, deps.clock.now())
 
-    if failed_symbols and not records and budget_detail is None:
+    # "Every symbol we were going to fetch failed" -- the signal that EDGAR
+    # itself is down. Deliberately requires `not skipped_fresh`: once the
+    # incremental rule is skipping most of the universe, a transient failure
+    # on the handful of symbols that were due must stay a partial failure,
+    # not escalate into a fatal step.
+    if failed_symbols and not records and not skipped_fresh and budget_detail is None:
         return _StepOutcome(
             False, f"EDGAR fetch failed for every symbol: {failed_symbols}"
         )

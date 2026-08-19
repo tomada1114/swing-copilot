@@ -19,8 +19,10 @@ from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
+    _FUNDAMENTALS_REFRESH_INTERVAL_DAYS,
     DailyDependencies,
     _config_hash,
+    _FundamentalsFreshness,
     _select_symbols,
     run_daily,
 )
@@ -34,6 +36,7 @@ from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
 from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 
 AS_OF = date(2027, 3, 1)
@@ -1019,12 +1022,15 @@ class TestFundamentalsSameDaySkip:
     ):
         """Regression for P6-25.
 
-        `has_fundamentals_fetched_on` must be checked against the injected
-        `Clock`'s wall-clock date, not `as_of`: `fetched_at` is a real fetch
-        timestamp, so a same-day rerun with a *past* `--as-of` must still
+        Fetch freshness must be measured against the injected `Clock`'s
+        wall-clock date, not `as_of`: the fetch log holds real fetch
+        timestamps, so a same-day rerun with a *past* `--as-of` must still
         skip the redundant EDGAR network fetch. Before this fix, the check
-        compared `fetched_at`'s date to `as_of` directly, which never
+        compared the recorded fetch date to `as_of` directly, which never
         matched once `as_of` was in the past, so every rerun refetched.
+        (Issue #258 moved the bookkeeping from `fundamentals.fetched_at` to
+        `fundamentals_fetch_log`; this P6-25 invariant is unchanged, and the
+        same-day skip is now the incremental rule's "0 elapsed days" case.)
         """
         past_as_of = AS_OF - timedelta(days=5)
 
@@ -1099,6 +1105,281 @@ class TestFundamentalsSameDaySkip:
         assert first.status == RunStatus.SUCCESS
         assert second.status == RunStatus.SUCCESS
         assert edgar_client.calls == 1
+
+
+class TestFundamentalsFreshnessRule:
+    """Issue #258: `docs/03_basic_design.md` 8.3's weekly/incremental rule.
+
+    Pinned as a unit matrix because the whole point of the change is *which
+    symbols are not fetched*, and every boundary here (never fetched, exactly
+    the interval, a filing dated exactly on the last fetch day) is a place a
+    plausible off-by-one would silently either refetch the universe daily or
+    sit on stale fundamentals for a week after a 10-Q lands.
+    """
+
+    TODAY = date(2027, 3, 8)
+
+    def _freshness(self, *, last_fetched_on=None, latest_filing_on=None):
+        return _FundamentalsFreshness(
+            today=self.TODAY,
+            last_fetched_on=(
+                {} if last_fetched_on is None else {"AAPL": last_fetched_on}
+            ),
+            latest_filing_on=(
+                {} if latest_filing_on is None else {"AAPL": latest_filing_on}
+            ),
+        )
+
+    def test_a_never_fetched_symbol_is_always_fetched(self):
+        assert self._freshness().needs_fetch("AAPL")
+
+    def test_exactly_the_refresh_interval_fetches(self):
+        """The boundary is inclusive on the fetch side: 7 days old is due."""
+        last = self.TODAY - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS)
+
+        assert self._freshness(last_fetched_on=last).needs_fetch("AAPL")
+
+    def test_one_day_short_of_the_interval_skips(self):
+        last = self.TODAY - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS - 1)
+
+        assert not self._freshness(last_fetched_on=last).needs_fetch("AAPL")
+
+    def test_older_than_the_interval_fetches(self):
+        last = self.TODAY - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS + 30)
+
+        assert self._freshness(last_fetched_on=last).needs_fetch("AAPL")
+
+    def test_a_same_day_rerun_skips(self):
+        """The old same-day skip, subsumed by "0 elapsed days < 7"."""
+        assert not self._freshness(last_fetched_on=self.TODAY).needs_fetch("AAPL")
+
+    def test_a_filing_after_the_last_fetch_fetches_within_the_interval(self):
+        last = self.TODAY - timedelta(days=3)
+
+        freshness = self._freshness(
+            last_fetched_on=last, latest_filing_on=last + timedelta(days=1)
+        )
+
+        assert freshness.needs_fetch("AAPL")
+
+    def test_a_filing_dated_exactly_on_the_last_fetch_day_fetches(self):
+        """Inclusive on purpose.
+
+        A 10-Q accepted at 16:30 ET is stored as that day's date at midnight
+        UTC, i.e. *before* the same evening's fetch timestamp. A strict
+        `filing > last_fetch` comparison would drop it entirely.
+        """
+        last = self.TODAY - timedelta(days=3)
+
+        freshness = self._freshness(last_fetched_on=last, latest_filing_on=last)
+
+        assert freshness.needs_fetch("AAPL")
+
+    def test_a_filing_from_before_the_last_fetch_skips(self):
+        """Self-limiting: the triggered refetch moves the day past the filing."""
+        last = self.TODAY - timedelta(days=3)
+
+        freshness = self._freshness(
+            last_fetched_on=last, latest_filing_on=last - timedelta(days=1)
+        )
+
+        assert not freshness.needs_fetch("AAPL")
+
+    def test_no_collected_filing_falls_back_to_the_elapsed_days_rule(self):
+        """The universe outside text collection's ~30 symbols lives here."""
+        last = self.TODAY - timedelta(days=3)
+
+        assert not self._freshness(last_fetched_on=last).needs_fetch("AAPL")
+
+    def test_another_symbols_filing_never_triggers_this_one(self):
+        freshness = _FundamentalsFreshness(
+            today=self.TODAY,
+            last_fetched_on={"AAPL": self.TODAY - timedelta(days=3)},
+            latest_filing_on={"MSFT": self.TODAY},
+        )
+
+        assert not freshness.needs_fetch("AAPL")
+
+
+class _CountingEdgarClient:
+    """EDGAR fake that records *which* symbols reached the network (#258)."""
+
+    def __init__(self, records_by_symbol=None):
+        self.calls: list[str] = []
+        self._records_by_symbol = records_by_symbol or {}
+
+    def fetch_fundamentals(self, symbol, as_of):
+        del as_of
+        self.calls.append(symbol)
+        return self._records_by_symbol.get(symbol, _healthy_fundamentals(symbol))
+
+    def fetch_filing_texts(self, symbol, form_types, *, as_of, since=None, limit=None):
+        del symbol, form_types, as_of, since, limit
+        return []
+
+
+class TestFundamentalsIncrementalRefresh:
+    """Issue #258, end to end: the rule must reach the EDGAR client itself.
+
+    `TestFundamentalsFreshnessRule` pins the decision; these prove the decision
+    is what actually gates the network call, that a successful fetch stamps
+    the log, and that a symbol with no records still gets stamped.
+    """
+
+    def _deps(self, settings, market_store, state_store, tmp_path, edgar_client):
+        return DailyDependencies(
+            data_provider=FakeDataProvider(_bars_for(["AAPL"], AS_OF)),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=(_member("AAPL"),),
+            strategies_config=STRATEGIES_CONFIG,
+            clock=FakeClock(),
+            edgar_client=edgar_client,
+            output_dir=str(tmp_path / "reports"),
+        )
+
+    def _run(self, deps):
+        return run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            deps,
+        )
+
+    def _seed_fetch(self, market_store, days_ago):
+        market_store.record_fundamentals_fetches(
+            ["AAPL"],
+            datetime.combine(
+                AS_OF - timedelta(days=days_ago), datetime.min.time(), tzinfo=UTC
+            ),
+        )
+
+    def _seed_filing(self, state_store, filed_on):
+        state_store.record_text_items(
+            [
+                TextItem(
+                    source_id="edgar:0000000-27-000001",
+                    symbol="AAPL",
+                    source_type="filing",
+                    published_at=datetime.combine(
+                        filed_on, datetime.min.time(), tzinfo=UTC
+                    ),
+                    title="10-Q - AAPL",
+                    source_url="https://www.sec.gov/example",
+                    content_text="Quarterly report body.",
+                    fetched_at=datetime.combine(
+                        filed_on, datetime.min.time(), tzinfo=UTC
+                    ),
+                )
+            ]
+        )
+
+    def test_a_first_ever_run_fetches_and_stamps_the_log(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {"AAPL": AS_OF}
+
+    def test_a_recent_fetch_with_no_new_filing_skips_the_network(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        self._seed_fetch(market_store, days_ago=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS - 1)
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == []
+
+    def test_reaching_the_refresh_interval_fetches_again(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        self._seed_fetch(market_store, days_ago=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS)
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {"AAPL": AS_OF}
+
+    def test_a_filing_collected_since_the_last_fetch_forces_an_early_refetch(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        self._seed_fetch(market_store, days_ago=2)
+        self._seed_filing(state_store, AS_OF - timedelta(days=1))
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+
+    def test_a_filing_older_than_the_last_fetch_does_not_force_a_refetch(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        self._seed_fetch(market_store, days_ago=2)
+        self._seed_filing(state_store, AS_OF - timedelta(days=3))
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == []
+
+    def test_a_fetch_that_found_no_records_is_still_stamped(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Otherwise this symbol is re-polled on every run, forever."""
+        edgar_client = _CountingEdgarClient(records_by_symbol={"AAPL": []})
+
+        first = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+        second = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert first.status == RunStatus.SUCCESS
+        assert second.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {"AAPL": AS_OF}
+
+    def test_a_failed_fetch_is_not_stamped_so_the_next_run_retries(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        class FailingThenWorkingEdgarClient(_CountingEdgarClient):
+            def fetch_fundamentals(self, symbol, as_of):
+                del as_of
+                self.calls.append(symbol)
+                if len(self.calls) == 1:
+                    msg = "EDGAR is down"
+                    raise RuntimeError(msg)
+                return _healthy_fundamentals(symbol)
+
+        edgar_client = FailingThenWorkingEdgarClient()
+        deps = self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+
+        self._run(deps)
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {}
+
+        self._run(deps)
+        assert edgar_client.calls == ["AAPL", "AAPL"]
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {"AAPL": AS_OF}
 
 
 class TestFundamentalsHeldFirstOrder:
@@ -1211,20 +1492,18 @@ class TestFundamentalsHeldFirstOrder:
             None,
         )
 
-    def test_same_day_skip_still_covers_the_reordered_held_symbol(
+    def test_freshness_skip_still_covers_the_reordered_held_symbol(
         self, market_store, make_deps
     ):
-        # P6-25 semantics unchanged: `fetched_at`'s date == the injected
-        # `Clock`'s wall-clock today, not `as_of`. Promoting the holding to
-        # the front of the queue must not make it refetch over the network.
-        market_store.upsert_fundamentals(
-            [
-                replace(
-                    record,
-                    fetched_at=datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC),
-                )
-                for record in _healthy_fundamentals(_HELD_SYMBOL)
-            ]
+        # P6-25 semantics unchanged: freshness is measured against the
+        # injected `Clock`'s wall-clock today, not `as_of`. Promoting the
+        # holding to the front of the queue must not make it refetch over the
+        # network. (Issue #258 moved the bookkeeping from `fundamentals.
+        # fetched_at` to `fundamentals_fetch_log`; the ordering contract this
+        # test guards is unchanged.)
+        market_store.record_fundamentals_fetches(
+            [_HELD_SYMBOL],
+            datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC),
         )
         edgar_client = _RecordingEdgarClient()
         deps_with_holding = make_deps(edgar_client, FakeMonotonic(0.0))

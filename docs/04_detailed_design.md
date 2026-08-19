@@ -379,9 +379,17 @@ class MarketStore:
     def upsert_fundamentals(self, records: list["FundamentalsRecord"]) -> None:
         """fundamentalsへaccession_noで訂正可能なupsertを1transactionで行う。"""
 
+    def read_fundamentals_fetch_dates(self, symbols: Sequence[str]) -> dict[str, date]:
+        """銘柄ごとの最終EDGAR取得日を返す（未取得の銘柄はキーごと欠落）。"""
+
+    def record_fundamentals_fetches(self, symbols: Sequence[str], fetched_at: datetime) -> None:
+        """取得に成功した銘柄群の最終取得時刻を1transactionでupsertする。"""
+
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """DuckDB接続を返す（screening/backtestからの直接SQL利用向け）。"""
 ```
+
+**fundamentals増分リフレッシュ（Issue #258）**: `fundamentals_fetch_log`（`symbol`主キー、`last_fetched_at`）は「その銘柄について最後にEDGARへ問い合わせた壁時計時刻」だけを持つ専用テーブルである。`fundamentals.fetched_at`を転用しないのは2点の理由による。(1) 取得に成功しても取得窓内にXBRL factsが無い銘柄は`fundamentals`に1行も残さないため、行に紐づく時刻では「問い合わせた」事実を記録できず、その銘柄が毎run再取得され続ける。(2) `fetched_at`は1提出レコードの属性で`accession_no`訂正upsertが書き換えるものであり、「いつこの銘柄を polling したか」と混ぜると両者を独立に読めなくなる。`last_fetched_at`は**メタデータ**であって point-in-time の値ではなく、ここから導いた何物も`as_of`の代替にはならない——`fundamentals`から読める内容は従来どおり`filed_at <= as_of`だけが決める。判定ロジック本体は3.21節を参照。既存DBでは本テーブルは空から始まるので、導入後の初回runだけ全銘柄を1度取得し、以後は増分になる。
 
 複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。ParquetとCSVはdestinationと同じdirectoryへ一意なtemp fileを書き、成功時だけ原子的に置換する。書き込み/replace失敗時は従来destinationを保持し、tempをcleanupする。
 
@@ -1519,6 +1527,11 @@ run全体は継続する。ステップ8はエクスポートに成功したrun�
 >    スキップする（ログのみ、`run_steps.detail`には含めない）。
 >    `accession_no`キーの訂正upsert自体は変更せず、翌日以降の実行は
 >    従来どおり必ず再取得・upsertする。
+>    （**Issue #258で置換**: 同日スキップだけでは3節・8.3節が定める
+>    「週1回＋新規filingのみ」の増分更新になっていなかった。下の
+>    「増分リフレッシュ実装（Issue #258）」で置き換え、
+>    `has_fundamentals_fetched_on()`は削除した。同日再実行のスキップは
+>    増分ルールの「経過0日 < 7日」ケースとして引き続き成立する。）
 > 4. **CLI `--dry-run`契約の明確化（通知抑止）**: 旧pseudocodeが
 >    記した「`dry_run=True`の場合、fixture/fake providerを必須とし、実
 >    ネットワークを禁止する」は、CLIの`--dry-run`実装が
@@ -1563,6 +1576,17 @@ def main(argv: list[str] | None = None) -> None:
     """CLI引数をDailyRunOptionsへ変換し、実アダプタ一式をcomposeして実行、
     DailyRunResult.exit_codeでプロセスを終了する。"""
 ```
+
+**増分リフレッシュ実装（Issue #258）**: 3.6節・8.3節（`docs/03_basic_design.md`）が定める「ファンダメンタルズ更新は週1回、かつ前回取得以降に新規filingがある銘柄のみ」を、`_FundamentalsFreshness`として`_run_step_fundamentals()`の内側に実装した。従来は同日再実行スキップ（上記blockquote 3）しか無く、平日は毎営業日S&P500全銘柄のcompanyfacts取得（約3〜4分）が走っていた。
+
+- **判定**: 次のいずれかを満たす銘柄だけEDGARへ問い合わせる。(1) 取得記録が無い（初回）、(2) 前回取得日から`_FUNDAMENTALS_REFRESH_INTERVAL_DAYS = 7`日**以上**経過（ちょうど7日は取得する側。6日は取得しない）、(3) 収集済みfilingの提出日が前回取得日**以降**（同日を含む）。どれも満たさなければネットワーク取得のみをスキップする。ステップ自体と`accession_no`自然キーのupsertロジックは無条件スキップせず毎回実行するため、`docs/03_basic_design.md` 7節の冪等性原則には引き続き反しない。
+- **前回取得日時の持ち方**: `fundamentals_fetch_log`（4.2節、3.7節）。取得に成功した銘柄だけを、`upsert_fundamentals()`のコミット後に`deps.clock.now()`で1transactionにまとめてstampする。取得例外の銘柄はstampせず次runで再試行する。取得は成功したが対象窓にfactsが無かった銘柄は**stampする**（そうしないと毎run再取得になる）。
+- **新規filingの判定源**: 既に収集済みのFR-07 filingテキスト（`text_items`の`source_type='filing'`）を`StateStore.latest_filing_dates(symbols, as_of=...)`でbatch読みする。**外部API呼び出しは1件も増えない**（EDGARへの追加問い合わせ・レート制限枠の追加消費なし）。被覆はテキスト収集の対象＝保有＋候補（最大30銘柄）に等しく、それ以外の銘柄は(2)の経過日数ルールが受け持つ。テキスト収集はステップ5でファンダメンタルズ（ステップ2）より後に走るため、当日提出のfilingが効くのは翌runである。
+- **日付粒度で比較する理由**: `published_at`（=SEC提出日）はUTC 0時として保存されるので、16:30 ETに受理された10-Qは同日夕方の取得時刻より「前」になってしまう。厳密な瞬時比較（`filing > last_fetch`）だと、run後に提出されたfilingを取りこぼす。両端inclusiveの日付比較にすると余分な取得は高々1回で、その取得が前回取得日をfiling日より後ろへ動かすため自己終息する。
+- **`as_of`との関係**: 経過日数は注入`Clock`の壁時計日（`deps.clock.today()`）で測る。`fundamentals_fetch_log`が持つのは実取得時刻なので、過去の`--as-of`と比較すると常識外の経過日数になり全銘柄再取得になる（P6-25と同じ理由）。一方、収集済みfilingの可視性は`published_at <= as_of`で切る（point-in-time）。両者を混ぜないこと——前者はメタデータ、後者は時点整合性である。
+- **ファンダ鮮度へのトレードオフ（明示）**: スクリーニングのfundamental filterは`fundamentals`を`filed_at <= as_of`で読むので、新しい10-Qが提出されてからDBに入るまでの遅れがそのまま「使う四半期が1つ古いままの期間」になる。従来は最大1日、増分化後は最大7日である。ただし**保有＋候補（テキスト収集の対象）は新規filingトリガーが効いて翌runで取り込まれる**ため、7日ずれ得るのはその日の判断に使っていない銘柄だけである。四半期報告の周期と数日〜数週間のスイング保有期間に対して許容できるずれとして、8.3節の規定どおり増分化を選んでいる。
+- **致命判定の緩和**: 「全銘柄のEDGAR取得が失敗」を致命扱いする条件に`skipped_fresh == 0`を追加した。増分化でスキップが常態になると、その日取得対象だった数銘柄の一時障害がrun全体のFAILEDへ昇格してしまうため、「取得しようとした全銘柄が失敗した」という元の意味を保つ側へ寄せた。
+- **回帰テスト**: `tests/pipeline/test_daily_core.py::TestFundamentalsIncrementalRefresh`（初回/7日境界/新規filing有無/同日再実行）と`tests/storage/test_market_store.py::TestFundamentalsFetchLog`、`tests/storage/test_state_store.py::TestLatestFilingDates`。
 
 ### 3.21a `pipeline/postmortem.py`（P2-11、roadmap §5 P2-11）
 
@@ -1954,6 +1978,13 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     shares             DOUBLE,
     source_url         VARCHAR NOT NULL,
     fetched_at         TIMESTAMPTZ NOT NULL
+);
+
+-- 銘柄ごとの「最後にEDGARへ問い合わせた時刻」。増分リフレッシュ判定専用の
+-- メタデータであり、point-in-timeの値ではない（3.7、Issue #258）。
+CREATE TABLE IF NOT EXISTS fundamentals_fetch_log (
+    symbol           VARCHAR PRIMARY KEY,
+    last_fetched_at  TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS universe_membership (

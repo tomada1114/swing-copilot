@@ -163,6 +163,35 @@ ON CONFLICT (accession_no) DO UPDATE SET
     fetched_at = EXCLUDED.fetched_at
 """
 
+#: Per-symbol EDGAR fetch bookkeeping for the weekly/incremental refresh rule
+#: (`docs/03_basic_design.md` 8.3, Issue #258). Deliberately its own table
+#: rather than a column on `fundamentals`, for two reasons:
+#:
+#: - It records *asking EDGAR about a symbol*, which happens even when the
+#:   answer is "no XBRL facts in the lookback window". Hanging the timestamp
+#:   off a `fundamentals` row would leave exactly those symbols with nothing
+#:   to remember, so they would be re-fetched on every single run forever.
+#: - `fundamentals.fetched_at` is a property of one filing record and is
+#:   rewritten by the `accession_no` correction upsert; conflating it with
+#:   "when did we last poll this symbol" would make the two impossible to
+#:   reason about separately.
+#:
+#: `last_fetched_at` is *metadata* (real wall-clock fetch time), never a
+#: point-in-time value: nothing derived from it may stand in for `as_of`.
+_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS fundamentals_fetch_log (
+    symbol           VARCHAR PRIMARY KEY,
+    last_fetched_at  TIMESTAMPTZ NOT NULL
+)
+"""
+
+_UPSERT_FUNDAMENTALS_FETCH_LOG = """
+INSERT INTO fundamentals_fetch_log (symbol, last_fetched_at)
+VALUES (?, ?)
+ON CONFLICT (symbol) DO UPDATE SET
+    last_fetched_at = EXCLUDED.last_fetched_at
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class FundamentalsRecord:
@@ -260,14 +289,16 @@ class MarketStore:
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """Return a DuckDB connection ready to query fundamentals and bars.
 
-        `fundamentals` is always ensured; the `bars` view is (re)created only
-        when at least one bar partition file exists.
+        `fundamentals` and `fundamentals_fetch_log` are always ensured; the
+        `bars` view is (re)created only when at least one bar partition file
+        exists.
 
         Returns:
             A connection usable as a context manager.
         """
         conn = self._database.connect()
         conn.execute(_CREATE_FUNDAMENTALS_TABLE)
+        conn.execute(_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE)
         if self._has_partition_files():
             glob = str(self.parquet_root / "year=*" / "*.parquet")
             conn.execute(
@@ -457,37 +488,68 @@ class MarketStore:
             return None
         return FundamentalsRecord(*row)
 
-    def has_fundamentals_fetched_on(self, symbol: str, day: date) -> bool:
-        """Return whether `symbol` already has a fundamentals row fetched on `day`.
+    def read_fundamentals_fetch_dates(self, symbols: Sequence[str]) -> dict[str, date]:
+        """Read when each symbol's fundamentals were last fetched from EDGAR.
 
-        Used to skip a same-day rerun's redundant EDGAR network fetch
-        (`pipeline/daily.py`'s fundamentals step). The correction upsert
-        keyed by `accession_no` is unaffected: a later day's run always
-        re-fetches and upserts, regardless of what this returns.
-
-        `fetched_at` is a real fetch timestamp, not a point-in-time value --
-        callers must pass the injected `Clock`'s wall-clock date here, never
-        `as_of` (P6-25: comparing against a possibly-past `as_of` would never
-        match `fetched_at` and defeat the same-day skip entirely).
+        Feeds the weekly/incremental refresh rule in `pipeline/daily.py`'s
+        fundamentals step (`docs/03_basic_design.md` 8.3). The value is
+        bookkeeping *metadata* — the real wall-clock day the network fetch
+        happened — and is never a point-in-time cutoff: what a caller may
+        read out of `fundamentals` is still governed solely by `as_of`
+        against `filed_at`.
 
         Args:
-            symbol: Ticker to check.
-            day: Calendar day to compare against `fetched_at`'s date.
+            symbols: Tickers to look up; an empty sequence returns `{}`
+                without touching the database.
 
         Returns:
-            `True` if `fundamentals` has at least one row for `symbol` whose
-            `fetched_at` falls on `day`.
+            `{symbol: last fetch day}`, omitting every symbol that has never
+            been fetched (which the caller must read as "fetch it now", not
+            as "fetched long ago").
         """
+        if not symbols:
+            return {}
+        placeholders = ",".join("?" for _ in symbols)
         with self.get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT 1 FROM fundamentals
-                WHERE symbol = ? AND CAST(fetched_at AS DATE) = ?
-                LIMIT 1
-                """,
-                [symbol, day],
-            ).fetchone()
-        return row is not None
+            rows = conn.execute(
+                f"SELECT symbol, CAST(last_fetched_at AS DATE) "  # noqa: S608 - placeholders only, values are bound
+                f"FROM fundamentals_fetch_log WHERE symbol IN ({placeholders})",
+                list(symbols),
+            ).fetchall()
+        return dict(rows)
+
+    def record_fundamentals_fetches(
+        self, symbols: Sequence[str], fetched_at: datetime
+    ) -> None:
+        """Stamp `symbols` as fetched from EDGAR at `fetched_at`, atomically.
+
+        Recorded for every symbol whose network fetch *succeeded*, including
+        one that legitimately yielded no record (no XBRL facts in the
+        lookback window) — that is precisely the case a `fundamentals`-row
+        timestamp cannot represent, and leaving it unrecorded would re-fetch
+        the symbol on every run forever.
+
+        A symbol whose fetch raised must not be passed here, so the next run
+        retries it.
+
+        Args:
+            symbols: Tickers to stamp; an empty sequence is a no-op.
+            fetched_at: Wall-clock fetch instant, from the injected `Clock`.
+                Never `as_of` — a past `as_of` would make the record claim a
+                fetch that did not happen then (P6-25).
+        """
+        if not symbols:
+            return
+        with self.get_connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for symbol in symbols:
+                    conn.execute(_UPSERT_FUNDAMENTALS_FETCH_LOG, [symbol, fetched_at])
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            else:
+                conn.execute("COMMIT")
 
     def read_filing_dates(
         self, symbols: Sequence[str], forms: Sequence[str], as_of: date

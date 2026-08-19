@@ -227,7 +227,7 @@ class TestReadFailures:
         path = tmp_path / REPORT_CONTEXT_FILENAME
         path.write_text(json.dumps({"schema_version": "v0"}), encoding="utf-8")
 
-        with pytest.raises(AnalysisIngestError, match="failed validation"):
+        with pytest.raises(AnalysisIngestError, match="but this build expects"):
             read_report_context(path)
 
     def test_an_unknown_run_status_is_a_hard_failure(self, tmp_path):
@@ -267,3 +267,60 @@ class TestReadFailures:
 
         with pytest.raises(AnalysisIngestError, match="failed validation"):
             read_report_context(path)
+
+
+class TestSchemaVersionMismatch:
+    """Issue #296: a schema generation bump must fail loudly and explicitly.
+
+    `BriefCandidate` gained three required fields (`score_pivot_proximity`,
+    `score_rs_percentile`, `score_criteria_met`) in Issue #251 without a
+    matching `CONTEXT_SCHEMA_VERSION` bump. A `report_context.json` written by
+    an older build would then fail deep inside `_BRIEF_ADAPTER.validate_python`
+    with a raw pydantic "Field required" error instead of a message that names
+    the actual cause (schema generation mismatch) and its recovery (re-run
+    `copilot-daily`).
+    """
+
+    def test_a_prior_generation_context_fails_with_an_explicit_generation_mismatch(
+        self, tmp_path
+    ):
+        """A v2 file with the three new fields missing must not reach pydantic.
+
+        This fixture would ALSO fail `_BRIEF_ADAPTER.validate_python` on its
+        own merits (the three fields are missing and undefaulted), so this
+        pins that the generation check runs first and wins -- not that it
+        merely happens to produce *some* `AnalysisIngestError`.
+        """
+        path = write_report_context(_context(RunStatus.SUCCESS, tmp_path), tmp_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["schema_version"] = "report-context-v2"
+        candidate = payload["brief"]["candidates"][0]
+        for field in (
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
+        ):
+            del candidate[field]
+        payload["context_digest"] = canonical_json_digest(
+            payload, excluded_field="context_digest"
+        )
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(AnalysisIngestError) as exc_info:
+            read_report_context(path)
+
+        message = str(exc_info.value)
+        assert "report-context-v2" in message
+        assert "report-context-v3" in message
+        assert "copilot-daily" in message
+        assert "Field required" not in message
+        assert "score_pivot_proximity" not in message
+
+    def test_the_current_generation_still_round_trips(self, tmp_path):
+        context = _context(RunStatus.SUCCESS, tmp_path / "reports")
+
+        path = write_report_context(context, tmp_path / "reports" / "2027-03-01")
+        reloaded = read_report_context(path)
+
+        assert reloaded.brief == context.brief
+        assert CONTEXT_SCHEMA_VERSION == "report-context-v3"

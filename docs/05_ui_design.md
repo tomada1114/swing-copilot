@@ -86,7 +86,7 @@ reports/
 
 Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、判断記録、免責文を含める。
 
-各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v2`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
+各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v3`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
 
 同じディレクトリには`rejections.json`（schema `rejections-v1`、`report/rejections.py`）も置く。Markdownの「落選サマリ」がreason_code別の件数しか出さないのに対し、こちらは落選銘柄の明細（`symbol`・`stage`・`reason_code`・`detail`）と、全ステージを通過したのに`candidate_limit`で切り捨てられた銘柄の明細（`truncated_by_candidate_limit`: `symbol`・`rank`・`score`・スコア内訳・実行状態）を残す。後者はDuckDBの`screening_rejections`にも載らない——落選理由コードは閉じたenumであり、順位落ちは落選ではないためで、run成果物としてはこのファイルだけが記録する。定性分析の3ファイルとは異なりdigestで束縛せず、読み戻す経路も持たない診断用の成果物である。
 

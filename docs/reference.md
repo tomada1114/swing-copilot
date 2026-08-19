@@ -220,7 +220,7 @@ quote側の数値から10のべき乗（千/百万/billion/million/億/万）で
 
 `analysis/cli.py`（`copilot-ingest-analysis`）はネットワークにも接続せず、
 スクリーニング・リスク・ランキングを再計算しない。日次runが
-`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v2`、
+`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v3`、
 表示非依存の`DailyBrief`のスナップショット）を読み直し、候補ごとの定性欄と
 run単位の`no_trade`/`no_trade_reason`だけを差し替えて同じMarkdownを再生成する。
 スコア・サイジング・実行状態・落選・レジームは無変更で持ち越す。

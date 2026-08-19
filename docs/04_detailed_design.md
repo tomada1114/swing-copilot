@@ -1215,9 +1215,14 @@ def main(argv: list[str] | None = None) -> None: ...
 
 # analysis/snapshot.py
 REPORT_CONTEXT_FILENAME = "report_context.json"
-CONTEXT_SCHEMA_VERSION = "report-context-v2"
+CONTEXT_SCHEMA_VERSION = "report-context-v3"
 def write_report_context(context: ReportContext, destination_dir: Path) -> Path: ...
-def read_report_context(path: Path) -> ReportContext: ...
+def read_report_context(path: Path) -> ReportContext:
+    """読み取り時、`schema_version`が`CONTEXT_SCHEMA_VERSION`と一致しない場合は
+    `_BRIEF_ADAPTER.validate_python`に到達する前に、世代不一致だと分かる
+    メッセージ（`copilot-daily`の再実行を促す）で`AnalysisIngestError`にする
+    （Issue #296）。
+    """
 
 # analysis/cli.py（copilot-ingest-analysis）
 def ingest(analysis_input_path: Path, result_path: Path, context_path: Path) -> Path: ...

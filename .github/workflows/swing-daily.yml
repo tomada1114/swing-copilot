@@ -52,14 +52,11 @@ jobs:
         run: uv run --group ops python scripts/data_sync.py pull
 
       # 最小権限: 分析セッションには R2 の資格情報を渡さない。
-      # API キーはステップの `env:` で渡す。secrets を `settings` の JSON へ
-      # 文字列展開すると、値に含まれる文字次第で JSON が壊れて入力全体が
-      # ファイルパスとして解釈される (run 32302254404 の ENOENT)。この 4 変数は
-      # action 内部の run ステップの env 宣言に無いのでシャドーイングされず、
-      # Claude Code とそのツール subprocess まで届く。
-      # `permissions.defaultMode` は無人実行で承認プロンプトを出さないための設定。
-      # リポジトリの .claude/settings.json (guard/format/stop_check フック) は
-      # project スコープとして別途読まれるので、そのまま生きる。
+      # API キーはステップの env: で渡す (settings JSON への secrets 埋め込みは
+      # 値に含まれる文字次第で JSON が壊れるため不可)。
+      # 権限モードは claude_args で CLI に直接渡す (settings の defaultMode は
+      # SDK 経由の起動には効かない)。リポジトリの .claude/settings.json
+      # (guard/format/stop_check フック) は project スコープとして別途読まれる。
       - name: Run swing-daily
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         env:
@@ -69,13 +66,10 @@ jobs:
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Claude GitHub App は未インストールなので、OIDC 交換 (id-token: write が
-          # 必要で、かつ App のインストールが前提) ではなく workflow の GITHUB_TOKEN
-          # を渡す。このワークフローの Claude は GitHub へ書き込まない。
+          # Claude GitHub App は未インストールなので、OIDC 交換ではなく
+          # workflow の GITHUB_TOKEN を渡す。Claude は GitHub へ書き込まない。
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model opus"
-          settings: |
-            {"permissions": {"defaultMode": "bypassPermissions"}}
+          claude_args: "--model opus --permission-mode bypassPermissions"
           prompt: |
             これは GitHub Actions 上の無人実行 (headless) です。
             `.claude/skills/swing-daily/SKILL.md` の「無人実行（headless）時の方針」に

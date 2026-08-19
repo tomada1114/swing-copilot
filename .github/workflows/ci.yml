@@ -39,37 +39,39 @@ jobs:
       - name: mypy
         run: uv run mypy src scripts tests
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    # 典型実行時間は約5分。遅いランナーでは DuckDB/Parquet 系スイートが
-    # 2〜3倍化するため、ハング検出という目的を保ちつつ実測の3〜4倍を確保する
-    # (10分では空振りキャンセルが発生していた: #234)。
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: true
-          python-version: "3.14"
-
-      - name: Install dependencies
-        run: uv sync --group dev --locked
-
-      # `just test` は経由せず pytest を直接呼ぶため、`-n auto` は justfile とは
-      # 別にここへも指定する (#256)。`-n auto` はランナーの実コア数に追従する。
-      - name: Run tests
-        run: uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95 --cov-report=xml
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          fail_ci_if_error: false
+  # Issue #298 の Actions 移行検証中はワークフロー編集だけの PR が続くため一時停止。
+  # #298 完了時にコメントを外して復帰させる。
+  # test:
+  #   name: Test
+  #   runs-on: ubuntu-latest
+  #   # 典型実行時間は約5分。遅いランナーでは DuckDB/Parquet 系スイートが
+  #   # 2〜3倍化するため、ハング検出という目的を保ちつつ実測の3〜4倍を確保する
+  #   # (10分では空振りキャンセルが発生していた: #234)。
+  #   timeout-minutes: 20
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #       with:
+  #         persist-credentials: false
+  #
+  #     - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+  #       with:
+  #         enable-cache: true
+  #         python-version: "3.14"
+  #
+  #     - name: Install dependencies
+  #       run: uv sync --group dev --locked
+  #
+  #     # `just test` は経由せず pytest を直接呼ぶため、`-n auto` は justfile とは
+  #     # 別にここへも指定する (#256)。`-n auto` はランナーの実コア数に追従する。
+  #     - name: Run tests
+  #       run: uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95 --cov-report=xml
+  #
+  #     - name: Upload coverage
+  #       uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+  #       with:
+  #         token: ${{ secrets.CODECOV_TOKEN }}
+  #         files: ./coverage.xml
+  #         fail_ci_if_error: false
 
   spell-check:
     name: Spell Check

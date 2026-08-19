@@ -194,14 +194,17 @@ def _prior_analysis_gaps(
       the directory it leaves behind outlives it, so the next live run would
       report that day for as long as the lookback window reaches it. Each
       replay therefore stamps its own export with `HISTORICAL_REPLAY_FILENAME`
-      (`_mark_historical_replay`), and a stamped directory is skipped here.
+      (`_mark_historical_replay`), which `find_incomplete_runs` classifies as
+      `HISTORICAL_REPLAY` -- so this caller, `copilot-history incomplete`, and
+      the dashboard banner all read a stamped directory the same way.
 
     Fail-soft by contract: an unanswered analysis is a fact about a past day,
     never a reason to stop today's run, and neither is a failure of this check.
-    The stderr writes are inside the same guard as the scan -- a closed or
-    broken stderr (`copilot-daily 2>&1 | head`) must not kill a run before it
-    even reaches `start_run`. A failure partway through leaves whatever lines
-    were already written and records nothing, which is the harmless direction.
+    The two exposure routes fail independently and in the right order: the
+    records are built first and returned even when stderr cannot be written
+    (`copilot-daily 2>&1 | head`), so a broken pipe costs the warning line but
+    never the durable `runs.metadata_json` record -- and never the run itself,
+    which has not even reached `start_run` yet.
 
     Args:
         deps: Run dependencies; `state_store` (read only) and `output_dir`.
@@ -228,11 +231,8 @@ def _prior_analysis_gaps(
             for run in incomplete
             if run.kind is IncompleteRunKind.ANALYSIS_MISSING
             and run.run_date < run_date
-            and not (run.path / HISTORICAL_REPLAY_FILENAME).exists()
         ]
-        for gap in gaps:
-            _emit_analysis_gap(gap)
-        return [
+        records: list[dict[str, object]] = [
             {
                 "reason": _ANALYSIS_GAP_REASON,
                 "run_id": str(gap.run_id),
@@ -244,6 +244,15 @@ def _prior_analysis_gaps(
     except Exception:
         logger.exception("prior-run analysis gap check failed: continuing without it")
         return []
+    try:
+        for gap in gaps:
+            _emit_analysis_gap(gap)
+    except Exception:
+        logger.exception(
+            "analysis gap warning could not be written to stderr: the gap is "
+            "still recorded in runs.metadata_json"
+        )
+    return records
 
 
 def _mark_historical_replay(analysis_input_path: Path, ctx: _RunContext) -> None:

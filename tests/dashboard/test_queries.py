@@ -108,6 +108,23 @@ class TestIncompleteRuns:
 
         assert missing == frozenset()
 
+    def test_a_replay_stamped_run_is_not_reported_as_analysis_missing(
+        self, builder: Builder, dashboard_db: Fixture
+    ) -> None:
+        # Issue #254: a `--as-of` replay stamps its own export. No skill
+        # session owed it an answer, so a banner would be permanent noise --
+        # and `copilot-history incomplete` and the daily preflight read the
+        # same stamp, so all three stay consistent.
+        builder.run()
+        directory = write_run_archive(dashboard_db.reports_root, has_result=False)
+        (directory / "historical_replay.json").write_text("{}", encoding="utf-8")
+
+        missing = queries.analysis_missing_run_ids(
+            dashboard_db.db_path, dashboard_db.reports_root
+        )
+
+        assert missing == frozenset()
+
     def test_a_missing_reports_tree_yields_nothing(self, dashboard_db: Fixture) -> None:
         assert (
             queries.analysis_missing_run_ids(

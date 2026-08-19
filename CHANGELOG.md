@@ -83,10 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   書くため、gate が無いと数日空けた2回目の dry run が1回目を欠落として報告してしまう。
   `--as-of` リプレイは実行中の報告を抑止するだけでは足りず(残った run ディレクトリを次の
   live run が見分けられない)、リプレイが自分の export に `historical_replay.json` を並べて
-  置き、プリフライトがそれを持つディレクトリを除外する。**fail-soft** で、過去日の欠落も
-  検知処理自体の失敗も当日の run を止めない——stderr への書き込みも同じ `try` の内側に置く
-  (`copilot-daily 2>&1 | head` のような閉じたパイプの `BrokenPipeError` が `start_run()`
-  以前に日次 run を丸ごと殺さないため)。露出は
+  置く。**マーカーの解釈は `find_incomplete_runs` 側**にあり、`IncompleteRunKind.HISTORICAL_REPLAY`
+  (非アクショナブル)として分類するので、日次プリフライト・`copilot-history incomplete`・
+  ダッシュボードのバナーが同じディレクトリについて食い違わない。**注意: マーカー導入前に
+  作られたリプレイディレクトリにはマーカーが無いため、導入後の最初の7日間(lookback 窓の
+  長さ)は過去のリプレイに対する偽の `ANALYSIS_GAP[...]` が出得る**——自然に解消するが、
+  Issue #273 がこのタグで分岐する前提としてシグナルは最初の1週間だけ信頼できない。
+  **fail-soft** で、過去日の欠落も検知処理自体の失敗も当日の run を止めない——stderr への
+  書き込みも `try` で囲う(`copilot-daily 2>&1 | head` のような閉じたパイプの
+  `BrokenPipeError` が `start_run()` 以前に日次 run を丸ごと殺さないため)。2経路は独立に
+  失敗し、レコードを先に構築してから emit するので、stderr が書けなくても
+  `runs.metadata_json` の記録は残る。露出は
   `sys.stderr` へ直接書く行頭一致のタグ
   `ANALYSIS_GAP[missing_analysis_result]: run_date=... run_id=... run_directory=...`
   （`logger.warning` ではない: フォーマッタが timestamp/level を前置するとタグが行頭から

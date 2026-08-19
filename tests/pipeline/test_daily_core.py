@@ -924,8 +924,8 @@ def _archive_run(
 ):
     """Recreate one finished run's `runs` row and its `reports/` artifacts.
 
-    Consecutive calls get strictly later `started_at` values, so archiving the
-    analyzed sibling of a date first makes it the *older* of the two.
+    Consecutive calls get strictly later `started_at` values, so two runs
+    archived for the same date are ordered by the order they were archived in.
     """
     run_id = uuid4()
     run_dir = Path(deps.output_dir) / run_date.isoformat() / str(run_id)
@@ -1024,15 +1024,21 @@ class TestPriorAnalysisGapDetection:
         assert _stored_gaps(state_store, result.run_id) is None
         assert _gap_lines(capsys) == []
 
-    def test_an_analysis_in_the_older_same_day_sibling_is_not_a_gap(
-        self, deps, state_store, capsys
+    @pytest.mark.parametrize(
+        "analyzed_first",
+        [True, False],
+        ids=["analysis-in-the-earlier-sibling", "analysis-in-the-later-sibling"],
+    )
+    def test_a_same_day_sibling_holding_the_analysis_is_not_a_gap(
+        self, deps, state_store, capsys, analyzed_first
     ):
         # A same-day double start (what #118 now blocks at the door) leaves two
         # directories for one date. The day's analysis lives in whichever
-        # sibling answered -- here the one that started earlier -- so the later
-        # empty directory is superseded, not missing.
-        _archive_run(deps, analyzed=True)
-        _archive_run(deps, analyzed=False)
+        # sibling answered, and which of the two started first does not change
+        # that -- `find_incomplete_runs` keys `SAME_DAY_SUPERSEDED` on the
+        # date, so both orders must come out the same.
+        _archive_run(deps, analyzed=analyzed_first)
+        _archive_run(deps, analyzed=not analyzed_first)
 
         result = run_daily(DailyRunOptions(), deps)
 
@@ -1178,22 +1184,31 @@ class TestPriorAnalysisGapDetection:
         assert [gap["run_id"] for gap in gaps] == [str(prior_id)]
         assert len(_gap_lines(capsys)) == 1
 
-    def test_an_unwritable_stderr_never_stops_todays_run(
+    def test_an_unwritable_stderr_costs_the_line_but_not_the_record(
         self, deps, state_store, monkeypatch, caplog
     ):
         # `copilot-daily 2>&1 | head -20` closes the pipe early. The warning
         # is worth less than the run: a BrokenPipeError here would otherwise
         # kill the batch before `start_run` and leave no `runs` row at all.
-        _archive_run(deps, analyzed=False)
+        # The two exposure routes fail independently, so the durable one still
+        # carries the gap the scan did find.
+        prior_id, run_dir = _archive_run(deps, analyzed=False)
         monkeypatch.setattr(sys, "stderr", _BrokenStderr())
 
         with caplog.at_level(logging.ERROR):
             result = run_daily(DailyRunOptions(), deps)
 
         assert result.status == RunStatus.SUCCESS
-        assert _stored_gaps(state_store, result.run_id) is None
+        assert _stored_gaps(state_store, result.run_id) == [
+            {
+                "reason": "missing_analysis_result",
+                "run_id": str(prior_id),
+                "run_date": _PRIOR_RUN_DATE.isoformat(),
+                "run_directory": str(run_dir),
+            }
+        ]
         assert any(
-            "prior-run analysis gap check failed" in record.getMessage()
+            "could not be written to stderr" in record.getMessage()
             for record in caplog.records
         )
 

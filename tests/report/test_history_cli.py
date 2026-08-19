@@ -540,6 +540,36 @@ class TestIncomplete:
         assert "同日重複" in output
         assert "対処が必要な未完runはありません" in output
 
+    def test_a_replay_stamped_run_is_listed_without_raising_the_exit_code(
+        self,
+        state_store: StateStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Issue #254: regenerating a report with `copilot-daily --as-of`
+        # leaves an export nobody owed an answer to. Without reading the
+        # stamp this command would keep returning exit 3 for that directory
+        # forever, while the daily preflight stayed silent about it.
+        replayed = _write_run_archive(tmp_path, date(2026, 8, 14), has_result=False)
+        directory = tmp_path / "reports" / "2026-08-14" / str(replayed)
+        (directory / "historical_replay.json").write_text("{}", encoding="utf-8")
+        _insert_run_row(state_store, replayed, date(2026, 8, 14))
+
+        main(
+            [
+                "incomplete",
+                "--reports-dir",
+                str(tmp_path / "reports"),
+                "--db",
+                _db_path(state_store),
+            ]
+        )
+
+        output = capsys.readouterr().out
+        assert str(replayed) in output
+        assert "リプレイ" in output
+        assert "対処が必要な未完runはありません" in output
+
     def test_since_narrows_the_window_to_the_dates_that_still_matter(
         self,
         state_store: StateStore,

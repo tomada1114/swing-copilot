@@ -1212,13 +1212,15 @@ class TestOutputFailureContract:
 class TestHistoricalReplayMarker:
     """#254: a replay stamps the export nobody is going to answer."""
 
-    def test_a_replay_stamps_its_own_run_directory(self, base_deps):
-        # Without the stamp, the next live run cannot tell a replay's export
-        # from a live run whose qualitative phase died, and would report the
+    def test_a_live_replay_stamps_its_own_run_directory(self, base_deps):
+        # The path the marker exists for: `copilot-daily --as-of <date>` in
+        # live mode writes into the same `reports/` tree the next live run
+        # scans. Without the stamp that run cannot tell a replay's export from
+        # a live run whose qualitative phase died, and would report the
         # replayed day as a gap for as long as the lookback window reaches it.
         deps = replace(base_deps, news_client=FakeNewsClient())
 
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
         assert result.analysis_input_path is not None
         marker = result.analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME
@@ -1227,7 +1229,21 @@ class TestHistoricalReplayMarker:
             "as_of": result.run_date.isoformat(),
         }
 
-    def test_a_live_run_leaves_no_marker(self, base_deps):
+    def test_a_dry_run_replay_is_stamped_too(self, base_deps):
+        # `--dry-run` writes into its own tree, but the stamp keys off
+        # `--as-of`, not the mode, so both replays are marked the same way.
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.analysis_input_path is not None
+        assert (
+            result.analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME
+        ).is_file()
+
+    def test_a_current_day_run_leaves_no_marker(self, base_deps):
+        # No `--as-of`: this export is exactly the one a skill session owes an
+        # answer to, so stamping it would silence the signal it exists for.
         deps = replace(base_deps, news_client=FakeNewsClient())
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)

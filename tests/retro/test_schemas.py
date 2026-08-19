@@ -53,6 +53,35 @@ def _input_coverage() -> dict[str, Any]:
     }
 
 
+def _input_coverage_before_issue_157() -> dict[str, Any]:
+    """The coverage block as an export wrote it before Issue #157."""
+    block = _input_coverage()
+    del block["exhibit_truncated_filing_count"]
+    return block
+
+
+def _input_coverage_since_issue_267() -> dict[str, Any]:
+    """The coverage block an export writes today, both counts present."""
+    return {**_input_coverage(), "starved_filing_count": 0}
+
+
+def _filing_coverage_before_issue_157() -> dict[str, Any]:
+    """One archived filing coverage as it was written before Issue #157.
+
+    `exhibit_truncated` and `sections` are the two keys the field addition
+    made appear in a re-read of a document that never carried them.
+    """
+    return {
+        "source_id": "edgar:0000320193-27-000001",
+        "coverage": {
+            "original_chars": 100,
+            "exported_chars": 100,
+            "is_truncated": False,
+            "selection_mode": "full",
+        },
+    }
+
+
 def _news_supply_aggregate() -> dict[str, Any]:
     """Issue #154's supply cross-tab, as an export would write it."""
     return {
@@ -262,6 +291,135 @@ class TestRetroInput:
 
         assert rehydrated["input_coverage"]["starved_filing_count"] == 0
         assert retro_input_digest(rehydrated) == archived_digest
+
+    @pytest.mark.parametrize(
+        "build_coverage",
+        [
+            pytest.param(_input_coverage_before_issue_157, id="before-issue-157"),
+            pytest.param(_input_coverage, id="issue-157-to-issue-267"),
+            pytest.param(_input_coverage_since_issue_267, id="since-issue-267"),
+        ],
+    )
+    def test_every_input_coverage_generation_verifies_its_own_digest(
+        self, build_coverage: Callable[[], dict[str, Any]]
+    ) -> None:
+        # Issue #276: the block gained `exhibit_truncated_filing_count` at
+        # Issue #157 and `starved_filing_count` at Issue #267, so three shapes
+        # sit in `reports/retro/`. Each was signed by the export of its own
+        # day, and re-reading it through today's widened schema has to
+        # reproduce that signature -- the pre-#157 generation did not, because
+        # a re-read materialized `exhibit_truncated_filing_count: 0` into a
+        # document whose stored bytes never carried the key.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = build_coverage()
+        archived_digest = retro_input_digest(payload)
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        )
+
+        assert document.input_coverage is not None
+        assert document.input_coverage.exhibit_truncated_filing_count == 0
+        assert document.input_coverage.starved_filing_count == 0
+
+    @pytest.mark.parametrize(
+        ("build_stored", "build_signed_as"),
+        [
+            pytest.param(
+                _input_coverage_before_issue_157,
+                _input_coverage,
+                id="pre-157-body-signed-as-157",
+            ),
+            pytest.param(
+                _input_coverage,
+                _input_coverage_before_issue_157,
+                id="157-body-signed-as-pre-157",
+            ),
+        ],
+    )
+    def test_rejects_an_input_coverage_signed_as_another_generation(
+        self,
+        build_stored: Callable[[], dict[str, Any]],
+        build_signed_as: Callable[[], dict[str, Any]],
+    ) -> None:
+        # The other half of Issue #276: hashing the keys the document itself
+        # carries must still tell the generations apart. A body from one
+        # generation carrying the neighbouring generation's signature is a
+        # document that was edited after it was written.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = build_stored()
+        signed_as = deepcopy(payload)
+        signed_as["input_coverage"] = build_signed_as()
+
+        with pytest.raises(ValidationError, match="input_digest"):
+            RetroInput.model_validate(
+                {**payload, "input_digest": retro_input_digest(signed_as)}
+            )
+
+    def test_a_counted_exhibit_truncation_changes_a_fresh_documents_digest(
+        self,
+    ) -> None:
+        # `exhibit_truncated_filing_count` cannot be dropped by value the way
+        # the `None`/`[]` defaults are: 0 is a measurement, and a dossier that
+        # counted two collection-stage truncations must hash differently from
+        # one that counted none -- and from one that never counted at all.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = {
+            **_input_coverage(),
+            "exhibit_truncated_filing_count": 2,
+        }
+        uncounted = deepcopy(payload)
+        uncounted["input_coverage"] = _input_coverage()
+        before_the_field = deepcopy(payload)
+        before_the_field["input_coverage"] = _input_coverage_before_issue_157()
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": retro_input_digest(payload)}
+        )
+
+        assert document.input_coverage is not None
+        assert document.input_coverage.exhibit_truncated_filing_count == 2
+        assert retro_input_digest(payload) != retro_input_digest(uncounted)
+        assert retro_input_digest(uncounted) != retro_input_digest(before_the_field)
+
+    def test_rejects_a_document_that_lost_a_coverage_key_it_was_signed_with(
+        self,
+    ) -> None:
+        # Hashing only the keys the document carries must not become a way to
+        # erase a signed field: deleting `exhibit_truncated_filing_count: 2`
+        # leaves a document whose stored digest counted it.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = {
+            **_input_coverage(),
+            "exhibit_truncated_filing_count": 2,
+        }
+        archived_digest = retro_input_digest(payload)
+        tampered = deepcopy(payload)
+        del tampered["input_coverage"]["exhibit_truncated_filing_count"]
+
+        with pytest.raises(ValidationError, match="input_digest"):
+            RetroInput.model_validate({**tampered, "input_digest": archived_digest})
+
+    def test_a_surprises_filing_coverage_from_before_issue_157_keeps_its_digest(
+        self,
+    ) -> None:
+        # The live break was not confined to `input_coverage`: Issue #157 put
+        # the same field on every archived `FilingCoverage`, and its `false`
+        # default is a measurement too. The 2026-08-12 dossier failed on these
+        # eleven nested blocks, not on the summary count.
+        payload = _unsigned_payload()
+        payload["surprises"]["items"][0]["input_filing_coverage"] = [
+            _filing_coverage_before_issue_157()
+        ]
+        archived_digest = retro_input_digest(payload)
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        )
+
+        coverage = document.surprises.items[0].input_filing_coverage[0].coverage
+        assert coverage.exhibit_truncated is False
+        assert coverage.sections == []
 
     def test_a_counted_starved_export_changes_a_fresh_documents_digest(self) -> None:
         # The other half: the default is dropped only because 0 means "not

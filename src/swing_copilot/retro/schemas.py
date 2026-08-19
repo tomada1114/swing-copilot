@@ -314,7 +314,9 @@ class InputCoverageSummary(_StrictModel):
     short or dropped whole earlier, while being collected, which the character
     counts cannot see (Issues #157/#163). It defaults to 0 so retrospective
     dossiers archived before it existed keep parsing; 0 there means "not
-    counted", not "none occurred".
+    counted", not "none occurred". Because 0 is also a real count, the digest
+    cannot drop it by value; `RetroInput._digest_payload` instead hashes only
+    the keys the document itself carried (Issue #276).
 
     `starved_filing_count` is the one number that answers "was this filing too
     small to call analyzed", across every selection mode (Issue #267).
@@ -547,11 +549,35 @@ class RetroInput(_StrictModel):
     @model_validator(mode="after")
     def _verify_input_digest(self) -> Self:
         """Reject a document whose body was edited after it was written."""
-        expected = retro_input_digest(self.model_dump(mode="json"))
+        expected = retro_input_digest(self._digest_payload())
         if self.input_digest != expected:
             msg = "input_digest does not match canonical retro input JSON"
             raise ValueError(msg)
         return self
+
+    def _digest_payload(self) -> dict[str, object]:
+        """Dump the body with this generation's absent fields still absent.
+
+        A plain `model_dump()` materializes every default, so a field added
+        after a dossier was archived reappears in the dump carrying a value
+        the archived bytes never had, and the digest stops reproducing.
+        `_drop_legacy_defaults` can only undo that where the absent form is
+        recognizable by value (`None`, `[]`); it cannot where the default is
+        also a legitimate measurement -- `exhibit_truncated_filing_count: 0`
+        and `FilingCoverage.exhibit_truncated: false`, both Issue #157, are
+        exactly that, and dropping every 0/`false` would instead break the
+        dossiers that really did measure one (Issue #276).
+
+        `exclude_unset` settles it without a per-field ledger to keep in sync:
+        it hashes the key set the parsed document actually carried, which is
+        the key set `copilot-retro export` hashed when it wrote the file. Any
+        generation therefore verifies, including generations not yet invented,
+        while a document that lost, gained, or altered a key still fails --
+        the removed key was in the stored digest, and is not in this one.
+        """
+        return cast(
+            "dict[str, object]", self.model_dump(mode="json", exclude_unset=True)
+        )
 
 
 def retro_input_digest(payload: dict[str, object]) -> str:

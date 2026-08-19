@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `retro_input.json` の `input_digest` 再検証を、その文書自身が持っていたキー集合
+  （`model_dump(exclude_unset=True)`）に対して行うようにした（Issue #276）。
+  読み込み時の素の `model_dump()` が既定値を実体化するため、Issue #157 で足した
+  `exhibit_truncated_filing_count` / `FilingCoverage.exhibit_truncated` が
+  「アーカイブ当時のバイト列には無かった値」として再出現し、#157 以前に書かれた
+  dossier（実測: `reports/retro/2026-08-12/`）が `input_digest does not match` で
+  読めなくなっていた。0/`false` を一律に落とすと今度は実際に計上した世代が壊れるため、
+  値ではなくキー集合で世代を見分ける。キーを失った・増やした・書き換えた文書が落ちる
+  従来の性質は変わらない
+
 ### Changed
 
 - 11 本の CLI が各自で書いていた「ドメイン Error を捕捉して `SystemExit` へ変換する」

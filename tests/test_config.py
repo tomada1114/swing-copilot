@@ -514,6 +514,23 @@ def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
             {"technical_signals": {"pullback": {"band_atr_multiple": -1.0}}},
             id="band-atr-multiple-negative",
         ),
+        # Issue #297: `chase_pivot_pct` is now also `pivot_proximity`'s decay
+        # width, which `screening/pipeline.py` divides by. `0.0` used to be
+        # accepted (`ge=0.0`); it must be rejected here, because that is the
+        # only thing standing between a settings edit and a ZeroDivisionError
+        # in the ranking loop.
+        pytest.param(
+            {"technical_signals": {"vcp": {"chase_pivot_pct": 0.0}}},
+            id="chase-pivot-pct-zero",
+        ),
+        pytest.param(
+            {"technical_signals": {"vcp": {"chase_pivot_pct": -0.01}}},
+            id="chase-pivot-pct-negative",
+        ),
+        pytest.param(
+            {"technical_signals": {"vcp": {"chase_pivot_pct": 1.01}}},
+            id="chase-pivot-pct-over-one",
+        ),
     ],
 )
 def test_settings_rejects_out_of_range_screening_ratios_and_thresholds(overrides):

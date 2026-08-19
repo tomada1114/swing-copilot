@@ -17,6 +17,7 @@ from swing_copilot.analysis.schemas import (
     INPUT_SCHEMA_VERSION,
     RESULT_SCHEMA_VERSION,
     canonical_json_digest,
+    filing_body_digest,
 )
 
 if TYPE_CHECKING:
@@ -178,6 +179,8 @@ def fragment_payload(kind: FragmentKind = "news", **overrides: Any) -> dict[str,
 
     The payload key defaults to the one `kind` owns; pass it explicitly in
     `overrides` to exercise a fragment that carries the wrong number of keys.
+    A filings fragment also gets the `filing_body_digests` its contract
+    requires, digesting the bodies `input_payload()` exports (Issue #261).
     """
     symbol = symbol_payload()
     payload: dict[str, Any] = {
@@ -188,8 +191,24 @@ def fragment_payload(kind: FragmentKind = "news", **overrides: Any) -> dict[str,
         "ac_check": "AC1-AC16 違反なし",
     }
     payload[PAYLOAD_FIELD_BY_KIND[kind]] = symbol[PAYLOAD_FIELD_BY_KIND[kind]]
+    if kind == "filings":
+        payload["filing_body_digests"] = exported_filing_digests()
     payload.update(overrides)
     return payload
+
+
+def exported_filing_digests(
+    payload: dict[str, Any] | None = None, symbol: str = "AAPL"
+) -> dict[str, str]:
+    """The `source_id` -> body digest map one candidate's filings hash to."""
+    document = input_payload() if payload is None else payload
+    candidate = next(
+        item for item in document["candidates"] if item["symbol"] == symbol
+    )
+    return {
+        filing["source_id"]: filing_body_digest(filing["text"])
+        for filing in candidate["filings"]
+    }
 
 
 @pytest.fixture

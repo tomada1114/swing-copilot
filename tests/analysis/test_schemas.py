@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from pydantic import ValidationError
 
@@ -19,6 +21,7 @@ from swing_copilot.analysis.schemas import (
     Verdict,
     VerdictReason,
     canonical_json_digest,
+    filing_body_digest,
 )
 from tests.analysis.conftest import (
     NEWS_ID,
@@ -99,6 +102,41 @@ class TestRunIdentity:
 
         with pytest.raises(ValidationError, match="input_digest"):
             AnalysisInput.model_validate(payload)
+
+
+class TestFilingBodyDigest:
+    """The reuse key behind Issue #261's cross-day filing fragments."""
+
+    def test_the_same_body_always_hashes_to_the_same_full_sha256(self):
+        body = "Quarterly report body."
+
+        digest = filing_body_digest(body)
+
+        assert digest == filing_body_digest(body)
+        assert len(digest) == 64
+        assert (
+            digest == hashlib.sha256(b'{"text":"Quarterly report body."}').hexdigest()
+        )
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            pytest.param("Quarterly report body", id="one-character-shorter"),
+            pytest.param("Quarterly report body. ", id="trailing-whitespace"),
+            pytest.param("quarterly report body.", id="case"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    def test_any_difference_in_the_body_changes_the_key(self, other):
+        """No normalization: the reading was written from these exact bytes."""
+        assert filing_body_digest(other) != filing_body_digest("Quarterly report body.")
+
+    def test_a_non_ascii_body_hashes_its_utf8_bytes(self):
+        """`ensure_ascii=False` is what keeps the digest independent of escaping."""
+        assert (
+            filing_body_digest("四半期報告書")
+            == hashlib.sha256('{"text":"四半期報告書"}'.encode()).hexdigest()
+        )
 
 
 class TestUniqueAnalysisEntities:

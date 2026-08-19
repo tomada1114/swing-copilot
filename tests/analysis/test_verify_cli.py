@@ -69,6 +69,55 @@ def _run(*argv: str) -> int:
     return exit_info.value.code
 
 
+#: The envelope a fragment carried over from an earlier trading day has: it
+#: names the run that wrote it, which has since ended.
+_YESTERDAYS_RUN = {
+    "run_id": "99999999-9999-4999-8999-999999999999",
+    "as_of": "2027-02-28",
+    "input_digest": "f" * 64,
+}
+
+
+class TestCrossDayFilingReuse:
+    """The reuse the orchestrator actually performs (Issue #261).
+
+    A carried-over fragment is verified in today's `analysis_work/`, against
+    today's `analysis_input.json`, by exactly the command Step 3 already runs
+    over every fragment -- there is no second, weaker path for a reused one.
+    """
+
+    def test_yesterdays_filing_reading_passes_against_todays_input(
+        self, workdir, capsys
+    ):
+        path = _write_fragment(
+            workdir, "filings-AAPL.json", fragment_payload("filings", **_YESTERDAYS_RUN)
+        )
+
+        code = _run(str(path))
+
+        assert code == 0
+        assert f"PASS {path} (fragment filings/AAPL)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("kind", "name"),
+        [
+            pytest.param("news", "news-AAPL.json", id="news"),
+            pytest.param("screening", "screening-AAPL.json", id="screening"),
+        ],
+    )
+    def test_yesterdays_as_of_dependent_reading_is_rejected(
+        self, workdir, capsys, kind, name
+    ):
+        path = _write_fragment(workdir, name, fragment_payload(kind, **_YESTERDAYS_RUN))
+
+        code = _run(str(path))
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert f"FAIL {path} (fragment {kind}/AAPL)" in out
+        assert "this fragment answers a different run" in out
+
+
 class TestFragmentChecking:
     def test_a_contract_satisfying_fragment_passes(self, workdir, capsys):
         path = _write_fragment(workdir, "news-AAPL.json", fragment_payload())

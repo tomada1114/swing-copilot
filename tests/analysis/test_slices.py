@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from swing_copilot.analysis.fragment import AnalysisFragment
+from swing_copilot.analysis.schemas import filing_body_digest
 from swing_copilot.analysis.slices import (
     InputSlice,
     SliceExportError,
@@ -160,6 +161,63 @@ def test_filings_slice_carries_only_the_filing_bodies() -> None:
     assert filings_slice["context"] == {}
 
 
+def test_only_the_filings_slice_carries_the_reuse_digests() -> None:
+    """Issue #261's key exists exactly where a filing body does.
+
+    A news or screening reading is `as_of`-dependent and can never be reused
+    across runs, so a digest on its slice would only invite an expert to copy
+    a key its fragment schema forbids.
+    """
+    payload = mixed_payload()
+
+    documents = build_slices(payload)
+
+    source = payload["candidates"][0]
+    assert slice_by(documents, "filings", "AAPL")["filing_body_digests"] == {
+        filing["source_id"]: filing_body_digest(filing["text"])
+        for filing in source["filings"]
+    }
+    for kind, symbol in (("news", "AAPL"), ("screening", "AAPL")):
+        assert "filing_body_digests" not in slice_by(documents, kind, symbol)
+
+
+def test_the_reuse_digest_follows_the_exported_body_not_the_original() -> None:
+    """Truncating a filing further must produce a different key.
+
+    `coverage` records how much of the collected filing reached the export, so
+    two runs can offer the same accession with different amounts of its text.
+    The reading was written from what was exported, and only that.
+    """
+    candidate = candidate_payload("AAPL")
+    filing = candidate["filings"][0]
+    truncated = input_payload(
+        candidates=[
+            {
+                **candidate,
+                "filings": [
+                    {
+                        **filing,
+                        "text": filing["text"][:12],
+                        "coverage": {
+                            **filing["coverage"],
+                            "exported_chars": 12,
+                            "is_truncated": True,
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+
+    before = slice_by(
+        build_slices(input_payload(candidates=[candidate])), "filings", "AAPL"
+    )
+    after = slice_by(build_slices(truncated), "filings", "AAPL")
+
+    assert set(before["filing_body_digests"]) == set(after["filing_body_digests"])
+    assert before["filing_body_digests"] != after["filing_body_digests"]
+
+
 def test_screening_slice_carries_the_deterministic_blocks_and_run_wide_context() -> (
     None
 ):
@@ -197,7 +255,7 @@ def test_every_slice_repeats_the_run_identity_verbatim() -> None:
     documents = build_slices(payload)
 
     for document in documents:
-        assert list(document.payload) == [
+        expected_keys = [
             "run_id",
             "as_of",
             "input_digest",
@@ -205,6 +263,10 @@ def test_every_slice_repeats_the_run_identity_verbatim() -> None:
             "context",
             "candidate",
         ]
+        if document.kind == "filings":
+            # Issue #261's reuse key, present only where a body exists to hash.
+            expected_keys.append("filing_body_digests")
+        assert list(document.payload) == expected_keys
         assert document.payload["run_id"] == payload["run_id"]
         assert document.payload["as_of"] == payload["as_of"]
         assert document.payload["input_digest"] == payload["input_digest"]
@@ -425,6 +487,50 @@ def test_input_slice_rejects_an_unknown_field() -> None:
                 "context": {},
                 "candidate": {"symbol": "AAPL", "news": []},
                 "generated_at": "2027-03-01T12:00:00Z",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "candidate", "digests", "expected"),
+    [
+        pytest.param(
+            "news",
+            {"symbol": "AAPL", "news": []},
+            {"edgar:1": "a" * 64},
+            "must not carry filing_body_digests",
+            id="news-claiming-a-filing-digest",
+        ),
+        pytest.param(
+            "filings",
+            {"symbol": "AAPL", "filings": []},
+            {"edgar:1": "a" * 64},
+            "digest of every filing body",
+            id="digest-for-a-body-the-slice-does-not-carry",
+        ),
+    ],
+)
+def test_input_slice_rejects_reuse_digests_that_do_not_match_its_bodies(
+    kind: str, candidate: dict[str, Any], digests: dict[str, str], expected: str
+) -> None:
+    """The expert copies this map without checking it, so the slice must.
+
+    A digest naming a body the slice never handed over would let the reading
+    claim coverage it does not have, and the claim is later compared against
+    the *input* -- which would agree with the forged map (Issue #261).
+    """
+    payload = input_payload()
+
+    with pytest.raises(ValueError, match=expected):
+        InputSlice.model_validate(
+            {
+                "run_id": payload["run_id"],
+                "as_of": payload["as_of"],
+                "input_digest": payload["input_digest"],
+                "kind": kind,
+                "context": {},
+                "candidate": candidate,
+                "filing_body_digests": digests,
             }
         )
 

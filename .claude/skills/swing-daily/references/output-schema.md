@@ -70,15 +70,61 @@
 }
 ```
 
-- `run_id` / `as_of` / `input_digest` / `ac_check` は**作業用メタデータ**。統括はマージ時にこれらを捨て、
-  ペイロードキー（`news_summary` / `filing_analyses` / `screening_assessment`）
-  だけを `analysis_result.json` に載せる。ingest は strict 検証（未知フィールド拒否）
+開示断片（`filings-<SYMBOL>.json`）だけは、これに加えて `filing_body_digests` を持つ。
+
+```jsonc
+{
+  "run_id": "...", "as_of": "2026-07-27", "input_digest": "...",
+  "symbol": "AAPL",
+  "ac_check": "AC1-AC16 違反なし",
+  "filing_body_digests": {           // 入力スライスの同名キーを逐語コピー。
+    "edgar:0000320193-26-000064": "<64 桁の SHA-256>",  // 自分で計算しない
+    "edgar:0000320193-26-000072": "<64 桁の SHA-256>"   // 読んだが何も書かなかった
+  },                                                    //   開示も必ず含める
+  "filing_analyses": [ ]
+}
+```
+
+- `run_id` / `as_of` / `input_digest` / `ac_check` / `filing_body_digests` は
+  **作業用メタデータ**。統括はマージ時にこれらを捨て、ペイロードキー
+  （`news_summary` / `filing_analyses` / `screening_assessment`）だけを
+  `analysis_result.json` に載せる。ingest は strict 検証（未知フィールド拒否）
   なので、混入すると hard fail する。
 - 該当テキストが無い銘柄の断片は、ペイロードを `null`（news）/ `[]`（filings）
   にしたファイルを書く（＝「分析済みで空」と「未分析」を区別できるようにする）。
+- `filing_body_digests` は**開示断片にだけ必須**で、他の 2 種の断片に書くと
+  schema 違反になる。値は `slice-filings-<SYMBOL>.json` の同名キーの逐語コピーで、
+  **自分でハッシュを計算しない**（Issue #261）。渡された開示は、`filing_analyses`
+  に何も書かなかったものも含めて**全件**をこのマップに残す。これが「この読みが
+  どの開示本文を対象にしたか」の申告であり、翌営業日の流用可否はこのマップだけで
+  決まる。
 - 断片の契約の正本は `src/swing_copilot/analysis/fragment.py` の `AnalysisFragment`
   （strict schema）。`analysis_result.json` の `AnalysisResult` とは別物で、
   ペイロードキーは 3 つのうち**ちょうど 1 つ**でなければならない。
+
+### 断片の流用可否【開示だけ日跨ぎ・他は run 単位】
+
+同じ読みを再利用してよいかの判定は、断片の種類で違う（Issue #261）。判定は
+`copilot-verify-analysis` が行うので、**統括も専門家も自前で比較しない**。
+
+| 断片 | 流用の鍵 | 日跨ぎ流用 |
+|---|---|---|
+| `filings-<SYMBOL>.json` | `filing_body_digests` が、その日の入力が export する開示本文の digest 集合と**完全一致**すること | **可** |
+| `news-<SYMBOL>.json` | `run_id` / `as_of` / `input_digest` の 3 値一致 | 不可 |
+| `screening-<SYMBOL>.json` | 同上 | 不可 |
+
+- 開示の読みは開示本文の関数であり、本文は営業日をまたいでも変わらないことの方が
+  多い（連続 2 営業日で共通 5 銘柄の accession が 14/14 一致した実測がある）。
+  一方 `news_summary` は当日のニュース、`screening_assessment` は当日の決定論的
+  スコアを読むので**真に `as_of` 依存**であり、開示本文が変わっていなくても
+  毎回作り直す。
+- 「完全一致」は集合としての一致である。本文が変わった開示、その日から新たに
+  export された開示、逆に export されなくなった開示のいずれか 1 つでもあれば
+  不一致で、その銘柄の開示は**再分析**になる。
+- 流用しても provenance は緩まない。流用した断片も、その日の
+  `analysis_input.json` に対して provenance・`evidence_quote` の逐語一致・CON-03 を
+  改めて通す。本文が変わった開示の古い読みは、たとえ digest 判定をすり抜けても
+  `evidence_quote` が現在の本文に存在しないため FAIL する（fail-closed）。
 
 ## 断片の契約検証【共有手段・自前実装しない】
 
@@ -103,9 +149,11 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
 - `analysis_input.json` は対象ファイルの隣か 1 つ上の階層から自動解決する。
   別の場所にある場合だけ `--input <path>` を付ける
 - 検査項目: 断片の strict schema（未知フィールド・ペイロードキーの数・
-  `screening_assessment: null` を拒否）、`run_id` / `as_of` / `input_digest` が
-  `analysis_input.json` と一致すること、ファイル名の `<kind>-<SYMBOL>` が
-  ペイロードと一致すること、provenance、`evidence_quote`、CON-03
+  `screening_assessment: null` を拒否）、流用の鍵（news / screening は
+  `run_id` / `as_of` / `input_digest` が `analysis_input.json` と一致すること、
+  filings は `filing_body_digests` がその日の開示本文と一致すること。上表参照）、
+  ファイル名の `<kind>-<SYMBOL>` がペイロードと一致すること、provenance、
+  `evidence_quote`、CON-03
 - 終了コード: `0` 全件合格 / `1` 契約違反あり / `2` パスや入力の解決に失敗
 - このコマンドは読み取り専用である。ネットワークにも DB にも触れず、レポートも
   書かない。何度実行してもよい
@@ -138,12 +186,19 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   "candidate": {
     "symbol": "AAPL",
     "...": "担当専門家に必要な元 candidates[] のフィールドだけ"
+  },
+  "filing_body_digests": {                          // filings スライスだけに付く
+    "edgar:0000320193-26-000064": "<64 桁の SHA-256>"
   }
 }
 ```
 
 - 元入力の `run_id` / `as_of` / `input_digest` は必ず含め、専門家は断片出力の同名 3 値へ
   逐語コピーする。統括は元の `analysis_input.json` と一致を確認する
+- `filing_body_digests` は filings スライスにだけ付く。このスライスが載せている
+  `filings[].text` の digest で、**スライス内で唯一の計算値**である（他は逐語コピー）。
+  開示担当はこれを断片へ逐語コピーする。翌営業日の流用可否がこの値で決まるため、
+  1 件でも落とすと再分析になる（Issue #261）
 - `source_id` と、その専門家が分析する `summary` / `text` は元入力から逐語コピーされる。
   担当対象の source object を要約・再採番・省略しない
 - ニュース／開示スライスには担当銘柄の該当 source object だけが、スクリーニング

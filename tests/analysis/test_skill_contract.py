@@ -62,7 +62,7 @@ def test_skill_reuses_only_fragments_bound_to_the_same_input() -> None:
         encoding="utf-8"
     )
 
-    assert "run_id`、`as_of`、`input_digest`" in skill
+    assert "`run_id` / `as_of` / `input_digest` の**3値一致**" in skill
     assert "analysis-result-v3" in skill
     assert "evidence_quote" in schema
     assert '"input_digest"' in schema
@@ -71,6 +71,37 @@ def test_skill_reuses_only_fragments_bound_to_the_same_input() -> None:
     assert "入力と完全一致" in schema
     assert "no_trade=true" in schema
     assert "NFKC" in schema
+
+
+def test_only_the_filing_reading_is_reusable_across_trading_days() -> None:
+    """Keep Issue #261's asymmetry in the instructions, not just in code.
+
+    `filing_body_digests` relaxes the reuse key for filings alone. An
+    instruction edit that extended the relaxation to `news_summary` or
+    `screening_assessment` would carry yesterday's articles and yesterday's
+    score into today's report, and nothing downstream could see it: both
+    readings would still cite IDs this input supplies and quote bodies it
+    exports. The `evidence_quote` net that backstops a stale *filing* reading
+    simply does not apply to them.
+    """
+    skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    schema = _read_output_schema()
+    filings_skill = (_SKILLS / "analyze-filings" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    for document in (skill, schema, filings_skill):
+        assert "filing_body_digests" in document
+    # The instruction must name the two readings that stay run-bound, and say
+    # why, so the asymmetry reads as a decision rather than an oversight.
+    assert "日跨ぎでは流用できない" in skill
+    assert "真に `as_of` 依存" in skill
+    assert "`as_of` 依存" in schema
+    # The digests are copied from the deterministic slice, never hand-computed.
+    assert "自分でハッシュを計算しない" in filings_skill
+    assert "自分でハッシュを計算しない" in schema
+    # The fail-closed net that makes the relaxed key safe.
+    assert "fail-closed" in schema
 
 
 def test_news_skill_must_declare_a_thin_symbol_specific_supply() -> None:

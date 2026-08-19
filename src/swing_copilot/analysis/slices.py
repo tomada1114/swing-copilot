@@ -29,6 +29,14 @@ already assigns: `news` for candidates that have news, `filings` for those that
 have filings, `screening` for every candidate, with the run-wide context blocks
 going to the screening expert alone -- it is the only one whose skill reads
 them.
+
+A filings slice additionally carries `filing_body_digests`, the only value in
+any slice that is computed rather than copied. It digests the bodies the slice
+itself hands over, and the expert copies it into its fragment as the key that
+decides whether a later run may reuse that reading (Issue #261). The expert
+cannot compute it -- the workflow forbids hand-rolled contract scripts (Issue
+#132) -- so the deterministic step that already reads every body is where it
+belongs.
 """
 
 from __future__ import annotations
@@ -51,6 +59,8 @@ from swing_copilot.analysis.schemas import (
     NewsSupply,
     NonBlankText,
     Sha256Digest,
+    SourceId,
+    filing_body_digest,
 )
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.io_atomic import write_json_batch_atomically
@@ -174,6 +184,14 @@ class InputSlice(_StrictModel):
     kind: FragmentKind
     context: SliceContext
     candidate: SliceCandidate
+    #: Only on a filings slice: `source_id` -> `filing_body_digest(text)` for
+    #: every body this slice carries. The filings expert copies the map
+    #: verbatim into its fragment, where it becomes the key that decides
+    #: whether a later run may reuse the reading (Issue #261). It is computed
+    #: rather than copied -- the input document has no such field -- but it is
+    #: a pure function of bodies that *are* copied verbatim, so the slice stays
+    #: byte-stable.
+    filing_body_digests: dict[SourceId, Sha256Digest] | None = None
 
     @model_validator(mode="after")
     def _verify_payload_matches_kind(self) -> Self:
@@ -205,6 +223,32 @@ class InputSlice(_StrictModel):
             msg = (
                 f"a {self.kind} slice must not carry run-wide context "
                 f"{', '.join(context_keys)}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _verify_filing_body_digests(self) -> Self:
+        """Hold the reuse keys to exactly the bodies this slice hands over.
+
+        The expert copies this map into its fragment and never recomputes it,
+        so a map that named a body the slice does not carry would let a reading
+        claim coverage it never had -- and the claim would be checked against
+        the *input*, which agrees with the map rather than with the slice.
+        """
+        if self.kind != "filings":
+            if self.filing_body_digests is not None:
+                msg = f"a {self.kind} slice must not carry filing_body_digests"
+                raise ValueError(msg)
+            return self
+        expected = {
+            item.source_id: filing_body_digest(item.text)
+            for item in self.candidate.filings or []
+        }
+        if self.filing_body_digests != expected:
+            msg = (
+                "filing_body_digests must be the digest of every filing body "
+                "this slice carries, and of nothing else"
             )
             raise ValueError(msg)
         return self
@@ -413,6 +457,11 @@ def _slice_document(
             },
         },
     }
+    if kind == "filings":
+        slice_payload["filing_body_digests"] = {
+            item.source_id: filing_body_digest(item.text)
+            for item in candidate.parsed.filings
+        }
     try:
         InputSlice.model_validate(slice_payload)
     except ValidationError as exc:

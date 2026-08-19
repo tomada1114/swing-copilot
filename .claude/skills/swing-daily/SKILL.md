@@ -38,7 +38,9 @@ description: >
 - `<WORKDIR>/analysis_result.json` — このスキルが直接書く唯一の成果物
 - 当日の Markdown レポート — `copilot-ingest-analysis` 経由で再描画される（間接出力）
 - `<WORKDIR>/analysis_work/**` — 専門家サブエージェントが書く。統括は読み取りのみ行い、
-  内容を書き換えない。陳腐化した断片は削除せず、上書き・無視で処理する（Step 0）
+  内容を書き換えない。陳腐化した断片は削除せず、上書き・無視で処理する（Step 0）。
+  唯一の例外は前営業日の開示断片の持ち越しで、これは**逐語コピー**であり内容を
+  1 文字も変えない（Step 0「開示断片の日跨ぎ流用」）
 - `<WORKDIR>/headless_note.md` — 無人実行時のみの人間向けメモ（「無人実行（headless）
   時の方針」を参照）。契約されたアーティファクトではなく、ingest は読まない
 
@@ -172,25 +174,61 @@ Step 2 の専門家・Step 3 と Step 3.5 の再分析／追加分析・Step 3.6
      既存の verdict を要約して報告し、再実行するか確認する
    - 再実行を求められている場合のみ、以降のステップで上書きしてよい（Step 1 の
      `uv run copilot-daily` に `--allow-same-day-rerun` を付けて実行する）
-2. `<WORKDIR>/analysis_work/` が存在する場合、各断片の `run_id`、`as_of`、`input_digest` を読む:
-   - 3値すべてが `analysis_input.json` と**一致**し、JSON として妥当で、
-     ペイロードキーがある → その銘柄 × 専門家は **再分析せず流用**する
-   - いずれかが**不一致**（別run・前日以前の残骸）→ 流用せず再分析対象にし、
-     担当専門家に**同じパスを上書き**させる
-   - JSON として壊れている、ペイロードキーが無い、`symbol` がファイル名と
-     食い違う → 同じく再分析対象にし、同じパスを上書きさせる
+2. `<WORKDIR>/analysis_work/` が存在する場合、各断片が流用できるかを判定する。
+   判定は `uv run copilot-verify-analysis <WORKDIR>/analysis_work` が機械的に
+   行う。**自前の照合スクリプトを書かない**（Step 3 の「断片の機械検証」参照）:
+   - **PASS** → その銘柄 × 専門家は **再分析せず流用**する
+   - **FAIL**（別 run の残骸、JSON として壊れている、ペイロードキーが無い、
+     `symbol` がファイル名と食い違う、provenance / `evidence_quote` / CON-03 違反）
+     → 流用せず再分析対象にし、担当専門家に**同じパスを上書き**させる
    - **陳腐化した断片を `rm` で消さない。** 上書きで同じ結果になり、削除は
      「一時ファイルと後始末」の禁止事項に当たる
-   - この 3 値の照合と JSON・ペイロードキーの妥当性は
-     `uv run copilot-verify-analysis <WORKDIR>/analysis_work` が機械的に行う。
-     **自前の照合スクリプトを書かない**（Step 3 の「断片の機械検証」参照）
-3. `analysis_input.json` の `candidates[].symbol` に無い銘柄の断片は、削除せず
+3. 流用の鍵は断片の種類で違う（Issue #261。正本は
+   [references/output-schema.md](references/output-schema.md) の「断片の流用可否」）:
+   - `news-<SYMBOL>.json` / `screening-<SYMBOL>.json` は
+     `run_id` / `as_of` / `input_digest` の**3値一致**が鍵。当日のニュース・当日の
+     決定論的スコアを読むので真に `as_of` 依存であり、**日跨ぎでは流用できない**。
+     開示本文が変わっていなくても毎回作り直す
+   - `filings-<SYMBOL>.json` は `filing_body_digests` が、その日の入力が export
+     する開示本文の digest 集合と**完全一致**することが鍵。開示の読みは開示本文の
+     関数なので、`run_id` が変わっても本文が同じなら流用できる（次の「開示断片の
+     日跨ぎ流用」）
+4. `analysis_input.json` の `candidates[].symbol` に無い銘柄の断片は、削除せず
    **無視する**（Step 3 のマージ対象から外す）。
-4. 流用した断片は Step 3 でそのままマージ対象に含める（要約は断片内の
-   `ac_check` と本文から統括が読み取る）。ただし `facts[].evidence_quote` が
-   欠落している、または引用元本文と一致しない断片は ingest の provenance 検査で
-   その銘柄ごと fail-closed になる。3 値が一致していても `evidence_quote` を
-   欠いた古い断片（本契約変更前に生成されたもの等）は流用せず再分析させる。
+5. 流用した断片は Step 3 でそのままマージ対象に含める（要約は断片内の
+   `ac_check` と本文から統括が読み取る）。`copilot-verify-analysis` が PASS した
+   ことが流用の根拠であり、統括が内容を読んで判断し直さない。逆に、`facts[].evidence_quote`
+   を欠く／引用元本文と一致しない古い断片は同コマンドが FAIL させるので、
+   自動的に再分析対象になる。
+
+### 開示断片の日跨ぎ流用（本文ハッシュ・Issue #261）
+
+連続 2 営業日の入力で、共通 5 銘柄の開示 accession が 14/14 一致していた。同じ
+10-Q/8-K を毎日ゼロから読み直すのが定性フェーズ最大の構造的無駄なので、開示断片
+だけは前営業日の読みを持ち越す。**この持ち越しは開示断片に限る。**
+
+持ち越しは `<WORKDIR>/analysis_input.json` が揃ってから（＝ Step 1 の直後）、Step 2 の
+起動より前に行う。当日の候補銘柄と `as_of` が分からないと対象を選べないためである。
+
+1. 過去の run ディレクトリを `reports/*/*/analysis_work/filings-*.json` の glob で
+   探し、**`as_of` より前の日付のうち新しい順に最大 2 日分**だけ見る。今日の候補
+   銘柄に該当するファイルが対象で、それ以外は開かない
+2. 該当ファイルを読み、**1 文字も変えずに** `<WORKDIR>/analysis_work/filings-<SYMBOL>.json`
+   へ書く。内容の書き換え・要約・整形をしない（Outputs の「統括は内容を書き換えない」
+   はここでも変わらない）。`cp` などのシェルコマンドは使わない（許可リストに無く、
+   無人実行が承認待ちで止まる）
+3. 書いたら Step 0 の 2 と同じく `copilot-verify-analysis` に掛ける。**PASS した
+   ものだけが流用**で、FAIL したものは Step 2 で開示担当を起動して同じパスを
+   上書きさせる。転記ミスも本文の変化も、この 1 本の検査が同じように落とす
+4. 流用しても provenance は緩まない。流用した断片も、その日の `analysis_input.json`
+   に対して provenance・`evidence_quote` の逐語一致・CON-03 を改めて通る。本文が
+   変わった開示の古い読みは、たとえ digest 判定をすり抜けても `evidence_quote` が
+   現在の本文に存在しないため FAIL する（fail-closed の網）
+5. 流用した断片も Step 3.5 以降の点検対象から外さない。マージ後の扱いは当日書かれた
+   断片とまったく同じである
+6. 過去 run が見つからない、`filing_body_digests` を持たない古い断片しかない、
+   digest が一致しない、のいずれでも**単に流用しない**だけで、通常どおり Step 2 で
+   再分析する。持ち越しの失敗は run を止める理由にならない
 
 ## Step 1: パイプライン実行
 
@@ -318,6 +356,9 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   strict スキーマ（`extra="forbid"`）検証を通ってから書かれる。形式・不変条件は
   [references/output-schema.md](references/output-schema.md) の「サブエージェント入力スライス」
   に従う
+- filings スライスにだけ `filing_body_digests`（`source_id` → 開示本文の SHA-256）が
+  付く。これはスライス内で唯一の計算値で、開示担当が断片へ逐語コピーする値である。
+  翌営業日の流用可否がこの値で決まる（Issue #261）
 - **自前の切り出しスクリプトを書かない。** 同じ入力からは常にバイト同一のスライスが
   出るので、失敗しても同じコマンドを再実行すればよい。スライス群は集合単位で
   書かれるため、失敗した実行は 1 件も書き残さない（部分的なスライス集合を拾って
@@ -342,7 +383,9 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
    担当する銘柄シンボルの列挙。スライスを分析に使い、元入力の
    `run_id` / `as_of` / `input_digest` と一致することを確認すること
 3. 出力は `<WORKDIR>/analysis_work/<kind>-<SYMBOL>.json` への**ファイル書き出し**
-   （`<kind>` は `news` / `filings` / `screening`、1 銘柄 1 ファイル）
+   （`<kind>` は `news` / `filings` / `screening`、1 銘柄 1 ファイル）。開示担当には
+   スライスの `filing_body_digests` を断片へ**全件逐語コピー**させること
+   （何も書かなかった開示の分も残す。自分でハッシュを計算させない。Issue #261）
 4. 親に返すのは **銘柄ごと 1〜2 行の要約 + 特記事項 + AC 自己点検結果**だけ。
    JSON 全文・生の入力テキストをメッセージに載せないこと
 5. 作業用の一時ファイルは scratchpad ディレクトリ配下にだけ作り、**削除しないこと
@@ -363,18 +406,20 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
 
 ## Step 3: 断片のマージ
 
-`<WORKDIR>/analysis_work/` を列挙し、同一の`run_id`・`as_of`・`input_digest`を持つ断片をすべて読む
-（Step 0 で流用した断片を含む）。
+`<WORKDIR>/analysis_work/` を列挙し、Step 0 の判定で**流用可**となった断片をすべて読む
+（当日書かれたものと、前営業日から持ち越した開示断片の両方）。流用可の判定は
+`copilot-verify-analysis` の PASS であり、統括が 3 値を目で突き合わせるのではない。
 
 - 期待する組がすべて揃っているか確認する。欠けている組があれば、その専門家を
   再起動する（メッセージで結果を送り直させない。必ずファイルに書かせる）。
   再起動は**同じ組につき通算 1 回まで**で、2 回目も揃わなければ withhold で確定させる
   （「サブエージェントの実行上限と打ち切り」）
-- 3値が不一致の断片、および `candidates[].symbol` に無い銘柄の断片は**読み飛ばす**
+- FAIL した断片、および `candidates[].symbol` に無い銘柄の断片は**読み飛ばす**
   （Step 0 で削除していないため、ディレクトリには残っている前提で扱う）
 - 各断片から**ペイロードキーだけ**を取り出し、銘柄ごとに `news_summary` /
   `filing_analyses` / `screening_assessment` を組み立てる
-- `as_of` / `ac_check` は作業用メタデータなので**捨てる**（strict 検証で hard fail する）。
+- `as_of` / `ac_check` / `filing_body_digests` は作業用メタデータなので**捨てる**
+  （strict 検証で hard fail する）。
   一方 `facts[].evidence_quote` は作業用メタデータではなく契約フィールドなので、
   断片の値をそのまま逐語で運ぶ（落とすと ingest でその銘柄が fail-closed になる）
 - 断片の本文は書き換えない。問題があれば Step 3.5 で再分析を依頼する
@@ -390,16 +435,18 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work
 ```
 
 - ingest（`copilot-ingest-analysis`）と**同一の関数**で、断片の strict schema、
-  `run_id` / `as_of` / `input_digest` の一致、ファイル名とペイロードの一致、
-  provenance、`evidence_quote` の逐語一致、CON-03 を検査する。契約と終了コードは
+  流用の鍵（news / screening は `run_id` / `as_of` / `input_digest` の一致、
+  filings は `filing_body_digests` と当日の開示本文の一致）、ファイル名とペイロードの
+  一致、provenance、`evidence_quote` の逐語一致、CON-03 を検査する。契約と終了コードは
   [references/output-schema.md](references/output-schema.md) の「断片の契約検証」参照
 - **同じ検査を自前のスクリプトで書き直さない。** 逐語一致と CON-03 は Unicode NFKC
   正規化を経て判定されるため、grep ベースの自己検査は ingest より弱くなる（Issue #132）
 - FAIL した断片は、統括が本文を書き換えるのではなく Step 3.5 の手順で該当専門家に
   再分析を依頼して**同じパスを上書き**させる（AC15）
-- 3 値が不一致の断片（別 run・前日以前の残骸）と、入力に無い銘柄の断片も FAIL として
-  出るが、扱いは Step 0 のとおりに分かれる。前者は流用せず**再分析対象**にし、
-  後者はマージ対象から外して**無視する**。どちらも `rm` で消さない
+- 流用の鍵が合わない断片（別 run の news / screening、開示本文が変わった filings）と、
+  入力に無い銘柄の断片も FAIL として出るが、扱いは Step 0 のとおりに分かれる。前者は
+  流用せず**再分析対象**にし、後者はマージ対象から外して**無視する**。どちらも
+  `rm` で消さない
 
 ## Step 3.5: 統合レビュー（2〜3 段目、セッション本体で実施）
 

@@ -17,13 +17,16 @@ from swing_copilot.analysis.fragment import (
 from swing_copilot.analysis.schemas import (
     AnalysisInput,
     AnalysisResult,
+    filing_body_digest,
 )
 from swing_copilot.analysis.validate import validate_analysis
 from tests.analysis.conftest import (
     CALENDAR_ID,
     FILING_ID,
+    FILING_QUOTE,
     NEWS_ID,
     NEWS_QUOTE,
+    exported_filing_digests,
     fragment_payload,
     input_payload,
     result_payload,
@@ -185,13 +188,211 @@ class TestFragmentIdentity:
         assert error is not None
         assert error.startswith("input_digest")
 
-    def test_a_symbol_the_input_never_offered_is_withheld(self):
-        fragment = AnalysisFragment.model_validate(fragment_payload(symbol="MSFT"))
+    @pytest.mark.parametrize(
+        "kind",
+        [pytest.param(kind, id=kind) for kind in ("news", "filings", "screening")],
+    )
+    def test_a_symbol_the_input_never_offered_is_withheld(self, kind):
+        """Named as an absent symbol, not as a body or identity mismatch.
+
+        The filings key is compared against a candidate that does not exist, so
+        the reuse check has to defer here rather than blame the digests.
+        """
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload(kind, symbol="MSFT")
+        )
 
         assert (
             verify_fragment(_analysis_input(), fragment)
             == "symbol is absent from analysis_input.json"
         )
+
+
+#: A run other than the one `input_payload()` describes. Reusing a fragment
+#: across days means exactly this: its envelope names a run that has ended.
+_ANOTHER_RUN = {
+    "run_id": "99999999-9999-4999-8999-999999999999",
+    "as_of": "2027-02-28",
+    "input_digest": "f" * 64,
+}
+
+
+def _input_with_filing(**filing_overrides: Any) -> dict[str, Any]:
+    """`input_payload()` with its one filing altered."""
+    payload = input_payload()
+    candidate = payload["candidates"][0]
+    return input_payload(
+        candidates=[
+            {**candidate, "filings": [{**candidate["filings"][0], **filing_overrides}]}
+        ]
+    )
+
+
+class TestFilingFragmentReuse:
+    """Issue #261: a filing reading is keyed on its bodies, not on its run."""
+
+    def test_an_unchanged_filing_body_makes_yesterdays_reading_reusable(self):
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload("filings", **_ANOTHER_RUN)
+        )
+
+        assert verify_fragment(_analysis_input(), fragment) is None
+
+    def test_a_changed_filing_body_forces_a_re_analysis(self):
+        """The same accession, re-exported with more of its text, is new work."""
+        analysis_input = AnalysisInput.model_validate(
+            _input_with_filing(
+                text="Quarterly report body. Revenue rose year over year.",
+                coverage={
+                    "original_chars": 51,
+                    "exported_chars": 51,
+                    "is_truncated": False,
+                    "selection_mode": "full",
+                    "exhibit_truncated": False,
+                    "sections": [],
+                },
+            )
+        )
+        fragment = AnalysisFragment.model_validate(fragment_payload("filings"))
+
+        error = verify_fragment(analysis_input, fragment)
+
+        assert error is not None
+        assert error.startswith("filing_body_digests do not match")
+        assert f"changed=['{FILING_ID}']" in error
+
+    def test_a_filing_the_reading_never_saw_forces_a_re_analysis(self):
+        """An 8-K filed overnight must not be covered by yesterday's reading."""
+        payload = input_payload()
+        candidate = payload["candidates"][0]
+        analysis_input = AnalysisInput.model_validate(
+            input_payload(
+                candidates=[
+                    {
+                        **candidate,
+                        "filings": [
+                            *candidate["filings"],
+                            {
+                                **candidate["filings"][0],
+                                "source_id": "edgar:0000320193-27-000002",
+                                "form_type": "8-K",
+                            },
+                        ],
+                    }
+                ]
+            )
+        )
+        fragment = AnalysisFragment.model_validate(fragment_payload("filings"))
+
+        error = verify_fragment(analysis_input, fragment)
+
+        assert error is not None
+        assert "newly_exported=['edgar:0000320193-27-000002']" in error
+
+    def test_a_filing_the_input_no_longer_exports_forces_a_re_analysis(self):
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload(
+                "filings",
+                filing_body_digests={
+                    **exported_filing_digests(),
+                    "edgar:0000320193-27-000009": "a" * 64,
+                },
+            )
+        )
+
+        error = verify_fragment(_analysis_input(), fragment)
+
+        assert error is not None
+        assert "no_longer_exported=['edgar:0000320193-27-000009']" in error
+
+    def test_a_filings_fragment_without_the_digests_is_rejected(self):
+        payload = fragment_payload("filings")
+        del payload["filing_body_digests"]
+
+        with pytest.raises(ValidationError, match="must declare filing_body_digests"):
+            AnalysisFragment.model_validate(payload)
+
+    def test_the_digests_must_cover_every_analyzed_filing(self):
+        """A reading may skip a filing; it may not read one it never declared."""
+        payload = fragment_payload(
+            "filings", filing_body_digests={"edgar:other": "b" * 64}
+        )
+
+        with pytest.raises(ValidationError, match="must cover every analyzed filing"):
+            AnalysisFragment.model_validate(payload)
+
+    def test_a_reading_covering_a_filing_it_wrote_nothing_about_is_allowed(self):
+        """A read filing with nothing to say stays distinct from an unread one."""
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload("filings", **_ANOTHER_RUN, filing_analyses=[])
+        )
+
+        assert verify_fragment(_analysis_input(), fragment) is None
+
+    @pytest.mark.parametrize(
+        "kind",
+        [pytest.param(kind, id=kind) for kind in ("news", "screening")],
+    )
+    def test_the_as_of_dependent_readings_are_never_reusable_across_runs(self, kind):
+        """`news_summary` and `screening_assessment` keep the three-value key.
+
+        One reads the day's articles and the other the day's deterministic
+        score, so an unchanged filing body says nothing about whether either is
+        still current.
+        """
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload(kind, **_ANOTHER_RUN)
+        )
+
+        error = verify_fragment(_analysis_input(), fragment)
+
+        assert error is not None
+        assert error.startswith("run_id 99999999-9999-4999-8999-999999999999")
+
+    @pytest.mark.parametrize(
+        "kind",
+        [pytest.param(kind, id=kind) for kind in ("news", "screening")],
+    )
+    def test_an_as_of_dependent_fragment_may_not_claim_body_digests(self, kind):
+        payload = fragment_payload(kind, filing_body_digests=exported_filing_digests())
+
+        with pytest.raises(ValidationError, match="filings fragment alone"):
+            AnalysisFragment.model_validate(payload)
+
+    def test_a_wrongly_reused_reading_still_fails_the_verbatim_quote_check(self):
+        """The fail-closed net that makes the relaxed key safe (Issue #261).
+
+        The digests are forged to match, so the reuse key is defeated
+        outright -- exactly the state a bug in the key would produce. The
+        reading is still withheld, because its `evidence_quote` was taken from
+        the body the *earlier* run exported and no longer occurs in this one.
+        """
+        analysis_input = AnalysisInput.model_validate(
+            _input_with_filing(
+                text="Annual report body.",
+                coverage={
+                    "original_chars": 19,
+                    "exported_chars": 19,
+                    "is_truncated": False,
+                    "selection_mode": "full",
+                    "exhibit_truncated": False,
+                    "sections": [],
+                },
+            )
+        )
+        forged = {
+            item.source_id: filing_body_digest(item.text)
+            for item in analysis_input.candidates[0].filings
+        }
+        fragment = AnalysisFragment.model_validate(
+            fragment_payload("filings", **_ANOTHER_RUN, filing_body_digests=forged)
+        )
+
+        error = verify_fragment(analysis_input, fragment)
+
+        assert error is not None
+        assert error.startswith("evidence_quote is absent from every cited source body")
+        assert FILING_QUOTE in error
 
 
 class TestFragmentFilename:

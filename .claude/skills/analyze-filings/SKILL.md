@@ -23,7 +23,8 @@ description: >
 - 銘柄別入力スライス — 統括から渡された場合は、
   [output-schema.md の入力スライス契約](../swing-daily/references/output-schema.md#サブエージェント入力スライス読み取り専用作業用)
   に従い、これを分析に使う。`run_id` / `as_of` / `input_digest` が元 input と一致することを
-  確認し、担当外の元入力本文は読み込まない
+  確認し、担当外の元入力本文は読み込まない。スライスの `filing_body_digests` は
+  出力断片の同名キーへ**全件逐語コピー**する（Issue #261。下記「出力ファイル」）
 - [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md) — AC1〜AC16 の共通規約（**必読**）
 - [../swing-daily/references/output-schema.md](../swing-daily/references/output-schema.md) — JSON の形と `analysis_work/` 断片の形式
 - `src/swing_copilot/analysis/schemas.py` — **スキーマの最終正本**。JSON を組み立てる前に読む
@@ -232,6 +233,10 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/filings-<SYMBOL>.json
   "input_digest": "<64 lowercase hexadecimal SHA-256 characters>", // 同じく逐語コピー
   "symbol": "AAPL",
   "ac_check": "AC1-AC16 違反なし",
+  "filing_body_digests": {         // スライスの同名キーを逐語コピー（自分で計算しない）
+    "filing-...": "<64 lowercase hexadecimal SHA-256 characters>",
+    "filing-...": "<渡された開示は全件。何も書かなかった開示も落とさない>"
+  },
   "filing_analyses": [             // 該当開示が無ければ []
     {
       "source_id": "filing-...",
@@ -245,10 +250,23 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/filings-<SYMBOL>.json
 }
 ```
 
-`run_id` / `as_of` / `input_digest` / `ac_check` は作業用メタデータで、統括がマージ時に捨てる。
-この 3 値は Step 0 の再入判定に使うため、いずれも省略・再計算・変更しない。
-`filing_analyses` の中身だけが `analysis_result.json` の
-`symbols[].filing_analyses` に載る。
+`run_id` / `as_of` / `input_digest` / `ac_check` / `filing_body_digests` は作業用
+メタデータで、統括がマージ時に捨てる。`filing_analyses` の中身だけが
+`analysis_result.json` の `symbols[].filing_analyses` に載る。
+
+**`filing_body_digests` は開示断片にだけある必須フィールドで、翌営業日にこの読みを
+そのまま流用してよいかの判定に使う**（Issue #261）。渡された入力スライスの同名キーを
+**逐語コピー**する。自分でハッシュを計算しない・整形しない・並べ替えない。
+`filing_analyses` に何も書かなかった開示（読んだが特記事項が無かったもの）の分も
+**全件残す**。1 件でも落とすと「その開示は読んでいない読み」になり、翌日は流用されず
+再分析になる。スライスが渡されていない単体起動では、自分でハッシュを計算するのでは
+なく次のコマンドでスライスを生成し、その `filing_body_digests` をコピーする。
+
+```bash
+uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad>/slices
+```
+
+`run_id` / `as_of` / `input_digest` の 3 値も、省略・再計算・変更しない。
 
 `filing_analyses` の要素は `source_id` / `facts` / `interpretation` / `red_flags` /
 `yoy_changes` の 5 フィールドで完結する。旧スキーマにあった `filing_type` や

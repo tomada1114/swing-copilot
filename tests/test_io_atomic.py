@@ -4,11 +4,56 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from swing_copilot.analysis import export
-from swing_copilot.io_atomic import write_json_atomically, write_text_atomically
+from swing_copilot.io_atomic import (
+    write_json_atomically,
+    write_json_batch_atomically,
+    write_text_atomically,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def partial_write_then_fail(*, on_call: int) -> Callable[..., int]:
+    """A `Path.write_text` that fills the file, then fails, on the Nth call.
+
+    ENOSPC does not spare the file it was writing: what fits is already on
+    disk when the error surfaces. A fake that raises *before* touching the
+    filesystem therefore cannot observe a temporary file leaked by the very
+    write that failed -- which is exactly the bug the batch writer had.
+
+    Shared with the analysis-slice tests so both layers are held to the same
+    failure shape.
+
+    Args:
+        on_call: Which call to `Path.write_text` fails, counting from 1.
+
+    Returns:
+        A drop-in replacement for `Path.write_text`.
+    """
+    original = Path.write_text
+    calls: list[Path] = []
+
+    def _write_text(
+        self: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        calls.append(self)
+        if len(calls) == on_call:
+            original(self, data[: len(data) // 2], encoding="utf-8")
+            msg = "disk full"
+            raise OSError(msg)
+        return original(self, data, encoding, errors, newline)
+
+    return _write_text
 
 
 class TestTemporaryFileLocation:
@@ -85,6 +130,66 @@ class TestSerializedForm:
         write_json_atomically(destination, {"generation": 2})
 
         assert json.loads(destination.read_text(encoding="utf-8")) == {"generation": 2}
+
+
+class TestBatchIsOneLogicalWrite:
+    """A set of files commits or rolls back together (Issue #260 review)."""
+
+    def test_every_destination_is_written(self, tmp_path):
+        write_json_batch_atomically(
+            [(tmp_path / "a.json", {"n": 1}), (tmp_path / "b.json", {"n": 2})]
+        )
+
+        assert json.loads((tmp_path / "a.json").read_text(encoding="utf-8")) == {"n": 1}
+        assert json.loads((tmp_path / "b.json").read_text(encoding="utf-8")) == {"n": 2}
+
+    def test_a_failure_partway_leaves_no_destination_and_no_temp(
+        self, tmp_path, monkeypatch
+    ):
+        """The eighth file failing must not leave the first seven behind.
+
+        The fake fills the file before raising, the way ENOSPC actually
+        arrives: a fake that raises *before* creating anything cannot see a
+        temporary left behind by the write that failed, which is the leak this
+        test exists for.
+        """
+        monkeypatch.setattr(Path, "write_text", partial_write_then_fail(on_call=3))
+
+        with pytest.raises(OSError, match="disk full"):
+            write_json_batch_atomically(
+                [(tmp_path / f"{index}.json", {"n": index}) for index in range(4)]
+            )
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == []
+
+    def test_an_existing_destination_survives_a_failed_batch(
+        self, tmp_path, monkeypatch
+    ):
+        destination = tmp_path / "0.json"
+        destination.write_text('{"previous": true}', encoding="utf-8")
+        monkeypatch.setattr(Path, "write_text", partial_write_then_fail(on_call=1))
+
+        with pytest.raises(OSError, match="disk full"):
+            write_json_batch_atomically([(destination, {"next": True})])
+
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"previous": True}
+        assert list(tmp_path.glob(".*.tmp")) == []
+
+    def test_an_empty_batch_writes_nothing(self, tmp_path):
+        write_json_batch_atomically([])
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_batch_writes_the_same_bytes_as_the_single_file_writer(self, tmp_path):
+        """One serialized form, so a batch cannot drift from a single write."""
+        payload = {"note": "受注が伸びている"}
+        write_json_atomically(tmp_path / "single.json", payload)
+
+        write_json_batch_atomically([(tmp_path / "batch.json", payload)])
+
+        assert (tmp_path / "batch.json").read_bytes() == (
+            tmp_path / "single.json"
+        ).read_bytes()
 
 
 class TestCompatibilityFacade:

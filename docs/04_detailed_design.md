@@ -1180,6 +1180,18 @@ def verify_document(analysis_input: AnalysisInput, path: Path) -> VerificationRe
 def verify_paths(paths: list[Path], input_path: Path | None) -> list[VerificationReport]: ...
 def main(argv: list[str] | None = None) -> None: ...
 
+# analysis/slices.py
+SLICE_FILENAME_PREFIX = "slice"
+class InputSlice(BaseModel):
+    """run_id / as_of / input_digest / kind / context / candidate（extra="forbid"）"""
+
+def build_slices(payload: Mapping[str, Any]) -> tuple[SliceDocument, ...]: ...
+def write_slices(documents: Sequence[SliceDocument], out_dir: str | Path) -> tuple[Path, ...]: ...
+
+# analysis/slice_cli.py（copilot-export-slices）
+def export_slices(input_path: Path, out_dir: Path) -> list[tuple[SliceDocument, Path]]: ...
+def main(argv: list[str] | None = None) -> None: ...
+
 # analysis/snapshot.py
 REPORT_CONTEXT_FILENAME = "report_context.json"
 CONTEXT_SCHEMA_VERSION = "report-context-v2"
@@ -1202,6 +1214,8 @@ def main(argv: list[str] | None = None) -> None: ...
 そこで`analysis/fragment.py`が断片の`extra="forbid"`スキーマ（ペイロードキーはちょうど1つ、`screening_assessment: null`は拒否、`news_summary: null` / `filing_analyses: []`は「分析済みで空」として許可）を持ち、`as_symbol_analysis()`で空のスタンドイン（`ScreeningAssessment(summary="")`と理由なしの`Verdict`。いずれも`source_id`も表示テキストも足さない）を補って`SymbolAnalysis`へ持ち上げ、`verify_symbol_analysis()`へ渡す。**これはingestが銘柄ごとに呼ぶのと同一の関数**であり、事前検査が本番検査より弱くなりえない構造にしてある。identity（`run_id` / `as_of` / `input_digest`）の不一致は内容検査より先に報告する——別runの断片をprovenance違反として報告すると原因を取り違えるためである。書き出し前の自己検査自体は残す必要がある（ingestはfail-closedでリトライしないため、後から見つけてもその銘柄のその日の分析は消える）。
 
 `analysis/verify_cli.py`（`copilot-verify-analysis`）がこれをスキルへ公開する。断片と`analysis_result.json`は`schema_version`で判別し（result側は必須、fragment側は`extra="forbid"`で禁止のため、どちらか一方としてしか解釈されえない）、result側は`load_analysis_result()`・`validate_artifact_identity()`・`validate_analysis()`をそのまま呼ぶingestのdry-runになる。`report_context.json`との照合だけは省く——同じrunの`copilot-daily`がコード側で書くファイルであり、スキルが取り違えうるのはresult側だからである。`analysis/cli.py`とは別モジュールに置くのは、あちらがレポートを**書き換える**入口であるのに対し、こちらは読み取り専用で何度でも実行できる必要があるためである。
+
+**入力スライスの決定論生成（Issue #260）**: 統括スキルは`analysis_input.json`の全件をサブエージェントへ渡さず、専門家×銘柄のスライスだけを渡す。この切り出しは長らく統括セッションの手作業で、2026-08-13のrunでは1.4MBの入力から21件を切るのに5.2分を消費し、欠落・重複の温床でもあった。`analysis/slices.py`と`analysis/slice_cli.py`（`copilot-export-slices`）がこれをコードへ移す。グルーピングは`swing-daily`スキルStep 2の担当割り当てをそのまま写し（`news`は`news`が非空の銘柄、`filings`は`filings`が非空の銘柄、`screening`は全銘柄、run単位contextはscreeningスライスのみ）、ファイル名は断片と取り違えないよう`slice-<kind>-<SYMBOL>.json`とする。`news`が空でも`news_supply`（Issue #130）を持つ銘柄へnewsスライスを出さないのは、`analyze-news`とAC14が「`news`が空なら`news_summary: null`を書く」ことを求めており、エージェントを立てても供給量の申告がレポートへ届かないためである。届かせるには専門家側の規約変更が要り、スライス生成とは独立した設計判断なので別イシューで追う。値は**元文書のJSONから逐語コピー**する——parse済みモデルを再シリアライズすると日時表記やキー順が変わり、provenance検査が突き合わせる文字列と一致しなくなるためである。**同一入力からバイト同一の出力**になること（トップレベルのキー順固定、入れ子は元の順序、UTF-8・LF・末尾改行1個、生成時刻やパスを payload に入れない）を、**プロセスを跨いで**成り立つ要件とし（回帰テストは`PYTHONHASHSEED`を変えた2つの別インタプリタでエントリポイントを実行して出力バイトを比較する。同一プロセス内の2回では、ハッシュ種とモジュール状態を共有するため実行間の順序差を検出できない）、書き出し前に`InputSlice`（`extra="forbid"`、`kind`ごとに`candidate`が持てるキー集合を固定）で検証する。`--out-dir`を必須にしているのは、既定値を入力の隣に置くとスキル規約がscratchpad配下と定めるスライスがrunディレクトリへ書かれうるためである。必須にするだけでは「入力として渡したのと同じパスを`--out-dir`にも渡す」誤りを防げないので値そのものも検査し、runディレクトリと同一・その配下・その上位、および`analysis_input.json`を既に持つディレクトリを拒否する（このワークフローは`rm`を実行しないため、落ちた`slice-*.json`はrunごとに溜まる）。gitチェックアウト配下かどうかは判定しない——wheelでインストールされたパッケージから運用者のリポジトリは同定できず、誤判定は無人runを丸ごと落とすためである。書き出しは`io_atomic.write_json_batch_atomically()`による**集合単位の1書き込み**で、全件を一時ファイルへ書いてから`os.replace`する。1件ずつ書くと8件目の失敗が7件を残したままコマンドを失敗させ、非ゼロ終了を「何も生成されなかった」と読む統括の前提を破る（AGENTS.mdの「論理的な複数行書き込みは1トランザクション」をファイル集合へ適用したもの）。
 
 **コード所有メタデータの解決**: 書類種別・提出日は`analysis_input.json`の`FilingInput`から、ソースURLは`ValidatedAnalysis.source_urls`（入力側news/filing/calendar URLのうち`http`/`https`だけ）から解決する。不正・空URLはリンクにもbare URLにもせずattributionを省略する。レポートはスキルが申告したリンクを一切信頼せず、ingestはこの解決のためにデータベースへ触れない。
 

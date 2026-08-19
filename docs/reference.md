@@ -272,6 +272,69 @@ copilot-verify-analysis <WORKDIR>/analysis_result.json          # ingestのdry-r
 `copilot-daily`がコード側で書くファイルで、スキルが取り違えうるのはresult側だから
 であり、identityの照合自体は`validate_artifact_identity()`をそのまま通している。
 
+## `copilot-export-slices`と入力スライスの決定論生成
+
+`analysis/slices.py`と`analysis/slice_cli.py`（`copilot-export-slices`）は、
+`analysis_input.json`から**専門家×銘柄**の入力スライスを切り出す。統括スキルが
+1.4MBの入力を読みながら21件を手で切っていた工程（2026-08-13の実走で5.2分）を
+決定論的なコードへ置き換えたものである（Issue #260）。
+
+```bash
+copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad>/slices
+copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクトリでもよい
+```
+
+- 出力は`slice-<kind>-<SYMBOL>.json`（`<kind>`は`news` / `filings` / `screening`）。
+  `analysis_work/<kind>-<SYMBOL>.json`の断片と名前の形が似るため`slice-`を付ける——
+  両者はスキーマが違い、マージされるのは断片だけである
+- グルーピングは`swing-daily`スキル Step 2 の担当割り当てをそのまま写す:
+  `news`は`news`が非空の銘柄、`filings`は`filings`が非空の銘柄、`screening`は
+  全銘柄。run単位のcontextブロックはscreeningスライスにだけ入る（それを読むと
+  規約に書かれているのは`interpret-screening`だけである）
+- `news`が空でも`news_supply`を持つ銘柄にnewsスライスを出さないのは、
+  `analyze-news`とAC14が「`news`が空なら`news_summary: null`を書く」ことを
+  求めているためである。エージェントを立てても null が返るだけで、供給量の申告
+  （Issue #130）はレポートへ届かない。届かせるには専門家側の規約変更が要り、
+  スライス生成とは独立した設計判断になるので別イシューで追う
+- `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
+  scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
+  呼び出し側に必ず宣言させる。さらに値そのものを検査し、**runディレクトリと同一・
+  その配下・その上位**、および`analysis_input.json`を既に持つディレクトリを拒否する。
+  必須にするだけでは「入力として渡したのと同じパスを`--out-dir`にも渡す」誤りを
+  防げず、このワークフローは`rm`を実行しないので`reports/<date>/<run-id>/`へ落ちた
+  `slice-*.json`はrunごとに溜まる。「gitチェックアウト配下か」は判定しない——
+  wheelでインストールされたパッケージから運用者のリポジトリは同定できず、
+  誤判定は無人runを丸ごと落とすためである
+- 標準出力は「絶対パス / kind / 銘柄 / `source_chars`」のタブ区切り＋総数行。
+  `source_chars`はそのスライスが載せている本文の文字数で、統括はこれを
+  1エージェントあたりの文字数上限（開示は240,000文字）に突き合わせる
+- 終了コードは`0`（生成成功）/`1`（入力が読めない・スキーマ違反・`--out-dir`が
+  拒否形・書き込み失敗）
+- スライス群は**1つの論理的な書き込み**として書く（`io_atomic.write_json_batch_atomically()`）。
+  全件をまず宛先ディレクトリ内の一時ファイルへ書き、そのあとで`os.replace`する。
+  容量不足や書き込み不可で途中失敗した場合、宛先は1つも変更されず一時ファイルも
+  残らない——「コマンドは失敗したのに7件だけ残っている」状態を作らないためである。
+  統括は非ゼロ終了を「何も生成されなかった」と読み、このワークフローは scratchpad を
+  掃除しない
+
+**決定論性が本コマンドの要件**である（同一入力→バイト同一出力。Issue #261 が
+本文ハッシュでの流用判定の前提にする。この性質はプロセスを跨いで成り立つ必要が
+あるため、回帰テストは同一プロセス内の2回ではなく、`PYTHONHASHSEED`を変えた
+2つの別インタプリタでエントリポイントを実行して出力バイトを比較する）。そのために、値は`analysis_input.json`の
+**JSONそのもの**から逐語コピーする——parse済みモデルを再シリアライズすると日時表記や
+キー順が書き換わり、provenance検査が突き合わせる文字列と一致しなくなる。
+トップレベルのキー順は`run_id` / `as_of` / `input_digest` / `kind` / `context` /
+`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。書き出しは上記の
+`io_atomic.write_json_batch_atomically()`で、直列化の形は単発の
+`write_json_atomically()`と同一（UTF-8・`indent=2`・`sort_keys=False`・
+末尾改行1個・LF・同一ディレクトリの一時ファイル＋`os.replace`）であり、生成時刻・
+パス・ホストなど実行環境依存の値をペイロードへ入れない。
+
+スライスは書かれる前に`InputSlice`（`extra="forbid"`）で検証される。`kind`ごとに
+`candidate`が持てるキーの集合をスキーマ側で固定してあるので、担当外のフィールド
+——他の専門家の長文テキストやrun単位のcontext——が紛れ込んだスライスは、
+サブエージェントへ渡る前に落ちる。
+
 ## `copilot-retro`とverdictの当否評価
 
 `retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、`collect`/`evaluate`/

@@ -79,6 +79,15 @@ _ANALYSIS_GAP_METADATA_KEY = "prior_analysis_gaps"
 #: Thursday), short enough that a gap nobody backfilled stops being re-reported
 #: forever -- `copilot-history incomplete` is the tool for the full history.
 _ANALYSIS_GAP_LOOKBACK_DAYS = 7
+#: Report-facing counterpart to `_emit_analysis_gap`'s stderr line (#273): the
+#: same fact, phrased for an operator who only reads the Markdown report and
+#: never sees an unattended run's stderr. Names the specific gapped
+#: `run_date` and the concrete recovery action (`--allow-same-day-rerun`
+#: against that date), rather than a generic "check the logs" pointer.
+_ANALYSIS_GAP_NOTICE_TEMPLATE = (
+    "前営業日（{run_date}）の定性分析が未完了です（analysis_result.json 欠落）。"
+    "`--allow-same-day-rerun` を付けて {run_date} 分を再実行すると解消できます。"
+)
 
 __all__ = ["DailyDependencies", "run_daily"]
 
@@ -253,6 +262,21 @@ def _prior_analysis_gaps(
             "still recorded in runs.metadata_json"
         )
     return records
+
+
+def _analysis_gap_notices(analysis_gaps: list[dict[str, object]]) -> tuple[str, ...]:
+    """Render each `_prior_analysis_gaps()` record as one operator-facing line.
+
+    A separate rendering from `_emit_analysis_gap`'s stderr tag (#273): that
+    line is a machine-readable contract the `swing-daily` skill parses, while
+    this one lands in `brief.notices` for whoever only reads the Markdown
+    report. One notice per gap, so a lookback window wide enough to catch a
+    weekend-plus-holiday still names every gapped day individually.
+    """
+    return tuple(
+        _ANALYSIS_GAP_NOTICE_TEMPLATE.format(run_date=gap["run_date"])
+        for gap in analysis_gaps
+    )
 
 
 def _mark_historical_replay(analysis_input_path: Path, ctx: _RunContext) -> None:
@@ -507,6 +531,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         regime_snapshot=cast("RegimeSnapshot", regime_snapshot),
         exposure_decision=cast("ExposureDecision", exposure_decision),
         ftd_snapshot=cast("FtdSnapshot", ftd_snapshot),
+        analysis_gaps=analysis_gaps,
     )
     return _run_soft_steps(options, deps, ctx, deadline)
 
@@ -623,6 +648,7 @@ def _run_soft_steps(
             else ()
         )
         + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
+        + _analysis_gap_notices(ctx.analysis_gaps)
         + tuple(
             f"{label}: {outcome.detail}"
             for label, outcome in (

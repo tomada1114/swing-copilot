@@ -27,6 +27,7 @@ from swing_copilot.pipeline.daily import (
     _select_symbols,
     run_daily,
 )
+from swing_copilot.pipeline.daily_runner import _ANALYSIS_GAP_LOOKBACK_DAYS
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -1079,14 +1080,33 @@ class TestPriorAnalysisGapDetection:
         assert _stored_gaps(state_store, result.run_id) is None
         assert _gap_lines(capsys) == []
 
-    def test_a_gap_older_than_the_lookback_window_is_not_reported(
+    def test_a_gap_exactly_at_the_lookback_boundary_is_still_reported(
+        self, deps, state_store, capsys
+    ):
+        # The window is inclusive at its far edge: `since` is exactly
+        # `run_date - _ANALYSIS_GAP_LOOKBACK_DAYS`, so that day still counts.
+        # Expressed through the constant, so changing the number moves the
+        # boundary rather than silently changing what "in the window" means.
+        prior_id, _ = _archive_run(
+            deps,
+            run_date=_LIVE_RUN_DATE - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS),
+            analyzed=False,
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        gaps = _stored_gaps(state_store, result.run_id)
+        assert [gap["run_id"] for gap in gaps] == [str(prior_id)]
+        assert len(_gap_lines(capsys)) == 1
+
+    def test_a_gap_one_day_older_than_the_lookback_window_is_not_reported(
         self, deps, state_store, capsys
     ):
         # Bounded on purpose: a gap nobody backfilled must stop being
         # re-reported forever. `copilot-history incomplete` still lists it.
         _archive_run(
             deps,
-            run_date=_LIVE_RUN_DATE - timedelta(days=8),
+            run_date=_LIVE_RUN_DATE - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS + 1),
             analyzed=False,
         )
 

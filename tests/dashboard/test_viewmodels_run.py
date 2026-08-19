@@ -146,13 +146,13 @@ class TestRegimePanel:
         self, builder: Builder, dashboard_db: Fixture
     ) -> None:
         builder.run()
-        builder.regime(gate_verdict="BULL", dd_level="HIGH", vix_close=21.5)
+        builder.regime(gate_verdict="BULL", dd_level="SEVERE", vix_close=21.5)
 
         panel = build(dashboard_db).regime
 
         assert panel is not None
         assert (panel.gate.text, panel.gate.tone) == ("BULL", "good")
-        assert (panel.dd_level.text, panel.dd_level.tone) == ("HIGH", "critical")
+        assert (panel.dd_level.text, panel.dd_level.tone) == ("SEVERE", "critical")
         labels = {stat.label: stat.value.text for stat in panel.stats}
         assert labels["VIX 終値"] == "21.50"
         assert labels["SPY 15日/5日DD"] == "1 / 0"

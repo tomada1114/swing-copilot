@@ -242,19 +242,28 @@ RISK_STATUS_TONES: Mapping[str, str] = {
     "not_calculable": "quiet",
 }
 
-#: Market-regime gate verdict → badge modifier.
+#: Market-regime gate verdict → badge modifier. The closed vocabulary is
+#: `regime/gate.py`'s `GateVerdict`. `UNKNOWN` takes the absence tone because
+#: it is not a mild reading: the pipeline treats it as stricter than the worst
+#: determinable one, so it must not look like an ordinary value.
 GATE_TONES: Mapping[str, str] = {
     "BULL": "good",
-    "NEUTRAL": "quiet",
+    "NEUTRAL": "warning",
     "BEAR": "critical",
+    "UNKNOWN": "absent",
 }
 
-#: Drawdown pressure level → badge modifier.
+#: Drawdown pressure level → badge modifier, ordered by the severity rank in
+#: `regime/distribution.py` (`NORMAL` < `CAUTION` < `HIGH` < `SEVERE`, with
+#: `UNKNOWN` deliberately outranking all of them). Every `DistributionLevel`
+#: member is mapped on purpose: an unmapped level falls back to the mildest
+#: tone, which is the one mistake a severity scale must not make.
 DD_LEVEL_TONES: Mapping[str, str] = {
-    "CALM": "good",
     "NORMAL": "quiet",
     "CAUTION": "warning",
-    "HIGH": "critical",
+    "HIGH": "serious",
+    "SEVERE": "critical",
+    "UNKNOWN": "absent",
 }
 
 #: Screening stage → the Japanese section label the rejection panel uses.

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from swing_copilot.dashboard import formatting as fmt
+from swing_copilot.dashboard import guidance
 from swing_copilot.dashboard.models import (
     Badge,
     ReasonRow,
@@ -96,6 +97,7 @@ def build_symbol_detail(sources: SymbolSources) -> SymbolDetail | None:
         tracking=_tracking(sources.positions, sources.symbol),
         outcomes=() if entry is None else entry.outcomes,
         outcomes_fallback=common.outcomes_fallback(entry),
+        outcome_hint=guidance.OUTCOME,
         legend=fmt.legend(LEGEND_KEYS),
     )
 

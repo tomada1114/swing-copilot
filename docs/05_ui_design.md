@@ -178,7 +178,15 @@ DuckDBのファイルロックは読み書きプロセスと他のすべての�
 
 `verdicts`は次のrunの`copilot-retro collect`で取り込まれるため、最新runにverdict行が無いのは正常である。この状態は「verdict未取込」として表示し、`skip`や空欄にしない。また`tracked_positions`はIssue #190以降`skip`も反実仮想として追跡しているため、台帳と集計は必ず`recommendation`で層別する。
 
-### 10.5 起動
+### 10.5 読み方の注記
+
+値だけを並べた画面は「何が良い状態か」を読み手の記憶に委ねてしまう。各セクションには`dashboard/guidance.py`に集約した1〜2行のキャプションを添え、長い定義は折りたたむ。文言はテンプレートに直書きせず、複数ページで同じ定数を共有する。
+
+とくに重要なのが当否の向きである。`retro/evaluate.py`は分類をverdict自身の主張に対して定義しており、`proceed`でも`skip`でもHITは「その判断が正しかった」を意味する（`skip`のHITは、見送った銘柄が実際に下落したケース）。この説明がないと、下落した`skip`が失敗に見える。判定成績のfacetで緑が正解・赤が不正解と両区分そろって読めるのも同じ理由による。
+
+閾値は`postmortem.neutral_threshold_pct`／`postmortem.severe_threshold_pct`のように設定キー名で示す。ダッシュボードは`settings.yaml`を読まないため、数値を焼き込めば黙って古くなる。
+
+### 10.6 起動
 
 ```bash
 uv run copilot-dashboard

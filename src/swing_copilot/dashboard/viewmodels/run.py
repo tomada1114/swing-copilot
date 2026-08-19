@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from swing_copilot.dashboard import formatting as fmt
+from swing_copilot.dashboard import guidance
 from swing_copilot.dashboard.models import (
     Badge,
     RegimePanel,
@@ -28,12 +29,6 @@ LEGEND_KEYS = ("not_ingested", "immature", "absent", "unrecorded", "no_snapshot"
 
 #: Screening stages in the order a symbol passes through them.
 _STAGE_ORDER = ("data_quality", "fundamental_filter", "technical_signal")
-
-_ANALYSIS_PENDING_NOTE = (
-    "決定論パイプラインは完走したが analysis_result.json が無い。"
-    "スクリーニング・落選理由は確定値、verdict 列は未確定。"
-    "/swing-daily で分析フェーズを再実行すると埋まる。"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +63,17 @@ def build_run_overview(sources: RunSources) -> RunOverview:
         run=sources.run,
         status_badge=common.status_badge(sources.run.status),
         regime=_regime_panel(sources.regime, sources.run.run_id),
+        regime_hint=guidance.REGIME,
         rows=rows,
+        verdict_hint=(
+            None if sources.is_analysis_missing else guidance.VERDICT_INGESTION
+        ),
+        outcome_hint=guidance.OUTCOME,
         proceed_count=recommendations.count("proceed"),
         skip_count=recommendations.count("skip"),
         no_trade=any(bool(entry.value("no_trade")) for entry in entries.values()),
         analysis_pending_note=(
-            _ANALYSIS_PENDING_NOTE if sources.is_analysis_missing else None
+            guidance.ANALYSIS_PENDING if sources.is_analysis_missing else None
         ),
         rejection_groups=groups,
         rejection_total=sum(group.count for group in groups),

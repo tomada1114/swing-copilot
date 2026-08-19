@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from swing_copilot.dashboard import formatting as fmt
+from swing_copilot.dashboard import guidance
 from swing_copilot.dashboard.models import (
     Badge,
     ClassificationBar,
@@ -64,9 +65,12 @@ def build_history(sources: HistorySources) -> HistoryView:
     positions = common.to_records(sources.positions)
     return HistoryView(
         panels=_classification_panels(records),
+        classification_hint=guidance.CLASSIFICATION_FACETS,
         regime_points=_regime_points(sources.regime),
+        regime_hint=guidance.REGIME_TIMELINE,
         open_positions=_ledger_rows(positions, status=_OPEN),
         closed_summaries=_closed_summaries(positions),
+        ledger_hint=guidance.LEDGER,
         legend=fmt.legend(LEGEND_KEYS),
     )
 

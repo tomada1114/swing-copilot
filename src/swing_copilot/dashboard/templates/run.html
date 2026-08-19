@@ -32,6 +32,7 @@
 
 <section class="panel">
   {{ m.sec("レジーム", "regime_snapshots") }}
+  {{ m.hint(view.regime_hint) }}
   {% if view.regime %}
   <div class="regime-verdicts">
     <div><span class="eyebrow">gate</span>{{ m.badge(view.regime.gate) }}</div>
@@ -46,6 +47,8 @@
 
 <section class="panel">
   {{ m.sec("候補と判断", "v_candidates × v_verdict_scorecard") }}
+  {% if view.verdict_hint %}{{ m.hint(view.verdict_hint) }}{% endif %}
+  {{ m.hint(view.outcome_hint) }}
   {% if view.rows %}
   <div class="table-scroll">
     <table class="grid">

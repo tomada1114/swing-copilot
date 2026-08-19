@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from swing_copilot.dashboard import formatting as fmt
+from swing_copilot.regime.distribution import DistributionLevel
+from swing_copilot.regime.gate import GateVerdict
 
 
 class TestIsMissing:
@@ -136,6 +138,36 @@ class TestIntegerAndTones:
 
     def test_none_state_falls_back_to_the_neutral_tone(self) -> None:
         assert fmt.tone_of(fmt.GATE_TONES, None) == "quiet"
+
+
+class TestRegimeVocabularies:
+    """The tone tables must cover every member of the real enums.
+
+    An unmapped level falls back to the neutral tone, so a missing `SEVERE`
+    would paint the worst regime as the mildest — the one mistake a severity
+    scale must not make.
+    """
+
+    def test_every_distribution_level_has_a_tone(self) -> None:
+        assert set(fmt.DD_LEVEL_TONES) == {level.value for level in DistributionLevel}
+
+    def test_every_gate_verdict_has_a_tone(self) -> None:
+        assert set(fmt.GATE_TONES) == {verdict.value for verdict in GateVerdict}
+
+    def test_drawdown_tones_rise_with_severity(self) -> None:
+        severity = ["NORMAL", "CAUTION", "HIGH", "SEVERE"]
+        assert [fmt.DD_LEVEL_TONES[level] for level in severity] == [
+            "quiet",
+            "warning",
+            "serious",
+            "critical",
+        ]
+
+    def test_an_undeterminable_level_is_not_shown_as_a_mild_value(self) -> None:
+        # `distribution_severity` ranks UNKNOWN above SEVERE precisely so it
+        # can never loosen a decision; the badge must not look ordinary.
+        assert fmt.DD_LEVEL_TONES["UNKNOWN"] == "absent"
+        assert fmt.GATE_TONES["UNKNOWN"] == "absent"
 
 
 class TestLegend:

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from datetime import date
 
     from swing_copilot.dashboard.formatting import Cell, NullToken
+    from swing_copilot.dashboard.guidance import Hint
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +122,12 @@ class RunOverview:
     run: RunRef
     status_badge: Badge
     regime: RegimePanel | None
+    regime_hint: Hint
     rows: tuple[SymbolRow, ...]
+    #: `None` when the analysis-pending banner already carries the same
+    #: clarification, so the page never states it twice.
+    verdict_hint: Hint | None
+    outcome_hint: Hint
     proceed_count: int
     skip_count: int
     no_trade: bool
@@ -170,6 +176,7 @@ class SymbolDetail:
     tracking: TrackingPanel | None
     outcomes: tuple[OutcomeCell, ...]
     outcomes_fallback: Cell
+    outcome_hint: Hint
     legend: tuple[NullToken, ...]
 
 
@@ -243,7 +250,10 @@ class HistoryView:
     """Everything `/history` renders."""
 
     panels: tuple[ClassificationPanel, ...]
+    classification_hint: Hint
     regime_points: tuple[RegimePoint, ...]
+    regime_hint: Hint
     open_positions: tuple[LedgerRow, ...]
     closed_summaries: tuple[ClosedSummary, ...]
+    ledger_hint: Hint
     legend: tuple[NullToken, ...]

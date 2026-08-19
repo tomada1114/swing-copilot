@@ -10,6 +10,22 @@
 <span class="badge badge--{{ b.tone }}"{% if b.title %} title="{{ b.title }}"{% endif %}>{{ b.text }}</span>
 {%- endmacro %}
 
+{# A "how to read this" caption. The text itself lives in
+   dashboard/guidance.py so a definition is never restated in two places. #}
+{% macro hint(h) -%}
+<div class="hint">
+  <p class="hint-summary">{{ h.summary }}</p>
+  {% if h.details %}
+  <details class="hint-more">
+    <summary>{{ h.details_label }}</summary>
+    <ul>
+      {% for line in h.details %}<li>{{ line }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{%- endmacro %}
+
 {% macro sec(name, source) -%}
 <h2 class="sec"><span class="sec-name">{{ name }}</span><span class="sec-src">{{ source }}</span></h2>
 {%- endmacro %}

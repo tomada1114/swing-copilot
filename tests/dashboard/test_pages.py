@@ -13,7 +13,7 @@ import duckdb
 import pytest
 from starlette.testclient import TestClient
 
-from swing_copilot.dashboard import create_app
+from swing_copilot.dashboard import create_app, guidance
 from tests.dashboard.conftest import RUN_ID, Builder, Fixture, write_run_archive
 
 if TYPE_CHECKING:
@@ -182,6 +182,68 @@ class TestHistoryPageWithoutData:
         assert response.status_code == HTTPStatus.OK
         assert "満期を迎えた verdict がまだ無い" in response.text
         assert "建玉中の仮想ポジションは無い" in response.text
+
+
+@pytest.mark.usefixtures("populated")
+class TestReadingHints:
+    """Every section that shows a judgement carries its own "how to read it".
+
+    The text lives in `dashboard/guidance.py`; these assertions pin that it
+    reaches the page, so a section can never ship the values without the
+    caption that makes them interpretable.
+    """
+
+    def test_the_run_page_explains_the_regime_scales(self, client: TestClient) -> None:
+        response = client.get(f"/runs/{RUN_ID}")
+
+        assert guidance.REGIME.summary in response.text
+        assert guidance.REGIME.details[0] in response.text
+
+    def test_the_run_page_explains_the_outcome_direction(
+        self, client: TestClient
+    ) -> None:
+        response = client.get(f"/runs/{RUN_ID}")
+
+        assert guidance.OUTCOME.summary in response.text
+
+    def test_the_run_page_explains_the_verdict_ingestion_lag(
+        self, client: TestClient
+    ) -> None:
+        response = client.get(f"/runs/{RUN_ID}")
+
+        assert guidance.VERDICT_INGESTION.summary in response.text
+
+    def test_the_symbol_page_explains_the_outcome_direction(
+        self, client: TestClient
+    ) -> None:
+        response = client.get(f"/runs/{RUN_ID}/symbols/AAPL")
+
+        assert guidance.OUTCOME.summary in response.text
+        assert guidance.OUTCOME.details[-1] in response.text
+
+    def test_the_history_page_explains_facets_regime_and_ledger(
+        self, client: TestClient
+    ) -> None:
+        response = client.get("/history")
+
+        assert guidance.CLASSIFICATION_FACETS.summary in response.text
+        assert guidance.REGIME_TIMELINE.summary in response.text
+        assert guidance.LEDGER.summary in response.text
+
+
+@pytest.mark.usefixtures("populated")
+class TestVerdictIngestionHintPlacement:
+    def test_a_pending_run_states_the_lag_in_the_banner_only(
+        self, client: TestClient, dashboard_db: Fixture
+    ) -> None:
+        # Both texts say the same thing; showing them together two sections
+        # apart would read as a contradiction rather than a clarification.
+        write_run_archive(dashboard_db.reports_root, has_result=False)
+
+        response = client.get(f"/runs/{RUN_ID}")
+
+        assert guidance.ANALYSIS_PENDING in response.text
+        assert guidance.VERDICT_INGESTION.summary not in response.text
 
 
 class TestUnreadableDatabase:

@@ -5,10 +5,7 @@
 {% block main %}
 <section class="panel">
   {{ m.sec("判定成績", "v_verdict_scorecard") }}
-  <p class="panel-lede">
-    proceed と skip は必ず分けて数える。#190 以降、skip も反実仮想として同じ手仕舞い規則で追跡されているので、
-    混ぜた平均は判断とその対照群を足し合わせただけになる。
-  </p>
+  {{ m.hint(view.classification_hint) }}
   {% if view.panels %}
   <ul class="chart-legend">
     <li><span class="swatch swatch--good"></span>HIT</li>
@@ -53,14 +50,14 @@
 
 <section class="panel">
   {{ m.sec("レジーム変遷", "regime_snapshots") }}
+  {{ m.hint(view.regime_hint) }}
   {% if view.regime_points %}
-  <p class="panel-lede">折れ線は VIX 終値。下段の帯は各 run のドローダウン圧力（ホバーで gate と level）。</p>
   <div class="chart-scroll">{{ regime_chart(view.regime_points) | safe }}</div>
   <ul class="chart-legend">
-    <li><span class="swatch swatch--good"></span>CALM</li>
     <li><span class="swatch swatch--quiet"></span>NORMAL</li>
     <li><span class="swatch swatch--warning"></span>CAUTION</li>
-    <li><span class="swatch swatch--critical"></span>HIGH</li>
+    <li><span class="swatch swatch--serious"></span>HIGH</li>
+    <li><span class="swatch swatch--critical"></span>SEVERE</li>
   </ul>
   {% else %}
   <p class="empty">レジーム snapshot がまだ記録されていない。</p>
@@ -69,6 +66,7 @@
 
 <section class="panel">
   {{ m.sec("追跡台帳・建玉中", "v_tracked_positions") }}
+  {{ m.hint(view.ledger_hint) }}
   {% if view.open_positions %}
   <div class="table-scroll">
     <table class="grid">

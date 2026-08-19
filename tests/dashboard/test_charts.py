@@ -93,20 +93,20 @@ class TestClassificationChart:
 class TestRegimeChart:
     def test_plots_one_marker_per_reading_and_one_strip_cell_per_run(self) -> None:
         points = (
-            RegimePoint(date(2027, 2, 26), 13.0, "CALM", "BULL"),
-            RegimePoint(date(2027, 3, 1), 21.0, "HIGH", "BEAR"),
+            RegimePoint(date(2027, 2, 26), 13.0, "NORMAL", "BULL"),
+            RegimePoint(date(2027, 3, 1), 21.0, "SEVERE", "BEAR"),
         )
 
         svg = charts.regime_chart(points)
 
         assert svg.count("<circle") == 2
         assert "<polyline" in svg
-        assert "var(--tone-good)" in svg
+        assert "var(--tone-quiet)" in svg
         assert "var(--tone-critical)" in svg
 
     def test_a_run_without_a_reading_keeps_its_strip_cell_but_no_marker(self) -> None:
         points = (
-            RegimePoint(date(2027, 2, 26), None, "CALM", "BULL"),
+            RegimePoint(date(2027, 2, 26), None, "NORMAL", "BULL"),
             RegimePoint(date(2027, 3, 1), 15.0, "HIGH", "BEAR"),
         )
 
@@ -156,7 +156,9 @@ class TestEscaping:
     [
         pytest.param(charts.classification_chart(make_panel(BAR)), id="classification"),
         pytest.param(
-            charts.regime_chart((RegimePoint(date(2027, 3, 1), 15.0, "CALM", "BULL"),)),
+            charts.regime_chart(
+                (RegimePoint(date(2027, 3, 1), 15.0, "NORMAL", "BULL"),)
+            ),
             id="regime",
         ),
     ],

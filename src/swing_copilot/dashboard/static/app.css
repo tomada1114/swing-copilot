@@ -407,6 +407,49 @@ main {
   font-size: 0.8rem;
 }
 
+/* ---- reading hints ----------------------------------------------------
+ * "How to read this" captions. Recessive by construction: muted ink, smaller
+ * than the data, and a left hairline that marks them as commentary rather
+ * than as another value in the section.
+ */
+
+.hint {
+  margin: 0 0 1rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--grid);
+  max-width: 76ch;
+}
+.hint-summary {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+.hint-more {
+  margin-top: 0.3rem;
+}
+.hint-more > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.hint-more > summary:hover {
+  color: var(--accent);
+}
+.hint-more ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--ink-2);
+  font-size: 0.76rem;
+  line-height: 1.75;
+}
+.hint-more li {
+  margin-bottom: 0.3rem;
+}
+.hint-more li:last-child {
+  margin-bottom: 0;
+}
+
 /* ---- banners ----------------------------------------------------------- */
 
 .banner {

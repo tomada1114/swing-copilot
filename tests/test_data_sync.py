@@ -52,6 +52,7 @@ class FakeObjectStore:
         self.written: list[str] = []
         self.deleted: list[str] = []
         self.fail_on_write: set[str] = set()
+        self.fail_on_delete: set[str] = set()
 
     def _guard(self, key: str) -> None:
         if key in self.fail_on_write:
@@ -79,6 +80,9 @@ class FakeObjectStore:
         destination.write_bytes(body)
 
     def delete(self, key: str) -> None:
+        if key in self.fail_on_delete:
+            msg = f"injected failure deleting {key}"
+            raise UploadFailedError(msg)
         self.objects.pop(key, None)
         self.deleted.append(key)
 
@@ -310,13 +314,46 @@ def test_pull_from_an_empty_bucket_reports_that_the_remote_is_empty(tmp_path):
         data_sync.pull(store, data_dir)
 
 
-def test_pull_after_a_push_that_died_before_its_manifest_fails_on_sha256(tmp_path):
+def test_a_push_interrupted_before_its_manifest_leaves_the_old_generation_readable(
+    tmp_path,
+):
+    # Only *new* keys were uploaded, so nothing the old manifest references was
+    # touched and a reader still sees generation 1 whole.
     origin = make_workspace(tmp_path, "origin")
     store = FakeObjectStore()
     push(store, origin)
     generation_one_manifest = store.objects[data_sync.MANIFEST_KEY]
 
-    # Second push: the data object lands, the manifest write dies.
+    _write(origin / "bars" / "year=2026" / "data.parquet", b"bars-2026-v1")
+    store.fail_on_write = {data_sync.MANIFEST_KEY}
+    with pytest.raises(UploadFailedError):
+        push(store, origin)
+    store.fail_on_write = set()
+
+    assert store.objects[data_sync.MANIFEST_KEY] == generation_one_manifest
+    assert "data/bars/year=2026/data.parquet" in store.objects
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    report = data_sync.pull(store, mirror)
+
+    assert report.generation == 1
+    assert set(report.downloaded) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
+    assert not (mirror / "bars" / "year=2026").exists()
+    assert (mirror / "copilot.duckdb").read_bytes() == b"duckdb-v1"
+
+
+def test_a_push_interrupted_before_its_manifest_fails_loudly_on_an_overwritten_key(
+    tmp_path,
+):
+    # Keys are paths, not content hashes, so re-uploading an existing key does
+    # replace bytes the old manifest still describes. That is the case the
+    # sha256 verification exists for: loud mismatch, never a silent half-tree.
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+    generation_one_manifest = store.objects[data_sync.MANIFEST_KEY]
+
     (origin / "copilot.duckdb").write_bytes(b"duckdb-v2")
     store.fail_on_write = {data_sync.MANIFEST_KEY}
     with pytest.raises(UploadFailedError):
@@ -334,6 +371,43 @@ def test_pull_after_a_push_that_died_before_its_manifest_fails_on_sha256(tmp_pat
     assert data_sync.read_state(mirror) is None
     assert not list(mirror.glob("*.tmp"))
     assert not list(mirror.glob(".*.tmp"))
+
+
+def test_a_push_interrupted_after_its_manifest_leaves_the_new_generation_consistent(
+    tmp_path,
+):
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    # Second push: the manifest commits, the garbage collection that follows
+    # it dies before removing the now-unreferenced object.
+    (origin / "bars" / "year=2025" / "data.parquet").unlink()
+    store.fail_on_delete = {BARS_2025_KEY}
+    with pytest.raises(UploadFailedError):
+        push(store, origin)
+    store.fail_on_delete = set()
+
+    assert read_manifest(store)["generation"] == 2
+    assert BARS_2025_KEY not in read_manifest(store)["files"]
+    assert BARS_2025_KEY in store.objects  # leftover garbage
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    report = data_sync.pull(store, mirror)
+
+    assert report.generation == 2
+    assert set(report.downloaded) == {DUCKDB_KEY, BARS_2024_KEY}
+    assert not (mirror / "bars" / "year=2025").exists()
+
+    # The interrupted push still committed, so the local state advanced with it
+    # and the next push is accepted -- and collects the leftover.
+    assert data_sync.read_state(origin).generation == 2
+    follow_up = push(store, origin)
+
+    assert follow_up.generation == 3
+    assert follow_up.deleted == (BARS_2025_KEY,)
+    assert BARS_2025_KEY not in store.objects
 
 
 def test_pull_deletes_local_files_the_manifest_no_longer_lists(tmp_path):

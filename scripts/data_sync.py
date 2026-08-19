@@ -7,18 +7,23 @@ The pipeline itself is untouched -- this script only moves bytes.
 
 Two invariants make that safe:
 
-**`manifest.json` is the commit point.** A `push` writes changed data objects
-first, deletes remote objects the local tree no longer has, and writes
-`manifest.json` last. Every S3-compatible PUT lands as one whole object, so a
-crash before the manifest write leaves the previous generation's manifest in
-place; a reader then finds an object whose bytes disagree with the sha256 the
-manifest recorded and fails loudly instead of loading a half-written mix.
-`pull` therefore verifies every downloaded object against the manifest.
+**`manifest.json` is the commit point.** A `push` goes in three steps: upload
+the changed data objects, write `manifest.json`, then delete the objects the
+new manifest does not reference. Every S3-compatible PUT lands as one whole
+object, so the middle step is the instant the new generation becomes real, and
+each half of a crashed push has a defined meaning:
 
-The one window this leaves open: a crash *after* the deletion step but before
-the manifest write leaves the old manifest referencing objects that are gone.
-`pull` fails loudly there too (the object is missing), and the fix is to re-run
-`push` from the machine that still holds the full local tree.
+- *Crashed after the manifest write.* The new generation is complete: every
+  object it references was uploaded before the manifest. What survives is
+  unreferenced garbage, which the next `push` collects (deletions are listed
+  live, not read from the manifest). A reader sees a fully consistent tree.
+- *Crashed before the manifest write.* The previous manifest still stands, and
+  nothing it references has been deleted -- deletion happens only after the
+  commit. Object keys are paths rather than content hashes, though, so a key
+  the old manifest references may already hold the *new* generation's bytes.
+  `pull` verifies every object against the manifest's sha256 and size, so that
+  shows up as a loud mismatch rather than a silently half-updated tree. The
+  fix is to re-run `push` from the machine holding the full local tree.
 
 **A generation counter is the only concurrency guard.** `pull` records the
 manifest's `generation` in `data/.r2_sync_state.json`; `push` refuses unless
@@ -644,9 +649,9 @@ def push(
 ) -> PushReport:
     """Publish the local `data/` tree as the next remote generation.
 
-    Order matters: changed objects go up first, remote objects the local tree
-    no longer has are removed second, and `manifest.json` is written last, so
-    the manifest write is the commit point (see the module docstring).
+    Order matters: changed objects go up first, `manifest.json` is written
+    second -- that write is the commit point -- and only then are the objects
+    the new generation no longer references deleted (see the module docstring).
 
     Raises:
         DataSyncError: When the optimistic-lock precondition is unmet, or the
@@ -675,16 +680,20 @@ def push(
         store.upload(key, _local_path(data_dir, key))
         uploaded.append(key)
 
-    # Listed live rather than read from the manifest, so objects orphaned by an
-    # earlier interrupted push are collected too.
-    deleted = [key for key in sorted(store.list_keys(DATA_PREFIX)) if key not in local]
-    for key in deleted:
-        store.delete(key)
-
+    # The commit point. Everything above only added objects the old manifest
+    # does not reference; everything below only removes objects the new one
+    # does not reference.
     _write_remote_manifest(
         store, Manifest(generation=generation, updated_at=now(), files=local)
     )
     write_state(data_dir, generation)
+
+    # Garbage collection, listed live rather than read from the manifest so
+    # that objects orphaned by an earlier interrupted push are collected too.
+    deleted = [key for key in sorted(store.list_keys(DATA_PREFIX)) if key not in local]
+    for key in deleted:
+        store.delete(key)
+
     return PushReport(
         generation=generation,
         uploaded=tuple(uploaded),

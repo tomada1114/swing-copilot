@@ -85,7 +85,7 @@ _ANALYSIS_GAP_LOOKBACK_DAYS = 7
 #: `run_date` and the concrete recovery action (`--allow-same-day-rerun`
 #: against that date), rather than a generic "check the logs" pointer.
 _ANALYSIS_GAP_NOTICE_TEMPLATE = (
-    "前営業日（{run_date}）の定性分析が未完了です（analysis_result.json 欠落）。"
+    "{run_date} の定性分析が未完了です（analysis_result.json 欠落）。"
     "`--allow-same-day-rerun` を付けて {run_date} 分を再実行すると解消できます。"
 )
 

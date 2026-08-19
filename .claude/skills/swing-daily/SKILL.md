@@ -276,7 +276,7 @@ stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式�
 出ることがある機械可読タグで、`run_date=... run_id=... run_directory=...`
 の形で前営業日以前の run を指す。見つけても run 自体は正常に進んでいるため、
 **本日の分析は Step 2 以降へ通常どおり進める**。タグに含まれる `run_date` を
-控えておき、最終報告と `headless_note.md` の両方に「前営業日（`run_date`）の
+控えておき、最終報告と `headless_note.md` の両方に「`run_date` の
 定性分析が欠落している」旨と、再実行の選択肢（`--allow-same-day-rerun` を
 付けてその `run_date` 分の run を再実行すれば再取得できる）を明記する。
 

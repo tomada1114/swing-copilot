@@ -130,6 +130,23 @@
 | 専門家スキル | 共有コマンドを使う指示が指示文に残っている | コマンドはあるのに誰も呼ばず、各自が自前検査へ戻る | `tests/analysis/test_skill_contract.py::test_every_fragment_author_is_pointed_at_the_shared_checker` |
 | `output-schema.md` | 「ingest と同一の関数」の主張が関数名で束縛されている | リネームで主張だけが残り、実体との対応が切れる | `tests/analysis/test_skill_contract.py::test_the_schema_reference_binds_the_checker_to_the_ingest_function` |
 
+## 開示断片の日跨ぎ流用（本文ハッシュ）
+
+要件 ID を持たない、Issue #261 で断片契約を緩めた経路の不変条件。緩めたのは
+**開示断片だけ**であり、この表はその境界と、緩和を安全にしている fail-closed の網を
+束縛する。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `analysis/fragment.py` | 開示本文が同じなら別 run の開示断片を流用できる | 本文が 1 文字も変わらないのに毎日 10-Q を読み直す | `tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_an_unchanged_filing_body_makes_yesterdays_reading_reusable` |
+| `analysis/fragment.py` | 本文が変わった開示は再分析になる | 切り詰め量が変わった開示に、古い読みがそのまま載る | `tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_changed_filing_body_forces_a_re_analysis` |
+| `analysis/fragment.py` | 読んでいない開示を含む銘柄は流用できない | 夜間に出た 8-K が「分析済み」として素通りする | `tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_filing_the_reading_never_saw_forces_a_re_analysis` |
+| `analysis/fragment.py` | `news_summary` / `screening_assessment` は本文ハッシュに関わらず日跨ぎ流用できない | 前日のニュース解釈・前日のスコア評価が当日のレポートに載る | `tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_the_as_of_dependent_readings_are_never_reusable_across_runs` |
+| `analysis/validate.py` | 誤って流用された古い読みは `evidence_quote` の逐語検証で FAIL する | 流用の鍵が壊れたとき、provenance を担保するものが何も残らない | `tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_wrongly_reused_reading_still_fails_the_verbatim_quote_check` |
+| `analysis/slices.py` | 本文ハッシュは filings スライスだけが載せ、その本文の digest と一致する | 専門家が自分でハッシュを計算し、実装差が流用判定の差になる | `tests/analysis/test_slices.py::test_only_the_filings_slice_carries_the_reuse_digests` |
+| `analysis/schemas.py` | ハッシュの入力は export 後の本文である | 収集段階の原文で採ると、切り詰め方が変わっても流用されてしまう | `tests/analysis/test_slices.py::test_the_reuse_digest_follows_the_exported_body_not_the_original` |
+| `swing-daily` / `analyze-filings` スキル | 緩和が開示に限られる旨と、ハッシュを自分で計算しない旨が指示文に残っている | 指示の書き換えでニュース断片まで日跨ぎ流用され、機械検査では見えない | `tests/analysis/test_skill_contract.py::test_only_the_filing_reading_is_reusable_across_trading_days` |
+
 ## 成果物読み取りの失敗型
 
 要件 ID を持たない、Issue #153 と Issue #164 で追加した経路の不変条件。

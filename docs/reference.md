@@ -260,7 +260,8 @@ copilot-verify-analysis <WORKDIR>/analysis_result.json          # ingestのdry-r
 
 **検査水準がingestと同一であること**が本コマンドの要件である（Issue #132）。
 断片は`analysis/fragment.py`の`AnalysisFragment`（`run_id` / `as_of` /
-`input_digest` / `ac_check` ＋ペイロードキーちょうど1つ）でparseし、
+`input_digest` / `ac_check` ＋ペイロードキーちょうど1つ。開示断片のみ
+`filing_body_digests`も必須）でparseし、
 `SymbolAnalysis`へ持ち上げてから`analysis/validate.py`の
 `verify_symbol_analysis()`——`copilot-ingest-analysis`が銘柄ごとに呼ぶのと
 **同一の関数**——へ渡す。結果側は`load_analysis_result()`・
@@ -271,6 +272,20 @@ copilot-verify-analysis <WORKDIR>/analysis_result.json          # ingestのdry-r
 結果側のdry-runで唯一省くのは`report_context.json`との照合である。あれは同じrunの
 `copilot-daily`がコード側で書くファイルで、スキルが取り違えうるのはresult側だから
 であり、identityの照合自体は`validate_artifact_identity()`をそのまま通している。
+
+**断片を流用してよいかの判定も、このコマンドが答える**（Issue #261）。鍵は断片の
+種類で違う。`news-<SYMBOL>.json`と`screening-<SYMBOL>.json`は従来どおり
+`run_id` / `as_of` / `input_digest`の3値一致——当日のニュースと当日の決定論的スコアを
+読むので真に`as_of`依存であり、日跨ぎでは流用できない。`filings-<SYMBOL>.json`だけは
+`filing_body_digests`（`source_id` → 開示本文のSHA-256。`schemas.filing_body_digest()`
+が算出し、`copilot-export-slices`がスライスへ載せ、開示担当が断片へ逐語コピーする）が
+その日の入力がexportする開示本文と**完全一致**することが鍵で、`run_id`が変わっても
+流用できる。開示の読みは開示本文の関数であり、連続2営業日で共通5銘柄のaccessionが
+14/14一致した実測がこの緩和の動機である。
+
+流用してもprovenanceは緩まない。流用した断片もその日の`analysis_input.json`に対して
+provenance・`evidence_quote`の逐語一致・CON-03を改めて通り、本文が変わった開示の
+古い読みはdigest判定をすり抜けても引用が現在の本文に無いためFAILする（fail-closed）。
 
 ## `copilot-export-slices`と入力スライスの決定論生成
 
@@ -324,7 +339,10 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
 **JSONそのもの**から逐語コピーする——parse済みモデルを再シリアライズすると日時表記や
 キー順が書き換わり、provenance検査が突き合わせる文字列と一致しなくなる。
 トップレベルのキー順は`run_id` / `as_of` / `input_digest` / `kind` / `context` /
-`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。書き出しは上記の
+`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。filingsスライスだけは
+最後に`filing_body_digests`が続く——スライス内で唯一の計算値で、そのスライスが
+載せている`filings[].text`のSHA-256である（Issue #261。開示担当はこれを断片へ
+逐語コピーし、翌営業日の流用可否がこの値で決まる）。書き出しは上記の
 `io_atomic.write_json_batch_atomically()`で、直列化の形は単発の
 `write_json_atomically()`と同一（UTF-8・`indent=2`・`sort_keys=False`・
 末尾改行1個・LF・同一ディレクトリの一時ファイル＋`os.replace`）であり、生成時刻・

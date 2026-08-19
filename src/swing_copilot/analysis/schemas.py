@@ -50,11 +50,44 @@ def canonical_json_digest(payload: dict[str, object], *, excluded_field: str) ->
     All other fields are serialized with stable key ordering, compact separators,
     and UTF-8 so independently produced documents bind to the same bytes.
     """
-    canonical_payload = _canonicalize_for_digest(
+    return _canonical_sha256(
         {key: value for key, value in payload.items() if key != excluded_field}
     )
+
+
+def filing_body_digest(text: str) -> str:
+    """Return the SHA-256 that identifies one filing's exported body (Issue #261).
+
+    A filing reading is a function of the filing text, and that text does not
+    move when the trading day does: two consecutive runs exported the same 14
+    filings for their five shared candidates, accession for accession. Keying
+    an `analysis_work/filings-<SYMBOL>.json` fragment on this digest is what
+    lets the next run reuse yesterday's reading of an unchanged 10-Q instead of
+    re-reading it from scratch (`analysis/fragment.py`).
+
+    The input is deliberately the *exported* body -- what survived
+    `filing_selection.py`'s budget and truncation and actually reached the
+    skill -- not the collected original. A change in how much of a filing the
+    expert is handed changes what the reading could have been written from, so
+    it has to invalidate the earlier one.
+
+    Shares its serialization with `canonical_json_digest` rather than hashing
+    the string on its own, so this contract has one digest implementation
+    instead of two.
+
+    Args:
+        text: The filing body exactly as `analysis_input.json` exports it.
+
+    Returns:
+        The full 64-character lowercase SHA-256 hex digest.
+    """
+    return _canonical_sha256({"text": text})
+
+
+def _canonical_sha256(payload: dict[str, object]) -> str:
+    """Hash one payload as canonical JSON: stable key order, compact, UTF-8."""
     canonical = json.dumps(
-        canonical_payload,
+        _canonicalize_for_digest(payload),
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

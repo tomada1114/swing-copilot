@@ -1157,7 +1157,11 @@ def verify_symbol_analysis(                        # 銘柄1件の検査（inges
 
 # analysis/fragment.py（analysis_work/ 断片の契約、Issue #132）
 class AnalysisFragment(BaseModel):
-    """run_id / as_of / input_digest / symbol / ac_check ＋ペイロードキーちょうど1つ"""
+    """run_id / as_of / input_digest / symbol / ac_check ＋ペイロードキーちょうど1つ
+
+    開示断片だけは filing_body_digests（source_id -> 本文 SHA-256）も必須で、
+    これが日跨ぎ流用の鍵になる（Issue #261）
+    """
 
 def as_symbol_analysis(fragment: AnalysisFragment) -> SymbolAnalysis: ...
 def fragment_filename_error(path: Path, fragment: AnalysisFragment) -> str | None: ...
@@ -1171,7 +1175,10 @@ def main(argv: list[str] | None = None) -> None: ...
 # analysis/slices.py
 SLICE_FILENAME_PREFIX = "slice"
 class InputSlice(BaseModel):
-    """run_id / as_of / input_digest / kind / context / candidate（extra="forbid"）"""
+    """run_id / as_of / input_digest / kind / context / candidate（extra="forbid"）
+
+    filings スライスのみ filing_body_digests を伴う（Issue #261）
+    """
 
 def build_slices(payload: Mapping[str, Any]) -> tuple[SliceDocument, ...]: ...
 def write_slices(documents: Sequence[SliceDocument], out_dir: str | Path) -> tuple[Path, ...]: ...
@@ -1200,6 +1207,12 @@ def main(argv: list[str] | None = None) -> None: ...
 **断片の事前検査（Issue #132）**: `analysis_result.json`は専門家サブエージェントが書いた`analysis_work/<kind>-<SYMBOL>.json`断片のマージで作られる。断片は`AnalysisResult`の部分集合では**ない**——マージが捨てる作業用メタデータ（`run_id` / `as_of` / `input_digest` / `ac_check`）を持ち、銘柄1件分ではなくペイロードキー1つだけを持つ——ため、`load_analysis_result()`では読めない。2026-08-11のrunでは、これを埋めるために15体の専門家がそれぞれ自前の検証を実装し、grepで済ませたものと実コードを呼んだものが混在した。grepは`evidence.py`のNFKC正規化・記号統一・空白畳み込みと`safety.py`の正規化を再現しないため、**ingestでは落ちるものを「合格」と報告しうる**。
 
 そこで`analysis/fragment.py`が断片の`extra="forbid"`スキーマ（ペイロードキーはちょうど1つ、`screening_assessment: null`は拒否、`news_summary: null` / `filing_analyses: []`は「分析済みで空」として許可）を持ち、`as_symbol_analysis()`で空のスタンドイン（`ScreeningAssessment(summary="")`と理由なしの`Verdict`。いずれも`source_id`も表示テキストも足さない）を補って`SymbolAnalysis`へ持ち上げ、`verify_symbol_analysis()`へ渡す。**これはingestが銘柄ごとに呼ぶのと同一の関数**であり、事前検査が本番検査より弱くなりえない構造にしてある。identity（`run_id` / `as_of` / `input_digest`）の不一致は内容検査より先に報告する——別runの断片をprovenance違反として報告すると原因を取り違えるためである。書き出し前の自己検査自体は残す必要がある（ingestはfail-closedでリトライしないため、後から見つけてもその銘柄のその日の分析は消える）。
+
+**開示断片の日跨ぎ流用（Issue #261）**: 上のidentity照合は「その断片を再分析せず流用してよいか」の鍵でもあり、`input_digest`がrun単位の値であるために、開示本文が1文字も変わらなくてもrunが変われば必ず不一致になっていた。連続2営業日（2026-08-13 / 08-14）の`analysis_input.json`では共通5銘柄の開示accessionが14/14一致しており、同じ10-Q/8-Kを毎日ゼロから読み直していたことになる。そこで**開示断片に限り**、鍵を「run identityの3値一致」から「per-filing本文ハッシュの一致」へ移す。`schemas.filing_body_digest()`が開示本文のSHA-256を返し（`canonical_json_digest()`と同じ正規化実装を共有し、新しいハッシュ方式を作らない）、`copilot-export-slices`がfilingsスライスへ`filing_body_digests`（`source_id` → digest）を載せ、開示担当がそれを断片へ逐語コピーする。専門家に計算させないのは、Issue #132で自前の契約スクリプトを禁じたのと同じ理由である。`fragment._filing_body_error()`はこのマップと当日の入力がexportする開示本文のdigestマップとの**完全一致**を要求する——本文が変わった開示・新たにexportされた開示・exportされなくなった開示のいずれか1つでも再分析になる。マップは「読んだが何も書かなかった開示」も含む全件であり、`filing_analyses: []`の断片が「開示を持たない銘柄」と見分けられなくなる穴を塞ぐ。
+
+ハッシュの入力は**export段で実際に定性分析へ渡された本文**（`FilingInput.text`）であって、収集段階の原文ではない。切り詰め方が変われば読みの前提が変わるので、再分析されるのが正しい。`news_summary`と`screening_assessment`は対象外である——前者は当日のニュース、後者は当日の決定論的スコアを読むので真に`as_of`依存であり、開示本文が同じであることは両者が今日も有効であることを何も保証しない。この非対称は、次に述べるfail-closedの網が開示にしか掛からないことと表裏である。
+
+緩めた鍵がprovenanceを弱めないのは、`validate._evidence_error()`が各factの`evidence_quote`を**その日の入力の本文**に対して逐語照合するためである。本文が変わった開示の古い読みは、たとえdigest判定をすり抜けても引用が現在の本文に存在せずFAILする（`tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_wrongly_reused_reading_still_fails_the_verbatim_quote_check`が、digestを偽装して鍵を無効化した状態でこれを固定する）。流用した断片もその日の`analysis_input.json`に対してprovenance・引用・CON-03を改めて通るので、検査水準は当日書かれた断片と同一である。
 
 `analysis/verify_cli.py`（`copilot-verify-analysis`）がこれをスキルへ公開する。断片と`analysis_result.json`は`schema_version`で判別し（result側は必須、fragment側は`extra="forbid"`で禁止のため、どちらか一方としてしか解釈されえない）、result側は`load_analysis_result()`・`validate_artifact_identity()`・`validate_analysis()`をそのまま呼ぶingestのdry-runになる。`report_context.json`との照合だけは省く——同じrunの`copilot-daily`がコード側で書くファイルであり、スキルが取り違えうるのはresult側だからである。`analysis/cli.py`とは別モジュールに置くのは、あちらがレポートを**書き換える**入口であるのに対し、こちらは読み取り専用で何度でも実行できる必要があるためである。
 

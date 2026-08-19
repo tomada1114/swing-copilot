@@ -19,6 +19,14 @@ requires and the fragment schema forbids, and each is then parsed strictly
 under its own schema -- so neither can be checked as the other. Like
 `copilot-ingest-analysis`, this command opens no network connection, touches no
 database, and re-runs no screening.
+
+This is also the command the orchestrator asks "may I reuse this fragment?",
+and the two answers differ by kind (Issue #261). A news or screening fragment
+passes only for the run it was written in; a filings fragment passes whenever
+`filing_body_digests` still matches the bodies this input exports, so an
+unchanged 10-Q keeps yesterday's reading. Nothing else is relaxed: the reused
+fragment goes through the same provenance, `evidence_quote` and CON-03 checks
+against *this* input, so a stale reading of a changed filing fails here.
 """
 
 from __future__ import annotations

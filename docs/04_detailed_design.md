@@ -1056,10 +1056,16 @@ def write_text_atomically(destination: Path, content: str) -> None: ...
 **Issue #255実装時追記（開示ごとの最低保証字数）**: `select_filing_inputs()`のsymbol単位配分を、「優先順に`max_filing_chars`まで食いつぶす」方式から「各開示に最低保証字数を確保してから、余りを優先順に配る」方式へ変更した。10-Qのセクション内配分（`_allocate_section_chars`）が既に採っている「最低保証→再配分」の考え方を、開示間の配分にも適用したものである。
 
 - **なぜ**: 既定値は1開示120,000字・1銘柄240,000字で、後者はちょうど前者の2倍しかない。したがって**per-filing上限に達する開示が2件あるだけでsymbol予算は尽き、3件目以降は予算0になる**。取得段のExhibit安全弁を60,000字→500,000字へ引き上げた（Issue #180）後はこれが常態化し、2026-08-14 runではHSTの3件目の8-K（原文6,670字）が`head_fallback`で**10字**、UDRの3件目（原文4,074字）が`omitted_symbol_budget`で**0字**になった。実質空の本文でも定性分析フェーズは「受け取って分析した」ことになるため、症状が沈黙する。
-- **アルゴリズム**: 各開示の保証字数を`min(len(content_text), max_filing_chars, _MIN_FILING_CHARS)`とし（短い開示は満額入るので保証は自分の長さで足りる）、割り当て順に1銘柄予算から確保する。実際の配分は従来どおり割り当て順の逐次処理だが、各開示に渡すbudgetを`min(max_filing_chars, 残予算 − 後続開示の保証合計)`とする。先行する開示は自分の後ろに控える保証分だけを譲り、それ以外の余りは従来どおり全部取る。上のHST実測では、決算8-Kは120,000字を維持したまま10-Qが6,670字を譲り、3件目が`full`で満額入る。
-- **`_MIN_FILING_CHARS = 8,000`の根拠**: 予算に対する比率ではなく絶対字数とする——実際に飢餓に陥ったのは6,670字と4,074字の8-K本体であり、配当決議や役員異動の8-K（主文書＋短いExhibit）の実サイズは予算の大小と無関係だからである。8,000は両実測値を余裕をもって上回り、かつ`max_filings_per_symbol: 3`の下では確保額の合計が最大24,000字（1銘柄予算240,000字の10%）に収まる。保証を実際に握るのは飢餓側の開示だけで、保証より短い開示は自分の長さしか確保しない。
+- **アルゴリズム**: 各開示の保証字数を`min(len(content_text), max_filing_chars, MIN_FILING_CHARS)`とし（短い開示は満額入るので保証は自分の長さで足りる）、割り当て順に1銘柄予算から確保する。実際の配分は従来どおり割り当て順の逐次処理だが、各開示に渡すbudgetを`min(max_filing_chars, 残予算 − 後続開示の保証合計)`とする。先行する開示は自分の後ろに控える保証分だけを譲り、それ以外の余りは従来どおり全部取る。上のHST実測では、決算8-Kは120,000字を維持したまま10-Qが6,670字を譲り、3件目が`full`で満額入る。
+- **`MIN_FILING_CHARS = 8,000`の根拠**: 予算に対する比率ではなく絶対字数とする——実際に飢餓に陥ったのは6,670字と4,074字の8-K本体であり、配当決議や役員異動の8-K（主文書＋短いExhibit）の実サイズは予算の大小と無関係だからである。8,000は両実測値を余裕をもって上回り、かつ`max_filings_per_symbol: 3`の下では確保額の合計が最大24,000字（1銘柄予算240,000字の10%）に収まる。保証を実際に握るのは飢餓側の開示だけで、保証より短い開示は自分の長さしか確保しない。
 - **保証すら全件に配れない場合**: 1銘柄予算が保証合計に満たないときは、**割り当て順に保証を配り、尽きた時点で以降は0**とする（＝従来の`omitted_symbol_budget`）。優先順位は「余りの配分」と「窮迫時の保証の配分」の両方に同じ順序で効く。この縮退はテストで固定してある。
 - **変えないもの**: `max_filing_chars` / `max_filing_chars_per_symbol`の値、取得段の安全弁`_MAX_EXHIBIT_CHARS_PER_FILING`、`selection_mode`のenum、`coverage`の意味、provenance/CON-03の検査経路。新しいconfigキーも追加しない（最低保証は`filing_selection.py`のモジュール定数）。
+
+**Issue #268実装時追記（最低保証を満たせないconfigのfail-fast検証）**: 上記の最低保証は「1銘柄予算が保証合計に足りていれば」全開示に行き渡る。足りていない設定は開示の内容によらず**毎回**後続開示を`omitted_symbol_budget`にするので、実行時に吸収する縮退ではなく**invalid limit**として`config.py`の`AnalysisConfig`で起動時に拒否する（AGENTS.md「Reject ... invalid limits」）。
+
+- **検証条件**: `max_filing_chars_per_symbol >= max_filings_per_symbol × min(max_filing_chars, MIN_FILING_CHARS)`。右辺の`min(...)`は`_reserve_minimum_chars()`が実際に確保する額（`min(len(content_text), max_filing_chars, MIN_FILING_CHARS)`）のうち、config段で分かる2項だけを取ったものである。`max_filing_chars`が`MIN_FILING_CHARS`より小さい設定では1開示がそもそもそれ以上受け取れないので、`MIN_FILING_CHARS`を無条件に掛けると整合的な小予算まで弾いてしまう。既存の`max_filing_chars_per_symbol >= max_filing_chars`検査は残す——`max_filings_per_symbol: 1`のときは新条件が旧条件を含まないため。
+- **定数の共有**: `filing_selection.py`の`_MIN_FILING_CHARS`を`MIN_FILING_CHARS`へ改名して公開し、`config.py`が直接importする。`analysis/news_supply.py::DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS`と同じ依存方向（config → analysis）で、循環importは生じない。定数を2箇所に複製しないので乖離しようがない。パッケージ公開API（`swing_copilot.__init__.__all__`）へは足さない。
+- **現行の既定値**: 240,000 >= 3 × min(120,000, 8,000) = 24,000 で通る。しきい値に触れていないので、既定設定の挙動は変わらない。
 
 **calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 
@@ -2522,6 +2528,7 @@ analysis:
   max_news_chars_per_item: 4000    # 1記事あたりのエクスポート文字数
   max_filing_chars: 120000         # 1開示あたりのエクスポート上限（文字数）
   max_filing_chars_per_symbol: 240000  # 1銘柄の全開示合計上限
+                                   # （max_filings_per_symbol × min(max_filing_chars, 8000)以上。Issue #268）
   filing_lookback_days: 90         # 開示「収集」の遡及日数（roadmap §5 P6-26）
   max_filings_per_symbol: 3        # 1銘柄あたりの開示件数（同上）
   max_calendar_events: 20          # context.calendar_eventsに載せるrun単位の件数上限

@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from swing_copilot.text.calendar_fred import (
+    _MIN_REQUEST_INTERVAL_SECONDS,
     FRED_RELEASE_DATES_URL,
     FRED_RELEASE_SERIES_URL,
     FRED_SERIES_OBSERVATIONS_URL,
@@ -16,6 +17,7 @@ from swing_copilot.text.calendar_fred import (
     FredCalendarTiming,
     _real_http_get,
 )
+from tests.conftest import ThrottleTimeline
 
 AS_OF = date(2027, 2, 1)
 RANGE_END = date(2027, 2, 28)
@@ -134,6 +136,24 @@ class _FailFirstFred(FakeFred):
     def __call__(self, url, params):
         if url == FRED_RELEASE_DATES_URL and not self._has_failed:
             self._has_failed = True
+            self.calls.append((url, params))
+            msg = "boom"
+            raise httpx.ConnectError(msg)
+        return super().__call__(url, params)
+
+
+class _TimedFred(FakeFred):
+    """`FakeFred` that stamps every request onto a `ThrottleTimeline`."""
+
+    def __init__(self, timeline: ThrottleTimeline, *, fail_first: bool = False) -> None:
+        super().__init__()
+        self._timeline = timeline
+        self._fail_first = fail_first
+
+    def __call__(self, url, params):
+        self._timeline.issue_request()
+        if self._fail_first and url == FRED_RELEASE_DATES_URL:
+            self._fail_first = False
             self.calls.append((url, params))
             msg = "boom"
             raise httpx.ConnectError(msg)
@@ -422,13 +442,16 @@ class TestRateLimiting:
     def test_throttles_every_request_including_retry_attempts(self):
         sleeps: list[float] = []
         # Ticks: `releases/dates` attempt 1 (fails), attempt 2, then the two
-        # enrichment requests -- each only 0.1s after the previous request.
+        # enrichment requests -- each re-entering the throttle only 0.1s after
+        # the previous request was issued, on a clock that the throttle's own
+        # sleep advances (the retry backoff is treated as instantaneous so the
+        # throttle stays the only thing under test).
         client = FredCalendarClient(
             "test-key",
             http_get=_FailFirstFred(),
             timing=FredCalendarTiming(
                 clock=FakeClock(),
-                rate_clock=ScriptedRateClock([0.0, 0.1, 0.2, 0.3]),
+                rate_clock=ScriptedRateClock([0.0, 0.1, 0.6, 1.1]),
                 sleep_fn=sleeps.append,
             ),
         )
@@ -459,6 +482,54 @@ class TestRateLimiting:
         client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
 
         assert sleeps == []
+
+    def test_successive_requests_are_issued_at_least_one_interval_apart(self):
+        """Issue #253: the throttle must count from the request it let through.
+
+        Recording the pre-sleep clock reading dropped the slept interval, so
+        every other request went out early and the effective rate exceeded
+        FRED's 120/minute cap. Asserted on issue instants, not sleep arguments.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.1)
+        client = FredCalendarClient(
+            "test-key",
+            http_get=_TimedFred(timeline),
+            timing=FredCalendarTiming(
+                clock=FakeClock(),
+                rate_clock=timeline.clock,
+                sleep_fn=timeline.sleep,
+            ),
+        )
+
+        client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        # `releases/dates` plus the two enrichment requests.
+        assert len(timeline.issued_at) == 3
+        assert timeline.issue_gaps == [pytest.approx(_MIN_REQUEST_INTERVAL_SECONDS)] * 2
+
+    def test_retried_attempts_keep_the_minimum_issue_interval(self):
+        """Issue #253: a retry attempt is a request and resets the same clock.
+
+        `before_attempt` fires once per attempt, so the failed attempt counts
+        against the rate limit too; every subsequent request must still be at
+        least one interval behind the one actually issued before it.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.1)
+        client = FredCalendarClient(
+            "test-key",
+            http_get=_TimedFred(timeline, fail_first=True),
+            timing=FredCalendarTiming(
+                clock=FakeClock(),
+                rate_clock=timeline.clock,
+                sleep_fn=timeline.sleep,
+            ),
+        )
+
+        client.fetch_calendar_events(AS_OF, RANGE_END, as_of=AS_OF)
+
+        # The failed attempt, its retry, and the two enrichment requests.
+        assert len(timeline.issued_at) == 4
+        assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
 
 
 class TestRealHttpGet:

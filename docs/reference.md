@@ -167,6 +167,15 @@ Exhibitが取得段の上限（1開示500,000字の安全弁／最大3件）で�
 コード所有の観測値であり、記事の除外にも並び順にも使わない。`sufficient`の下限は
 `settings.analysis.sufficient_news_mention_items`（既定5、要検証）であり、
 初出の較正値がそのまま定数として固まらないようconfig化してある（Issue #191）。
+`analysis/validate.py`は`SymbolOutcome.news_supply`として`candidate.news_supply`を
+検証結果に関わらずそのまま運び、`report/daily_brief.py`の
+`BriefAnalysis.news_supply`（`BriefNewsSupply`）を経て`report/markdown_report.py`が
+候補セクションに`- News supply: ...`として描画する（Issue #281）。AC14と
+`analyze-news/SKILL.md`は`news`が空なら`news_summary: null`のままなので、
+「`level`がnone/sparseで`collected_items`が非0（本文には言及が薄いニュースが
+存在した＝抑制）」と「`collected_items`が0（そもそも収集していない）」の違いは
+`news_summary`側には現れない。この行はその2つを`collected_items`の値だけで
+文言レベルから分けて示す、決定論コード側の記述である。
 候補ごとの`prior_verdicts`は、同一銘柄・戦略に対する過去のverdictとその後の当否
 （`HIT`／`MISS_*`と`forward_return_pct`）を対にした不活性ブロックで、
 「同じ種類の根拠で繰り返し外していないか」をスキル自身が見られるようにする
@@ -308,9 +317,11 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   規約に書かれているのは`interpret-screening`だけである）
 - `news`が空でも`news_supply`を持つ銘柄にnewsスライスを出さないのは、
   `analyze-news`とAC14が「`news`が空なら`news_summary: null`を書く」ことを
-  求めているためである。エージェントを立てても null が返るだけで、供給量の申告
-  （Issue #130）はレポートへ届かない。届かせるには専門家側の規約変更が要り、
-  スライス生成とは独立した設計判断になるので別イシューで追う
+  求めているためである。エージェントを立てても null が返るだけなので、この判定
+  （`_has_work()`、Issue #260の状態のまま）は変えていない。供給量の申告
+  （Issue #130）をレポートへ届かせるのは決定論コード側の役目で、
+  `analysis/validate.py`・`report/daily_brief.py`・`report/markdown_report.py`が
+  担う（前段の`news_supply`の項を参照、Issue #281）
 - `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
   scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
   呼び出し側に必ず宣言させる。さらに値そのものを検査し、**runディレクトリと同一・

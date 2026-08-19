@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         CandidateInput,
         FilingAnalysis,
         NewsSummary,
+        NewsSupply,
         ScreeningAssessment,
         SourcedFact,
         SymbolAnalysis,
@@ -106,6 +107,15 @@ class SymbolOutcome:
 
     symbol: str
     news_summary: NewsSummary | None = None
+    #: The candidate's code-owned news-supply measurement, carried through
+    #: verbatim from `analysis_input.json` (Issue #281). Independent of
+    #: `news_summary`/`error`: it is never skill-authored, so it is set
+    #: whenever the input offered the symbol at all, letting a report
+    #: distinguish "suppressed" (`level` none/sparse over a non-empty
+    #: collected set) from "genuinely zero" (`collected_items == 0`) even
+    #: though AC14 keeps `news_summary` null in both cases when `news[]` is
+    #: empty.
+    news_supply: NewsSupply | None = None
     filings: tuple[ResolvedFiling, ...] = ()
     screening_assessment: ScreeningAssessment | None = None
     verdict: Verdict | None = None
@@ -351,6 +361,7 @@ def verify_symbol_analysis(
     return SymbolOutcome(
         symbol=analysis.symbol,
         news_summary=analysis.news_summary,
+        news_supply=candidate.news_supply,
         filings=tuple(
             ResolvedFiling(
                 form_type=filings_by_id[item.source_id].form_type,

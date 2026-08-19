@@ -17,7 +17,7 @@ from uuid import UUID  # noqa: TC003
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from swing_copilot.analysis.schemas import SourcedFact
+    from swing_copilot.analysis.schemas import NewsSupply, SourcedFact
     from swing_copilot.analysis.validate import (
         ResolvedFiling,
         SymbolOutcome,
@@ -149,6 +149,25 @@ class BriefFilingAnalysis:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefNewsSupply:
+    """Presentation copy of `analysis.schemas.NewsSupply` (Issue #281).
+
+    AC14 keeps `news_summary` null whenever `news[]` is empty, which erases
+    the distinction `news_supply` exists to record: "suppressed" (`level`
+    none/sparse over a non-empty collected set -- the news exists but hardly
+    any of it names the company) versus "genuinely zero" (`collected_items ==
+    0` -- nothing was collected at all). Both counts and `level` are
+    code-computed at export time (`analysis/news_supply.py`) and copied here
+    verbatim, never written or judged by a skill.
+    """
+
+    level: str
+    collected_items: int
+    exported_items: int
+    symbol_mention_items: int
+
+
+@dataclass(frozen=True, slots=True)
 class BriefAnalysis:
     """Compact qualitative analysis for one candidate.
 
@@ -171,6 +190,10 @@ class BriefAnalysis:
     verdict_summary: str | None = None
     strengths: tuple[str, ...] = ()
     concerns: tuple[str, ...] = ()
+    # Code-owned news-supply measurement (Issue #281), `None` only when the
+    # verified outcome carried none (a pre-#130 archived document, or a
+    # withheld/pending/missing analysis where nothing verified exists at all).
+    news_supply: BriefNewsSupply | None = None
 
 
 _CONSTRAINT_LABELS = {
@@ -750,6 +773,19 @@ def _build_verified_analysis_brief(
         verdict_summary=_verdict_summary(outcome),
         strengths=tuple(assessment.strengths) if assessment else (),
         concerns=tuple(assessment.concerns) if assessment else (),
+        news_supply=_news_supply_brief(outcome.news_supply),
+    )
+
+
+def _news_supply_brief(supply: NewsSupply | None) -> BriefNewsSupply | None:
+    """Copy the code-owned news-supply measurement into presentation data."""
+    if supply is None:
+        return None
+    return BriefNewsSupply(
+        level=supply.level,
+        collected_items=supply.collected_items,
+        exported_items=supply.exported_items,
+        symbol_mention_items=supply.symbol_mention_items,
     )
 
 

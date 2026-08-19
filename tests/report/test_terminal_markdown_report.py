@@ -19,6 +19,7 @@ from swing_copilot.report.daily_brief import (
     BriefFilingAnalysis,
     BriefFundamentals,
     BriefMarketItem,
+    BriefNewsSupply,
     BriefPastDecision,
     BriefPortfolioHeat,
     BriefRegime,
@@ -597,6 +598,71 @@ def test_markdown_omits_qualitative_assessment_section_when_empty() -> None:
     )
 
     assert "### 定性評価" not in output
+
+
+class TestMarkdownDistinguishesNewsSuppressionFromZero:
+    """Issue #281: 「抑制された」と「そもそも0件だった」の区別をレポート上で固定する.
+
+    AC14 and `analyze-news/SKILL.md` keep `news_summary: null` whenever
+    `news[]` is empty, which is true in *both* cases below, so the report
+    must draw the distinction itself from the code-owned `news_supply`
+    counts -- not from anything the skill wrote.
+    """
+
+    def test_suppressed_news_is_labeled_differently_from_zero_collected(self) -> None:
+        suppressed = replace(
+            _analysis_with_filing(),
+            news_supply=BriefNewsSupply(
+                level="sparse",
+                collected_items=8,
+                exported_items=8,
+                symbol_mention_items=1,
+            ),
+        )
+        zero = replace(
+            _analysis_with_filing(),
+            news_supply=BriefNewsSupply(
+                level="none",
+                collected_items=0,
+                exported_items=0,
+                symbol_mention_items=0,
+            ),
+        )
+
+        suppressed_output = render_markdown(
+            _brief_with_analysis(suppressed), RunStatus.SUCCESS
+        )
+        zero_output = render_markdown(_brief_with_analysis(zero), RunStatus.SUCCESS)
+
+        assert suppressed_output != zero_output
+        assert "抑制" in suppressed_output
+        assert "抑制" not in zero_output
+        assert "そもそも" in zero_output
+        assert "そもそも" not in suppressed_output
+        assert "collected_items: 8" in suppressed_output
+        assert "collected_items: 0" in zero_output
+
+    def test_a_sufficient_news_supply_is_also_shown(self) -> None:
+        analysis = replace(
+            _analysis_with_filing(),
+            news_supply=BriefNewsSupply(
+                level="sufficient",
+                collected_items=12,
+                exported_items=10,
+                symbol_mention_items=6,
+            ),
+        )
+
+        output = render_markdown(_brief_with_analysis(analysis), RunStatus.SUCCESS)
+
+        assert "抑制" not in output
+        assert "そもそも" not in output
+        assert "collected_items: 12" in output
+
+    def test_news_supply_line_is_omitted_when_absent(self) -> None:
+        output = render_markdown(_brief(), RunStatus.SUCCESS)
+
+        assert "News supply" not in output
 
 
 def test_markdown_shows_qualitative_risk_flags_heading_not_the_old_llm_heading() -> (

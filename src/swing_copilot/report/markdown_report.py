@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
+        BriefNewsSupply,
         BriefPortfolioHeat,
         DailyBrief,
         SignalPerformanceRow,
@@ -294,6 +295,7 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
         f"- Fundamentals: PER {candidate.fundamentals.per}, FCF {candidate.fundamentals.fcf}, "
         f"Equity ratio {candidate.fundamentals.equity_ratio}, EPS {candidate.fundamentals.eps}",
     ]
+    lines.extend(_news_supply_lines(candidate))
     lines.extend(f"- Risk: {reason}" for reason in candidate.risk.reasons)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
@@ -313,6 +315,41 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     lines.extend(_filing_analysis_sections(candidate))
     lines.extend(_past_decisions_section(candidate))
     return lines
+
+
+def _news_supply_lines(candidate: BriefCandidate) -> list[str]:
+    """Issue #281: state, in code-owned text, why the news read the way it did.
+
+    AC14 and `analyze-news/SKILL.md` keep `news_summary: null` whenever
+    `news[]` is empty, which erases the difference between "suppressed"
+    (`level` none/sparse over a *non-empty* collected set -- news exists but
+    hardly any of it names the company, the J.B. Hunt scenario from Issue
+    #130) and "genuinely zero" (`collected_items == 0` -- nothing was
+    collected at all). This line draws that distinction from the
+    deterministic counts alone, independent of anything the skill wrote.
+
+    Omitted entirely when `news_supply` was never measured (an
+    `analysis-input-v2`/pre-#130 document, or an analysis that is still
+    pending/withheld/missing), matching this file's style for optional
+    per-candidate subsections.
+    """
+    supply = candidate.analysis.news_supply
+    if supply is None:
+        return []
+    return [f"- News supply: {_news_supply_text(supply)}"]
+
+
+def _news_supply_text(supply: BriefNewsSupply) -> str:
+    counts = (
+        f"level: {supply.level}, collected_items: {supply.collected_items}, "
+        f"exported_items: {supply.exported_items}, "
+        f"symbol_mention_items: {supply.symbol_mention_items}"
+    )
+    if supply.collected_items == 0:
+        return f"そもそもニュースが収集されていません（{counts}）"
+    if supply.level in ("none", "sparse"):
+        return f"本銘柄への言及が乏しく抑制されました（{counts}）"
+    return f"本銘柄への言及があるニュースが十分に収集されています（{counts}）"
 
 
 def _screening_assessment_section(candidate: BriefCandidate) -> list[str]:

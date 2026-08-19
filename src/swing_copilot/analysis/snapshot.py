@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 REPORT_CONTEXT_FILENAME = "report_context.json"
-CONTEXT_SCHEMA_VERSION = "report-context-v2"
+CONTEXT_SCHEMA_VERSION = "report-context-v3"
 
 # Pydantic evaluates a dataclass's annotation strings against its *defining*
 # module's globals, so `report/daily_brief.py` imports `date`/`datetime`/`UUID`
@@ -51,7 +51,7 @@ class _ReportContextDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["report-context-v2"]
+    schema_version: Literal["report-context-v3"]
     run_id: UUID
     as_of: date
     strategy_key: NonBlankText
@@ -139,6 +139,7 @@ def read_report_context(path: Path) -> ReportContext:
             incompatible version, or carries an unknown run status.
     """
     payload = _read_payload(path)
+    _require_matching_schema_version(payload, path)
     try:
         document = _ReportContextDocument.model_validate(payload)
         status = RunStatus(document.status)
@@ -162,6 +163,36 @@ def read_report_context(path: Path) -> ReportContext:
         strategy_key=document.strategy_key,
         input_digest=document.input_digest,
     )
+
+
+def _require_matching_schema_version(payload: dict[str, Any], path: Path) -> None:
+    """Fail with a generation-mismatch message before any further parsing.
+
+    `CONTEXT_SCHEMA_VERSION` bumps whenever a required field is added to
+    `DailyBrief` (Issue #296: `BriefCandidate` gained three required score
+    fields without a matching bump). Left unchecked, a file written by an
+    older build fails deep inside `_BRIEF_ADAPTER.validate_python` with a raw
+    pydantic "Field required" error for fields that build never wrote.
+    Checking the version first, before `_ReportContextDocument.model_validate`
+    even runs, turns that into a message that names the actual cause and its
+    recovery.
+
+    Args:
+        payload: The parsed JSON envelope, before any schema validation.
+        path: The archive path, for the error message.
+
+    Raises:
+        AnalysisIngestError: `schema_version` is absent or does not match
+            `CONTEXT_SCHEMA_VERSION`.
+    """
+    actual = payload.get("schema_version")
+    if actual == CONTEXT_SCHEMA_VERSION:
+        return
+    msg = (
+        f"{path} is schema {actual!r} but this build expects "
+        f"{CONTEXT_SCHEMA_VERSION!r}; re-run copilot-daily for this run_date"
+    )
+    raise AnalysisIngestError(msg)
 
 
 def _read_payload(path: Path) -> dict[str, Any]:

@@ -53,6 +53,21 @@ smoke:
 # Non-mutating local release/PR gate (fail-fast: cheap gates before the suite)
 verify: lint docs-check smoke test
 
+# boto3 lives in the optional `ops` group, so these three ask for it explicitly
+# rather than making every `uv run` install it.
+
+# Fetch the R2 copy of data/ (copilot.duckdb + bars/) into this checkout
+data-pull:
+    uv run --group ops python scripts/data_sync.py pull
+
+# Publish this checkout's data/ as the next R2 generation (pull first, then push)
+data-push:
+    uv run --group ops python scripts/data_sync.py push
+
+# Show how this checkout's data/ compares with the R2 copy (read-only)
+data-status:
+    uv run --group ops python scripts/data_sync.py status
+
 # Remove build artifacts
 clean:
     rm -rf dist/ build/ .mypy_cache/ .ruff_cache/ .pytest_cache/ htmlcov/ .coverage site/

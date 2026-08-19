@@ -217,11 +217,21 @@ class SymbolWindow:
     def ohlc(self) -> dict[str, float]:
         """Open/high/low/close of the last bar at or before `as_of`.
 
-        The replaced scan (`backtest/engine.py`'s `_latest_bar`) masked the
-        frame and took `sort_values("date").iloc[-1]`, i.e. the *last* row of
-        the newest dated group. The index sorts with `kind="stable"`, so rows
-        sharing that date keep their original relative order and row
-        `bar_count - 1` is that same last row (Issue #244).
+        This reads row `bar_count - 1`. Where a frame holds one row per
+        `(symbol, date)` -- what `storage/market_store.py` writes, since it
+        de-duplicates that pair on every write -- that is exactly the row the
+        replaced scan (`backtest/engine.py`'s `_latest_bar`) reached through
+        `sort_values("date").iloc[-1]`.
+
+        On a frame that *does* duplicate the newest dated row the two are not
+        equivalent, and the difference is a fix rather than a regression. The
+        old scan's tie-break was unspecified: `sort_values` defaults to
+        `kind="quicksort"` (numpy introsort), which is only stable by accident,
+        for masked histories short enough to fall to its insertion-sort
+        cutoff. This index sorts with `kind="stable"`, so tied rows keep their
+        original frame order and this property deterministically returns the
+        last of them -- the opposite end from `_SymbolIndex.ohlc_on`, which
+        keeps `_bar`'s (already deterministic) first-row choice (Issue #244).
         """
         return self._series.ohlc_at(self._cut - 1)
 
@@ -269,7 +279,10 @@ class _SymbolIndex:
     def __init__(self, bars: pd.DataFrame) -> None:
         self._groups: dict[str, _SymbolSeries] = {}
         # `kind="stable"` so rows sharing a date keep their original relative
-        # order, matching the previous mask-then-sort behavior.
+        # order. The mask-then-sort this replaced used pandas' default
+        # (`kind="quicksort"`), which is not stable, so its order within a tied
+        # group was unspecified; sorting stably pins one answer rather than
+        # inheriting that.
         ordered = bars.sort_values(["symbol", "date"], kind="stable")
         for symbol, group in ordered.groupby("symbol", sort=False):
             dates = pd.to_datetime(group["date"]).to_numpy()
@@ -289,12 +302,18 @@ class _SymbolIndex:
         """Return `symbol`'s OHLC on exactly `day`, or `None` if it has no bar.
 
         `"left"` -- not `"right"` -- is load-bearing. The scan this replaces
-        (`backtest/engine.py`'s `_bar`) took `iloc[0]` of the masked rows, so
-        when a `(symbol, date)` pair is duplicated it read the *first* such row
-        in frame order, while the as-of lookup above reads the *last* one. The
-        stable sort preserves that original relative order inside the tied
-        group, so `searchsorted(..., "left")` lands on the same first row and
-        the asymmetry survives indexing (Issue #244).
+        (`backtest/engine.py`'s `_bar`) took `iloc[0]` of the masked rows and
+        sorted nothing, so on a duplicated `(symbol, date)` it deterministically
+        read the *first* such row in frame order. The stable sort preserves that
+        original relative order inside the tied group, so
+        `searchsorted(..., "left")` lands on that same first row.
+
+        `SymbolWindow.ohlc` deliberately lands on the *last* row of its tied
+        group instead. Duplicates do not reach either accessor from
+        `storage/market_store.py`, which de-duplicates `(symbol, date)` on
+        write, but the two answers must stay pinned apart anyway: they are
+        different questions, and a hand-built frame can still ask both
+        (Issue #244).
         """
         series = self._groups.get(symbol)
         if series is None:

@@ -234,12 +234,21 @@ def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
 
 
 def _mark_to_market(state: _SimState, bars: pd.DataFrame, day: date) -> float:
-    """Value every open position at its newest close on or before `day`."""
+    """Value every open position at its newest close on or before `day`.
+
+    Reads `SymbolWindow.close` rather than `_latest_bar`, which is the same
+    row: only the close is priced here, and this is the engine's most-called
+    path (once per open position per day, twice over on days that fill). Going
+    through the OHLC dict would build a four-key dict per position per day and
+    force `open`/`high`/`low` to be materialized as float64 arrays for every
+    held symbol, roughly tripling the raw-price memory each cached
+    `_SymbolIndex` pins, to read one of the four values.
+    """
     total = 0.0
     for position in state.open_positions.values():
-        bar = _latest_bar(bars, position.symbol, day)
-        if bar is not None:
-            total += position.shares * bar["close"]
+        window = symbol_window(bars, position.symbol, day)
+        if window is not None:
+            total += position.shares * window.close
     return total
 
 
@@ -250,8 +259,9 @@ def _latest_bar(
 
     Issue #244: the indexed lookup replaces the same full-frame masking `_bar`
     describes, plus a `sort_values("date")` of the surviving rows. `.ohlc` reads
-    the last row of the `as_of` prefix, which is the row that scan's `iloc[-1]`
-    picked.
+    the last row of the `as_of` prefix; see that property for why this is the
+    same row the replaced scan reached, and for the one case (a frame with a
+    duplicated newest row) where the old scan had no defined answer at all.
     """
     window = symbol_window(bars, symbol, as_of)
     return None if window is None else window.ohlc

@@ -176,8 +176,8 @@ class TestDuplicateBars:
 
     A corrected bar appended after the original leaves two rows on one
     `(symbol, date)`. The fill/exit lookup takes the *first* such row and the
-    mark-to-market lookup takes the *last* -- an asymmetry the index has to
-    reproduce, since flipping either one silently moves the equity curve.
+    as-of lookup behind the mark-to-market takes the *last* -- flipping either
+    one moves the equity curve silently, so both ends are pinned end to end.
     """
 
     def test_fill_reads_the_first_row_and_the_close_mark_reads_the_last(

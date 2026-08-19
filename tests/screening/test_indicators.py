@@ -224,7 +224,18 @@ def _naive_ohlc_on(bars, symbol, day):
 
 
 def _naive_latest_ohlc(bars, symbol, as_of):
-    """`backtest/engine.py`'s pre-#244 `_latest_bar`, the second oracle."""
+    """`backtest/engine.py`'s pre-#244 `_latest_bar`, the second oracle.
+
+    Only a *conditionally* valid oracle, unlike `_naive_ohlc_on`, which sorts
+    nothing. `sort_values` defaults to `kind="quicksort"` (numpy introsort),
+    which is not a stable sort: on a duplicated newest date it returns a
+    defined row only while the masked history is short enough to fall to
+    numpy's insertion-sort cutoff (16 elements), as this 11-row fixture is.
+    Grow the fixture past that and this oracle stops predicting the old
+    behavior -- it never had one to predict. That is why the duplicate
+    tie-break is *also* asserted as bare numbers below, which is the assertion
+    that actually pins the contract.
+    """
     rows = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)]
     if rows.empty:
         return None
@@ -241,10 +252,10 @@ class TestOhlcLookupsMatchTheNaiveScan:
     """Issue #244's equivalence contract for the two engine bar lookups.
 
     The simulator asks two different questions of one frame -- "the bar dated
-    exactly `day`" and "the newest bar at or before `as_of`" -- and the scans
-    they replace answered them with *different* tie-breaks when a
-    `(symbol, date)` pair is duplicated. Both halves are pinned here, because
-    an equity curve changes silently if either one flips.
+    exactly `day`" and "the newest bar at or before `as_of`" -- and resolves a
+    duplicated `(symbol, date)` at opposite ends: first row in frame order for
+    the exact day, last row for the as-of read. Both halves are pinned here,
+    because an equity curve changes silently if either one flips.
     """
 
     @pytest.fixture
@@ -254,9 +265,12 @@ class TestOhlcLookupsMatchTheNaiveScan:
             make_bars("BBB", [50.0 + i for i in range(6)], start=date(2026, 1, 3)),
         ]
         # AAA 2026-01-05 arrives twice with different prices -- a corrected bar
-        # appended after the original, which is how a duplicate reaches the
-        # engine. The second copy is deliberately far away in price so either
-        # tie-break is unmistakable in the assertions below.
+        # appended after the original. `storage/market_store.py` de-duplicates
+        # `(symbol, date)` on write, so this shape reaches the accessors only
+        # from a hand-built frame; it is asserted anyway because the two
+        # lookups must keep answering different questions. The second copy is
+        # deliberately far away in price so either tie-break is unmistakable in
+        # the assertions below.
         duplicate = frames[0].iloc[4].copy()
         for field in _OHLC:
             duplicate[field] = float(duplicate[field]) + 1000.0

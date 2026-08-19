@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -17,8 +18,6 @@ from swing_copilot.analysis.slices import (
 from tests.analysis.conftest import FILING_ID, NEWS_ID, input_payload
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from swing_copilot.analysis.slices import SliceDocument
 
 
@@ -309,6 +308,34 @@ def test_write_slices_replaces_a_stale_slice_of_the_same_name(tmp_path: Path) ->
     ] == ("AAPL")
 
 
+def test_a_failed_write_leaves_no_slice_and_no_temporary_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The set is one logical write: seven files must not survive the eighth.
+
+    A command that exits non-zero tells the orchestrator nothing was produced,
+    and this workflow never deletes anything from the scratchpad, so a partial
+    set would sit there unnoticed.
+    """
+    out_dir = tmp_path / "slices"
+    original = Path.write_text
+    calls: list[Path] = []
+
+    def _fail_on_the_third(self: Path, *args: object, **kwargs: object) -> int:
+        calls.append(self)
+        if len(calls) == 3:
+            msg = "disk full"
+            raise OSError(msg)
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _fail_on_the_third)
+
+    with pytest.raises(OSError, match="disk full"):
+        write_slices(build_slices(mixed_payload()), out_dir)
+
+    assert list(out_dir.iterdir()) == []
+
+
 def test_build_slices_rejects_a_document_that_is_not_an_analysis_input() -> None:
     with pytest.raises(SliceExportError, match="failed schema validation"):
         build_slices({"schema_version": "analysis-input-v3"})
@@ -349,8 +376,26 @@ def test_build_slices_rejects_a_symbol_that_cannot_be_a_filename() -> None:
         pytest.param(
             "screening",
             {"symbol": "AAPL", "score_breakdown": "s"},
-            "must carry candidate fields risk_constraints",
-            id="screening-missing-block",
+            "must carry candidate fields decision_history, risk_constraints",
+            id="screening-missing-blocks",
+        ),
+        pytest.param(
+            "screening",
+            {"symbol": "AAPL", "score_breakdown": "s", "risk_constraints": "r"},
+            "must carry candidate fields decision_history",
+            id="screening-missing-the-human-journal",
+        ),
+        pytest.param(
+            "screening",
+            {
+                "symbol": "AAPL",
+                "score_breakdown": "s",
+                "risk_constraints": "r",
+                "decision_history": None,
+                "news": [],
+            },
+            "must not carry candidate fields news",
+            id="screening-carrying-news",
         ),
     ],
 )

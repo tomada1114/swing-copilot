@@ -170,10 +170,12 @@ def test_a_missing_input_document_fails_without_writing_anything(
 def test_a_document_that_is_not_an_analysis_input_object_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], document: str, expected: str
 ) -> None:
-    _dump(tmp_path / ANALYSIS_INPUT_FILENAME, document)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _dump(run_dir / ANALYSIS_INPUT_FILENAME, document)
 
     with pytest.raises(SystemExit) as exit_info:
-        main([str(tmp_path), "--out-dir", str(tmp_path / "slices")])
+        main([str(run_dir), "--out-dir", str(tmp_path / "slices")])
 
     assert exit_info.value.code == 1
     assert expected in capsys.readouterr().err
@@ -182,17 +184,75 @@ def test_a_document_that_is_not_an_analysis_input_object_fails(
 def test_an_input_violating_its_own_schema_fails_before_any_slice_is_written(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
     payload = input_payload(candidates=[candidate_payload("AAPL")])
     payload["candidates"][0]["unknown_field"] = "x"
-    _dump(tmp_path / ANALYSIS_INPUT_FILENAME, payload)
+    _dump(run_dir / ANALYSIS_INPUT_FILENAME, payload)
     out_dir = tmp_path / "slices"
 
     with pytest.raises(SystemExit) as exit_info:
-        main([str(tmp_path), "--out-dir", str(out_dir)])
+        main([str(run_dir), "--out-dir", str(out_dir)])
 
     assert exit_info.value.code == 1
     assert "failed schema validation" in capsys.readouterr().err
     assert not out_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("relative_out_dir", "expected"),
+    [
+        pytest.param(".", "is inside the run directory", id="the-run-directory"),
+        pytest.param(
+            "analysis_work", "is inside the run directory", id="beneath-the-run"
+        ),
+        pytest.param("..", "contains the run directory", id="above-the-run"),
+    ],
+)
+def test_an_out_dir_in_the_operators_output_tree_is_refused(
+    workdir: Path,
+    capsys: pytest.CaptureFixture[str],
+    relative_out_dir: str,
+    expected: str,
+) -> None:
+    """Requiring `--out-dir` states the rule; this one enforces it.
+
+    Nothing stops a caller from passing back the very path it read the input
+    from, and the workflow never deletes what lands there, so the run
+    directory would collect `slice-*.json` one run at a time.
+    """
+    out_dir = workdir / relative_out_dir
+
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(workdir), "--out-dir", str(out_dir)])
+
+    assert exit_info.value.code == 1
+    assert expected in capsys.readouterr().err
+    assert not list(workdir.glob("slice-*.json"))
+
+
+def test_an_out_dir_holding_another_runs_input_is_refused(
+    workdir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other_run = tmp_path / "elsewhere"
+    other_run.mkdir()
+    _dump(other_run / ANALYSIS_INPUT_FILENAME, mixed_payload())
+
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(workdir), "--out-dir", str(other_run)])
+
+    assert exit_info.value.code == 1
+    assert "is a run directory of its own" in capsys.readouterr().err
+    assert not list(other_run.glob("slice-*.json"))
+
+
+def test_a_scratch_directory_beside_the_run_is_accepted(
+    workdir: Path, tmp_path: Path
+) -> None:
+    """The positive control: an unrelated directory is not refused."""
+    exported = export_slices(workdir, tmp_path / "scratch" / "slices")
+
+    assert len(exported) == 8
 
 
 def test_the_output_directory_is_required(workdir: Path) -> None:

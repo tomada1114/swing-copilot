@@ -297,7 +297,9 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
 ```
 
 - `<scratchpad>` は**セッションの scratchpad ディレクトリ**。`<WORKDIR>` やリポジトリ
-  配下を `--out-dir` に指定しない（「一時ファイルと後始末」参照）
+  配下を `--out-dir` に指定しない（「一時ファイルと後始末」参照）。`<WORKDIR>` と
+  同じパス・その配下・その上位を渡した場合はコマンドが拒否して終了する（exit 1）ので、
+  その場合は scratchpad のパスを渡し直す
 - 生成物は `slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` /
   `screening`）で、1 スライス = 1 専門家 × 1 銘柄。`filings` が空の銘柄には filings
   スライスを作らず、`screening` は全銘柄に作る。news スライスは **`news` が空でも
@@ -315,8 +317,10 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   [references/output-schema.md](references/output-schema.md) の「サブエージェント入力スライス」
   に従う
 - **自前の切り出しスクリプトを書かない。** 同じ入力からは常にバイト同一のスライスが
-  出るので、失敗しても同じコマンドを再実行すればよい（既存ファイルは原子的に上書き
-  される）。Step 0 で流用が決まった組のスライスが生成されても、渡さなければよい
+  出るので、失敗しても同じコマンドを再実行すればよい。スライス群は集合単位で
+  書かれるため、失敗した実行は 1 件も書き残さない（部分的なスライス集合を拾って
+  しまう心配は要らない）。Step 0 で流用が決まった組のスライスが生成されても、
+  渡さなければよい
 - 元の `analysis_input.json` の絶対パスも併記するが、サブエージェントは metadata の
   照合以外で全件を読み込まない。これにより、長大な開示本文を担当外銘柄ごとに
   重複してコンテキストへ載せない

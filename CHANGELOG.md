@@ -56,8 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   共有するため実行間の順序差を検出できない）。各スライスは書き出し前に strict スキーマ `InputSlice`
   （`extra="forbid"`、`kind` ごとに `candidate` が持てるキー集合を固定）で検証する
   ので、担当外のフィールドが紛れ込んだスライスはサブエージェントへ渡る前に落ちる。
-  `--out-dir` は必須である——既定値を入力の隣に置くと、スキル規約が scratchpad 配下と
-  定めるスライスが run ディレクトリへ書かれうるためである
+  `--out-dir` は必須で、値そのものも検査する——run ディレクトリと同一・その配下・
+  その上位、および `analysis_input.json` を既に持つディレクトリを拒否する。必須に
+  するだけでは「入力として渡したのと同じパスを `--out-dir` にも渡す」誤りを防げず、
+  このワークフローは `rm` を実行しないので `reports/<date>/<run-id>/` へ落ちた
+  `slice-*.json` は run ごとに溜まる。スライス群は **1 つの論理的な書き込み**として
+  書き（新設の `io_atomic.write_json_batch_atomically()`）、全件を一時ファイルへ
+  書いてから `os.replace` するので、途中失敗は宛先を 1 つも変更せず一時ファイルも
+  残さない——統括は非ゼロ終了を「何も生成されなかった」と読むため、「失敗したのに
+  7 件だけ残っている」状態を作ってはならない
 
 - 蓄積された日次分析結果を閲覧する読み取り専用ローカルダッシュボード
   `copilot-dashboard` を追加した。FastAPI + Jinja2 のサーバレンダリングで、

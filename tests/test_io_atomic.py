@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from swing_copilot.analysis import export
-from swing_copilot.io_atomic import write_json_atomically, write_text_atomically
+from swing_copilot.io_atomic import (
+    write_json_atomically,
+    write_json_batch_atomically,
+    write_text_atomically,
+)
 
 
 class TestTemporaryFileLocation:
@@ -85,6 +89,75 @@ class TestSerializedForm:
         write_json_atomically(destination, {"generation": 2})
 
         assert json.loads(destination.read_text(encoding="utf-8")) == {"generation": 2}
+
+
+class TestBatchIsOneLogicalWrite:
+    """A set of files commits or rolls back together (Issue #260 review)."""
+
+    def test_every_destination_is_written(self, tmp_path):
+        write_json_batch_atomically(
+            [(tmp_path / "a.json", {"n": 1}), (tmp_path / "b.json", {"n": 2})]
+        )
+
+        assert json.loads((tmp_path / "a.json").read_text(encoding="utf-8")) == {"n": 1}
+        assert json.loads((tmp_path / "b.json").read_text(encoding="utf-8")) == {"n": 2}
+
+    def test_a_failure_partway_leaves_no_destination_and_no_temp(
+        self, tmp_path, monkeypatch
+    ):
+        """The eighth file failing must not leave the first seven behind."""
+        original = Path.write_text
+        written: list[Path] = []
+
+        def _fail_on_the_third(self: Path, *args: object, **kwargs: object) -> int:
+            written.append(self)
+            if len(written) == 3:
+                msg = "disk full"
+                raise OSError(msg)
+            return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "write_text", _fail_on_the_third)
+
+        with pytest.raises(OSError, match="disk full"):
+            write_json_batch_atomically(
+                [(tmp_path / f"{index}.json", {"n": index}) for index in range(4)]
+            )
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == []
+
+    def test_an_existing_destination_survives_a_failed_batch(
+        self, tmp_path, monkeypatch
+    ):
+        destination = tmp_path / "0.json"
+        destination.write_text('{"previous": true}', encoding="utf-8")
+
+        def _explode(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(Path, "write_text", _explode)
+
+        with pytest.raises(OSError, match="disk full"):
+            write_json_batch_atomically([(destination, {"next": True})])
+
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"previous": True}
+        assert list(tmp_path.glob(".*.tmp")) == []
+
+    def test_an_empty_batch_writes_nothing(self, tmp_path):
+        write_json_batch_atomically([])
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_batch_writes_the_same_bytes_as_the_single_file_writer(self, tmp_path):
+        """One serialized form, so a batch cannot drift from a single write."""
+        payload = {"note": "受注が伸びている"}
+        write_json_atomically(tmp_path / "single.json", payload)
+
+        write_json_batch_atomically([(tmp_path / "batch.json", payload)])
+
+        assert (tmp_path / "batch.json").read_bytes() == (
+            tmp_path / "single.json"
+        ).read_bytes()
 
 
 class TestCompatibilityFacade:

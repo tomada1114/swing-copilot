@@ -56,17 +56,72 @@ def export_slices(input_path: Path, out_dir: Path) -> list[tuple[SliceDocument, 
 
     Raises:
         AnalysisIngestError: The input document is missing or is not JSON.
-        SliceExportError: The document is not a valid `analysis_input.json`, or
-            a slice violates its own strict schema.
-        OSError: A slice could not be written.
+        SliceExportError: The document is not a valid `analysis_input.json`, a
+            slice violates its own strict schema, or `out_dir` would put the
+            slices in a run directory.
+        OSError: The slices could not be written.
     """
     resolved = (
         input_path / ANALYSIS_INPUT_FILENAME if input_path.is_dir() else input_path
     )
+    _verify_out_dir(resolved, out_dir)
     payload = _read_input(resolved)
     documents = build_slices(payload)
     written = write_slices(documents, out_dir)
     return list(zip(documents, written, strict=True))
+
+
+def _verify_out_dir(input_path: Path, out_dir: Path) -> None:
+    """Refuse a destination that is (or contains) operator-owned output.
+
+    Requiring `--out-dir` states where slices belong; it does not stop the
+    caller from naming the run directory it just read the input from. That
+    would drop `slice-*.json` into `reports/<date>/<run-id>/`, which the
+    workflow is forbidden to clean up, so the mess would accumulate one run at
+    a time. The `slice-` prefix keeps such a file from ever being merged as a
+    fragment, so this guard is about the operator's tree, not correctness.
+
+    Three shapes are refused, all of them decidable from the paths alone: the
+    run directory itself, anywhere beneath it, and any directory that already
+    holds an `analysis_input.json` (another run's). A directory *above* the run
+    -- `reports/`, or the repository root -- is refused for the same reason: it
+    is the tree the run directory lives in.
+
+    Deliberately no "is this inside a git checkout?" test: an installed wheel
+    cannot tell the operator's repository from any other checkout, and a false
+    refusal would cost a whole unattended day. The shapes above cover the
+    destination a caller actually reaches for by mistake -- the path it was
+    just given.
+
+    Args:
+        input_path: The resolved `analysis_input.json` being sliced.
+        out_dir: The requested destination, which need not exist yet.
+
+    Raises:
+        SliceExportError: The destination is one of the refused shapes.
+    """
+    destination = out_dir.resolve()
+    run_dir = input_path.resolve().parent
+    if destination == run_dir or run_dir in destination.parents:
+        msg = (
+            f"--out-dir {out_dir} is inside the run directory {run_dir}; "
+            "slices are session scratch and must not be written to the "
+            "operator's report output"
+        )
+        raise SliceExportError(msg)
+    if destination in run_dir.parents:
+        msg = (
+            f"--out-dir {out_dir} contains the run directory {run_dir}; "
+            "write slices to the session scratchpad instead"
+        )
+        raise SliceExportError(msg)
+    if (destination / ANALYSIS_INPUT_FILENAME).is_file():
+        msg = (
+            f"--out-dir {out_dir} is a run directory of its own (it holds "
+            f"{ANALYSIS_INPUT_FILENAME}); write slices to the session "
+            "scratchpad instead"
+        )
+        raise SliceExportError(msg)
 
 
 def _read_input(path: Path) -> dict[str, Any]:
@@ -106,7 +161,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "Directory to write the slices into, created when absent. Use the "
             "session scratchpad: slices are working files and must not sit in "
-            "the run directory or the repository."
+            "the run directory or the repository. A destination inside, above, "
+            "or equal to a run directory is refused."
         ),
     )
     return parser.parse_args(argv)

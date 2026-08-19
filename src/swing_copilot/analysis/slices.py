@@ -53,7 +53,7 @@ from swing_copilot.analysis.schemas import (
     Sha256Digest,
 )
 from swing_copilot.exceptions import SwingCopilotError
-from swing_copilot.io_atomic import write_json_atomically
+from swing_copilot.io_atomic import write_json_batch_atomically
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -94,14 +94,20 @@ _CANDIDATE_KEYS_BY_KIND: Final[dict[FragmentKind, tuple[str, ...]]] = {
     ),
 }
 
-#: The subset of the above that an `analysis-input-v3` candidate always has.
-#: The remainder (`news_supply`, `decision_history`, `prior_verdicts`) is
-#: copied when the document carries it and left out when it does not, so an
-#: archived input never grows a key it did not have.
+#: The subset of the above that every parsable input carries, and that a slice
+#: of that kind therefore must too. `CandidateInput` gives these fields no
+#: default, so a document missing one never reaches slicing at all -- which is
+#: precisely why they belong here: this is the check that catches the *slicing*
+#: dropping a field, and `decision_history` (the human's own journal, nullable
+#: but always present) is worth as much of that protection as the score
+#: breakdown. Only `news_supply` and `prior_verdicts` stay optional: both were
+#: added after `analysis-input-v3` was frozen, so an archived input can
+#: legitimately lack them, and a slice must not invent a key its input never
+#: had.
 _REQUIRED_CANDIDATE_KEYS_BY_KIND: Final[dict[FragmentKind, frozenset[str]]] = {
     "news": frozenset({"news"}),
     "filings": frozenset({"filings"}),
-    "screening": frozenset({"score_breakdown", "risk_constraints"}),
+    "screening": frozenset({"score_breakdown", "risk_constraints", "decision_history"}),
 }
 
 #: Run-wide context per expert. Only the screening skill reads these blocks
@@ -278,30 +284,40 @@ def _verify_distinct_filenames(documents: Sequence[SliceDocument]) -> None:
 def write_slices(
     documents: Sequence[SliceDocument], out_dir: str | Path
 ) -> tuple[Path, ...]:
-    """Write every slice into `out_dir` via atomic replacement.
+    """Write the whole set of slices into `out_dir`, or none of it.
+
+    The set is written as one logical write (`write_json_batch_atomically`),
+    not slice by slice. A command that reports failure must not have left a
+    partial set behind in a directory this workflow never cleans up: the
+    orchestrator reads "no output" as "nothing was produced", and stale slices
+    from a half-finished run are exactly what an unattended session cannot
+    notice.
 
     Args:
         documents: The slices to write, as returned by `build_slices`.
         out_dir: Destination directory, created when absent. It must not be the
             run directory or anywhere in the repository: slices are session
-            scratch, and a subagent that mistakes one for a fragment would
-            merge a document that was never analyzed.
+            scratch, and one written beside the fragments would sit in
+            operator-owned output that nothing deletes.
 
     Returns:
         The resolved absolute paths, in `documents` order.
 
     Raises:
-        OSError: Writing or replacing failed. Each destination is replaced
-            all-or-nothing and leaves no temporary artifact behind.
+        OSError: Writing failed. No destination was changed and no temporary
+            artifact remains (see `write_json_batch_atomically` for the one
+            residual case, a failure during the rename phase).
     """
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    for document in documents:
-        destination = directory / document.filename
-        write_json_atomically(destination, document.payload)
-        written.append(destination.resolve())
-    return tuple(written)
+    destinations = [directory / document.filename for document in documents]
+    write_json_batch_atomically(
+        [
+            (destination, document.payload)
+            for destination, document in zip(destinations, documents, strict=True)
+        ]
+    )
+    return tuple(destination.resolve() for destination in destinations)
 
 
 @dataclass(frozen=True, slots=True)

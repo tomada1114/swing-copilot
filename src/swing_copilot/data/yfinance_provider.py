@@ -9,7 +9,7 @@ rather than trusting yfinance's own end-date handling.
 
 `_normalize` also *validates* every OHLCV cell it emits, because a per-symbol
 data-quality problem has to leave here as a `BarFetchResult.failures` entry
-and never as an exception (`data/base.py`'s contract). Two kinds of absence
+and never as an exception (`data/base.py`'s contract). Three kinds of trouble
 are read differently, deliberately:
 
 * **`Close` is NaN** — that row is not a trading row for this symbol. A bulk
@@ -21,19 +21,30 @@ are read differently, deliberately:
   thin or trading-halted name is the realistic case (Issue #249), and it used
   to escape as `int(nan)`'s `ValueError`. The *symbol* is now reported in
   `failures` and none of its rows are emitted.
+* **The response's timestamp index has a duplicate** — `.loc[timestamp]`
+  returns a `Series` instead of a scalar for a duplicated key, and
+  `pd.isna(...)` on that `Series` used in an `if` used to escape as
+  `ValueError: The truth value of a Series is ambiguous` (Issue #294). No
+  observed `yfinance.download(..., auto_adjust=True, multi_level_index=True)`
+  response path produces a duplicate `DatetimeIndex` today, so this is
+  validated defensively rather than silently collapsed to one row: a quiet
+  "pick the last row" rule would misreport a genuinely broken price window if
+  that ever changed. The symbol fails with a reason naming the date and the
+  duplicate count; none of its rows are emitted.
 
-The second case is not a silent per-row drop on purpose: a hole punched into
+Neither of the latter two cases is a silent per-row drop: a hole punched into
 a price window is invisible to every downstream indicator that averages over
-N bars, while a failure is named in the run's report. It is also not
-retryable — a malformed value is a validation error, so the retry loop leaves
-it alone. `MarketStore.write_bars`' batch-wide rejection (Issue #227) stays
-the layer *under* this one, unchanged.
+N bars, while a failure is named in the run's report. Neither is retryable —
+both are validation errors, so the retry loop leaves them alone.
+`MarketStore.write_bars`' batch-wide rejection (Issue #227) stays the layer
+*under* this one, unchanged.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -107,9 +118,20 @@ def _symbol_bars(
         emitted, so no caller persists half of a window whose feed is broken.
     """
     rows: list[dict[str, object]] = []
+    # `.loc[timestamp]` below assumes a unique index (see module docstring,
+    # Issue #294) -- check for duplicates before ever indexing with it.
+    timestamp_counts = Counter(index)
     for timestamp in index:
         bar_date = timestamp.date()
-        if not (start <= bar_date < end) or pd.isna(fields["Close"].loc[timestamp]):
+        if not (start <= bar_date < end):
+            continue
+        duplicate_count = timestamp_counts[timestamp]
+        if duplicate_count > 1:
+            return [], (
+                f"duplicate timestamp in response on {bar_date.isoformat()} "
+                f"({duplicate_count} rows)"
+            )
+        if pd.isna(fields["Close"].loc[timestamp]):
             continue
         values = {name: fields[name].loc[timestamp] for name in _REQUIRED_FIELDS}
         numeric: dict[str, float] = {}

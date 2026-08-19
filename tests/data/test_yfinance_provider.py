@@ -353,6 +353,94 @@ class TestNonFiniteValues:
         assert set(result.bars["symbol"]) == {"AAPL"}
 
 
+class TestDuplicateTimestamps:
+    """Issue #294: a duplicate response timestamp is a `failures` entry too.
+
+    Before the fix, `.loc[timestamp]` against a duplicated `DatetimeIndex`
+    returns a `Series` instead of a scalar; `pd.isna(...)` on that `Series`
+    used in an `if` raises `ValueError: The truth value of a Series is
+    ambiguous`, escaping `get_daily_bars` as an uncaught exception -- the same
+    `data/base.py` contract violation Issue #249 closed for non-finite cells.
+    """
+
+    @staticmethod
+    def _fixture_with_duplicate(dates: list[str]) -> pd.DataFrame:
+        n = len(dates)
+        columns: dict[tuple[str, str], list[object]] = {
+            ("Open", "AAPL"): [10.0 + i for i in range(n)],
+            ("High", "AAPL"): [10.5 + i for i in range(n)],
+            ("Low", "AAPL"): [9.5 + i for i in range(n)],
+            ("Close", "AAPL"): [10.2 + i for i in range(n)],
+            ("Volume", "AAPL"): [1000 + i for i in range(n)],
+        }
+        return _frame(columns, dates)
+
+    def test_duplicate_timestamp_is_reported_as_a_failure_instead_of_raising(self):
+        fixture = self._fixture_with_duplicate(
+            ["2026-08-13", "2026-08-14", "2026-08-14"]
+        )
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _delay: None
+        )
+
+        result = provider.get_daily_bars(["AAPL"], date(2026, 8, 13), date(2026, 8, 15))
+
+        failures = {failure.symbol: failure for failure in result.failures}
+        assert set(failures) == {"AAPL"}
+        assert "duplicate timestamp" in failures["AAPL"].reason
+        assert "2026-08-14" in failures["AAPL"].reason
+        assert "2 rows" in failures["AAPL"].reason
+        assert result.bars.empty
+
+    def test_a_duplicate_timestamp_is_a_validation_error_and_is_not_retried(self):
+        calls = 0
+
+        def _download(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return self._fixture_with_duplicate(
+                ["2026-08-13", "2026-08-14", "2026-08-14"]
+            )
+
+        def _no_sleep(_delay):
+            pytest.fail("a duplicate timestamp must not be retried")
+
+        provider = YFinanceProvider(download_fn=_download, sleep_fn=_no_sleep)
+
+        result = provider.get_daily_bars(["AAPL"], date(2026, 8, 13), date(2026, 8, 15))
+
+        assert calls == 1
+        assert result.failures[0].retryable is False
+
+    def test_a_duplicate_timestamp_outside_the_window_does_not_fail_the_symbol(self):
+        fixture = self._fixture_with_duplicate(
+            ["2026-08-13", "2026-08-14", "2026-08-14"]
+        )
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _delay: None
+        )
+
+        # `end` is exclusive: only 2026-08-13 is requested, so the duplicated
+        # 2026-08-14 rows sit outside `[start, end)` and stay inert.
+        result = provider.get_daily_bars(["AAPL"], date(2026, 8, 13), date(2026, 8, 14))
+
+        assert result.failures == ()
+        assert result.bars["date"].tolist() == [date(2026, 8, 13)]
+
+    def test_get_latest_bars_also_reports_duplicate_timestamp_instead_of_raising(self):
+        fixture = self._fixture_with_duplicate(
+            ["2026-08-13", "2026-08-14", "2026-08-14"]
+        )
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _delay: None
+        )
+
+        result = provider.get_latest_bars(["AAPL"], date(2026, 8, 14))
+
+        assert {failure.symbol for failure in result.failures} == {"AAPL"}
+        assert result.bars.empty
+
+
 class TestGetLatestBars:
     def test_returns_single_most_recent_bar_per_symbol(self):
         dates = ["2026-07-15", "2026-07-16", "2026-07-17"]

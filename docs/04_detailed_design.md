@@ -289,6 +289,13 @@ class YFinanceProvider(DataProvider):
 
 **エラー処理**: yfinanceは非公式ラッパーでありSLAがない。各`download`呼び出しには`timeout=10`を渡し、接続・タイムアウト・HTTP 408/429/5xxまたはプロバイダ応答で欠けた銘柄だけを、固定バックオフ1秒・2秒で最大3回まで再試行する。すでに取得できた銘柄を再送しない。その他の例外は非retryableな`FetchFailure`として返す。固定sleepはテスト困難なため、待機関数を注入してユニットテスト可能にする。
 
+**セル単位の値検証（Issue #249）**: `_normalize`は emit するOHLCVセルを1つ残らず有限性検証する。`data/base.py`が定める「銘柄単位の失敗は**送出せず**`BarFetchResult.failures`へ入れる」契約を守るためであり、従来は`Close`のNaNしか見ておらず、NaN `Volume`が`int(nan)`の`ValueError`として`get_daily_bars`の**外**へ抜けていた（薄商い・売買停止日に現実に起こりうる）。無人の18:30 runでは1銘柄のNaNがその日の取得全体を落とす。欠損の読み分けは意図的に2通りである。
+
+- **`Close`がNaN**: その行はこの銘柄の取引行ではない。一括`download`は要求銘柄のカレンダーを和集合にするため、他銘柄だけが取引した日は全NaN行になる。従来どおり行スキップ。
+- **`Close`は実価格だが他フィールドが非有限**（NaN/±inf/数値化不能）: フィードは「バーがある」と言いながら使えない値を返している。**その銘柄**を`failures`に入れ、当該銘柄の行は1本も emit しない。
+
+後者を「該当行だけ黙って落とす」にしないのは、価格窓に空いた穴がN本平均を取る下流指標からは見えないためである——`storage/market_store.py`の`NonFiniteBarsError`が「行を黙って捨てるのはNaN保存の沈黙をバー消失の沈黙へ移すだけ」として fail-fast を選んだのと同じ判断を、1層上のprovider境界で銘柄粒度に適用している。**retryableではない**（不正値は validation error であり、再取得は試行予算を使うだけ）。3.7節の`write_bars`側バッチ拒否は**下**に敷いた防御層のまま変わらず、到達経路が減るだけである。回帰テストは`tests/data/test_yfinance_provider.py::TestNonFiniteValues`（`[start, end)`外の壊れたバーが銘柄を落とさない as-of 境界も含む）。
+
 ### 3.5 EODHD対応（P4）
 
 P1〜P2では`DataProvider`契約だけを確定し、EODHD固有ファイルは作らない。P4で公式仕様と契約プランを確認してから実装し、`DataProvider`共通契約テストへ追加する。
@@ -1988,6 +1995,8 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 日次runが取る価格履歴は400暦日のローリング窓であり、複数レジーム（2020年暴落・2022年弱気・2021/2023-24強気）をまたぐバックテストには足りない。`pipeline/backfill.py`（`copilot-backfill`）は、その履歴を一度だけまとめて取り込む一回限りのツールである。日次経路とは独立に置き、既存のアダプタ（`YFinanceProvider`・`EdgarClient`）とリポジトリ（`MarketStore`）を通す——生の`yf.download`を直接叩く経路を作らないのは、タイムアウト・リトライ・レート制限の契約を迂回しないためである。
 
 チャンク分割（50銘柄）とチャンク間スリープ（2秒）はyfinance側にレート制限が無いことへの配慮で、`write_bars`の呼び出しを最後の1回に集約するのは年パーティション全書き直しのコストを銘柄数に比例させないためである。レジューム条件は「既存バーの最古日が`--start`以前」であり、後年上場の銘柄は毎回再取得される（銘柄単位の「取得済みだが空」台帳を持たない割り切り）。操作面は`docs/reference.md`が正本。
+
+**`NonFiniteBarsError`の終了規約（Issue #250、#249へ統合）**: `_EXIT_POLICY`は`NonFiniteBarsError`も変換対象に含め、`copilot-backfill`はstderr 1行＋終了コード1で落ちる（トレースバックにしない）。#221が`ParquetRootNotFoundError`について確立した「操作者が読む1行＋exit 1」の規約に揃えたものである。**fail-fastのまま**である点が要点で、3.7節のバッチ全体拒否をfail-softへ戻さない——1行も書かれていないので終了コード0は「取り込んだ」という嘘になり、`copilot-backfill ... && copilot-backtest ...`のような連結を通してしまう。既存の「全銘柄の取得に失敗した」`BackfillError`と同じ扱いである。`write_bars`を呼ぶもう1つの経路である`copilot-daily`（`pipeline/daily.py::_run_step_prices`）は、`daily_runner.py`のfatal stepsループが`except Exception`で`RunStatus.FAILED`＋終了コード1へ変換済みなので変更不要であり、`NonFiniteBarsError`を送出しうるCLIはこの2つだけである（他CLIの`MarketStore`利用は読み出しのみ）。
 
 `--limit N`は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない（Issue #206）。`copilot-backtest`（#194）・`copilot-daily`（#205）と**同じ関数・同じsalt**を共有するので、同じユニバースと同じ`N`なら3つのCLIが同じ銘柄集合を覆う——暖機したキャッシュがそのままスモーク実行・バックテストの対象と一致する。`copilot-backfill`は測定値を出さないため辞書順バイアスの害は「Aで始まる銘柄しか温まらない」に留まるが、その偏りは後続の実行が「キャッシュ済みで速い銘柄」に引かれる形で間接的に効く。`--limit <= 0`はCLI側の`BackfillError`（「`--limit`は1以上の整数で指定してください。」）で従来どおりfail-fastする——サンプラ自身は`0`を空サンプル、負値を`ValueError`とする別契約なので、CLIの下限とメッセージはCLIが持ち続ける。
 

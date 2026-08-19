@@ -261,6 +261,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `YFinanceProvider` が NaN `Volume` の行で `int(nan)` の `ValueError` を
+  `get_daily_bars` の外へ送出し、「銘柄単位の失敗は送出せず
+  `BarFetchResult.failures` へ入れる」という `data/base.py` の契約を破っていた
+  問題を修正した（Issue #249）。従来のスキップ判定は `Close` の NaN しか見て
+  おらず、薄商い・売買停止日の NaN `Volume` は素通りしていた。無人の 18:30 run
+  では 1 銘柄の欠測がその日の取得全体を落とす。`_normalize` は emit する OHLCV
+  セルを全て有限性検証し、**`Close` が NaN の行は従来どおり行スキップ**
+  （＝この銘柄の取引行ではない）、**`Close` は実価格なのに他フィールドが
+  非有限なら銘柄ごと `failures`** へ入れる（`retryable=False`。不正値は
+  validation error なので再取得しない）。該当行だけ黙って落とさないのは、価格窓
+  に空いた穴が N 本平均を取る下流指標から見えないためで、Issue #227 が
+  `write_bars` で下した判断を 1 層上の銘柄粒度へ適用したものである。#227 の
+  バッチ全体拒否は**下に敷いた防御層のまま**で、到達経路が減るだけである。
+  あわせて `copilot-backfill` の `_EXIT_POLICY` に `NonFiniteBarsError` を加え、
+  ストアが拒否したときトレースバックではなく stderr 1 行＋終了コード 1 を返す
+  ようにした（Issue #250 を本件へ統合。#221 が `ParquetRootNotFoundError` で
+  確立した規約に揃えたもので、fail-fast のまま）。`NonFiniteBarsError` を
+  送出しうるもう 1 つの CLI である `copilot-daily` は、fatal steps ループが
+  既に `RunStatus.FAILED` ＋終了コード 1 へ変換しているため変更していない
+
 - 同一 API キーを使う `FinnhubNewsClient` と `FinnhubEarningsClient` が
   スロットル状態を共有せず、アカウント単位（60 calls/分）の上限を
   2クライアント合計では守れない設計だった問題を修正した（Issue #263）。

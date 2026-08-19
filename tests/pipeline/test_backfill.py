@@ -578,6 +578,45 @@ class TestBackfillCli:
         assert excinfo.value.code == 1
         assert "全銘柄の取得に失敗" in capsys.readouterr().err
 
+    def test_a_non_finite_bar_exits_one_with_a_single_stderr_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Issue #250 (folded into #249): the store's rejection is not a crash.
+
+        `write_bars` rejects the whole batch before touching a partition, so
+        the run is fatal either way — what changes is that the operator gets
+        the one stderr line Issue #221 standardized instead of a traceback.
+        """
+        provider = _RecordingProvider(non_finite_symbols=frozenset({"BBB"}))
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            backfill_main(
+                [
+                    "bars",
+                    "--start",
+                    "2019-01-01",
+                    "--end",
+                    "2026-07-30",
+                    "--db",
+                    str(tmp_path / "copilot.duckdb"),
+                    "--symbols",
+                    "AAA,BBB",
+                ]
+            )
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert stderr.splitlines() == [stderr.strip()]
+        assert "非有限" in stderr
+        # Fail-fast, unchanged since Issue #227: nothing reached Parquet.
+        assert not (tmp_path / "bars").exists()
+
     def test_rejects_a_start_after_end(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit):
             backfill_main(

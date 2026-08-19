@@ -6,10 +6,33 @@ adjusted OHLCV in a `(field, ticker)` MultiIndex-columns DataFrame regardless
 of symbol count; `_normalize` flattens that into the tidy `BARS_COLUMNS`
 schema every `DataProvider` returns, and clamps to `[start, end)` explicitly
 rather than trusting yfinance's own end-date handling.
+
+`_normalize` also *validates* every OHLCV cell it emits, because a per-symbol
+data-quality problem has to leave here as a `BarFetchResult.failures` entry
+and never as an exception (`data/base.py`'s contract). Two kinds of absence
+are read differently, deliberately:
+
+* **`Close` is NaN** — that row is not a trading row for this symbol. A bulk
+  `yfinance.download` unions every requested symbol's calendar, so a symbol
+  that did not trade on a date another symbol did gets an all-NaN row.
+  Skipped, as it always has been.
+* **`Close` is a real price but another field is not finite** — the feed
+  claims a bar exists yet hands over an unusable field. A NaN `Volume` on a
+  thin or trading-halted name is the realistic case (Issue #249), and it used
+  to escape as `int(nan)`'s `ValueError`. The *symbol* is now reported in
+  `failures` and none of its rows are emitted.
+
+The second case is not a silent per-row drop on purpose: a hole punched into
+a price window is invisible to every downstream indicator that averages over
+N bars, while a failure is named in the run's report. It is also not
+retryable — a malformed value is a validation error, so the retry loop leaves
+it alone. `MarketStore.write_bars`' batch-wide rejection (Issue #227) stays
+the layer *under* this one, unchanged.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -39,6 +62,79 @@ class _DownloadFn(Protocol):
 
 def _empty_bars_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(BARS_COLUMNS))
+
+
+def _finite_value(value: object) -> float | None:
+    """One OHLCV cell as a real, finite number, or `None` if it is not usable.
+
+    Mirrors `MarketStore._reject_non_finite_bars`' notion of "usable", so the
+    two layers cannot disagree about what counts as a broken value: a
+    non-numeric cell is non-finite here too, and fails at this boundary
+    instead of as a `ValueError` out of `float()`/`int()`.
+
+    The parsed number is handed back rather than a bool so the caller builds
+    the row out of it. Re-reading the raw cell would reopen the same hole one
+    field over: `int("2100.5")` raises `ValueError` on a numeric *string*
+    `Volume` that `float()` accepted, which is exactly the escape this guard
+    exists to close.
+    """
+    try:
+        numeric = float(value)  # type: ignore[arg-type] # any numeric-like cell
+    except TypeError, ValueError:
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _symbol_bars(
+    symbol: str,
+    fields: dict[str, pd.Series],
+    index: pd.Index,
+    start: date,
+    end: date,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Build one symbol's rows over `[start, end)`, or say why it is unusable.
+
+    Args:
+        symbol: The ticker these rows belong to.
+        fields: That symbol's `Open`/`High`/`Low`/`Close`/`Volume` series.
+        index: The response's shared timestamp index.
+        start: Inclusive range start.
+        end: Exclusive range end.
+
+    Returns:
+        The rows and `None`; or an empty list and the operator-facing reason
+        the symbol must be failed. Rows are discarded rather than partially
+        emitted, so no caller persists half of a window whose feed is broken.
+    """
+    rows: list[dict[str, object]] = []
+    for timestamp in index:
+        bar_date = timestamp.date()
+        if not (start <= bar_date < end) or pd.isna(fields["Close"].loc[timestamp]):
+            continue
+        values = {name: fields[name].loc[timestamp] for name in _REQUIRED_FIELDS}
+        numeric: dict[str, float] = {}
+        invalid: list[str] = []
+        for name in _REQUIRED_FIELDS:
+            parsed = _finite_value(values[name])
+            if parsed is None:
+                invalid.append(name)
+            else:
+                numeric[name] = parsed
+        if invalid:
+            detail = ", ".join(f"{name}={values[name]}" for name in invalid)
+            return [], f"non-finite OHLCV value on {bar_date.isoformat()} ({detail})"
+        rows.append(
+            {
+                "symbol": symbol,
+                "date": bar_date,
+                "open": numeric["Open"],
+                "high": numeric["High"],
+                "low": numeric["Low"],
+                "close": numeric["Close"],
+                "volume": int(numeric["Volume"]),
+            }
+        )
+    return rows, None
 
 
 def _normalize(
@@ -77,21 +173,18 @@ def _normalize(
             )
             continue
 
-        for timestamp in raw.index:
-            bar_date = timestamp.date()
-            if not (start <= bar_date < end) or pd.isna(fields["Close"].loc[timestamp]):
-                continue
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "date": bar_date,
-                    "open": float(fields["Open"].loc[timestamp]),
-                    "high": float(fields["High"].loc[timestamp]),
-                    "low": float(fields["Low"].loc[timestamp]),
-                    "close": float(fields["Close"].loc[timestamp]),
-                    "volume": int(fields["Volume"].loc[timestamp]),
-                }
+        symbol_rows, corrupt_reason = _symbol_bars(
+            symbol, fields, raw.index, start, end
+        )
+        if corrupt_reason is not None:
+            # Not retryable: a malformed value is a validation error, and a
+            # refetch would only spend the attempt budget (AGENTS.md, "Do not
+            # retry validation/programming errors").
+            failures.append(
+                FetchFailure(symbol=symbol, reason=corrupt_reason, retryable=False)
             )
+            continue
+        rows.extend(symbol_rows)
 
     bars = pd.DataFrame(rows, columns=list(BARS_COLUMNS))
     return BarFetchResult(bars=bars, failures=tuple(failures))

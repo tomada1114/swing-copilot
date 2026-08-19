@@ -97,6 +97,9 @@ analysis:
   # max_filing_chunks).
   max_filing_chars: 120000
   # Combined filing-text budget for one symbol / filing-analysis context.
+  # Validated at load time (Issue #268): must be >= max_filing_chars, and >=
+  # max_filings_per_symbol * min(max_filing_chars, MIN_FILING_CHARS=8000) so
+  # every collected filing can hold its guaranteed minimum share.
   max_filing_chars_per_symbol: 240000
   # Filing collection recency bound (days) and per-symbol count cap.
   filing_lookback_days: 90

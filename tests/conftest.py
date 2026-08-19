@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import socket
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -63,9 +65,30 @@ def _fingerprint(paths: tuple[Path, ...]) -> tuple[int | None, ...]:
     return tuple(_mtime_ns(path) for path in paths)
 
 
+def _format_mtime(mtime_ns: int | None) -> str:
+    """Render one watched mtime for the guard's diagnostic message."""
+    if mtime_ns is None:
+        return "absent"
+    stamp = datetime.fromtimestamp(mtime_ns / 1_000_000_000, tz=UTC).astimezone()
+    return f"{stamp.isoformat()} (mtime_ns={mtime_ns})"
+
+
+def _describe_changes(
+    paths: tuple[Path, ...],
+    before: tuple[int | None, ...],
+    after: tuple[int | None, ...],
+) -> str:
+    """List every watched path whose mtime moved, with its before/after value."""
+    return "\n".join(
+        f"  {path}: {_format_mtime(was)} -> {_format_mtime(now)}"
+        for path, was, now in zip(paths, before, after, strict=True)
+        if was != now
+    )
+
+
 @contextmanager
 def _guard_repo_directory(directory: Path, *watched: Path) -> Iterator[None]:
-    """Fail the test that writes into a repository directory it does not own.
+    """Fail the running test when a repository directory it does not own changes.
 
     Filesystem tests must stay in `tmp_path`. This catches the omission the
     socket blocker cannot: a default output path that resolves to real,
@@ -77,28 +100,56 @@ def _guard_repo_directory(directory: Path, *watched: Path) -> Iterator[None]:
     `write_markdown_report`, which always rewrites `reports/latest.md` even
     when the dated subdirectory already exists, and of every DuckDB file under
     `data/`.
+
+    An mtime fingerprint proves *that* the directory changed, never *who*
+    changed it: this working copy is also the unattended execution environment,
+    so the 18:30 routine writing `data/copilot.duckdb` and `reports/latest.md`
+    trips the guard in whatever unrelated tests happen to be in flight
+    (observed 2026-08, Issue #257). The message therefore names both causes and
+    reports the evidence -- which watched paths moved, and their mtimes before
+    and after -- instead of asserting that the test is at fault.
     """
     paths = (directory, *watched)
     before = _fingerprint(paths)
     yield
-    if _fingerprint(paths) != before:
+    after = _fingerprint(paths)
+    if after != before:
         msg = (
-            f"Test wrote into the repository's real {directory}/ directory. "
-            "Pass an isolated path (tmp_path) instead."
+            f"The repository's real {directory}/ directory changed while this "
+            "test ran. An mtime fingerprint cannot tell who wrote, so weigh "
+            "both causes:\n"
+            "  (1) this test wrote there -- pass an isolated path (tmp_path), "
+            "or monkeypatch.chdir(tmp_path) before calling a composition root "
+            "that uses the repo-relative defaults;\n"
+            "  (2) a concurrent external process wrote there -- the scheduled "
+            "18:30 daily routine, a manual `copilot-daily` run, or anything "
+            "else sharing this checkout. Then the test is innocent: check the "
+            "timestamps below against that process and re-run once it is "
+            "done.\n"
+            "Changed watched paths (mtime before -> after):\n"
+            + _describe_changes(paths, before, after)
         )
         raise AssertionError(msg)
 
 
 @pytest.fixture(autouse=True)
 def _block_repo_report_writes() -> Iterator[None]:
-    """Fail the test that writes into the repository's real `reports/`."""
+    """Fail when the repository's real `reports/` changes during this test.
+
+    The mtime fingerprint cannot prove this test is the writer -- see
+    `_guard_repo_directory`'s docstring.
+    """
     with _guard_repo_directory(_REPO_REPORTS_DIR, _REPO_REPORTS_DIR / "latest.md"):
         yield
 
 
 @pytest.fixture(autouse=True)
 def _block_repo_data_writes() -> Iterator[None]:
-    """Fail the test that writes into the repository's real `data/`."""
+    """Fail when the repository's real `data/` changes during this test.
+
+    The mtime fingerprint cannot prove this test is the writer -- see
+    `_guard_repo_directory`'s docstring.
+    """
     with _guard_repo_directory(
         _REPO_DATA_DIR,
         _REPO_DATA_DIR / "copilot.duckdb",
@@ -167,6 +218,54 @@ def plant_non_finite_bars(market_store: MarketStore, df: pd.DataFrame) -> None:
         # Deliberately the unvalidated half of `write_bars`: re-implementing
         # partition merge/replace here would drift from the real writer.
         market_store._write_partition(int(year), working[years == year])  # noqa: SLF001
+
+
+class ThrottleTimeline:
+    """Monotonic clock that only sleeping and request latency advance.
+
+    Models the one timeline an external client's rate limit is actually
+    defined over: `sleep` (throttle wait and retry backoff alike) and each
+    request's round trip both move it forward, and every issued request stamps
+    the instant it went out. That makes the *issue* interval observable, not
+    just the sleep arguments — which is what Issue #253 turned on, since the
+    buggy throttle slept the right amount and still let every other request go
+    out early.
+
+    Shared here rather than per test module on purpose: `data/edgar.py`,
+    `text/news_finnhub.py`, `data/earnings_finnhub.py` and
+    `text/calendar_fred.py` each assert the same invariant, so a change to the
+    float tolerance or to how a gap is defined has to move all four at once.
+    Four verbatim copies had already started to drift. Only the injection
+    shape differs per client (`clock=` / `rate_clock=` / `EarningsTiming` /
+    `FredCalendarTiming`), and that stays in the tests.
+    """
+
+    def __init__(self, request_seconds: float) -> None:
+        self.now = 0.0
+        self.issued_at: list[float] = []
+        self._request_seconds = request_seconds
+
+    def clock(self) -> float:
+        """Read the clock, as the client's injected `rate_clock` would."""
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep, as the client's injected `sleep_fn`/`backoff_fn` would."""
+        self.now += seconds
+
+    def issue_request(self) -> None:
+        """Stamp a request as issued now, then charge its round-trip latency."""
+        self.issued_at.append(self.now)
+        self.now += self._request_seconds
+
+    @property
+    def issue_gaps(self) -> list[float]:
+        """Intervals between consecutive requests actually going out."""
+        return [later - earlier for earlier, later in pairwise(self.issued_at)]
+
+    def gaps_below(self, minimum: float, tolerance: float = 1e-9) -> list[float]:
+        """Return every issue gap shorter than `minimum`, float slop aside."""
+        return [gap for gap in self.issue_gaps if gap < minimum - tolerance]
 
 
 @pytest.fixture

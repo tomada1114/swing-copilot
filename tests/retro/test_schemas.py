@@ -39,6 +39,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+def _input_coverage() -> dict[str, Any]:
+    """Issue #157's coverage block, as an export wrote it before Issue #267."""
+    return {
+        "filing_count": 3,
+        "truncated_filing_count": 1,
+        "exhibit_truncated_filing_count": 0,
+        "fallback_filing_count": 1,
+        "omitted_filing_count": 0,
+        "severe_miss_symbol_count_with_gap": 1,
+        "severe_miss_symbol_count_without_gap": 0,
+        "severe_miss_symbol_count_unknown": 0,
+    }
+
+
 def _news_supply_aggregate() -> dict[str, Any]:
     """Issue #154's supply cross-tab, as an export would write it."""
     return {
@@ -233,6 +247,38 @@ class TestRetroInput:
         assert rehydrated["failure_class_history"] is None
         assert rehydrated["aggregates_by_config"] == []
         assert retro_input_digest(rehydrated) == archived_digest
+
+    def test_a_dossier_written_before_issue_267_keeps_its_digest(self) -> None:
+        # Same regression, for the starved-export count: a dossier archived
+        # while `input_coverage` existed but that count did not must still
+        # hash to the digest it was written with.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = _input_coverage()
+        archived_digest = canonical_json_digest(payload, excluded_field="input_digest")
+
+        rehydrated = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        ).model_dump(mode="json")
+
+        assert rehydrated["input_coverage"]["starved_filing_count"] == 0
+        assert retro_input_digest(rehydrated) == archived_digest
+
+    def test_a_counted_starved_export_changes_a_fresh_documents_digest(self) -> None:
+        # The other half: the default is dropped only because 0 means "not
+        # counted". A dossier that did count a starved filing must hash
+        # differently from one that counted none.
+        payload = _unsigned_payload()
+        payload["input_coverage"] = {**_input_coverage(), "starved_filing_count": 1}
+        uncounted = deepcopy(payload)
+        uncounted["input_coverage"] = _input_coverage()
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": retro_input_digest(payload)}
+        )
+
+        assert document.input_coverage is not None
+        assert document.input_coverage.starved_filing_count == 1
+        assert retro_input_digest(payload) != retro_input_digest(uncounted)
 
     def test_a_recorded_gate_cross_tab_changes_a_fresh_documents_digest(self) -> None:
         payload = _unsigned_payload()

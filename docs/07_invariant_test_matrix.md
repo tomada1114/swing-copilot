@@ -96,6 +96,8 @@
 | `data/edgar.py` | 添付ダウンロードにも 10 リクエスト/秒の throttle を適用する | Exhibit 取得だけがレート制限を迂回する | `tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download` |
 | `analysis/filing_selection.py` | 予算逼迫時は主文書と EX-99.1 を supplement より優先して配分する | 数倍大きい supplemental package が予算を食い、プレスリリースが削られる | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_budget_pressure_serves_the_press_release_before_a_supplement` |
 | `analysis/filing_selection.py` | 割当超過の Exhibit は末尾切りではなく、定型文から落として markdown テーブルを最後まで残す | 末尾に置かれる財務諸表・非 GAAP 調整表が真っ先に落ちる（Issue #157 の GOOG 申告） | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_a_far_over_allocation_keeps_the_tables_after_everything_else` |
+| `analysis/filing_selection.py` | 各開示は最低保証字数を確保してから、余りを優先順に配る（優先順位は読める量を決め、読めるかどうかは決めない） | per-filing 上限に達する開示 2 件で 1 銘柄予算が尽き、3 件目が 10 字（HST）や 0 字（UDR）のまま「分析済み」になる | `tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_small_third_filing_survives_two_ceiling_filling_filings` |
+| `analysis/filing_selection.py` | 保証すら全件に配れないときは割り当て順に保証を配り、尽きたら 0 にする | 窮迫時の配分が実装詳細で変わり、同じ入力から同じ出力が出ない | `tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_ceiling_too_small_for_every_guarantee_serves_them_in_priority_order` |
 | `analysis/filing_selection.py` | Exhibit 選別は `selection_mode` / `sections_json` へ Exhibit 語彙で記録され、P8 から読める | 「開示が切れた」までしか分からず、どの Exhibit が削られたか追跡できない | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_exhibit_coverage_survives_the_analysis_source_coverage_round_trip` |
 
 ## 自社材料の供給量の申告
@@ -172,3 +174,25 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 | `backtest/cli.py` | `--policy` の A/B は 1 本の候補ストリームを共有する | アームごとにスクリーニングし直し、差分がゲート以外にも由来する | `tests/backtest/test_cli.py::TestPolicyEndToEnd::test_ab_run_compares_arms_over_one_candidate_stream` |
 | `backtest/cli.py` | `--policy regime+risk` にだけ決算カレンダーを配線する | 決算ゲートを適用しないアームが提出履歴を読み、被覆率だけを表示する | `tests/backtest/test_cli.py::TestEarningsGuardWiring::test_regime_risk_arm_receives_the_filing_derived_calendar`、`tests/backtest/test_cli.py::TestEarningsGuardWiring::test_arms_that_cannot_use_the_gate_never_read_the_filing_history` |
 | `backtest/metrics.py` | 発火 0 件のエントリー阻止理由も 0 として必ず報告する | 一度も効かなかったゲートがレポートから消え、「効いた」と読めてしまう | `tests/backtest/test_metrics.py::TestEntryBlockBreakdown::test_every_known_reason_is_reported_even_at_zero` |
+
+## レート制限スロットルの記録時点（Issue #253）
+
+4つの外部クライアントの `_throttle` は、待機してから実際にリクエストを
+発行する。記録すべきは「発行時点」であって「スロットル判定を始めた時点」では
+ない。後者を記録すると sleep した分が次回の間隔計算から落ち、発行間隔が
+`_MIN_REQUEST_INTERVAL_SECONDS` と待機なしの間隔を交互に取って実効レートが
+公称上限を上回る。ここで固定するのは sleep の呼び出し回数や引数ではなく、
+「実際にリクエストが出た時刻の間隔」の下限である。`retry_external_call` は
+試行ごとに `before_attempt` を呼ぶため、失敗した試行も1リクエストとして
+同じ不変条件に服する。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `data/edgar.py` | 連続する発行時刻の間隔が 10 リクエスト/秒の下限を下回らない | 待機前の時刻を記録し、1回おきに 0.1 秒未満で SEC へ投げる | `tests/data/test_edgar.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart` |
+| `data/edgar.py` | リトライを挟んでも発行間隔の下限が保たれる | 失敗試行を発行として数えず、後続の待機を過小評価する | `tests/data/test_edgar.py::TestRateLimiting::test_retried_attempts_keep_the_minimum_issue_interval` |
+| `text/news_finnhub.py` | 連続する発行時刻の間隔が 60 calls/分の下限を下回らない | 待機前の時刻を記録し、実効レートが 60/分を超える | `tests/text/test_news_finnhub.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart` |
+| `text/news_finnhub.py` | リトライを挟んでも発行間隔の下限が保たれる | 429 の試行を発行として数えず、後続の待機を過小評価する | `tests/text/test_news_finnhub.py::TestRetries::test_retried_attempts_keep_the_minimum_issue_interval` |
+| `data/earnings_finnhub.py` | 連続する発行時刻の間隔が 60 calls/分の下限を下回らない | 待機前の時刻を記録し、実効レートが 60/分を超える | `tests/data/test_earnings_finnhub.py::test_successive_requests_are_issued_at_least_one_interval_apart` |
+| `data/earnings_finnhub.py` | リトライを挟んでも発行間隔の下限が保たれる | 失敗試行を発行として数えず、後続の待機を過小評価する | `tests/data/test_earnings_finnhub.py::test_retried_attempts_keep_the_minimum_issue_interval` |
+| `text/calendar_fred.py` | 連続する発行時刻の間隔が 120 リクエスト/分の下限を下回らない | 待機前の時刻を記録し、enrichment 2件が 0.5 秒未満で続く | `tests/text/test_calendar_fred.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart` |
+| `text/calendar_fred.py` | リトライを挟んでも発行間隔の下限が保たれる | 失敗試行を発行として数えず、後続の待機を過小評価する | `tests/text/test_calendar_fred.py::TestRateLimiting::test_retried_attempts_keep_the_minimum_issue_interval` |

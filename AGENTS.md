@@ -18,13 +18,13 @@ mypy strict, pytest, DuckDB, and Parquet.
 just install   # Install all dependency groups and git hooks
 just fmt       # Apply ruff fixes and formatting (mutating)
 just lint      # Ruff lint/format check + mypy strict
-just test      # Pytest with line and branch coverage >= 95%
+just test      # Pytest (parallel, `-n auto`) with line and branch coverage >= 95%
 just docs      # Serve docs locally
 just docs-check # Build MkDocs with --strict
 just build     # Build distribution packages
 just smoke     # Build and verify the wheel in a temp environment
 just check     # Apply formatting, then run lint and tests
-just verify    # Non-mutating release gate: lint, test, docs-check, smoke
+just verify    # Non-mutating release gate: lint, docs-check, smoke, test
 ```
 
 Without Just, use the corresponding `uv run` commands in `justfile`. During

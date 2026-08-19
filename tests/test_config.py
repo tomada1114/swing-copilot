@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from swing_copilot import config as config_module
+from swing_copilot.analysis import filing_selection
+from swing_copilot.analysis.filing_selection import MIN_FILING_CHARS
 from swing_copilot.config import (
     Secrets,
     Settings,
@@ -565,7 +568,7 @@ def test_analysis_config_max_filing_chars_is_directly_configurable():
         {
             "analysis": {
                 "max_filing_chars": 3_000,
-                "max_filing_chars_per_symbol": 4_000,
+                "max_filing_chars_per_symbol": 9_000,
             }
         }
     )
@@ -582,6 +585,107 @@ def test_analysis_config_rejects_symbol_budget_below_per_filing_budget():
                 }
             }
         )
+
+
+def test_config_validates_against_the_selectors_own_minimum():
+    # Issue #268: the bound `config.py` enforces and the reservation
+    # `filing_selection.py` actually hands out have to be the *same* number, so
+    # the validation is the one imported constant rather than a copy that can
+    # drift from it. Asserting *identity* -- not equality of two literals --
+    # is what makes a second definition impossible to add unnoticed: a copy
+    # declared in `config.py` would be an equal but distinct int object.
+    # Read out of the module namespace rather than as an attribute because
+    # mypy's `no_implicit_reexport` rejects reading an imported name off
+    # another module, which is the same rule that keeps this one-way.
+    assert vars(config_module)["MIN_FILING_CHARS"] is filing_selection.MIN_FILING_CHARS
+
+
+def test_shipped_settings_cover_every_filing_minimum():
+    # Issue #268's "existing valid configuration still loads" guard, stated as
+    # the invariant rather than as three literals: the shipped per-symbol
+    # ceiling has to cover one reservation per collected filing.
+    analysis = load_settings("config/settings.yaml").analysis
+    assert (
+        analysis.max_filing_chars_per_symbol
+        >= analysis.max_filings_per_symbol
+        * min(analysis.max_filing_chars, MIN_FILING_CHARS)
+    )
+
+
+def test_analysis_config_rejects_symbol_budget_below_the_filing_minimums():
+    # Issue #268: `max_filing_chars_per_symbol >= max_filing_chars` alone let a
+    # per-symbol ceiling through that cannot seat one `MIN_FILING_CHARS`
+    # reservation per collected filing, so every filing past the first exported
+    # as `omitted_symbol_budget` on every run. Rejected at load time, before any
+    # EDGAR call.
+    with pytest.raises(ValidationError, match="max_filings_per_symbol"):
+        Settings.model_validate(
+            {
+                "analysis": {
+                    "max_filing_chars": 10_000,
+                    "max_filing_chars_per_symbol": 3 * MIN_FILING_CHARS - 1,
+                    "max_filings_per_symbol": 3,
+                }
+            }
+        )
+
+
+def test_analysis_config_accepts_exactly_the_filing_minimums():
+    # The boundary itself is valid: every filing seats its reservation, with
+    # nothing left over for any of them to grow into.
+    settings = Settings.model_validate(
+        {
+            "analysis": {
+                "max_filing_chars": 10_000,
+                "max_filing_chars_per_symbol": 3 * MIN_FILING_CHARS,
+                "max_filings_per_symbol": 3,
+            }
+        }
+    )
+    assert settings.analysis.max_filing_chars_per_symbol == 3 * MIN_FILING_CHARS
+
+
+@pytest.mark.parametrize(
+    ("per_symbol_chars", "is_valid"),
+    [(5_999, False), (6_000, True)],
+)
+def test_analysis_config_floors_the_minimum_at_the_per_filing_ceiling(
+    per_symbol_chars, is_valid
+):
+    # A per-filing ceiling below `MIN_FILING_CHARS` caps what a filing can
+    # reserve, exactly as `_reserve_minimum_chars` does, so the required total
+    # is 3 * 2_000 and not 3 * MIN_FILING_CHARS -- otherwise a small but
+    # perfectly coherent budget would be rejected.
+    overrides = {
+        "analysis": {
+            "max_filing_chars": 2_000,
+            "max_filing_chars_per_symbol": per_symbol_chars,
+            "max_filings_per_symbol": 3,
+        }
+    }
+    if not is_valid:
+        with pytest.raises(ValidationError, match="max_filings_per_symbol"):
+            Settings.model_validate(overrides)
+        return
+    settings = Settings.model_validate(overrides)
+    assert settings.analysis.max_filing_chars_per_symbol == per_symbol_chars
+
+
+def test_analysis_config_error_names_the_required_minimum_and_the_actual_value():
+    # A rejection has to say what to change it to, not just that it is wrong.
+    with pytest.raises(ValidationError) as excinfo:
+        Settings.model_validate(
+            {
+                "analysis": {
+                    "max_filing_chars": 10_000,
+                    "max_filing_chars_per_symbol": 20_000,
+                    "max_filings_per_symbol": 3,
+                }
+            }
+        )
+    message = str(excinfo.value)
+    assert "20000" in message
+    assert str(3 * MIN_FILING_CHARS) in message
 
 
 def test_analysis_config_no_longer_has_the_old_chunk_keys():

@@ -57,7 +57,10 @@ jobs:
       # ファイルパスとして解釈される (run 32302254404 の ENOENT)。この 4 変数は
       # action 内部の run ステップの env 宣言に無いのでシャドーイングされず、
       # Claude Code とそのツール subprocess まで届く。
-      # `permissions.defaultMode` は無人実行で承認プロンプトを出さないための設定。
+      # 権限は claude_args の --permission-mode で明示する。settings の
+      # `defaultMode` だけでは SDK 経由の起動に効かず、allowlist 外のツールが
+      # 全部拒否されてスキルが走らないまま success になった
+      # (run 32303316000: permission_denials_count=7、3分で終了)。
       # リポジトリの .claude/settings.json (guard/format/stop_check フック) は
       # project スコープとして別途読まれるので、そのまま生きる。
       - name: Run swing-daily
@@ -73,9 +76,7 @@ jobs:
           # 必要で、かつ App のインストールが前提) ではなく workflow の GITHUB_TOKEN
           # を渡す。このワークフローの Claude は GitHub へ書き込まない。
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model opus"
-          settings: |
-            {"permissions": {"defaultMode": "bypassPermissions"}}
+          claude_args: "--model opus --permission-mode bypassPermissions"
           prompt: |
             これは GitHub Actions 上の無人実行 (headless) です。
             `.claude/skills/swing-daily/SKILL.md` の「無人実行（headless）時の方針」に

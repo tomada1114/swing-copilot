@@ -1026,7 +1026,7 @@ ATRがNaNまたは0のときは距離が定義できないため帯を閉じる�
 
 | 重み | 由来メトリクス | 必要なsignal | 正規化 |
 | --- | --- | --- | --- |
-| `ranking.score_weights.pivot_proximity` | `vcp_pivot`と`close` | `vcp_breakout` | ピボット丁度で1.0、上下どちらへ5%離れると0.0 |
+| `ranking.score_weights.pivot_proximity` | `vcp_pivot`と`close` | `vcp_breakout` | ピボット丁度で1.0、上下どちらへ`chase_pivot_pct`離れると0.0 |
 | `ranking.score_weights.rs_percentile` | `minervini_rs_percentile` | `minervini_stage2` | 0–100を100で割る |
 | `ranking.score_weights.criteria_met` | `minervini_criteria_met` | `minervini_stage2` | 0–7を7で割る |
 
@@ -1042,7 +1042,21 @@ signalは走っているがメトリクスが無い候補（例: 252日履歴が
 
 `pivot_proximity`がピボットの上下で対称なのは、ピボット直下で収縮している
 セットアップと抜けた直後の銘柄がどちらも「ピボット付近」であり、すでに
-5%上へ伸びた銘柄こそVCPが避けたい追いかけ買いだからである。
+`chase_pivot_pct`上へ伸びた銘柄こそVCPが避けたい追いかけ買いだからである。
+正規化幅は`vcp.chase_pivot_pct`（ピボットからどこまで上の候補を通すかの
+上限）そのものから導出する（Issue #297）。かつては独立の定数だったが、
+フィルタが通す帯域とスコアが飽和する帯域は一致しているべきで、独立させると
+`chase_pivot_pct`を動かした瞬間に帯域の一部が無言で同点化する結合になる。
+`chase_pivot_pct`は幅としての意味を失う`0.0`を`config.py`が`gt=0.0`で
+弾くため、`pivot_proximity`が幅ゼロ除算を起こすことはない（既定値`0.05`は
+変更なし）。
+
+ただし一致するのは**上側だけ**である。`is_chasing_pivot`が縛るのは
+`close > pivot * (1 + chase_pivot_pct)`、つまりピボットより上への伸びだけで、
+下側に対応するフィルタは無い。下側で同じ幅を使うのは「ピボット直下の収縮も
+同じ尺度で測る」という設計上の選択であって、フィルタ帯域との一致ではない。
+`chase_pivot_pct`を動かすと、上側は「通す帯域」と「スコアが飽和する幅」が
+揃ったまま動き、下側は評価尺度だけが動く。
 
 **既定値の変更（段階2）は未了である。** 機構は入ったが、`vcp_breakout`の
 順位付けは依然として押し目の深さを向いている。既定値を動かすには

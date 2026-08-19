@@ -79,16 +79,6 @@ _TREND_QUALITY_NORMALIZATION = 0.10
 # above the S&P 500 median (~3.1%) so the component still discriminates among
 # the genuinely volatile names rather than saturating across the universe.
 _ATR_PCT_NORMALIZATION = 0.06
-# Issue #251: distance from the VCP pivot at which the `pivot_proximity`
-# component reaches 0. Symmetric around the pivot -- a setup coiling just under
-# it and one that has just cleared it are both "at the pivot", while a name
-# already 5% past it is the extended entry the VCP method exists to avoid.
-# Deliberately a fixed absolute width (like `_ATR_PCT_NORMALIZATION`), so the
-# same distance always earns the same value across runs. It happens to equal
-# the shipped `vcp.chase_pivot_pct`, which caps how far above the pivot a hit
-# can be: raising that setting therefore widens the admitted band beyond this
-# one, and every candidate past 5% ties at 0.0 here.
-_PIVOT_PROXIMITY_NORMALIZATION = 0.05
 #: Denominator of the `criteria_met` component: the Minervini trend template's
 #: conditions (P5-21), shared with the signal that counts them so the two
 #: cannot normalize against different totals.
@@ -231,6 +221,15 @@ class ScreeningPipeline:
         self._score_weights: ScoreWeights = spec.ranking.score_weights
         self._settings = settings
         self._execution_config = settings.technical_signals.execution
+        # Issue #297: `pivot_proximity`'s decay width is derived from the same
+        # `chase_pivot_pct` that caps how far above the pivot a VCP hit may be
+        # (`screening/vcp.py`'s `VcpThresholds.chase_pivot_pct`), rather than
+        # a separately hardcoded constant. The two describe the same band --
+        # the filter's admitted range and the score's dynamic range -- so
+        # deriving one from the other keeps them from silently drifting apart
+        # (a `config.py`-validated `float`, not I/O; passed down as a plain
+        # argument the same way `vcp.py`'s own signal receives it).
+        self._pivot_proximity_width = settings.technical_signals.vcp.chase_pivot_pct
 
     @property
     def candidate_limit(self) -> int:
@@ -441,6 +440,7 @@ class ScreeningPipeline:
                 metrics,
                 liquidity=liquidity_by_symbol[symbol],
                 rsi_threshold=rsi_threshold,
+                pivot_proximity_width=self._pivot_proximity_width,
             )
             weighted = {
                 f"score_{name}": getattr(weights, name) * components[name]
@@ -543,7 +543,11 @@ def _clamp01(value: float) -> float:
 
 
 def _component_values(
-    metrics: Mapping[str, float], *, liquidity: float, rsi_threshold: float
+    metrics: Mapping[str, float],
+    *,
+    liquidity: float,
+    rsi_threshold: float,
+    pivot_proximity_width: float,
 ) -> dict[str, float]:
     """Normalize one row's ranking components to `[0, 1]`, keyed by weight name.
 
@@ -556,6 +560,10 @@ def _component_values(
         liquidity: The row's `avg_volume` percentile within the candidate set.
         rsi_threshold: The configured pullback threshold `rsi_pullback` scales
             against.
+        pivot_proximity_width: `pivot_proximity`'s decay width, in `(0, 1]`
+            (Issue #297: derived by the caller from `chase_pivot_pct`, the
+            same way `screening/vcp.py` receives it -- never read from
+            settings here, to keep this pure layer free of config I/O).
 
     Returns:
         One value per `ScoreWeights` field, before weighting.
@@ -569,7 +577,7 @@ def _component_values(
         "atr_pct": _clamp01(
             (metrics["atr14"] / metrics["close"]) / _ATR_PCT_NORMALIZATION
         ),
-        "pivot_proximity": _pivot_proximity(metrics),
+        "pivot_proximity": _pivot_proximity(metrics, pivot_proximity_width),
         "rs_percentile": _clamp01(
             metrics.get("minervini_rs_percentile", 0.0) / _RS_PERCENTILE_SCALE
         ),
@@ -579,17 +587,20 @@ def _component_values(
     }
 
 
-def _pivot_proximity(metrics: Mapping[str, float]) -> float:
+def _pivot_proximity(metrics: Mapping[str, float], width: float) -> float:
     """Score how close the last close sits to the VCP pivot (Issue #251).
 
-    1.0 exactly at the pivot, falling linearly to 0.0 at
-    `_PIVOT_PROXIMITY_NORMALIZATION` away on either side. A non-positive or
-    absent pivot scores 0.0 rather than dividing by it: `vcp_pivot` is only
-    written by the `vcp_breakout` signal, and a strategy weighting this
-    component without that signal is already rejected in `config.py`.
+    1.0 exactly at the pivot, falling linearly to 0.0 at `width` away on
+    either side. A non-positive or absent pivot scores 0.0 rather than
+    dividing by it: `vcp_pivot` is only written by the `vcp_breakout` signal,
+    and a strategy weighting this component without that signal is already
+    rejected in `config.py`.
 
     Args:
         metrics: The row's merged signal and ranking metrics.
+        width: The decay width (Issue #297: the caller's `chase_pivot_pct`,
+            which `config.py` constrains to `> 0.0` so this never divides by
+            zero).
 
     Returns:
         The normalized proximity in `[0, 1]`.
@@ -598,4 +609,4 @@ def _pivot_proximity(metrics: Mapping[str, float]) -> float:
     if pivot is None or pivot <= 0.0:
         return 0.0
     distance = abs(metrics["close"] - pivot) / pivot
-    return _clamp01(1.0 - distance / _PIVOT_PROXIMITY_NORMALIZATION)
+    return _clamp01(1.0 - distance / width)

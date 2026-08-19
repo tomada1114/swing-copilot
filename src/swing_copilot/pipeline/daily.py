@@ -139,6 +139,11 @@ if TYPE_CHECKING:
     from swing_copilot.universe import UniverseMember
 
 _TEXT_LOOKBACK_DAYS = 14
+#: Forms whose *full text* step 5 collects. This governs collection only; it
+#: does **not** gate the fundamentals freshness trigger, which accepts any
+#: collected filing regardless of form (`_FundamentalsFreshness`). Widening it
+#: would widen the analysis export and add EDGAR requests, so the trigger is
+#: deliberately decoupled from it rather than sharing it.
 _FILING_FORM_TYPES = ["8-K", "10-Q"]
 _TEXT_SYMBOL_LIMIT = (
     30  # held + candidates, capped per NFR-03 (docs/04_detailed_design.md 3.14)
@@ -146,9 +151,16 @@ _TEXT_SYMBOL_LIMIT = (
 #: `docs/03_basic_design.md` 8.3's "weekly" fundamentals refresh, in days.
 #: Not a config knob: it is a fixed property of the NFR-03 time-budget design
 #: (S&P 500 companies report quarterly, so a weekly poll cannot miss a
-#: reporting cycle), and the new-filing trigger already handles the case a
-#: shorter interval would be reached for.
+#: reporting cycle). It is also the width of the new-filing trigger's retry
+#: window, which keeps that window from ever outliving the backstop.
 _FUNDAMENTALS_REFRESH_INTERVAL_DAYS = 7
+#: SEC forms `EdgarClient.fetch_fundamentals` normalizes into a
+#: `FundamentalsRecord` (mirrors `data/edgar.py`'s `_FUNDAMENTALS_FORMS`).
+#: Used to ask "has the filing we know about actually landed in
+#: `fundamentals` yet?", which is what disarms the new-filing trigger. 10-K is
+#: included even though step 5 never collects 10-K *text*: what matters here
+#: is which forms produce an ingested record, not which produce collected text.
+_FUNDAMENTALS_INGESTED_FORMS = ("10-K", "10-Q")
 _DECISION_HISTORY_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
 _RETRO_NOTE_DETAIL_LIMIT = 3
@@ -579,7 +591,7 @@ class _FundamentalsFreshness:
 
     Implements `docs/03_basic_design.md` 8.3's rule -- "weekly, and only for
     symbols with a new filing since the last fetch" -- as a decision made
-    once per run from two batched reads, so the per-symbol loop adds no
+    once per run from three batched reads, so the per-symbol loop adds no
     query and (crucially) no extra EDGAR request. A symbol is fetched when
     **any** of these holds; otherwise its network fetch is skipped:
 
@@ -588,28 +600,51 @@ class _FundamentalsFreshness:
     - `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` or more have elapsed since the
       last fetch (the "weekly" half, and the universal backstop -- it is the
       only rule that covers a symbol text collection never touched);
-    - a filing already collected by FR-07 is dated on or after the last
-      fetch day (the "new filing" half).
+    - a filing we already know about has not landed in `fundamentals` yet
+      (the "new filing" half, `_has_pending_filing`).
 
-    The new-filing comparison is deliberately at *day* granularity and
-    inclusive on both sides. A 10-Q accepted at 16:30 ET is stored as that
-    day's date at midnight UTC, i.e. earlier than the same day's fetch
-    timestamp, so a strict `filing > last_fetch` instant comparison would
-    silently drop a filing submitted after the run. Being inclusive costs at
-    most one extra fetch and is self-limiting: that fetch moves the last-fetch
-    day past the filing date, so the trigger does not repeat.
+    The pending-filing trigger is a *bounded retry window*, not a one-shot
+    edge (Issue #258 review finding 1). EDGAR's bulk company-facts endpoint
+    publishes a filing's XBRL some time after the filing itself is
+    retrievable, so the first fetch a filing triggers frequently returns
+    nothing new. An edge that fired only on the day after the filing would
+    stamp that empty fetch and then sit out the whole backstop interval,
+    which is precisely the "held + candidates are picked up by the trigger"
+    promise failing quietly. So the trigger stays armed every run until the
+    record actually lands -- and no longer than
+    `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` after the filing date, at which
+    point the backstop owns the symbol anyway.
+
+    The window's upper bound is what keeps this from reopening the hole the
+    fetch log exists to close: an 8-K never becomes a `FundamentalsRecord`,
+    so "retry until it lands" without a bound would poll that symbol on
+    every run forever. Bounded, the worst case is one request per day for
+    one week, for the <=30 symbols text collection covers.
+
+    Comparisons are at *day* granularity and inclusive. A 10-Q accepted at
+    16:30 ET is stored as that day's date at midnight UTC, i.e. earlier than
+    the same day's fetch timestamp, so a strict instant comparison would
+    silently drop a filing submitted after the run.
 
     Freshness is bookkeeping only. Nothing here loosens the point-in-time
     contract: `filed_at <= as_of` still decides what a fetch may return and
-    what any reader may see.
+    what any reader may see -- every input below is already `as_of`-bounded
+    by the query that produced it.
     """
 
     #: Wall-clock day (injected `Clock`), never `as_of`: the fetch log holds
-    #: real fetch timestamps, so measuring elapsed days against a past
+    #: real fetch horizons, so measuring elapsed days against a past
     #: `--as-of` would report an absurd age and refetch everything (P6-25).
     today: date
     last_fetched_on: dict[str, date]
+    #: Newest filing date per symbol among filings already *collected* as
+    #: text (`text_items`). Deliberately form-agnostic: whatever step 5
+    #: collected counts, so this is strictly broader than
+    #: `_FILING_FORM_TYPES` and a collected 10-K would arm the trigger too.
     latest_filing_on: dict[str, date]
+    #: Newest filing date per symbol already *ingested* into `fundamentals`.
+    #: Comparing the two is what tells a landed filing from a pending one.
+    latest_ingested_on: dict[str, date]
 
     def needs_fetch(self, symbol: str) -> bool:
         """Return whether `symbol` still needs a network fetch this run."""
@@ -618,29 +653,51 @@ class _FundamentalsFreshness:
             return True
         if (self.today - last_fetched_on).days >= _FUNDAMENTALS_REFRESH_INTERVAL_DAYS:
             return True
-        latest_filing_on = self.latest_filing_on.get(symbol)
-        return latest_filing_on is not None and latest_filing_on >= last_fetched_on
+        return self._has_pending_filing(symbol)
+
+    def _has_pending_filing(self, symbol: str) -> bool:
+        """Return whether a known filing is still missing from `fundamentals`."""
+        filing_on = self.latest_filing_on.get(symbol)
+        if filing_on is None:
+            return False
+        if (self.today - filing_on).days >= _FUNDAMENTALS_REFRESH_INTERVAL_DAYS:
+            # Retry window closed. The backstop covers the symbol from here,
+            # so an 8-K (which never produces a record) stops costing
+            # requests instead of arming the trigger forever.
+            return False
+        ingested_on = self.latest_ingested_on.get(symbol)
+        return ingested_on is None or ingested_on < filing_on
 
 
 def _load_fundamentals_freshness(
     deps: DailyDependencies, symbols: list[str], as_of: date, today: date
 ) -> _FundamentalsFreshness:
-    """Batch-read the two inputs the incremental refresh rule decides from.
+    """Batch-read the three inputs the incremental refresh rule decides from.
+
+    All three are single batched queries against storage this run already
+    owns, so the per-symbol loop adds no query and -- the point of the whole
+    change -- no extra EDGAR request.
 
     Args:
-        deps: Run dependencies (`market_store` fetch log, `state_store`
-            collected filing metadata).
+        deps: Run dependencies (`market_store` fetch log and ingested filing
+            history, `state_store` collected filing metadata).
         symbols: The step's full symbol list.
-        as_of: Point-in-time cutoff applied to collected filing dates.
+        as_of: Point-in-time cutoff applied to both filing-date reads.
         today: Wall-clock day used for the elapsed-days rule.
 
     Returns:
         The freshness decision object; see `_FundamentalsFreshness`.
     """
+    ingested = deps.market_store.read_filing_dates(
+        symbols, _FUNDAMENTALS_INGESTED_FORMS, as_of
+    )
     return _FundamentalsFreshness(
         today=today,
         last_fetched_on=deps.market_store.read_fundamentals_fetch_dates(symbols),
         latest_filing_on=deps.state_store.latest_filing_dates(symbols, as_of=as_of),
+        latest_ingested_on={
+            symbol: max(dates) for symbol, dates in ingested.items() if dates
+        },
     )
 
 
@@ -676,6 +733,37 @@ def _fetch_or_skip_fundamentals(
         logger.exception("fundamentals fetch failed for %s", symbol)
         return [], True, False
     return records, False, False
+
+
+def _fetch_horizon(deps: DailyDependencies, as_of_cutoff: datetime) -> datetime:
+    """Return how current this run's fundamentals fetch actually made a symbol.
+
+    A fetch only ever retrieves filings with `filed_at <= as_of`, so what it
+    buys is knowledge up to `as_of` -- not up to now. Stamping the fetch log
+    with the wall clock regardless would let one `--as-of <past date>` replay
+    declare the whole universe fresh and suppress the operator's real refresh
+    for a full `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` (Issue #258 review
+    finding 2). Under the previous same-day-only skip the same mistake cost
+    one day; the incremental rule turns it into a week, so the replay must
+    not be able to make that claim.
+
+    Clamping (rather than refusing to stamp on a replay) is what keeps
+    P6-25's guarantee intact: a same-day rerun with a recent `--as-of` still
+    skips the redundant network fetch, because the clamped stamp is still
+    inside the refresh interval. A replay of an `as_of` older than that
+    interval simply refetches, which is the correct, conservative direction.
+
+    Args:
+        deps: Run dependencies, for the injected `Clock`.
+        as_of_cutoff: `as_of` widened to end-of-day UTC -- the same value the
+            fetch itself was bounded by.
+
+    Returns:
+        `min(now, as_of_cutoff)`. For a normal run `as_of` *is* today
+        (`options.as_of or clock.today()`), so this is exactly `now` and the
+        production path is unchanged.
+    """
+    return min(deps.clock.now(), as_of_cutoff)
 
 
 def _log_fundamentals_progress(position: int, total: int) -> None:
@@ -723,16 +811,19 @@ def _run_step_fundamentals(
     - Incremental refresh (`_FundamentalsFreshness`, Issue #258): a symbol is
       re-fetched only when it has never been fetched, when
       `_FUNDAMENTALS_REFRESH_INTERVAL_DAYS` have elapsed since its last
-      fetch, or when an already-collected filing is dated on or after that
-      last fetch -- `docs/03_basic_design.md` 8.3's weekly/incremental rule.
-      Ages are measured against the injected `Clock`'s wall-clock date, not
-      `as_of`: the fetch log holds real fetch timestamps, so measuring
-      against a possibly-past `--as-of` would report an absurd age and
-      refetch everything regardless of `--as-of` (P6-25). Point-in-time
+      fetch, or while a filing we already know about has still not landed in
+      `fundamentals` -- `docs/03_basic_design.md` 8.3's weekly/incremental
+      rule. Ages are measured against the injected `Clock`'s wall-clock
+      date, not `as_of`: the fetch log holds real fetch horizons, so
+      measuring against a possibly-past `--as-of` would report an absurd age
+      and refetch everything regardless of `--as-of` (P6-25). What the log
+      *records*, conversely, is clamped to `as_of` (`_fetch_horizon`), so a
+      replay cannot claim a freshness it did not buy. Point-in-time
       correctness is unaffected -- callers still read fundamentals filtered
       by `as_of`, never by fetch bookkeeping. Correction semantics are also
-      unaffected: every fetch still upserts by `accession_no`, and a new
-      filing is exactly what forces an early re-fetch.
+      unaffected: every fetch still upserts by `accession_no`, and a filing
+      that has not been ingested yet is exactly what forces an early
+      re-fetch.
     - NFR-03 time budget: once `deps.monotonic() >= deadline`, fetching
       stops early with whatever records were already gathered upserted, and
       the step still succeeds (not fatal) with a detail explaining the
@@ -790,14 +881,20 @@ def _run_step_fundamentals(
     # A success that yielded no record *is* stamped -- that symbol simply has
     # no XBRL facts in the window, and not recording it would re-fetch it
     # every single run (the gap the dedicated fetch log exists to close).
-    deps.market_store.record_fundamentals_fetches(fetched_symbols, deps.clock.now())
+    deps.market_store.record_fundamentals_fetches(
+        fetched_symbols, _fetch_horizon(deps, as_of_cutoff)
+    )
 
-    # "Every symbol we were going to fetch failed" -- the signal that EDGAR
-    # itself is down. Deliberately requires `not skipped_fresh`: once the
-    # incremental rule is skipping most of the universe, a transient failure
-    # on the handful of symbols that were due must stay a partial failure,
-    # not escalate into a fatal step.
-    if failed_symbols and not records and not skipped_fresh and budget_detail is None:
+    # "Every symbol we tried to fetch failed" -- the signal that EDGAR itself
+    # is down. Keyed on `fetched_symbols` rather than on the skip count
+    # (Issue #258 review finding 3): once the incremental rule skips most of
+    # the universe, `skipped_fresh` is non-zero on essentially every run, so
+    # gating on it would have hidden a total EDGAR outage behind a SUCCESS
+    # exit until the backstop made all ~500 symbols due at once. This form
+    # still cannot fire when nothing was attempted, because `failed_symbols`
+    # is then empty. (`records` is necessarily empty here too: a record can
+    # only come from a symbol that is in `fetched_symbols`.)
+    if failed_symbols and not fetched_symbols and budget_detail is None:
         return _StepOutcome(
             False, f"EDGAR fetch failed for every symbol: {failed_symbols}"
         )

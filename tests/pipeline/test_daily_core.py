@@ -1119,7 +1119,9 @@ class TestFundamentalsFreshnessRule:
 
     TODAY = date(2027, 3, 8)
 
-    def _freshness(self, *, last_fetched_on=None, latest_filing_on=None):
+    def _freshness(
+        self, *, last_fetched_on=None, latest_filing_on=None, latest_ingested_on=None
+    ):
         return _FundamentalsFreshness(
             today=self.TODAY,
             last_fetched_on=(
@@ -1127,6 +1129,9 @@ class TestFundamentalsFreshnessRule:
             ),
             latest_filing_on=(
                 {} if latest_filing_on is None else {"AAPL": latest_filing_on}
+            ),
+            latest_ingested_on=(
+                {} if latest_ingested_on is None else {"AAPL": latest_ingested_on}
             ),
         )
 
@@ -1153,7 +1158,7 @@ class TestFundamentalsFreshnessRule:
         """The old same-day skip, subsumed by "0 elapsed days < 7"."""
         assert not self._freshness(last_fetched_on=self.TODAY).needs_fetch("AAPL")
 
-    def test_a_filing_after_the_last_fetch_fetches_within_the_interval(self):
+    def test_a_filing_not_yet_ingested_fetches_within_the_interval(self):
         last = self.TODAY - timedelta(days=3)
 
         freshness = self._freshness(
@@ -1175,15 +1180,74 @@ class TestFundamentalsFreshnessRule:
 
         assert freshness.needs_fetch("AAPL")
 
-    def test_a_filing_from_before_the_last_fetch_skips(self):
-        """Self-limiting: the triggered refetch moves the day past the filing."""
-        last = self.TODAY - timedelta(days=3)
+    def test_the_trigger_stays_armed_after_a_fetch_that_found_nothing(self):
+        """Issue #258 review finding 1: the trigger is a window, not an edge.
+
+        EDGAR's bulk company-facts lags the filing itself, so the fetch a
+        filing triggers routinely returns nothing new. The old rule compared
+        the filing date against the *last fetch* date, so that empty fetch
+        disarmed the trigger for the whole backstop interval -- exactly the
+        promise "held + candidates are picked up by the trigger" failing
+        quietly. Here the filing is a day older than the fetch that missed
+        it, and the symbol must still be due.
+        """
+        filed_on = self.TODAY - timedelta(days=4)
+        fetched_after_it = self.TODAY - timedelta(days=3)
 
         freshness = self._freshness(
-            last_fetched_on=last, latest_filing_on=last - timedelta(days=1)
+            last_fetched_on=fetched_after_it, latest_filing_on=filed_on
+        )
+
+        assert freshness.needs_fetch("AAPL")
+
+    def test_the_trigger_disarms_once_the_filing_is_ingested(self):
+        """The window closes early on success, so the retry is not perpetual."""
+        filed_on = self.TODAY - timedelta(days=4)
+
+        freshness = self._freshness(
+            last_fetched_on=self.TODAY - timedelta(days=3),
+            latest_filing_on=filed_on,
+            latest_ingested_on=filed_on,
         )
 
         assert not freshness.needs_fetch("AAPL")
+
+    def test_an_ingested_filing_older_than_the_collected_one_stays_armed(self):
+        """Last quarter's record does not satisfy this quarter's filing."""
+        filed_on = self.TODAY - timedelta(days=4)
+
+        freshness = self._freshness(
+            last_fetched_on=self.TODAY - timedelta(days=3),
+            latest_filing_on=filed_on,
+            latest_ingested_on=filed_on - timedelta(days=90),
+        )
+
+        assert freshness.needs_fetch("AAPL")
+
+    def test_the_retry_window_closes_at_the_refresh_interval(self):
+        """The bound that stops an 8-K from arming the trigger forever.
+
+        An 8-K never becomes a `FundamentalsRecord`, so "retry until it
+        lands" is unbounded without this. At exactly the interval the window
+        is shut and the backstop -- which owns the symbol from here -- is the
+        only rule left.
+        """
+        filed_on = self.TODAY - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS)
+
+        freshness = self._freshness(
+            last_fetched_on=self.TODAY - timedelta(days=1), latest_filing_on=filed_on
+        )
+
+        assert not freshness.needs_fetch("AAPL")
+
+    def test_the_retry_window_is_still_open_one_day_before_the_interval(self):
+        filed_on = self.TODAY - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS - 1)
+
+        freshness = self._freshness(
+            last_fetched_on=self.TODAY - timedelta(days=1), latest_filing_on=filed_on
+        )
+
+        assert freshness.needs_fetch("AAPL")
 
     def test_no_collected_filing_falls_back_to_the_elapsed_days_rule(self):
         """The universe outside text collection's ~30 symbols lives here."""
@@ -1196,6 +1260,7 @@ class TestFundamentalsFreshnessRule:
             today=self.TODAY,
             last_fetched_on={"AAPL": self.TODAY - timedelta(days=3)},
             latest_filing_on={"MSFT": self.TODAY},
+            latest_ingested_on={},
         )
 
         assert not freshness.needs_fetch("AAPL")
@@ -1226,46 +1291,54 @@ class TestFundamentalsIncrementalRefresh:
     the log, and that a symbol with no records still gets stamped.
     """
 
-    def _deps(self, settings, market_store, state_store, tmp_path, edgar_client):
+    def _deps(  # noqa: PLR0913 - a fixture-assembly helper, one arg per fixture
+        self,
+        settings,
+        market_store,
+        state_store,
+        tmp_path,
+        edgar_client,
+        symbols=("AAPL",),
+    ):
         return DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL"], AS_OF)),
+            data_provider=FakeDataProvider(_bars_for(list(symbols), AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
-            universe=(_member("AAPL"),),
+            universe=tuple(_member(symbol) for symbol in symbols),
             strategies_config=STRATEGIES_CONFIG,
             clock=FakeClock(),
             edgar_client=edgar_client,
             output_dir=str(tmp_path / "reports"),
         )
 
-    def _run(self, deps):
+    def _run(self, deps, as_of=AS_OF):
         return run_daily(
-            DailyRunOptions(as_of=AS_OF, is_dry_run=True, allow_same_day_rerun=True),
+            DailyRunOptions(as_of=as_of, is_dry_run=True, allow_same_day_rerun=True),
             deps,
         )
 
-    def _seed_fetch(self, market_store, days_ago):
+    def _seed_fetch(self, market_store, days_ago, symbol="AAPL"):
         market_store.record_fundamentals_fetches(
-            ["AAPL"],
+            [symbol],
             datetime.combine(
                 AS_OF - timedelta(days=days_ago), datetime.min.time(), tzinfo=UTC
             ),
         )
 
-    def _seed_filing(self, state_store, filed_on):
+    def _seed_filing(self, state_store, filed_on, form="10-Q"):
         state_store.record_text_items(
             [
                 TextItem(
-                    source_id="edgar:0000000-27-000001",
+                    source_id=f"edgar:0000000-27-{form}",
                     symbol="AAPL",
                     source_type="filing",
                     published_at=datetime.combine(
                         filed_on, datetime.min.time(), tzinfo=UTC
                     ),
-                    title="10-Q - AAPL",
+                    title=f"{form} - AAPL",
                     source_url="https://www.sec.gov/example",
-                    content_text="Quarterly report body.",
+                    content_text="Periodic report body.",
                     fetched_at=datetime.combine(
                         filed_on, datetime.min.time(), tzinfo=UTC
                     ),
@@ -1327,11 +1400,25 @@ class TestFundamentalsIncrementalRefresh:
         assert result.status == RunStatus.SUCCESS
         assert edgar_client.calls == ["AAPL"]
 
-    def test_a_filing_older_than_the_last_fetch_does_not_force_a_refetch(
+    def test_a_filing_already_ingested_does_not_force_a_refetch(
         self, settings, market_store, state_store, tmp_path
     ):
+        """The trigger disarms on the record landing, not on a fetch happening."""
+        filed_on = AS_OF - timedelta(days=3)
+        market_store.upsert_fundamentals(
+            [
+                replace(
+                    record,
+                    accession_no="acc-landed",
+                    filed_at=datetime.combine(
+                        filed_on, datetime.min.time(), tzinfo=UTC
+                    ),
+                )
+                for record in _healthy_fundamentals("AAPL")[:1]
+            ]
+        )
         self._seed_fetch(market_store, days_ago=2)
-        self._seed_filing(state_store, AS_OF - timedelta(days=3))
+        self._seed_filing(state_store, filed_on)
         edgar_client = _CountingEdgarClient()
 
         result = self._run(
@@ -1340,6 +1427,142 @@ class TestFundamentalsIncrementalRefresh:
 
         assert result.status == RunStatus.SUCCESS
         assert edgar_client.calls == []
+
+    def test_a_pending_filing_keeps_retrying_after_an_empty_fetch(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Issue #258 review finding 1, end to end.
+
+        The collected filing predates the recorded fetch, so the old
+        one-shot edge treated it as already handled. Company-facts lag makes
+        that the common case, and the symbol then waited out the whole
+        backstop interval with last quarter's numbers.
+        """
+        self._seed_fetch(market_store, days_ago=2)
+        self._seed_filing(state_store, AS_OF - timedelta(days=3))
+        edgar_client = _CountingEdgarClient(records_by_symbol={"AAPL": []})
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+
+    def test_a_collected_10k_arms_the_trigger_too(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Issue #258 review finding 4: the trigger is not form-gated.
+
+        `_FILING_FORM_TYPES` governs which forms step 5 *collects*; it must
+        never become the trigger's filter, or the form that carries the
+        annual figures would be the one form unable to ask for them.
+        """
+        self._seed_fetch(market_store, days_ago=2)
+        self._seed_filing(state_store, AS_OF - timedelta(days=1), form="10-K")
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert edgar_client.calls == ["AAPL"]
+
+    def test_a_past_as_of_replay_does_not_grant_current_freshness(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Issue #258 review finding 2.
+
+        A replay only ever retrieves `filed_at <= as_of`, so it must not
+        stamp the log with the wall clock -- doing so let one replay declare
+        the universe fresh and suppress the operator's real refresh for a
+        whole week. The stamp is clamped to the replay's own horizon, so the
+        next real run still sees the symbol as due.
+        """
+        replay_as_of = AS_OF - timedelta(days=_FUNDAMENTALS_REFRESH_INTERVAL_DAYS + 3)
+        edgar_client = _CountingEdgarClient()
+        deps = self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+
+        self._run(deps, as_of=replay_as_of)
+        assert market_store.read_fundamentals_fetch_dates(["AAPL"]) == {
+            "AAPL": replay_as_of
+        }
+
+        self._run(deps)
+
+        assert edgar_client.calls == ["AAPL", "AAPL"]
+
+    def test_a_normal_run_stamps_the_wall_clock_instant(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """The clamp must not disturb the production path.
+
+        `as_of` defaults to `clock.today()`, so the clamp is inert there and
+        the recorded horizon is the real fetch time.
+        """
+        edgar_client = _CountingEdgarClient()
+
+        self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        with market_store.get_connection() as conn:
+            stamped = conn.execute(
+                "SELECT last_fetched_at FROM fundamentals_fetch_log WHERE symbol = ?",
+                ["AAPL"],
+            ).fetchone()
+        assert stamped is not None
+        assert stamped[0] == FakeClock().now()
+
+    def test_every_attempted_symbol_failing_is_fatal_even_while_others_skip(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Issue #258 review finding 3.
+
+        Once the incremental rule skips most of the universe, a skip count
+        is non-zero on essentially every run. Gating the fatal branch on it
+        hid a total EDGAR outage behind exit 0 until the backstop made all
+        ~500 symbols due at once.
+        """
+        self._seed_fetch(market_store, days_ago=1, symbol="AAPL")
+
+        class AlwaysFailing(_CountingEdgarClient):
+            def fetch_fundamentals(self, symbol, as_of):
+                del as_of
+                self.calls.append(symbol)
+                msg = "EDGAR is down"
+                raise RuntimeError(msg)
+
+        edgar_client = AlwaysFailing()
+
+        result = self._run(
+            self._deps(
+                settings,
+                market_store,
+                state_store,
+                tmp_path,
+                edgar_client,
+                symbols=("AAPL", "MSFT"),
+            )
+        )
+
+        assert edgar_client.calls == ["MSFT"]  # AAPL was skipped as still fresh
+        assert result.status == RunStatus.FAILED
+
+    def test_a_run_whose_symbols_are_all_skipped_is_not_fatal(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """Nothing attempted, nothing failed -- the guard must stay quiet."""
+        self._seed_fetch(market_store, days_ago=1)
+        edgar_client = _CountingEdgarClient()
+
+        result = self._run(
+            self._deps(settings, market_store, state_store, tmp_path, edgar_client)
+        )
+
+        assert edgar_client.calls == []
+        assert result.status == RunStatus.SUCCESS
 
     def test_a_fetch_that_found_no_records_is_still_stamped(
         self, settings, market_store, state_store, tmp_path

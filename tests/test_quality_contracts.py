@@ -231,10 +231,58 @@ def test_repo_directory_guard_fails_when_a_watched_file_appears(tmp_path):
     watched = guarded_dir / "copilot.duckdb"
 
     with (
-        pytest.raises(AssertionError, match=r"wrote into the repository's real"),
+        pytest.raises(AssertionError, match=r"directory changed while this test ran"),
         _guard_repo_directory(guarded_dir, watched),
     ):
         watched.write_bytes(b"fixture")
+
+
+def test_repo_directory_guard_message_names_the_concurrent_external_process(tmp_path):
+    """Issue #257: the guard fires on the 18:30 routine's writes too.
+
+    This working copy is also the unattended execution environment, so a
+    message that blames the test sends the operator hunting a bug that is not
+    there. Both causes must be on the failure itself.
+    """
+    guarded_dir = tmp_path / "data"
+    guarded_dir.mkdir()
+    watched = guarded_dir / "copilot.duckdb"
+
+    with (
+        pytest.raises(AssertionError) as failure,
+        _guard_repo_directory(guarded_dir, watched),
+    ):
+        watched.write_bytes(b"fixture")
+
+    message = str(failure.value)
+    assert "concurrent external process" in message
+    assert "18:30" in message
+    assert "copilot-daily" in message
+    assert "tmp_path" in message
+
+
+def test_repo_directory_guard_message_reports_the_changed_paths_and_mtimes(tmp_path):
+    """The evidence has to be on the failure: which paths moved, and when."""
+    guarded_dir = tmp_path / "data"
+    guarded_dir.mkdir()
+    watched = guarded_dir / "copilot.duckdb"
+    untouched = guarded_dir / "copilot_dry_run.duckdb"
+    untouched.write_bytes(b"fixture")
+
+    with (
+        pytest.raises(AssertionError) as failure,
+        _guard_repo_directory(guarded_dir, watched, untouched),
+    ):
+        watched.write_bytes(b"fixture")
+
+    message = str(failure.value)
+    assert "Changed watched paths (mtime before -> after):" in message
+    # The file did not exist beforehand, so its "before" is reported as absent
+    # rather than the evidence line being silently omitted.
+    assert f"{watched}: absent -> " in message
+    assert f"mtime_ns={watched.stat().st_mtime_ns}" in message
+    # A watched path that did not move stays out of the evidence list.
+    assert f"{untouched}: " not in message
 
 
 def test_repo_directory_guard_stays_quiet_for_writes_outside_the_watched_tree(tmp_path):

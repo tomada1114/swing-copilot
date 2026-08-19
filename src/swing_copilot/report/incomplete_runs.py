@@ -16,9 +16,11 @@ has zero `verdicts` rows, and a row-count predicate would flag it every time.
 
 Being unfinished does not always mean something is recoverable, either. The
 `reports/` tree also holds the leftovers of a same-day double start (the shape
-Issue #118 now blocks at the door) and runs whose deterministic pipeline never
-completed at all. `IncompleteRunKind` separates those, and only the actionable
-kinds drive the CLI's non-zero exit.
+Issue #118 now blocks at the door), runs whose deterministic pipeline never
+completed at all, and the exports left by `--as-of` replays, which stamp
+themselves with `HISTORICAL_REPLAY_FILENAME` precisely because nobody owes
+them an answer (Issue #254). `IncompleteRunKind` separates those, and only the
+actionable kinds drive the CLI's non-zero exit.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
+    HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.retro.collect import find_run_directories
 from swing_copilot.storage.history_queries import get_run_statuses
@@ -75,6 +78,10 @@ class IncompleteRunKind(enum.Enum):
     #: A run directory exists under `reports/` with no matching `runs` row,
     #: meaning the database and the archive tree have diverged.
     RUN_ROW_MISSING = "run_row_missing"
+    #: The export was written by a `--as-of` replay (Issue #254), which
+    #: stamps its own directory. No skill session was ever going to answer
+    #: it, so the absent result is the expected state, not a gap.
+    HISTORICAL_REPLAY = "historical_replay"
 
 
 _ACTIONABLE_KINDS = frozenset(
@@ -99,10 +106,11 @@ class IncompleteRun:
         """Whether this gap is worth re-running the analysis phase for.
 
         `SAME_DAY_SUPERSEDED` is not a gap at all -- that date's analysis
-        survives in the sibling run -- and `PIPELINE_UNFINISHED` is already
-        visible through `runs.status`. Both are still listed, but neither
-        raises the exit code: a signal that can never go green again is
-        operational noise rather than a warning.
+        survives in the sibling run -- `HISTORICAL_REPLAY` never owed one,
+        and `PIPELINE_UNFINISHED` is already visible through `runs.status`.
+        All three are still listed, but none raises the exit code: a signal
+        that can never go green again is operational noise rather than a
+        warning.
         """
         return self.kind in _ACTIONABLE_KINDS
 
@@ -162,10 +170,19 @@ def _classify(
 ) -> IncompleteRun:
     """Decide one directory's kind.
 
-    A completed sibling wins over every other reason, because whatever else
-    is true of this run, that date's analysis is not missing.
+    A replay's stamp wins over every other reason: it is a fact about this
+    directory rather than about the date, and it says outright that no
+    analysis was ever owed here (Issue #254). Otherwise a completed sibling
+    wins, because whatever else is true of this run, that date's analysis is
+    not missing.
+
+    The stamp is read here rather than at each caller so that the daily
+    preflight, `copilot-history incomplete`, and the dashboard banner cannot
+    disagree about the same directory.
     """
-    if completed_sibling_run_id is not None:
+    if (run_directory.path / HISTORICAL_REPLAY_FILENAME).is_file():
+        kind = IncompleteRunKind.HISTORICAL_REPLAY
+    elif completed_sibling_run_id is not None:
         kind = IncompleteRunKind.SAME_DAY_SUPERSEDED
     elif status_row is None:
         kind = IncompleteRunKind.RUN_ROW_MISSING

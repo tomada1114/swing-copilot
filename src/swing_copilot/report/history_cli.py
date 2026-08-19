@@ -66,6 +66,7 @@ _INCOMPLETE_KIND_LABELS = {
     IncompleteRunKind.SAME_DAY_SUPERSEDED: "同日重複",
     IncompleteRunKind.PIPELINE_UNFINISHED: "パイプライン未完",
     IncompleteRunKind.RUN_ROW_MISSING: "runs行なし",
+    IncompleteRunKind.HISTORICAL_REPLAY: "リプレイ",
 }
 # Wide fixed width so Rich never truncates a long cell (e.g. a reason_code or
 # UUID) with an ellipsis regardless of the invoking terminal's actual size --

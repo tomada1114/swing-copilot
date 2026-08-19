@@ -75,6 +75,9 @@ _CANDIDATE_SCORE_KEYS = (
     "score_trend_quality",
     "score_liquidity",
     "score_atr_pct",
+    "score_pivot_proximity",
+    "score_rs_percentile",
+    "score_criteria_met",
 )
 
 
@@ -141,8 +144,9 @@ _INSERT_CANDIDATE = """
 INSERT INTO candidates (
     run_id, symbol, strategy_key, rank, signal_names, metrics_json,
     score, score_rsi_pullback, score_trend_quality, score_liquidity,
-    score_atr_pct, execution_state, execution_distance
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    score_atr_pct, score_pivot_proximity, score_rs_percentile,
+    score_criteria_met, execution_state, execution_distance
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (run_id, symbol, strategy_key) DO UPDATE SET
     rank = EXCLUDED.rank,
     signal_names = EXCLUDED.signal_names,
@@ -152,6 +156,9 @@ ON CONFLICT (run_id, symbol, strategy_key) DO UPDATE SET
     score_trend_quality = EXCLUDED.score_trend_quality,
     score_liquidity = EXCLUDED.score_liquidity,
     score_atr_pct = EXCLUDED.score_atr_pct,
+    score_pivot_proximity = EXCLUDED.score_pivot_proximity,
+    score_rs_percentile = EXCLUDED.score_rs_percentile,
+    score_criteria_met = EXCLUDED.score_criteria_met,
     execution_state = EXCLUDED.execution_state,
     execution_distance = EXCLUDED.execution_distance
 """
@@ -329,8 +336,9 @@ def _replace_truncations(
             INSERT INTO screening_truncations (
                 run_id, symbol, strategy_key, rank, score,
                 score_rsi_pullback, score_trend_quality, score_liquidity,
-                score_atr_pct, execution_state, execution_distance, as_of
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                score_atr_pct, score_pivot_proximity, score_rs_percentile,
+                score_criteria_met, execution_state, execution_distance, as_of
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(meta.run_id),
@@ -342,6 +350,9 @@ def _replace_truncations(
                 breakdown.get("score_trend_quality"),
                 breakdown.get("score_liquidity"),
                 breakdown.get("score_atr_pct"),
+                breakdown.get("score_pivot_proximity"),
+                breakdown.get("score_rs_percentile"),
+                breakdown.get("score_criteria_met"),
                 truncation.execution_state,
                 truncation.execution_distance,
                 meta.as_of,

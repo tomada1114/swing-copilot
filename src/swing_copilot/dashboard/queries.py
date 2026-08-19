@@ -41,13 +41,15 @@ if TYPE_CHECKING:
 #: a page. Every name below is read from a `v_*` view in `storage/schema.py`.
 _CANDIDATE_COLUMNS = (
     "symbol, strategy_key, rank, score, score_rsi_pullback, score_trend_quality, "
-    "score_liquidity, score_atr_pct, execution_state, execution_distance, "
+    "score_liquidity, score_atr_pct, score_pivot_proximity, score_rs_percentile, "
+    "score_criteria_met, execution_state, execution_distance, "
     "rsi14, sma50, sma200, atr14, close, avg_volume, signal_names"
 )
 _SCORECARD_COLUMNS = (
     "symbol, strategy_key, recommendation, no_trade, news_supply_level, "
     "horizon_days, forward_return_pct, classification, rank, score, "
     "score_rsi_pullback, score_trend_quality, score_liquidity, score_atr_pct, "
+    "score_pivot_proximity, score_rs_percentile, score_criteria_met, "
     "execution_state, execution_distance, rsi14, atr14, close, avg_volume, "
     "risk_status, binding_constraint, position_status, exit_reason, "
     "realized_return_pct, days_held, gics_sector"

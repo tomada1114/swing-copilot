@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from swing_copilot.config import StrategiesConfig
+from swing_copilot.config import ScoreWeights, StrategiesConfig
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -35,9 +35,10 @@ from swing_copilot.screening.rejection_classifier import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from swing_copilot.config import (
         ExecutionStateConfig,
-        ScoreWeights,
         Settings,
         StrategySpec,
     )
@@ -77,17 +78,26 @@ _TREND_QUALITY_NORMALIZATION = 0.10
 # above the S&P 500 median (~3.1%) so the component still discriminates among
 # the genuinely volatile names rather than saturating across the universe.
 _ATR_PCT_NORMALIZATION = 0.06
+# Issue #251: distance from the VCP pivot at which the `pivot_proximity`
+# component reaches 0. Symmetric around the pivot -- a setup coiling just under
+# it and one that has just cleared it are both "at the pivot", while a name
+# already 5% past it is the extended entry the VCP method exists to avoid.
+_PIVOT_PROXIMITY_NORMALIZATION = 0.05
+#: Denominator of the `criteria_met` component: the Minervini trend template's
+#: seven conditions (P5-21).
+_MINERVINI_CRITERIA_TOTAL = 7.0
+#: Denominator of the `rs_percentile` component: `minervini_rs_percentile` is
+#: recorded on a 0-100 scale.
+_RS_PERCENTILE_SCALE = 100.0
 _DAMAGED_MAX_D = -3.0
 _FAIR_MAX_D = 2.0
 _EXTENDED_MAX_D = 4.0
 
 #: `_score_rows`'s per-component contributions, in weight-declaration order.
-_SCORE_COMPONENT_KEYS = (
-    "score_rsi_pullback",
-    "score_trend_quality",
-    "score_liquidity",
-    "score_atr_pct",
-)
+#: Derived from `ScoreWeights` so a component can never be weighted without
+#: also being broken out (Issue #251); `tests/screening/test_pipeline.py`
+#: pins the resulting key set.
+_SCORE_COMPONENT_KEYS = tuple(f"score_{name}" for name in ScoreWeights.model_fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +416,13 @@ class ScreeningPipeline:
         same small-population noise `liquidity` already suffers from. It is
         normalized against a fixed ATR% instead, so the same volatility always
         earns the same component value across runs.
+
+        The strategy-specific components (Issue #251) read metrics only one
+        signal produces, so `config.py` rejects a non-zero weight on one whose
+        signal the strategy does not run. They still degrade to 0.0 for a
+        candidate that legitimately lacks the metric -- a Minervini hit that
+        met six conditions without a computable RS percentile, for instance --
+        which is the same "weakest reading" that made condition seven fail.
         """
         weights = self._score_weights
         rsi_threshold = self._rsi_threshold
@@ -413,33 +430,16 @@ class ScreeningPipeline:
             {symbol: metrics["avg_volume"] for symbol, _names, metrics in rows}
         )
         for symbol, _signal_names, metrics in rows:
-            liquidity = liquidity_by_symbol[symbol]
-            rsi_pullback = _clamp01((rsi_threshold - metrics["rsi14"]) / rsi_threshold)
-            trend_quality = _clamp01(
-                (metrics["sma50"] / metrics["sma200"] - 1)
-                / _TREND_QUALITY_NORMALIZATION
+            components = _component_values(
+                metrics,
+                liquidity=liquidity_by_symbol[symbol],
+                rsi_threshold=rsi_threshold,
             )
-            atr_pct = _clamp01(
-                (metrics["atr14"] / metrics["close"]) / _ATR_PCT_NORMALIZATION
-            )
-            score_rsi_pullback = weights.rsi_pullback * rsi_pullback
-            score_trend_quality = weights.trend_quality * trend_quality
-            score_liquidity = weights.liquidity * liquidity
-            score_atr_pct = weights.atr_pct * atr_pct
-            metrics.update(
-                {
-                    "score": (
-                        score_rsi_pullback
-                        + score_trend_quality
-                        + score_liquidity
-                        + score_atr_pct
-                    ),
-                    "score_rsi_pullback": score_rsi_pullback,
-                    "score_trend_quality": score_trend_quality,
-                    "score_liquidity": score_liquidity,
-                    "score_atr_pct": score_atr_pct,
-                }
-            )
+            weighted = {
+                f"score_{name}": getattr(weights, name) * components[name]
+                for name in ScoreWeights.model_fields
+            }
+            metrics.update({"score": sum(weighted.values()), **weighted})
 
 
 def ranking_metrics(data: ScreeningInput, symbol: str) -> dict[str, float] | None:
@@ -533,3 +533,62 @@ def _state_sort_key(state: str, score: float, symbol: str) -> tuple[int, float, 
 def _clamp01(value: float) -> float:
     """Clamp `value` into `[0, 1]`."""
     return max(0.0, min(1.0, value))
+
+
+def _component_values(
+    metrics: Mapping[str, float], *, liquidity: float, rsi_threshold: float
+) -> dict[str, float]:
+    """Normalize one row's ranking components to `[0, 1]`, keyed by weight name.
+
+    Every `ScoreWeights` field must appear here; `_SCORE_COMPONENT_KEYS` is
+    derived from the same field list, so a missing entry is a `KeyError` in
+    `_score_rows` rather than a silently dropped component.
+
+    Args:
+        metrics: The row's merged signal and ranking metrics.
+        liquidity: The row's `avg_volume` percentile within the candidate set.
+        rsi_threshold: The configured pullback threshold `rsi_pullback` scales
+            against.
+
+    Returns:
+        One value per `ScoreWeights` field, before weighting.
+    """
+    return {
+        "rsi_pullback": _clamp01((rsi_threshold - metrics["rsi14"]) / rsi_threshold),
+        "trend_quality": _clamp01(
+            (metrics["sma50"] / metrics["sma200"] - 1) / _TREND_QUALITY_NORMALIZATION
+        ),
+        "liquidity": liquidity,
+        "atr_pct": _clamp01(
+            (metrics["atr14"] / metrics["close"]) / _ATR_PCT_NORMALIZATION
+        ),
+        "pivot_proximity": _pivot_proximity(metrics),
+        "rs_percentile": _clamp01(
+            metrics.get("minervini_rs_percentile", 0.0) / _RS_PERCENTILE_SCALE
+        ),
+        "criteria_met": _clamp01(
+            metrics.get("minervini_criteria_met", 0.0) / _MINERVINI_CRITERIA_TOTAL
+        ),
+    }
+
+
+def _pivot_proximity(metrics: Mapping[str, float]) -> float:
+    """Score how close the last close sits to the VCP pivot (Issue #251).
+
+    1.0 exactly at the pivot, falling linearly to 0.0 at
+    `_PIVOT_PROXIMITY_NORMALIZATION` away on either side. A non-positive or
+    absent pivot scores 0.0 rather than dividing by it: `vcp_pivot` is only
+    written by the `vcp_breakout` signal, and a strategy weighting this
+    component without that signal is already rejected in `config.py`.
+
+    Args:
+        metrics: The row's merged signal and ranking metrics.
+
+    Returns:
+        The normalized proximity in `[0, 1]`.
+    """
+    pivot = metrics.get("vcp_pivot")
+    if pivot is None or pivot <= 0.0:
+        return 0.0
+    distance = abs(metrics["close"] - pivot) / pivot
+    return _clamp01(1.0 - distance / _PIVOT_PROXIMITY_NORMALIZATION)

@@ -1337,6 +1337,26 @@ def _truncated(symbol: str, rank: int, score: float = 0.5) -> TruncatedCandidate
     )
 
 
+def _truncated_with_strategy_components(symbol: str, rank: int) -> TruncatedCandidate:
+    """Issue #251: a near-miss whose breakdown carries all seven components."""
+    return TruncatedCandidate(
+        symbol=symbol,
+        rank=rank,
+        score=0.5,
+        score_breakdown={
+            "score_rsi_pullback": 0.1,
+            "score_trend_quality": 0.2,
+            "score_liquidity": 0.3,
+            "score_atr_pct": 0.4,
+            "score_pivot_proximity": 0.5,
+            "score_rs_percentile": 0.6,
+            "score_criteria_met": 0.7,
+        },
+        execution_state="READY",
+        execution_distance=0.02,
+    )
+
+
 class _FlakyTruncationConnection:
     """Wraps a real connection; raises on the Nth `INSERT INTO screening_truncations`.
 
@@ -1369,6 +1389,28 @@ class _FlakyTruncationConnection:
 
 class TestRecordScreeningTruncations:
     """Issue #188: `screening_truncations` and its share of the one transaction."""
+
+    def test_strategy_specific_components_reach_their_own_columns(self, state_store):
+        # Issue #251: the truncated tail has no `metrics_json` fallback, so a
+        # component the breakdown carries but no column holds would be lost.
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[],
+                rejections=[],
+                truncated=[_truncated_with_strategy_components("NEAR", rank=6)],
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT score_pivot_proximity, score_rs_percentile, "
+                "score_criteria_met FROM screening_truncations WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == (0.5, 0.6, 0.7)
 
     def test_records_rank_score_and_breakdown_columns(self, state_store):
         run_id = uuid4()
@@ -1866,6 +1908,38 @@ class TestPromotedCandidateColumns:
             "READY",
             0.35,
         )
+
+    def test_strategy_specific_components_reach_their_own_columns(self, state_store):
+        # Issue #251: the three components added to `ScoreWeights` are
+        # promoted like the first four, so `score` still equals the sum of
+        # the component columns when a strategy weights one of them.
+        run_id = uuid4()
+
+        state_store.record_screening_results(
+            ScreeningResult(
+                candidates=[
+                    self._candidate(
+                        metrics={
+                            "score": 0.62,
+                            "score_pivot_proximity": 0.07,
+                            "score_rs_percentile": 0.05,
+                            "score_criteria_met": 0.03,
+                        }
+                    )
+                ],
+                rejections=[],
+                truncated=[],
+            ),
+            ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT score_pivot_proximity, score_rs_percentile, "
+                "score_criteria_met FROM candidates WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == (0.07, 0.05, 0.03)
 
     def test_a_rerun_corrects_the_promoted_columns_too(self, state_store):
         # Correction upsert: a stale score beside a corrected `metrics_json`

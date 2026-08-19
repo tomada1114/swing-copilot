@@ -381,15 +381,26 @@ def _past_decisions_section(candidate: BriefCandidate) -> list[str]:
     return lines
 
 
+#: The weighted components rendered under a candidate's score, in the order
+#: `config.ScoreWeights` declares them. All-or-nothing: a missing component
+#: suppresses the whole table (see `_score_breakdown_section`).
+_SCORE_BREAKDOWN_COMPONENTS = (
+    "rsi_pullback",
+    "trend_quality",
+    "liquidity",
+    "atr_pct",
+    "pivot_proximity",
+    "rs_percentile",
+    "criteria_met",
+)
+
+
 def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
     """REQ-008: a per-candidate table of the composite score's weighted components."""
-    if (
-        candidate.score is None
-        or candidate.score_rsi_pullback is None
-        or candidate.score_trend_quality is None
-        or candidate.score_liquidity is None
-        or candidate.score_atr_pct is None
-    ):
+    values = [
+        getattr(candidate, f"score_{name}") for name in _SCORE_BREAKDOWN_COMPONENTS
+    ]
+    if candidate.score is None or any(value is None for value in values):
         return []
     return [
         "",
@@ -399,10 +410,10 @@ def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
         "",
         "| Component | Weighted value |",
         "|---|---:|",
-        f"| rsi_pullback | {candidate.score_rsi_pullback:.3f} |",
-        f"| trend_quality | {candidate.score_trend_quality:.3f} |",
-        f"| liquidity | {candidate.score_liquidity:.3f} |",
-        f"| atr_pct | {candidate.score_atr_pct:.3f} |",
+        *(
+            f"| {name} | {value:.3f} |"
+            for name, value in zip(_SCORE_BREAKDOWN_COMPONENTS, values, strict=True)
+        ),
     ]
 
 

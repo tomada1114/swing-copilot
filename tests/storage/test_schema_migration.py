@@ -58,6 +58,26 @@ _LEGACY_DDL = (
         PRIMARY KEY (run_id, symbol, strategy_key)
     )
     """,
+    # Issue #251's "before" shape for the truncated tail: created by Issue
+    # #188 with the first four score components, without the three
+    # strategy-specific ones. `CREATE TABLE IF NOT EXISTS` cannot widen it.
+    """
+    CREATE TABLE screening_truncations (
+        run_id              UUID NOT NULL,
+        symbol              VARCHAR NOT NULL,
+        strategy_key        VARCHAR NOT NULL,
+        rank                INTEGER NOT NULL,
+        score               DOUBLE NOT NULL,
+        score_rsi_pullback  DOUBLE,
+        score_trend_quality DOUBLE,
+        score_liquidity     DOUBLE,
+        score_atr_pct       DOUBLE,
+        execution_state     VARCHAR NOT NULL,
+        execution_distance  DOUBLE,
+        as_of               DATE NOT NULL,
+        PRIMARY KEY (run_id, symbol, strategy_key)
+    )
+    """,
     """
     CREATE TABLE regime_snapshots (
         run_id          UUID PRIMARY KEY,
@@ -140,6 +160,11 @@ def _legacy_database(tmp_path: Path) -> Path:
             [str(_RUN_ID), json.dumps(_METRICS)],
         )
         conn.execute(
+            "INSERT INTO screening_truncations VALUES (?, 'MSFT', 'default', 6, "
+            "0.42, 0.20, 0.12, 0.08, 0.02, 'READY', 0.31, DATE '2026-07-21')",
+            [str(_RUN_ID)],
+        )
+        conn.execute(
             "INSERT INTO regime_snapshots VALUES (?, DATE '2026-07-21', 'BULL', "
             "3.0, 4.0, 'NORMAL', 'OK', ?)",
             [str(_RUN_ID), json.dumps(_REGIME_DETAIL)],
@@ -175,6 +200,44 @@ class TestPromotedColumnBackfill:
             ).fetchone()
 
         assert row == (0.62, 0.30, 0.20, 0.10, 0.02)
+
+    def test_strategy_specific_score_columns_are_added_but_not_backfilled(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #251: NULL means "not recorded", never a measured 0.0.
+
+        A row written before the components existed has them in neither a
+        column nor `metrics_json`, so there is nothing to restate -- unlike
+        the four columns above, whose values were merely in the wrong shape.
+        """
+        store = _migrated(tmp_path)
+
+        with store.database.connect() as conn:
+            candidate = conn.execute(
+                "SELECT score_pivot_proximity, score_rs_percentile, "
+                "score_criteria_met FROM candidates"
+            ).fetchone()
+            truncation = conn.execute(
+                "SELECT score_pivot_proximity, score_rs_percentile, "
+                "score_criteria_met FROM screening_truncations"
+            ).fetchone()
+
+        assert candidate == (None, None, None)
+        assert truncation == (None, None, None)
+
+    def test_the_migrated_truncation_keeps_its_recorded_components(
+        self, tmp_path: Path
+    ) -> None:
+        # Widening the table must not disturb the rows already in it.
+        store = _migrated(tmp_path)
+
+        with store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT symbol, rank, score, score_rsi_pullback, score_atr_pct "
+                "FROM v_truncated_candidates"
+            ).fetchone()
+
+        assert row == ("MSFT", 6, 0.42, 0.20, 0.02)
 
     def test_candidate_execution_state_stays_null_for_pre_existing_rows(
         self, tmp_path: Path

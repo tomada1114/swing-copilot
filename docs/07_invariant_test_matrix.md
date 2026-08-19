@@ -63,6 +63,12 @@
 | `pullback_rsi` | `band_atr_multiple` 未設定時の判定は従来どおりである | 追加したモードが既定挙動を書き換える | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_none_keeps_the_legacy_percentage_band_hit` |
 | ランキング | `atr_pct` は既定 0.0 で、出荷中のスコアを変えない | 新成分が既定で合成スコアに混入する | `tests/screening/test_pipeline.py::TestAtrPctScoreComponent::test_default_weight_is_zero_so_existing_scores_are_unchanged` |
 | ランキング | `atr_pct` も score_weights 合計 1.0 検証の対象である | 新成分を足しても合計 1.0 とみなされる | `tests/test_config.py::TestLoadStrategies::test_atr_pct_counts_toward_the_sum_to_one_requirement` |
+| ランキング | 戦略別成分は既定 0.0 で、出荷中3戦略のスコアを1ビットも動かさない | 機構追加が運用中のランキングを黙って書き換える | `tests/screening/test_pipeline.py::TestStrategySpecificScoreComponentsAreOffByDefault::test_a_shipped_strategy_scores_exactly_as_it_did_before_the_components` |
+| ランキング | 成分内訳のキーは `ScoreWeights` のフィールドと完全一致する | 成分を足しても実列・レポートに現れず、score と内訳の合計がずれる | `tests/screening/test_pipeline.py::TestStrategySpecificScoreComponentsAreOffByDefault::test_the_breakdown_keys_are_exactly_the_score_weights_fields` |
+| ランキング | メトリクスを生む signal を持たない戦略で戦略別成分に重みを付けると外部I/O前に落ちる | 全候補が同じ 0.0 を得て他成分の実効重みだけが薄まる | `tests/test_config.py::TestLoadStrategies::test_a_weighted_component_without_its_signal_is_rejected` |
+| ランキング | ピボットが欠損・非正でもその銘柄だけ 0.0 になり候補からは落ちない | 除算で run 全体が落ちる／成分が事実上のフィルタになる | `tests/screening/test_pipeline.py::TestPivotProximityComponent::test_an_absent_or_nonpositive_pivot_scores_zero_and_keeps_the_candidate` |
+| ランキング | 戦略別成分を重み付けても同点は symbol 昇順で決まる | 決定的順序が壊れる（REQ-010） | `tests/screening/test_pipeline.py::TestPivotProximityComponent::test_a_tie_still_breaks_on_symbol_ascending` |
+| ストレージ | 戦略別成分の実列は既存DBへ追加されるが backfill しない | 記録が無い行に 0.0 が入り「計測された寄与ゼロ」と読めてしまう | `tests/storage/test_schema_migration.py::TestPromotedColumnBackfill::test_strategy_specific_score_columns_are_added_but_not_backfilled` |
 | バックテスト | 発火 0 件の決済理由も 0 として必ず報告する | 一度も出ていない理由がレポートから消える | `tests/backtest/test_metrics.py::TestExitReasonBreakdown::test_counts_every_reason_including_the_absent_ones` |
 | 分析数値整合 | 逐語引用と桁が食い違う fact を警告として名指しする | 千ドル単位の 3,495,296 を「35億9,530万ドル」と書いた fact が全検査を素通りする | `tests/analysis/test_validate.py::TestNumericConsistencyWarnings::test_a_misconverted_figure_is_warned_about` |
 | 分析数値整合 | 単位変換を跨いだ正しい言い換えは警告しない | 34億9,530万ドルや前年同期 29億2,818万ドルを誤検知する | `tests/analysis/test_numeric_consistency.py::TestTheIssueCase::test_the_corrected_figure_is_not_reported` |

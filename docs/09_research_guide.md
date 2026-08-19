@@ -126,7 +126,8 @@ JSON の中にしか無かった値が実列になった。`json_extract` を書
 
 | 列 | 意味 | NULL の意味 |
 |---|---|---|
-| `candidates.score` / `score_*` | 複合スコアとその 4 成分 | 既存行は `metrics_json` からバックフィル済み。それでも NULL なら成分導入前の run |
+| `candidates.score` / `score_rsi_pullback` / `score_trend_quality` / `score_liquidity` / `score_atr_pct` | 複合スコアと当初の 4 成分 | 既存行は `metrics_json` からバックフィル済み。それでも NULL なら成分導入前の run |
+| `candidates.score_pivot_proximity` / `score_rs_percentile` / `score_criteria_met` | 戦略別ランキング成分の加重後の値（Issue #251、既定重み 0.0） | **未記録**。成分が存在しなかった run は `metrics_json` にも無いのでバックフィルしていない。0.0（計測された寄与ゼロ）と読み替えないこと |
 | `candidates.execution_state` / `execution_distance` | ランキングの実行状態（`READY` / `EXTENDED` など）と SMA50 からの ATR 距離 | **未記録**。どこにも永続化されていなかったので過去行は復元不能。`UNKNOWN`（距離が計算不能という測定結果）と読み替えないこと |
 | `regime_snapshots.dd15_*` / `dd5_*` / `spy_close` / `spy_ema` / `vix_close` | 短い窓の distribution 件数とゲート入力（`dd_count_*` は従来どおり 25 セッション） | ゲート入力はバー欠損で評価不能だった run。バックフィル済みなので「列が無かった」ではない |
 | `exposure_decisions.gate_verdict` / `dd_level` / `is_conservatively_downgraded` / `reduce_only_risk_multiplier` | 露出上限の判断根拠 | バックフィル済み |

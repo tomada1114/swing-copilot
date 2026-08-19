@@ -228,6 +228,128 @@ class TestLoadStrategies:
 
         assert weights.atr_pct == pytest.approx(0.2)
 
+    @pytest.mark.parametrize(
+        "component", ["pivot_proximity", "rs_percentile", "criteria_met"]
+    )
+    def test_strategy_specific_components_default_to_zero_in_every_shipped_strategy(
+        self, component
+    ):
+        # Issue #251 stage 1: the mechanism ships disabled, so no shipped
+        # strategy's ranking output moves.
+        strategies = load_strategies("config/strategies.yaml")
+
+        for spec in strategies.strategies.values():
+            assert getattr(spec.ranking.score_weights, component) == pytest.approx(0.0)
+
+    def test_a_strategy_specific_component_counts_toward_the_sum_to_one_requirement(
+        self, tmp_path
+    ):
+        # Issue #251: the sum check enumerates `ScoreWeights.model_fields`, so
+        # a component added later cannot escape it by omission.
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [vcp_breakout]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.5\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        pivot_proximity: 0.1\n"
+        )
+
+        with pytest.raises(ConfigError, match="default") as exc_info:
+            load_strategies(str(bad))
+        assert "1.1" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("component", "required_signal"),
+        [
+            ("pivot_proximity", "vcp_breakout"),
+            ("rs_percentile", "minervini_stage2"),
+            ("criteria_met", "minervini_stage2"),
+        ],
+    )
+    def test_a_weighted_component_without_its_signal_is_rejected(
+        self, tmp_path, component, required_signal
+    ):
+        # Issue #251: without the signal the metric never exists, so every
+        # candidate would score a constant 0.0 there and the components that
+        # do work would silently lose that share of the weight.
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.4\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            f"        {component}: 0.1\n"
+        )
+
+        with pytest.raises(ConfigError, match=component) as exc_info:
+            load_strategies(str(bad))
+        assert required_signal in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("component", "required_signal"),
+        [
+            ("pivot_proximity", "vcp_breakout"),
+            ("rs_percentile", "minervini_stage2"),
+            ("criteria_met", "minervini_stage2"),
+        ],
+    )
+    def test_a_weighted_component_with_its_signal_is_accepted(
+        self, tmp_path, component, required_signal
+    ):
+        good = tmp_path / "strategies.yaml"
+        good.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            f"    signals_all: [{required_signal}]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.4\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            f"        {component}: 0.1\n"
+        )
+
+        weights = load_strategies(str(good)).strategies["default"].ranking.score_weights
+
+        assert getattr(weights, component) == pytest.approx(0.1)
+
+    def test_a_zero_weighted_component_needs_no_signal(self, tmp_path):
+        # The guard keys off a weight greater than zero: an explicit 0.0 is
+        # exactly the shipped default and must stay loadable everywhere.
+        good = tmp_path / "strategies.yaml"
+        good.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: [trend_sma]\n"
+            "    candidate_limit: 10\n"
+            "    ranking:\n"
+            "      score_weights:\n"
+            "        rsi_pullback: 0.5\n"
+            "        trend_quality: 0.3\n"
+            "        liquidity: 0.2\n"
+            "        pivot_proximity: 0.0\n"
+        )
+
+        weights = load_strategies(str(good)).strategies["default"].ranking.score_weights
+
+        assert weights.pivot_proximity == pytest.approx(0.0)
+
     def test_non_utf8_file_raises_config_error(self, tmp_path):
         bad = tmp_path / "strategies.yaml"
         bad.write_bytes("strategies:\n  default: 日本\n".encode("shift_jis"))

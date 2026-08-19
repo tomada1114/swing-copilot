@@ -73,6 +73,9 @@ def _populated_brief() -> DailyBrief:
                 score_trend_quality=0.25,
                 score_liquidity=0.16,
                 score_atr_pct=0.0,
+                score_pivot_proximity=0.0,
+                score_rs_percentile=0.0,
+                score_criteria_met=0.0,
                 signals=("SMA200上抜け",),
                 fundamentals=BriefFundamentals("21.0x", "$1,000", "60%", "$9.00"),
                 risk=BriefRisk(

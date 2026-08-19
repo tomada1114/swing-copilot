@@ -53,6 +53,9 @@ def _full_score_metrics() -> dict[str, float]:
         "score_trend_quality": 0.251,
         "score_liquidity": 0.160,
         "score_atr_pct": 0.000,
+        "score_pivot_proximity": 0.000,
+        "score_rs_percentile": 0.000,
+        "score_criteria_met": 0.000,
     }
 
 
@@ -82,6 +85,9 @@ class TestScoreBreakdown:
         assert "trend_quality（加重後）: 0.251" in block
         assert "liquidity（加重後）: 0.160" in block
         assert "atr_pct（加重後）: 0.000" in block
+        assert "pivot_proximity（加重後）: 0.000" in block
+        assert "rs_percentile（加重後）: 0.000" in block
+        assert "criteria_met（加重後）: 0.000" in block
 
     @pytest.mark.parametrize(
         "missing",
@@ -91,6 +97,9 @@ class TestScoreBreakdown:
             "score_trend_quality",
             "score_liquidity",
             "score_atr_pct",
+            "score_pivot_proximity",
+            "score_rs_percentile",
+            "score_criteria_met",
         ],
     )
     def test_any_missing_component_degrades_to_an_empty_block(self, missing):

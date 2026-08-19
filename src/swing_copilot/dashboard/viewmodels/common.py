@@ -26,6 +26,9 @@ SCORE_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("score_trend_quality", "トレンド質"),
     ("score_liquidity", "流動性"),
     ("score_atr_pct", "ATR%"),
+    ("score_pivot_proximity", "ピボット近接"),
+    ("score_rs_percentile", "RS百分位"),
+    ("score_criteria_met", "条件充足"),
 )
 
 #: The verdict badge shown when the run has no `verdicts` row at all. Not

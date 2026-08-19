@@ -324,9 +324,10 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
 **JSONそのもの**から逐語コピーする——parse済みモデルを再シリアライズすると日時表記や
 キー順が書き換わり、provenance検査が突き合わせる文字列と一致しなくなる。
 トップレベルのキー順は`run_id` / `as_of` / `input_digest` / `kind` / `context` /
-`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。書き出しは
-`io_atomic.write_json_atomically()`（UTF-8・`indent=2`・`sort_keys=False`・
-末尾改行1個・LF・同一ディレクトリの一時ファイル＋`os.replace`）で、生成時刻・
+`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。書き出しは上記の
+`io_atomic.write_json_batch_atomically()`で、直列化の形は単発の
+`write_json_atomically()`と同一（UTF-8・`indent=2`・`sort_keys=False`・
+末尾改行1個・LF・同一ディレクトリの一時ファイル＋`os.replace`）であり、生成時刻・
 パス・ホストなど実行環境依存の値をペイロードへ入れない。
 
 スライスは書かれる前に`InputSlice`（`extra="forbid"`）で検証される。`kind`ごとに

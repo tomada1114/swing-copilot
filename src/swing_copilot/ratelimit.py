@@ -12,7 +12,17 @@ if TYPE_CHECKING:
 #: `text/news_finnhub.py` and `data/earnings_finnhub.py` speak to that one
 #: account with the same API key, so the number lives here once rather than as
 #: two constants that only happen to be equal (Issue #263).
-FINNHUB_MIN_REQUEST_INTERVAL_SECONDS = 1.0
+#:
+#: `60 / 60 = 1.0` leaves zero headroom: because `before_request()` records
+#: the pre-sleep clock reading plus the computed wait (Issue #253's
+#: deliberate trade-off, see its docstring below), the steady-state issue
+#: interval lands almost exactly on 1.000s, and 61 requests can fit inside one
+#: rolling 60-second window (instants 0, 1, ..., 60 span exactly 60 seconds).
+#: A 429 there triggers a retry that itself spends the shared budget, which is
+#: a worse outcome than the ~3 calls/minute of throughput this margin gives
+#: up. 1.05s brings the steady-state rate to ~57 calls/minute, about 5%
+#: headroom under the cap (Issue #283).
+FINNHUB_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 
 
 class MinIntervalThrottle:

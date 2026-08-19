@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from itertools import pairwise
 
 import httpx
 import pytest
 
-from swing_copilot.text.news_finnhub import FinnhubNewsClient, _real_http_get
+from swing_copilot.text.news_finnhub import (
+    _MIN_REQUEST_INTERVAL_SECONDS,
+    FinnhubNewsClient,
+    _real_http_get,
+)
 
 
 class FakeClock:
@@ -16,6 +21,39 @@ class FakeClock:
 
     def __call__(self):
         return self._times.pop(0)
+
+
+class ThrottleTimeline:
+    """Monotonic clock that only sleeping and request latency advance.
+
+    Models the one timeline the rate limit is actually defined over: `sleep`
+    (throttle wait and retry backoff alike) and each request's round trip both
+    move it forward, and every issued request stamps the instant it went out.
+    That makes the *issue* interval observable, not just the sleep arguments.
+    """
+
+    def __init__(self, request_seconds):
+        self.now = 0.0
+        self.issued_at = []
+        self._request_seconds = request_seconds
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def issue_request(self):
+        self.issued_at.append(self.now)
+        self.now += self._request_seconds
+
+    @property
+    def issue_gaps(self):
+        return [later - earlier for earlier, later in pairwise(self.issued_at)]
+
+    def gaps_below(self, minimum, tolerance=1e-9):
+        """Return every issue gap shorter than `minimum`, float slop aside."""
+        return [gap for gap in self.issue_gaps if gap < minimum - tolerance]
 
 
 class FakeDateClock:
@@ -237,6 +275,32 @@ class TestRateLimiting:
 
         assert sleeps == []
 
+    def test_successive_requests_are_issued_at_least_one_interval_apart(self):
+        """Issue #253: the throttle must count from the request it let through.
+
+        Recording the pre-sleep clock reading dropped the slept interval, so
+        every other request went out early and the effective rate exceeded the
+        60/minute cap. Asserted on issue instants, not on sleep arguments.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.3)
+
+        def timed_get(_url, _params):
+            timeline.issue_request()
+            return _fake_response()
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=timed_get,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+            rate_clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        for symbol in ("AAPL", "MSFT", "NVDA"):
+            client.fetch_company_news(symbol, date(2027, 1, 1), as_of=date(2027, 1, 10))
+
+        assert timeline.issue_gaps == [pytest.approx(_MIN_REQUEST_INTERVAL_SECONDS)] * 2
+
 
 class TestRetries:
     def test_retries_rate_limited_request_and_throttles_every_attempt(self):
@@ -268,6 +332,42 @@ class TestRetries:
         assert len(result) == 1
         assert calls == 2
         assert sleeps == [1.0]
+
+    def test_retried_attempts_keep_the_minimum_issue_interval(self):
+        """Issue #253: a retry attempt is a request and resets the same clock.
+
+        `before_attempt` fires once per attempt, so the failed attempt counts
+        against the rate limit too; every subsequent request must still be at
+        least one interval behind the one actually issued before it.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.3)
+        calls = 0
+
+        def rate_limited_then_succeeds(_url, _params):
+            nonlocal calls
+            calls += 1
+            timeline.issue_request()
+            if calls == 1:
+                request = httpx.Request("GET", "https://example.com")
+                response = httpx.Response(429, request=request)
+                msg = "rate limited"
+                raise httpx.HTTPStatusError(msg, request=request, response=response)
+            return _fake_response()
+
+        client = FinnhubNewsClient(
+            "test-key",
+            http_get=rate_limited_then_succeeds,
+            date_clock=FakeDateClock(date(2027, 1, 10)),
+            rate_clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        for symbol in ("AAPL", "MSFT", "NVDA"):
+            client.fetch_company_news(symbol, date(2027, 1, 1), as_of=date(2027, 1, 10))
+
+        # Four issued requests: the 429, its retry, and one per later symbol.
+        assert calls == 4
+        assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
 
     def test_does_not_retry_non_transient_http_error(self):
         calls = 0

@@ -150,12 +150,18 @@ class FredCalendarClient:
 
     def _throttle(self) -> None:
         """Space requests to FRED's 120/minute ceiling, before *every* attempt."""
+        # Record when the request is actually issued (after any wait), not when
+        # the throttle decision started. Recording the pre-sleep reading drops
+        # the slept interval from the next gap calculation and lets the
+        # effective request rate exceed 1/_MIN_REQUEST_INTERVAL_SECONDS.
         now = self._rate_clock()
+        issued_at = now
         if self._last_request_at is not None:
             wait = _MIN_REQUEST_INTERVAL_SECONDS - (now - self._last_request_at)
             if wait > 0:
                 self._sleep_fn(wait)
-        self._last_request_at = now
+                issued_at = now + wait
+        self._last_request_at = issued_at
 
     def _fetch_with_retries(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         """Run one FRED HTTP GET with throttling and bounded retry."""

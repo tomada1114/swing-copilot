@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from swing_copilot.analysis.filing_selection import select_filing_text
-from swing_copilot.data.edgar import EdgarClient, FilingRef
+from swing_copilot.data.edgar import (
+    _MIN_REQUEST_INTERVAL_SECONDS,
+    EdgarClient,
+    FilingRef,
+)
 from swing_copilot.storage.market_store import FundamentalsRecord
 
 if TYPE_CHECKING:
@@ -207,6 +213,62 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self._times.pop(0)
+
+
+class ThrottleTimeline:
+    """Monotonic clock that only sleeping and request latency advance.
+
+    Models the one timeline the rate limit is actually defined over: `sleep`
+    (throttle wait and retry backoff alike) and each request's round trip both
+    move it forward, and every issued request stamps the instant it went out.
+    That makes the *issue* interval observable, not just the sleep arguments.
+    """
+
+    def __init__(self, request_seconds: float) -> None:
+        self.now = 0.0
+        self.issued_at: list[float] = []
+        self._request_seconds = request_seconds
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def issue_request(self) -> None:
+        self.issued_at.append(self.now)
+        self.now += self._request_seconds
+
+    @property
+    def issue_gaps(self) -> list[float]:
+        return [later - earlier for earlier, later in pairwise(self.issued_at)]
+
+    def gaps_below(self, minimum: float, tolerance: float = 1e-9) -> list[float]:
+        """Return every issue gap shorter than `minimum`, float slop aside."""
+        return [gap for gap in self.issue_gaps if gap < minimum - tolerance]
+
+
+class TimedCompany(FakeCompany):
+    """`FakeCompany` whose `get_facts` stamps a `ThrottleTimeline` request."""
+
+    def __init__(
+        self,
+        timeline: ThrottleTimeline,
+        facts: FakeEntityFacts,
+        *,
+        fail_first: bool = False,
+    ) -> None:
+        super().__init__(facts=facts)
+        self._timeline = timeline
+        self._fail_first = fail_first
+
+    def get_facts(self):
+        self._timeline.issue_request()
+        if self._fail_first:
+            self._fail_first = False
+            msg = "temporary"
+            raise httpx.ConnectError(msg)
+        return super().get_facts()
 
 
 def _company_factory(company: FakeCompany) -> Callable[[str], FakeCompany]:
@@ -639,6 +701,53 @@ class TestRateLimiting:
         client.fetch_fundamentals("MSFT", datetime(2026, 7, 20, tzinfo=UTC))
 
         assert sleeps == []
+
+    def test_successive_requests_are_issued_at_least_one_interval_apart(self):
+        """Issue #253: the throttle must count from the request it let through.
+
+        Recording the pre-sleep clock reading dropped the slept interval, so
+        every other request went out early and the effective rate exceeded
+        SEC's 10/second guidance. Asserted on issue instants, not sleep
+        arguments.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.02)
+        company = TimedCompany(timeline, FakeEntityFacts(DEFAULT_CIK, []))
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(company),
+            clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        for symbol in ("AAPL", "MSFT", "NVDA"):
+            client.fetch_fundamentals(symbol, datetime(2026, 7, 20, tzinfo=UTC))
+
+        assert timeline.issue_gaps == [pytest.approx(_MIN_REQUEST_INTERVAL_SECONDS)] * 2
+
+    def test_retried_attempts_keep_the_minimum_issue_interval(self):
+        """Issue #253: a retry attempt is a request and resets the same clock.
+
+        `before_attempt` fires once per attempt, so the failed attempt counts
+        against the rate limit too; every subsequent request must still be at
+        least one interval behind the one actually issued before it.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.02)
+        company = TimedCompany(
+            timeline, FakeEntityFacts(DEFAULT_CIK, []), fail_first=True
+        )
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(company),
+            clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        for symbol in ("AAPL", "MSFT", "NVDA"):
+            client.fetch_fundamentals(symbol, datetime(2026, 7, 20, tzinfo=UTC))
+
+        # Four issued requests: the failure, its retry, then one per later fetch.
+        assert len(timeline.issued_at) == 4
+        assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
 
 
 class TestRetries:
@@ -1587,8 +1696,10 @@ class TestEightKExhibitRateLimiting:
         )
         sleeps: list[float] = []
         # One tick per throttled request: get_filings, filing.text,
-        # filing.attachments, and one per exhibit download.
-        clock = FakeClock([0.0, 0.0, 0.0, 0.0, 0.0])
+        # filing.attachments, and one per exhibit download. The ticks model
+        # instantaneous requests on a clock that only the throttle's own sleep
+        # advances, so every tick equals the previous request's issue time.
+        clock = FakeClock([0.0, 0.0, 0.1, 0.2, 0.3])
 
         _fetch_one(
             _eight_k_with_exhibits(*exhibits), sleep_fn=sleeps.append, clock=clock

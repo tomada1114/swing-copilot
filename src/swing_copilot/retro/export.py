@@ -209,6 +209,13 @@ def export_retro_input(
     Raises:
         RetroIngestError: The proposal ledger exists but could not be read.
             Nothing is written in that case.
+        ValidationError: `build_retro_input` refused to hand over a document
+            (Issue #292's readback assertion, or the construction validate
+            above it). Nothing is written in that case either. This is a
+            schema-drift signal aimed at development, not an operator-facing
+            failure mode, so it stays outside `_INGEST_EXIT`'s conversion --
+            the same place the pre-existing construction `ValidationError`
+            has always sat.
         OSError: Writing failed. The previous export is left untouched.
     """
     document = build_retro_input(deps, request)

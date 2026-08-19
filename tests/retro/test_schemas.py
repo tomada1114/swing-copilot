@@ -405,8 +405,10 @@ class TestRetroInput:
     ) -> None:
         # The live break was not confined to `input_coverage`: Issue #157 put
         # the same field on every archived `FilingCoverage`, and its `false`
-        # default is a measurement too. The 2026-08-12 dossier failed on these
-        # eleven nested blocks, not on the summary count.
+        # default is a measurement too. The 2026-08-12 dossier carried both
+        # shapes of the loss -- a summary block without
+        # `exhibit_truncated_filing_count` and eleven nested coverage blocks
+        # without `exhibit_truncated` -- so either alone would have failed it.
         payload = _unsigned_payload()
         payload["surprises"]["items"][0]["input_filing_coverage"] = [
             _filing_coverage_before_issue_157()

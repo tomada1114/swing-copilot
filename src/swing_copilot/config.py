@@ -22,6 +22,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from swing_copilot.analysis.filing_selection import MIN_FILING_CHARS
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.documents import read_text_document
@@ -363,8 +364,38 @@ class AnalysisConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _verify_filing_export_budgets(self) -> Self:
+        """Reject a per-symbol ceiling too small for the filings it must hold.
+
+        Two separate lower bounds, both invalid limits rather than degradations
+        to absorb at export time:
+
+        - the per-symbol ceiling must fit one filing at the per-filing ceiling,
+          otherwise `max_filing_chars` is unreachable and misdescribes itself;
+        - it must also fit every collected filing's guaranteed minimum
+          reservation (Issue #268). `analysis/filing_selection.py` reserves
+          `min(len(text), max_filing_chars, MIN_FILING_CHARS)` per filing out of
+          one shared ceiling, so `max_filings_per_symbol` filings need
+          `max_filings_per_symbol * min(max_filing_chars, MIN_FILING_CHARS)`
+          between them before any of them is served beyond its floor. Under
+          less than that, the reservations run out mid-list and the trailing
+          filings export as `omitted_symbol_budget` on *every* run -- a broken
+          configuration, not a property of the day's filings, so it fails fast
+          here rather than after EDGAR has been called.
+        """
         if self.max_filing_chars_per_symbol < self.max_filing_chars:
             msg = "max_filing_chars_per_symbol must be >= max_filing_chars"
+            raise ValueError(msg)
+        guaranteed_per_filing = min(self.max_filing_chars, MIN_FILING_CHARS)
+        required = self.max_filings_per_symbol * guaranteed_per_filing
+        if self.max_filing_chars_per_symbol < required:
+            msg = (
+                f"max_filing_chars_per_symbol ({self.max_filing_chars_per_symbol}) "
+                f"must be >= {required} = max_filings_per_symbol "
+                f"({self.max_filings_per_symbol}) * the guaranteed minimum per "
+                f"filing ({guaranteed_per_filing} = min(max_filing_chars="
+                f"{self.max_filing_chars}, MIN_FILING_CHARS={MIN_FILING_CHARS})); "
+                "otherwise filings past the first are always starved of budget"
+            )
             raise ValueError(msg)
         return self
 

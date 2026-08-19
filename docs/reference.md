@@ -145,7 +145,7 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
-開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする。
+開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする（後者は`max_filing_chars`以上、かつ`max_filings_per_symbol × min(max_filing_chars, MIN_FILING_CHARS)`以上でなければ`Settings`の読み込み時に拒否される。Issue #268）。
 10-Q/10-Q-Aは財務諸表、MD&A、リスク要因、法的手続を章優先で構成し、抽出不能時のみ
 先頭スライスへ縮退する。8-Kは主文書に加えてExhibit 99系（プレスリリース本文、
 合計500,000字の安全弁まで）を同じ本文へ連結して取り込むため、`coverage`の`original_chars`は

@@ -13,6 +13,7 @@ import pytest
 from swing_copilot.analysis.schemas import (
     FilingAnalysis,
     NewsSummary,
+    NewsSupply,
     ScreeningAssessment,
     SourcedFact,
     Verdict,
@@ -117,7 +118,9 @@ class FakeStateStore:
 
 
 def _validated_analysis(
-    *, filings: tuple[ResolvedFiling, ...] | None = None
+    *,
+    filings: tuple[ResolvedFiling, ...] | None = None,
+    news_supply: NewsSupply | None = None,
 ) -> ValidatedAnalysis:
     if filings is None:
         filings = (
@@ -142,6 +145,7 @@ def _validated_analysis(
             interpretation=["Growth may continue", "Demand remains uncertain"],
             risk_flags=["Valuation risk"],
         ),
+        news_supply=news_supply,
         filings=filings,
         screening_assessment=ScreeningAssessment(
             summary="Growth may continue",
@@ -212,6 +216,79 @@ def _context(
         strategy_key="default",
         notices=("calendar unavailable",),
     )
+
+
+class TestNewsSupplyReachesTheBrief:
+    """Issue #281: `news_supply` must survive `validate.py` -> `daily_brief.py`.
+
+    `news_summary` stays null whenever `news[]` is empty (AC14 is unchanged),
+    but `news_supply` is code-owned and independent of it -- it must reach
+    `BriefAnalysis` regardless, so the report can later tell "suppressed"
+    (level none/sparse over a non-empty collected set) apart from "genuinely
+    zero" (`collected_items == 0`).
+    """
+
+    def test_a_suppressed_news_supply_reaches_the_candidate(self) -> None:
+        context = replace(
+            _context(),
+            analysis=_validated_analysis(
+                news_supply=NewsSupply(
+                    level="sparse",
+                    collected_items=8,
+                    exported_items=8,
+                    symbol_mention_items=1,
+                )
+            ),
+        )
+
+        brief = build_daily_brief(
+            context,
+            cast("MarketStore", FakeMarketStore()),
+            cast("StateStore", FakeStateStore()),
+        )
+
+        supply = brief.candidates[0].analysis.news_supply
+        assert supply is not None
+        assert supply.level == "sparse"
+        assert supply.collected_items == 8
+        assert supply.exported_items == 8
+        assert supply.symbol_mention_items == 1
+
+    def test_a_zero_collected_news_supply_reaches_the_candidate(self) -> None:
+        context = replace(
+            _context(),
+            analysis=_validated_analysis(
+                news_supply=NewsSupply(
+                    level="none",
+                    collected_items=0,
+                    exported_items=0,
+                    symbol_mention_items=0,
+                )
+            ),
+        )
+
+        brief = build_daily_brief(
+            context,
+            cast("MarketStore", FakeMarketStore()),
+            cast("StateStore", FakeStateStore()),
+        )
+
+        supply = brief.candidates[0].analysis.news_supply
+        assert supply is not None
+        assert supply.level == "none"
+        assert supply.collected_items == 0
+        # Distinct from the suppressed case above: a genuinely-zero supply
+        # must not be confused with a suppressed-but-nonzero one.
+        assert supply.symbol_mention_items == 0
+
+    def test_absent_news_supply_leaves_the_field_none(self) -> None:
+        brief = build_daily_brief(
+            _context(),
+            cast("MarketStore", FakeMarketStore()),
+            cast("StateStore", FakeStateStore()),
+        )
+
+        assert brief.candidates[0].analysis.news_supply is None
 
 
 def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:

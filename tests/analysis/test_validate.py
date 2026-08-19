@@ -905,6 +905,78 @@ class TestResolvedMetadata:
         assert (NEWS_ID in validated.source_urls) is is_linked
 
 
+class TestNewsSupplyReachesTheOutcome:
+    """Issue #281: `news_supply` must reach `SymbolOutcome` untouched.
+
+    It is code-owned (`analysis/news_supply.py`), never skill-authored, so it
+    threads straight from the exported candidate regardless of what the
+    skill wrote for `news_summary` -- the two are independent axes. AC14 and
+    `analyze-news/SKILL.md` still keep `news_summary` null whenever `news[]`
+    is empty; `news_supply` is how the report tells "suppressed" (level
+    none/sparse over a non-empty collected set) apart from "genuinely zero"
+    (`collected_items == 0`), a distinction `news_summary: null` alone erases.
+    """
+
+    def test_the_default_candidates_news_supply_survives_verification(
+        self, write_documents
+    ):
+        validated = _validated(write_documents)
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is None
+        assert outcome.news_supply is not None
+        assert outcome.news_supply.level == "sparse"
+        assert outcome.news_supply.collected_items == 1
+
+    def test_a_suppressed_news_supply_over_a_nonzero_collected_set_survives(
+        self, write_documents
+    ):
+        candidate = input_payload()["candidates"][0]
+        candidate["news_supply"] = {
+            "collected_items": 8,
+            "exported_items": 8,
+            "symbol_mention_items": 1,
+            "level": "sparse",
+        }
+        analysis_input = input_payload(candidates=[candidate])
+
+        validated = _validated(write_documents, analysis_input=analysis_input)
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is None
+        assert outcome.news_supply.level == "sparse"
+        assert outcome.news_supply.collected_items == 8
+        assert outcome.news_supply.symbol_mention_items == 1
+
+    def test_a_genuinely_zero_news_supply_survives_with_no_news_items(
+        self, write_documents
+    ):
+        candidate = input_payload()["candidates"][0]
+        candidate["news"] = []
+        candidate["news_supply"] = {
+            "collected_items": 0,
+            "exported_items": 0,
+            "symbol_mention_items": 0,
+            "level": "none",
+        }
+        analysis_input = input_payload(candidates=[candidate])
+
+        validated = _validated(
+            write_documents,
+            analysis_input=analysis_input,
+            symbols=[symbol_payload(news_summary=None)],
+        )
+
+        outcome = validated.outcomes[0]
+        assert outcome.error is None
+        assert outcome.news_summary is None
+        assert outcome.news_supply.collected_items == 0
+        assert outcome.news_supply.level == "none"
+        # Distinct from the suppressed case above: zero collected, not merely
+        # a nonzero collected set with too few symbol mentions.
+        assert outcome.news_supply.exported_items == 0
+
+
 class TestInputLoading:
     def test_a_malformed_input_document_is_a_hard_failure(self, write_documents):
         input_path, _result_path = write_documents(input_payload(as_of="not-a-date"))

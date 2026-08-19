@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 from swing_copilot.analysis.schemas import VERDICT_BASES, AnalysisResult
+from swing_copilot.analysis.slices import SLICE_FILENAME_PREFIX
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -109,6 +110,25 @@ def test_every_fragment_author_is_pointed_at_the_shared_checker(
 
     assert "copilot-verify-analysis" in skill
     assert "検証スクリプト" in skill
+
+
+def test_the_orchestrator_is_pointed_at_the_deterministic_slice_command() -> None:
+    """Keep Issue #260's command in the instructions, not just in code.
+
+    Hand-cutting the slices is what the command replaced, and an instruction
+    that still describes the manual cut restores a failure mode nothing
+    downstream can see: a slice that dropped an article is indistinguishable
+    from a symbol that never had one.
+    """
+    skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    schema = _read_output_schema()
+
+    assert "copilot-export-slices" in skill
+    assert "手で切り出さない" in skill
+    assert "自前の切り出しスクリプトを書かない" in skill
+    assert "copilot-export-slices" in schema
+    for document in (skill, schema):
+        assert f"{SLICE_FILENAME_PREFIX}-<kind>-<SYMBOL>.json" in document
 
 
 def test_the_schema_reference_binds_the_checker_to_the_ingest_function() -> None:

@@ -16,7 +16,13 @@ beside the day's report, the `swing-daily` skill analyzes it, and
 `copilot-ingest-analysis` machine-verifies the answer (schema, source
 provenance, CON-03) before re-rendering the report. `copilot-verify-analysis`
 runs those same checks read-only, so the skill can check one working fragment —
-or dry-run the merged answer — without writing anything.
+or dry-run the merged answer — without writing anything, and
+`copilot-export-slices` cuts the per-expert, per-symbol input slices the skill
+hands to its subagents, deterministically and verbatim:
+
+```bash
+uv run copilot-export-slices reports/2026-07-29/<run-id> --out-dir /tmp/slices
+```
 
 ## Quickstart
 

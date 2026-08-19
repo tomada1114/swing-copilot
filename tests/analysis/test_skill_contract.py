@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -102,6 +103,24 @@ def test_only_the_filing_reading_is_reusable_across_trading_days() -> None:
     assert "自分でハッシュを計算しない" in schema
     # The fail-closed net that makes the relaxed key safe.
     assert "fail-closed" in schema
+
+
+def test_disclosure_fragment_carryover_window_is_two_trading_days() -> None:
+    """Keep Issue #288's carry-over window count fixed in the instructions.
+
+    The Issue #261 carry-over glob-selects past run directories and looks at
+    only the newest N trading days before `as_of`. The prose is the only
+    place N lives -- no code constant enforces it -- so nothing failed if a
+    future edit widened or narrowed the window. This reads the number out of
+    the sentence and pins it to the value the design settled on, the same
+    way `test_only_the_filing_reading_is_reusable_across_trading_days` pins
+    the neighboring `filing_body_digests` contract.
+    """
+    skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+    match = re.search(r"新しい順に最大\s*(\d+)\s*日分", skill)
+    assert match is not None, "carry-over window sentence not found in SKILL.md"
+    assert int(match.group(1)) == 2
 
 
 def test_news_skill_must_declare_a_thin_symbol_specific_supply() -> None:

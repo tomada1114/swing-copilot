@@ -49,7 +49,12 @@ def _earnings_payload(*_args, **_kwargs):
 def _finnhub_pair(
     timeline: ThrottleTimeline, *, throttle: MinIntervalThrottle | None = None
 ) -> tuple[FinnhubNewsClient, FinnhubEarningsClient]:
-    """Build both Finnhub clients over one timeline, optionally sharing a budget."""
+    """Build both Finnhub clients over one timeline, optionally sharing a budget.
+
+    A shared throttle owns the rate clock and its sleep, and the clients reject
+    being handed both, so the per-client rate seams are injected only when each
+    client is building its own throttle.
+    """
 
     def news_get(_url, _params):
         timeline.issue_request()
@@ -59,11 +64,12 @@ def _finnhub_pair(
         timeline.issue_request()
         return _earnings_payload()
 
+    is_shared = throttle is not None
     news_client = FinnhubNewsClient(
         "test-key",
         http_get=news_get,
         date_clock=FakeClock(),
-        rate_clock=timeline.clock,
+        rate_clock=None if is_shared else timeline.clock,
         sleep_fn=timeline.sleep,
         throttle=throttle,
     )
@@ -71,10 +77,14 @@ def _finnhub_pair(
         "test-key",
         http_get=earnings_get,
         clock=FakeClock(),
-        timing=EarningsTiming(
-            rate_clock=timeline.clock,
-            sleep_fn=timeline.sleep,
-            backoff_fn=timeline.sleep,
+        timing=(
+            EarningsTiming(backoff_fn=timeline.sleep)
+            if is_shared
+            else EarningsTiming(
+                rate_clock=timeline.clock,
+                sleep_fn=timeline.sleep,
+                backoff_fn=timeline.sleep,
+            )
         ),
         throttle=throttle,
     )
@@ -90,6 +100,84 @@ def _alternate(
     for _ in range(rounds):
         news_client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=_AS_OF)
         earnings_client.fetch_next_earnings("AAPL", _AS_OF, date(2027, 2, 10))
+
+
+class TestThrottleAndRateClockAreMutuallyExclusive:
+    """A shared budget runs on one clock, so the pair is rejected, not ignored.
+
+    Accepting both and quietly dropping the caller's clock would leave a caller
+    reading a timeline that never runs -- and, in production, believing they had
+    slowed a client down when the shared throttle was pacing it all along.
+    """
+
+    def test_news_client_rejects_a_rate_clock_beside_a_throttle(self):
+        with pytest.raises(ValueError, match=r"rate_clock and throttle are mutually"):
+            FinnhubNewsClient(
+                "test-key",
+                rate_clock=lambda: 0.0,
+                throttle=MinIntervalThrottle(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS),
+            )
+
+    def test_news_client_keeps_sleep_fn_injectable_beside_a_throttle(self):
+        # `sleep_fn` still drives retry backoff, so it is not a dead parameter.
+        client = FinnhubNewsClient(
+            "test-key",
+            sleep_fn=lambda _seconds: None,
+            throttle=MinIntervalThrottle(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS),
+        )
+
+        assert isinstance(client, FinnhubNewsClient)
+
+    @pytest.mark.parametrize(
+        ("timing", "expected_message"),
+        [
+            pytest.param(
+                EarningsTiming(rate_clock=lambda: 0.0),
+                r"EarningsTiming\.rate_clock and throttle are mutually",
+                id="rate-clock",
+            ),
+            pytest.param(
+                EarningsTiming(sleep_fn=lambda _seconds: None),
+                r"EarningsTiming\.sleep_fn and throttle are mutually",
+                id="sleep-fn",
+            ),
+            pytest.param(
+                EarningsTiming(rate_clock=lambda: 0.0, sleep_fn=lambda _s: None),
+                r"EarningsTiming\.rate_clock/sleep_fn and throttle are mutually",
+                id="both",
+            ),
+        ],
+    )
+    def test_earnings_client_rejects_throttle_owned_timing_fields(
+        self, timing, expected_message
+    ):
+        with pytest.raises(ValueError, match=expected_message):
+            FinnhubEarningsClient(
+                "test-key",
+                timing=timing,
+                throttle=MinIntervalThrottle(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS),
+            )
+
+    def test_earnings_client_keeps_backoff_fn_injectable_beside_a_throttle(self):
+        # The boundary: `backoff_fn` drives retry backoff either way, so a
+        # timing that only overrides it must stay accepted.
+        client = FinnhubEarningsClient(
+            "test-key",
+            timing=EarningsTiming(backoff_fn=lambda _seconds: None),
+            throttle=MinIntervalThrottle(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS),
+        )
+
+        assert isinstance(client, FinnhubEarningsClient)
+
+    def test_each_client_still_takes_its_own_rate_seams_without_a_throttle(self):
+        # The un-shared default is untouched: the same injections that are
+        # rejected beside a throttle remain the supported way to fake time.
+        timeline = ThrottleTimeline(request_seconds=_REQUEST_SECONDS)
+        news_client, earnings_client = _finnhub_pair(timeline)
+
+        _alternate(news_client, earnings_client, rounds=1)
+
+        assert timeline.issued_at == [pytest.approx(0.0), pytest.approx(0.3)]
 
 
 class TestMinIntervalThrottle:

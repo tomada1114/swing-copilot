@@ -48,6 +48,23 @@ class EarningsTiming:
     sleep_fn: Callable[[float], None] = time.sleep
     backoff_fn: Callable[[float], None] = time.sleep
 
+    def throttle_fields_set(self) -> tuple[str, ...]:
+        """Name the throttle-owned fields this instance overrides.
+
+        `rate_clock` and `sleep_fn` configure the client's own throttle, while
+        `backoff_fn` drives retry backoff regardless. An injected throttle owns
+        the first two, so the client uses this to reject a combination whose
+        halves would silently contradict each other.
+        """
+        return tuple(
+            name
+            for name, injected, default in (
+                ("rate_clock", self.rate_clock, time.monotonic),
+                ("sleep_fn", self.sleep_fn, time.sleep),
+            )
+            if injected is not default
+        )
+
 
 class FinnhubEarningsClient:
     """Finnhub `/calendar/earnings` implementation."""
@@ -68,14 +85,32 @@ class FinnhubEarningsClient:
             http_get: Injectable JSON GET boundary.
             clock: Audit timestamp source.
             timing: Injectable rate-limit and retry timing functions. Its
-                `rate_clock`/`sleep_fn` are unused when `throttle` is injected,
-                since a shared throttle carries the clock its whole budget is
-                measured on; `backoff_fn` still drives retry backoff.
+                `rate_clock`/`sleep_fn` configure this client's own throttle
+                and are mutually exclusive with `throttle`; `backoff_fn` drives
+                retry backoff either way and stays free to inject.
             throttle: Rate-limit budget to count this client's requests
                 against. Defaults to one private to this instance; pass the
                 same instance to every client on one Finnhub account to bound
                 their combined rate (Issue #263).
+
+        Raises:
+            ValueError: `throttle` was supplied together with a `timing` that
+                overrides `rate_clock` or `sleep_fn`. A shared budget can only
+                be measured on one clock, so silently dropping the caller's
+                would leave them believing a timeline that never runs.
         """
+        dead_timing_fields = (
+            timing.throttle_fields_set()
+            if timing is not None and throttle is not None
+            else ()
+        )
+        if dead_timing_fields:
+            msg = (
+                f"EarningsTiming.{'/'.join(dead_timing_fields)} and throttle are "
+                "mutually exclusive: an injected throttle measures its whole "
+                "budget on its own clock (backoff_fn stays injectable)"
+            )
+            raise ValueError(msg)
         self._api_key = api_key
         self._http_get = http_get
         self._clock = clock or SystemClock()

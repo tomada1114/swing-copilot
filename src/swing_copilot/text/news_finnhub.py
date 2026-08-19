@@ -94,15 +94,28 @@ class FinnhubNewsClient:
             api_key: Finnhub API key.
             http_get: Injectable HTTP GET, used by tests to avoid real calls.
             date_clock: Injectable calendar clock for the query's end date.
-            rate_clock: Injectable monotonic clock for rate-limit tests. Unused
-                when `throttle` is injected, since a shared throttle carries
-                the clock its whole budget is measured on.
+            rate_clock: Injectable monotonic clock for the client's own
+                throttle. Mutually exclusive with `throttle`, which carries the
+                clock its whole budget is measured on.
             sleep_fn: Injectable sleep function for rate-limit and retry tests.
+                Still used for retry backoff when `throttle` is injected.
             throttle: Rate-limit budget to count this client's requests
                 against. Defaults to one private to this instance; pass the
                 same instance to every client on one Finnhub account to bound
                 their combined rate (Issue #263).
+
+        Raises:
+            ValueError: Both `rate_clock` and `throttle` were supplied. A
+                shared budget can only be measured on one clock, so silently
+                dropping the caller's would leave them believing a timeline
+                that never runs.
         """
+        if rate_clock is not None and throttle is not None:
+            msg = (
+                "rate_clock and throttle are mutually exclusive: an injected "
+                "throttle measures its whole budget on its own clock"
+            )
+            raise ValueError(msg)
         self._api_key = api_key
         self._http_get = http_get
         self._date_clock = date_clock or SystemClock()

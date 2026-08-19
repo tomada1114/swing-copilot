@@ -226,7 +226,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   並列化した場合に 429・最悪アカウント BAN を招きうる。上限値は
   `FINNHUB_MIN_REQUEST_INTERVAL_SECONDS` として1箇所に持ち、
   「たまたま等しい2つの定数」ではなく「1アカウントの1上限」であることを示す。
-  EDGAR / FRED は別アカウント・別上限なので共有しない。固定した不変条件は
+  EDGAR / FRED は別アカウント・別上限なので共有しない。共有予算は1つの時計の
+  上でしか測れないため、スロットル注入とクライアント自身のレート時計の注入
+  （news の `rate_clock`、earnings の `EarningsTiming.rate_clock` / `sleep_fn`）は
+  排他とし、両方渡されたらコンストラクタで `ValueError` にする——黙って無視すると
+  呼び出し元は動いていないタイムラインを信じたままになる。リトライバックオフの
+  注入口（news の `sleep_fn`、earnings の `EarningsTiming.backoff_fn`）は共有
+  スロットル下でも生きているので注入可能なまま残す。固定した不変条件は
   Issue #253 と同じく「実際にリクエストが出た時刻の間隔」であり、
   2クライアントを交互に呼んだときの発行間隔と、片方のリトライ試行も共有予算を
   消費することを fake clock / fake sleep で検証する

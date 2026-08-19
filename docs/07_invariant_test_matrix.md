@@ -209,9 +209,19 @@ Finnhub の 60 calls/分は API キーの**アカウント**に対する上限�
 なので共有しない）。固定するのは Issue #253 と同じく「実際にリクエストが出た
 時刻の間隔」であって、どちらのクライアントが sleep したかではない。
 
+共有予算は 1 つの時計の上でしか測れないので、スロットル注入と**クライアント
+自身のレート時計の注入**（news の `rate_clock`、earnings の
+`EarningsTiming.rate_clock` / `sleep_fn`）は排他であり、両方渡すと
+`ValueError` で落とす。黙って無視すると、呼び出し元は動いていない
+タイムラインを信じたままになる。リトライバックオフ（news の `sleep_fn`、
+earnings の `EarningsTiming.backoff_fn`）は共有スロットル下でも生きているので
+注入可能なまま残す。
+
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
 | `ratelimit.py` | 共有スロットルを注入した2クライアントを交互に呼んでも発行間隔が 60 calls/分の下限を下回らない | クライアントごとに `_last_request_at` を持ち、合計レートが上限の約2倍になる | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_keeps_alternating_clients_one_interval_apart` |
 | `ratelimit.py` | 片方のクライアントのリトライ試行も共有予算を消費する | 失敗試行をアカウントのリクエストとして数えず、もう一方を早く通す | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_survives_a_retry_inside_one_client` |
 | `ratelimit.py` | 未注入時はインスタンス固有のままで、既存呼び出し元の挙動が変わらない | 既定を暗黙のグローバル共有にし、単体利用のクライアントに無関係な待機を課す | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_without_a_shared_budget_each_client_still_throttles_only_itself` |
 | `pipeline/daily_composition.py` | 日次実行の2つの Finnhub クライアントは同一スロットルを共有する | 生成箇所で別々に `MinIntervalThrottle` を作り、共有が静かに失われる | `tests/pipeline/test_cli.py::TestFinnhubClients::test_both_clients_share_one_account_wide_throttle` |
+| `text/news_finnhub.py`・`data/earnings_finnhub.py` | スロットルとクライアント自身のレート時計の同時注入は `ValueError` で拒否する | 後から渡した方を黙って無視し、呼び出し元が動かない時計を信じる | `tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_rejects_a_rate_clock_beside_a_throttle`、`tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_rejects_throttle_owned_timing_fields` |
+| `text/news_finnhub.py`・`data/earnings_finnhub.py` | バックオフ関数の注入はスロットル注入下でも受け付ける | 排他の範囲を広げすぎ、リトライを fake sleep で試験できなくする | `tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_keeps_sleep_fn_injectable_beside_a_throttle`、`tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_keeps_backoff_fn_injectable_beside_a_throttle` |

@@ -57,6 +57,16 @@ class MinIntervalThrottle:
         the throttle decision started. Recording the pre-sleep reading drops
         the slept interval from the next gap calculation and lets the effective
         request rate exceed 1/`min_interval_seconds` (Issue #253).
+
+        The instant is computed as `now + wait` rather than re-read from the
+        clock after sleeping, which is the trade-off Issue #253 chose
+        deliberately: every rate-limit test's fake clock is written to the
+        contract "one tick per throttled request", so a second reading would
+        consume two ticks per call and starve all of those timelines. The cost
+        is that the OS's sleep overshoot (sub-millisecond) goes uncounted, so
+        the recorded instant is marginally earlier than the true one -- the
+        error is bounded by that overshoot and is the same for every client
+        sharing this throttle.
         """
         now = self._clock()
         issued_at = now

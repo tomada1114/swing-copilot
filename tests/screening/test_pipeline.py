@@ -1508,6 +1508,48 @@ class TestPivotProximityComponent:
         assert [candidate.symbol for candidate in candidates] == ["AAPL", "MSFT"]
         assert candidates[0].metrics["score"] == candidates[1].metrics["score"]
 
+    def test_the_decay_width_tracks_a_raised_chase_pivot_pct(
+        self, settings, monkeypatch
+    ):
+        # Issue #297: the normalization width used to be a hardcoded 5% that
+        # only coincidentally matched the shipped `chase_pivot_pct`. Once the
+        # cap is raised past that old width, candidates spread across the
+        # newly admitted 5%-10% band must still get distinct, non-saturated
+        # scores instead of all tying at 0.0.
+        widened_settings = settings.model_copy(
+            update={
+                "technical_signals": settings.technical_signals.model_copy(
+                    update={
+                        "vcp": settings.technical_signals.vcp.model_copy(
+                            update={"chase_pivot_pct": 0.10}
+                        )
+                    }
+                )
+            }
+        )
+        rows = {
+            "AAAA": (_metrics(rsi14=45.0) | {"close": 106.0}, {"vcp_pivot": 100.0}),
+            "BBBB": (_metrics(rsi14=45.0) | {"close": 108.0}, {"vcp_pivot": 100.0}),
+            "CCCC": (_metrics(rsi14=45.0) | {"close": 109.5}, {"vcp_pivot": 100.0}),
+        }
+        candidates = _component_candidates(
+            widened_settings,
+            monkeypatch,
+            _ComponentCase(
+                rows=rows, ranking=_PIVOT_RANKING, signal_name="vcp_breakout"
+            ),
+        )
+
+        scores = {
+            candidate.symbol: candidate.metrics["score_pivot_proximity"]
+            for candidate in candidates
+        }
+        assert scores["AAAA"] == pytest.approx(0.1 * 0.4)
+        assert scores["BBBB"] == pytest.approx(0.1 * 0.2)
+        assert scores["CCCC"] == pytest.approx(0.1 * 0.05)
+        assert len({scores["AAAA"], scores["BBBB"], scores["CCCC"]}) == 3
+        assert all(value > 0.0 for value in scores.values())
+
 
 class TestMinerviniScoreComponents:
     """Issue #251: `rs_percentile` and `criteria_met` off `SignalHit.metrics`."""

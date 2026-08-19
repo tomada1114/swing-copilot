@@ -230,7 +230,7 @@ class VcpSignalConfig(_StrictModel):
     pattern_days_max: int = Field(default=325, ge=1)
     dry_up_ideal_max: float = Field(default=0.30, gt=0.0, le=1.0)
     dry_up_weak_min: float = Field(default=0.70, gt=0.0, le=1.0)
-    chase_pivot_pct: float = Field(default=0.05, ge=0.0, le=1.0)
+    chase_pivot_pct: float = Field(default=0.05, gt=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate_ranges(self) -> VcpSignalConfig:

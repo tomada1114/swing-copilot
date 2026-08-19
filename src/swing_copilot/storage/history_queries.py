@@ -315,53 +315,6 @@ def get_successful_run(database: Database, run_date: date) -> SuccessfulRun | No
     )
 
 
-@dataclass(frozen=True, slots=True)
-class PriorReportedRun:
-    """The newest earlier run that got far enough to archive a report (#254)."""
-
-    run_id: UUID
-    run_date: date
-    report_path: Path
-
-
-def get_prior_reported_run(
-    database: Database, run_date: date
-) -> PriorReportedRun | None:
-    """Return the newest run before `run_date` that produced a report.
-
-    Backs `daily_runner.py`'s qualitative-analysis gap check (#254): the
-    deterministic pipeline and the skill-side qualitative phase are separate
-    lifecycles, so the only run whose analysis phase can be judged complete
-    or missing is one that already finished. `status='degraded'` counts
-    alongside `'success'` -- a degraded run still archives a report and still
-    exports `analysis_input.json`, so its analysis phase is just as
-    answerable. A `running` row is the current day's own in-flight work and a
-    `failed` one never handed anything to the skill; neither is evidence of a
-    gap. A NULL `report_path` means the run never reached the output step, so
-    it has no artifact directory to inspect.
-
-    Args:
-        database: Shared DuckDB connection owner.
-        run_date: The resolved run date of the run being started; only
-            strictly earlier runs are considered.
-
-    Returns:
-        The newest such run's identity, date, and report path, or `None` when
-        no earlier finished run exists (the first run ever, in particular).
-    """
-    with database.connect() as conn:
-        row = conn.execute(
-            "SELECT run_id, run_date, report_path FROM runs "
-            "WHERE run_date < ? AND status IN ('success', 'degraded') "
-            "AND report_path IS NOT NULL "
-            "ORDER BY run_date DESC, started_at DESC LIMIT 1",
-            [run_date],
-        ).fetchone()
-    if row is None:
-        return None
-    return PriorReportedRun(run_id=row[0], run_date=row[1], report_path=Path(row[2]))
-
-
 def get_run_by_date(database: Database, run_date: date) -> UUID | None:
     """Return the most recently started run at `run_date`, or `None` (P2-11).
 

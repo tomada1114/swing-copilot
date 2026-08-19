@@ -548,12 +548,6 @@ class StateStore:
         """Return the most recently started `status='success'` run on `run_date`."""
         return history_queries.get_successful_run(self._database, run_date)
 
-    def get_prior_reported_run(
-        self, run_date: date
-    ) -> history_queries.PriorReportedRun | None:
-        """Return the newest run before `run_date` that archived a report."""
-        return history_queries.get_prior_reported_run(self._database, run_date)
-
     def record_universe_membership(
         self, snapshot_date: date, members: Sequence[UniverseMember]
     ) -> None:

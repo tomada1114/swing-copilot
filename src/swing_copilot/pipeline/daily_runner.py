@@ -8,14 +8,12 @@ real-adapter composition live in :mod:`daily_composition`.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from swing_copilot.analysis.export import (
-    ANALYSIS_INPUT_FILENAME,
-    ANALYSIS_RESULT_FILENAME,
-)
 from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunStatus
@@ -55,6 +53,10 @@ from swing_copilot.pipeline.daily import (
     _warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
+from swing_copilot.report.incomplete_runs import (
+    IncompleteRunKind,
+    find_incomplete_runs,
+)
 from swing_copilot.storage.config_records import ConfigVersionRecord
 from swing_copilot.storage.tracking_records import OPEN, PROCEED
 
@@ -62,14 +64,19 @@ logger = logging.getLogger(__name__)
 _HISTORICAL_POSITION_NOTICE = (
     "NO_POSITION_DATA: historical replay does not use current position state"
 )
-#: Why an `ANALYSIS_GAP` was recorded. A single value today; kept as a named
-#: constant so the stderr tag and the `metadata_json` record can never drift.
+#: Why an `ANALYSIS_GAP` line was written. A single value today; kept as a
+#: named constant so the stderr tag and the `metadata_json` record cannot drift.
 _ANALYSIS_GAP_REASON = "missing_analysis_result"
 #: Machine-readable stderr marker for the fail-soft gap warning (#254),
 #: shaped like `daily_composition.py`'s `PREFLIGHT_ABORT[<reason>]:` tag.
 _ANALYSIS_GAP_TAG = f"ANALYSIS_GAP[{_ANALYSIS_GAP_REASON}]"
-#: `runs.metadata_json` key holding the previous run's detected gap.
-_ANALYSIS_GAP_METADATA_KEY = "prior_analysis_gap"
+#: `runs.metadata_json` key holding the gaps this run's preflight found.
+_ANALYSIS_GAP_METADATA_KEY = "prior_analysis_gaps"
+#: How far back the preflight looks for an unanswered analysis. Long enough to
+#: survive a weekend plus a holiday (so a Tuesday run still sees the previous
+#: Thursday), short enough that a gap nobody backfilled stops being re-reported
+#: forever -- `copilot-history incomplete` is the tool for the full history.
+_ANALYSIS_GAP_LOOKBACK_DAYS = 7
 
 __all__ = ["DailyDependencies", "run_daily"]
 
@@ -83,6 +90,7 @@ if TYPE_CHECKING:
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.report.daily_brief import SignalPerformanceRow
+    from swing_copilot.report.incomplete_runs import IncompleteRun
     from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import (
@@ -148,68 +156,91 @@ def _held_symbols(
     return symbols | {position.symbol for position in tracked}
 
 
-def _prior_analysis_gap(
-    deps: DailyDependencies, run_date: date
-) -> dict[str, object] | None:
-    """Detect a previous run whose qualitative analysis was never completed (#254).
+def _prior_analysis_gaps(
+    deps: DailyDependencies, run_date: date, *, is_historical: bool
+) -> list[dict[str, object]]:
+    """Report earlier runs whose qualitative analysis was never completed (#254).
 
     `copilot-daily` and the skill-side qualitative phase (`analysis_result.json`
     plus `copilot-ingest-analysis`) are separate lifecycles: the pipeline can
     finish `success` while the analysis that gives the run its verdicts never
-    lands, and until now nothing noticed. The next run's preflight is the first
-    moment the previous day's phase is unambiguously over, so this is where the
+    lands, and nothing used to notice. The next run's preflight is the first
+    moment an earlier day's phase is unambiguously over, so this is where the
     absence becomes observable.
 
-    Only the *exported* case counts as a gap. A finished run that never wrote
-    `analysis_input.json` (no candidates, or step 5 produced no text) handed the
-    skill nothing to answer, so its missing `analysis_result.json` is correct
-    rather than lost work. The artifact directory is derived from the stored
-    `report_path` -- `<date>/<run_id>.md` and `<date>/<run_id>/` are siblings
-    written by the same run -- so a later `output_dir` change cannot make an
-    older run look unanalyzed.
+    The scan itself is Issue #129's `find_incomplete_runs`, whose `since=`
+    argument exists for exactly this caller. Reusing it is what makes the
+    same-day double start come out right: when one `run_date` has two run
+    directories and only one holds the analysis, that date is
+    `SAME_DAY_SUPERSEDED` -- not a gap -- regardless of which sibling started
+    later. Only `ANALYSIS_MISSING` is reported here, as in
+    `dashboard/queries.py`: `PIPELINE_UNFINISHED` is already visible in
+    `runs.status`, and `RUN_ROW_MISSING` is a database/archive divergence that
+    `copilot-history incomplete` is the right place to work through.
 
-    Fail-soft by contract: a missing analysis yesterday is a reporting fact
-    about yesterday, never a reason to stop today's run, and neither is a
-    failure of this check itself.
+    A historical replay (`--as-of`) reports nothing. Replaying a recent date
+    writes a report and an `analysis_input.json` that no skill session will
+    ever answer, so counting replays would make the next live run record a
+    permanent, false gap for a day whose real analysis is fine.
+
+    Fail-soft by contract: an unanswered analysis is a fact about a past day,
+    never a reason to stop today's run, and neither is a failure of this check.
 
     Args:
-        deps: Run dependencies; only `state_store` is read.
-        run_date: The resolved run date of the run being started.
+        deps: Run dependencies; `state_store` (read only) and `output_dir`.
+        run_date: The resolved run date of the run being started. Only
+            strictly earlier dates are reported -- today's own analysis is
+            not due yet, including for a `--allow-same-day-rerun` sibling.
+        is_historical: Whether this run replays an explicit `--as-of` date.
 
     Returns:
-        A JSON-serializable record of the gap for `runs.metadata_json`, or
-        `None` when there is no earlier finished run, its analysis is present,
-        it exported nothing to analyze, or the check itself failed.
+        One JSON-serializable record per gap for `runs.metadata_json`, newest
+        first; empty when there is nothing to report or the check failed.
     """
+    if is_historical:
+        return []
     try:
-        prior = deps.state_store.get_prior_reported_run(run_date)
-        if prior is None:
-            return None
-        run_directory = prior.report_path.parent / str(prior.run_id)
-        if not (run_directory / ANALYSIS_INPUT_FILENAME).is_file():
-            return None
-        expected = run_directory / ANALYSIS_RESULT_FILENAME
-        if expected.is_file():
-            return None
+        incomplete = find_incomplete_runs(
+            deps.state_store.database,
+            Path(deps.output_dir),
+            since=run_date - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS),
+        )
     except Exception:
         logger.exception("prior-run analysis gap check failed: continuing without it")
-        return None
-    # The `ANALYSIS_GAP[...]` prefix mirrors the `PREFLIGHT_ABORT[...]` stderr
-    # convention in `daily_composition.py`: one machine-readable tag an
-    # operator or skill can grep for, on a line that is otherwise prose.
-    logger.warning(
-        "%s: run_date=%s run_id=%s expected=%s",
-        _ANALYSIS_GAP_TAG,
-        prior.run_date.isoformat(),
-        prior.run_id,
-        expected,
+        return []
+    gaps = [
+        run
+        for run in incomplete
+        if run.kind is IncompleteRunKind.ANALYSIS_MISSING and run.run_date < run_date
+    ]
+    for gap in gaps:
+        _emit_analysis_gap(gap)
+    return [
+        {
+            "reason": _ANALYSIS_GAP_REASON,
+            "run_id": str(gap.run_id),
+            "run_date": gap.run_date.isoformat(),
+            "run_directory": str(gap.path),
+        }
+        for gap in gaps
+    ]
+
+
+def _emit_analysis_gap(gap: IncompleteRun) -> None:
+    """Write one gap to stderr as a line that starts with the tag.
+
+    Deliberately not `logger.warning`: the `ANALYSIS_GAP[<reason>]:` prefix is
+    a machine-readable contract (Issue #273 teaches the `swing-daily` skill to
+    branch on it), and a logging formatter would push a timestamp, a level, and
+    a logger name in front of it, while `--log-level ERROR` would drop it
+    entirely. Writing the raw line keeps it anchored at column zero the way
+    `daily_composition.py`'s `PREFLIGHT_ABORT[<reason>]:` line is, which also
+    goes to stderr without passing through logging.
+    """
+    sys.stderr.write(
+        f"{_ANALYSIS_GAP_TAG}: run_date={gap.run_date.isoformat()} "
+        f"run_id={gap.run_id} run_directory={gap.path}\n"
     )
-    return {
-        "reason": _ANALYSIS_GAP_REASON,
-        "run_id": str(prior.run_id),
-        "run_date": prior.run_date.isoformat(),
-        "expected_path": str(expected),
-    }
 
 
 def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionally linear
@@ -265,7 +296,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     # Checked after the rerun guard so an aborted rerun never emits a warning
     # about a day it is not going to record anyway.
-    analysis_gap = _prior_analysis_gap(deps, run_date)
+    analysis_gaps = _prior_analysis_gaps(deps, run_date, is_historical=is_historical)
 
     config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
     # Issue #189: record what that hash stands for before anything reads it.
@@ -282,11 +313,11 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         )
     )
     metadata = _run_metadata(deps)
-    if analysis_gap is not None:
-        # Recorded on *this* run's row rather than the gapped one: the earlier
-        # row is finished history, and `metadata_json` already exists for
-        # exactly this kind of non-secret run fact (no schema change needed).
-        metadata[_ANALYSIS_GAP_METADATA_KEY] = analysis_gap
+    if analysis_gaps:
+        # Recorded on *this* run's row rather than the gapped ones: those rows
+        # are finished history, and `metadata_json` already exists for exactly
+        # this kind of non-secret run fact (no schema change needed).
+        metadata[_ANALYSIS_GAP_METADATA_KEY] = analysis_gaps
     run_id = deps.state_store.start_run(
         run_date,
         mode,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,9 +65,30 @@ def _fingerprint(paths: tuple[Path, ...]) -> tuple[int | None, ...]:
     return tuple(_mtime_ns(path) for path in paths)
 
 
+def _format_mtime(mtime_ns: int | None) -> str:
+    """Render one watched mtime for the guard's diagnostic message."""
+    if mtime_ns is None:
+        return "absent"
+    stamp = datetime.fromtimestamp(mtime_ns / 1_000_000_000, tz=UTC).astimezone()
+    return f"{stamp.isoformat()} (mtime_ns={mtime_ns})"
+
+
+def _describe_changes(
+    paths: tuple[Path, ...],
+    before: tuple[int | None, ...],
+    after: tuple[int | None, ...],
+) -> str:
+    """List every watched path whose mtime moved, with its before/after value."""
+    return "\n".join(
+        f"  {path}: {_format_mtime(was)} -> {_format_mtime(now)}"
+        for path, was, now in zip(paths, before, after, strict=True)
+        if was != now
+    )
+
+
 @contextmanager
 def _guard_repo_directory(directory: Path, *watched: Path) -> Iterator[None]:
-    """Fail the test that writes into a repository directory it does not own.
+    """Fail the running test when a repository directory it does not own changes.
 
     Filesystem tests must stay in `tmp_path`. This catches the omission the
     socket blocker cannot: a default output path that resolves to real,
@@ -78,28 +100,56 @@ def _guard_repo_directory(directory: Path, *watched: Path) -> Iterator[None]:
     `write_markdown_report`, which always rewrites `reports/latest.md` even
     when the dated subdirectory already exists, and of every DuckDB file under
     `data/`.
+
+    An mtime fingerprint proves *that* the directory changed, never *who*
+    changed it: this working copy is also the unattended execution environment,
+    so the 18:30 routine writing `data/copilot.duckdb` and `reports/latest.md`
+    trips the guard in whatever unrelated tests happen to be in flight
+    (observed 2026-08, Issue #257). The message therefore names both causes and
+    reports the evidence -- which watched paths moved, and their mtimes before
+    and after -- instead of asserting that the test is at fault.
     """
     paths = (directory, *watched)
     before = _fingerprint(paths)
     yield
-    if _fingerprint(paths) != before:
+    after = _fingerprint(paths)
+    if after != before:
         msg = (
-            f"Test wrote into the repository's real {directory}/ directory. "
-            "Pass an isolated path (tmp_path) instead."
+            f"The repository's real {directory}/ directory changed while this "
+            "test ran. An mtime fingerprint cannot tell who wrote, so weigh "
+            "both causes:\n"
+            "  (1) this test wrote there -- pass an isolated path (tmp_path), "
+            "or monkeypatch.chdir(tmp_path) before calling a composition root "
+            "that uses the repo-relative defaults;\n"
+            "  (2) a concurrent external process wrote there -- the scheduled "
+            "18:30 daily routine, a manual `copilot-daily` run, or anything "
+            "else sharing this checkout. Then the test is innocent: check the "
+            "timestamps below against that process and re-run once it is "
+            "done.\n"
+            "Changed watched paths (mtime before -> after):\n"
+            + _describe_changes(paths, before, after)
         )
         raise AssertionError(msg)
 
 
 @pytest.fixture(autouse=True)
 def _block_repo_report_writes() -> Iterator[None]:
-    """Fail the test that writes into the repository's real `reports/`."""
+    """Fail when the repository's real `reports/` changes during this test.
+
+    The mtime fingerprint cannot prove this test is the writer -- see
+    `_guard_repo_directory`'s docstring.
+    """
     with _guard_repo_directory(_REPO_REPORTS_DIR, _REPO_REPORTS_DIR / "latest.md"):
         yield
 
 
 @pytest.fixture(autouse=True)
 def _block_repo_data_writes() -> Iterator[None]:
-    """Fail the test that writes into the repository's real `data/`."""
+    """Fail when the repository's real `data/` changes during this test.
+
+    The mtime fingerprint cannot prove this test is the writer -- see
+    `_guard_repo_directory`'s docstring.
+    """
     with _guard_repo_directory(
         _REPO_DATA_DIR,
         _REPO_DATA_DIR / "copilot.duckdb",

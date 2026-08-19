@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from swing_copilot.analysis.filing_selection import (
+    _MIN_FILING_CHARS,
     _allocate_section_chars,
     _shape_exhibit,
     select_filing_inputs,
@@ -1101,6 +1102,138 @@ class TestPerSymbolBudgetAllocationOrder:
         )
         # Budget for everything, so ordering is the only thing under test.
         assert {_selection_mode(entry) for entry in inputs} == {"full"}
+
+
+class TestPerSymbolMinimumGuarantee:
+    """Issue #255: priority decides the share, never whether a filing is read.
+
+    The shipped ceilings are 120,000 per filing and 240,000 per symbol --
+    exactly twice -- so two filings that each fill the per-filing ceiling
+    consumed the whole symbol budget and the third exported at 10 characters
+    (HST, 2026-08-14) or 0 (UDR). Every filing therefore reserves
+    `_MIN_FILING_CHARS` (or its own length, when shorter) before the leaders
+    are served beyond that reservation.
+    """
+
+    @pytest.mark.parametrize(
+        ("length", "symbol"),
+        [(6_670, "HST"), (4_074, "UDR")],
+        ids=["hst", "udr"],
+    )
+    def test_a_small_third_filing_survives_two_ceiling_filling_filings(
+        self, length: int, symbol: str
+    ) -> None:
+        """The 2026-08-14 run's two starved 8-K bodies, at their real lengths."""
+        items = [
+            _filing("edgar:8k-earnings", "8-K - Host", 25, _huge_earnings_eight_k()),
+            _filing("edgar:10q", "10-Q - Host", 20, _huge_ten_q()),
+            _filing("edgar:8k-old", "8-K - Host", 5, _dividend_eight_k(length)),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=120_000, per_symbol_chars=240_000
+        )
+
+        old = _input_of(inputs, "edgar:8k-old")
+        assert old.text == _dividend_eight_k(length), symbol
+        assert _selection_mode(old) == "full"
+        assert sum(len(entry.text) for entry in inputs) <= 240_000
+
+    def test_the_leading_filings_still_take_everything_but_the_reservation(
+        self,
+    ) -> None:
+        """The guarantee is a floor for the tail, not a share-out of the budget."""
+        items = [
+            _filing("edgar:8k-earnings", "8-K - Host", 25, _huge_earnings_eight_k()),
+            _filing("edgar:10q", "10-Q - Host", 20, _huge_ten_q()),
+            _filing("edgar:8k-old", "8-K - Host", 5, _dividend_eight_k(6_670)),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=120_000, per_symbol_chars=240_000
+        )
+
+        release = _input_of(inputs, "edgar:8k-earnings")
+        quarterly = _input_of(inputs, "edgar:10q")
+        # The earnings 8-K keeps the whole per-filing ceiling; only the 10-Q,
+        # served after it, pays for the 6,670 characters held back.
+        assert len(release.text) >= 119_000
+        assert len(quarterly.text) == 240_000 - len(release.text) - 6_670
+
+    def test_a_long_third_filing_gets_the_minimum_rather_than_nothing(self) -> None:
+        """A filing longer than the guarantee is truncated, never omitted."""
+        items = [
+            _filing("edgar:8k-earnings", "8-K - Host", 25, _huge_earnings_eight_k()),
+            _filing("edgar:10q", "10-Q - Host", 20, _huge_ten_q()),
+            _filing("edgar:10k", "10-K - Host", 5, "Annual report text. " * 20_000),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=120_000, per_symbol_chars=240_000
+        )
+
+        annual = _input_of(inputs, "edgar:10k")
+        assert len(annual.text) >= _MIN_FILING_CHARS
+        assert _selection_mode(annual) == "head_fallback"
+        assert sum(len(entry.text) for entry in inputs) <= 240_000
+
+    def test_a_filing_shorter_than_the_guarantee_reserves_only_its_own_length(
+        self,
+    ) -> None:
+        items = [
+            _filing("edgar:10k", "10-K - Host", 25, "Annual report text. " * 20_000),
+            _filing("edgar:8k-old", "8-K - Host", 5, _dividend_eight_k(500)),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=120_000, per_symbol_chars=120_000
+        )
+
+        assert _selection_mode(_input_of(inputs, "edgar:8k-old")) == "full"
+        # 119,500, not 112,000: the tail held back 500, not the full guarantee.
+        assert len(_input_of(inputs, "edgar:10k").text) == 120_000 - 500
+
+    def test_a_ceiling_too_small_for_every_guarantee_serves_them_in_priority_order(
+        self,
+    ) -> None:
+        """Deterministic starvation: full minimum, the remainder, then zero."""
+        annual = "Annual report text. " * 20_000
+        items = [
+            _filing("edgar:new", "10-K - Host", 25, annual),
+            _filing("edgar:mid", "10-K - Host", 20, annual),
+            _filing("edgar:old", "10-K - Host", 15, annual),
+        ]
+
+        inputs = select_filing_inputs(
+            items, per_filing_chars=100_000, per_symbol_chars=_MIN_FILING_CHARS + 4_000
+        )
+
+        assert len(_input_of(inputs, "edgar:new").text) == _MIN_FILING_CHARS
+        assert len(_input_of(inputs, "edgar:mid").text) == 4_000
+        assert _input_of(inputs, "edgar:old").text == ""
+        assert (
+            _selection_mode(_input_of(inputs, "edgar:old")) == "omitted_symbol_budget"
+        )
+
+
+def _huge_earnings_eight_k() -> str:
+    """An earnings 8-K far past the per-filing ceiling (HST: 380,267 chars)."""
+    return _eight_k([("EX-99.1", "release.htm", _paragraphs(8_000, "Release"))])
+
+
+def _huge_ten_q() -> str:
+    """A 10-Q far past the per-filing ceiling (HST: 269,474 chars)."""
+    return "Condensed consolidated financial statements. " * 6_000
+
+
+def _dividend_eight_k(length: int) -> str:
+    """A small non-earnings 8-K of exactly `length` characters.
+
+    Item 8.01 and no `EX-99*` exhibit, so it lands in the trailing allocation
+    tier -- the position that used to export at 10 characters or fewer.
+    """
+    body = "Item 8.01 Other Events. The board declared a dividend. "
+    return (body * (length // len(body) + 1))[:length]
 
 
 def _input_of(inputs: list[FilingInput], source_id: str) -> FilingInput:

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ view.symbol }} · {{ view.run.label }} · swing-copilot{% endblock %}
+
+{% block main %}
+<section class="symhead">
+  <div>
+    <span class="eyebrow">symbol</span>
+    <p class="bigticker mono">{{ view.symbol }}</p>
+    <p class="symhead-sub">{{ m.cell(view.gics_sector) }}<span class="strategy">{{ view.strategy_key }}</span></p>
+  </div>
+  <div class="symhead-verdict">
+    <span class="eyebrow">verdict</span>
+    {{ m.badge(view.verdict) }}
+    <p class="symhead-supply">ニュース供給 {{ m.cell(view.news_supply_level) }}</p>
+  </div>
+  <div class="symhead-meta">
+    <a class="mono backlink" href="/runs/{{ view.run.run_id }}">← {{ view.run.label }} の概観</a>
+    <span class="badge badge--{{ view.status_badge.tone }}">{{ view.status_badge.text }}</span>
+  </div>
+</section>
+
+<div class="split">
+  <section class="panel">
+    {{ m.sec("判断根拠", "v_verdict_reasons") }}
+    {% if view.reasons %}
+    <ol class="reasons">
+      {% for r in view.reasons %}
+      <li>
+        <div class="reason-meta">
+          <span class="reason-idx mono">{{ "%02d"|format(r.index) }}</span>
+          <span class="reason-basis">{{ m.cell(r.basis) }}</span>
+          <span class="reason-src">source {{ m.cell(r.source_id_count) }}</span>
+        </div>
+        <p class="reason-text">{{ r.text }}</p>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">この run の verdict 理由はまだ DuckDB に無い。verdicts は次の run の retro collect で取り込まれる。</p>
+    {% endif %}
+  </section>
+
+  <div class="side">
+    <section class="panel">
+      {{ m.sec("当否", "verdict_outcomes") }}
+      {{ m.outcomes(view.outcomes, view.outcomes_fallback) }}
+      {{ m.hint(view.outcome_hint) }}
+    </section>
+
+    <section class="panel">
+      {{ m.sec("スコア内訳", "v_candidates") }}
+      {{ m.stats(view.score_components) }}
+    </section>
+
+    <section class="panel">
+      {{ m.sec("テクニカル生値", "v_candidates.metrics_json") }}
+      {{ m.stats(view.technicals) }}
+    </section>
+
+    <section class="panel">
+      {{ m.sec("実行バケット", "candidates.execution_*") }}
+      {{ m.stats(view.execution) }}
+    </section>
+
+    <section class="panel">
+      {{ m.sec("リスク", "risk_assessments") }}
+      {{ m.stats(view.risk) }}
+    </section>
+
+    <section class="panel">
+      {{ m.sec("追跡状況", "v_tracked_positions") }}
+      {% if view.tracking %}
+      <div class="regime-verdicts">
+        <div><span class="eyebrow">side</span>{{ m.badge(view.tracking.recommendation) }}</div>
+        <div><span class="eyebrow">state</span>{{ m.badge(view.tracking.status) }}</div>
+        <div><span class="eyebrow">exit</span>{{ m.cell(view.tracking.exit_reason) }}</div>
+      </div>
+      {{ m.stats(view.tracking.stats) }}
+      {% else %}
+      <p class="empty">この verdict には仮想ポジションが建っていない（追跡未開始）。</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block legend %}{{ m.legend(view.legend) }}{% endblock %}

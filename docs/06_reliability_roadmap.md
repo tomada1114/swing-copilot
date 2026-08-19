@@ -32,9 +32,10 @@ swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fa
 | D6 | `PaperJournal.summarize_performance()` が実装済みなのに未接続。判断履歴の読み出し CLI がない | `paper/journal.py`, `paper/cli.py` |
 | D7 | 口座レベルのリスク制御（総リスク量・実現損失上限・決算近接）が皆無 | `risk/checks.py` |
 
-HTML レポートは commit a30f670 で削除済み。terminal/markdown/discord が `DailyBrief`
-単一モデルを共有する現行構成を維持し、**HTML は再導入しない**（決定記録）。
-Markdown が `reports/` に原子的に残るため「実行結果の永続化」は満たされている。
+日次 run の出力は terminal/markdown/discord が `DailyBrief` 単一モデルを共有する
+構成で、run 自体は HTML を生成しない。Markdown が `reports/` に原子的に残るため
+「実行結果の永続化」は満たされている。蓄積済みデータの振り返りは、別プロセスの
+読み取り専用ビューア `copilot-dashboard` が担う（`docs/05_ui_design.md` 10節）。
 
 ## 2. 改修原則
 

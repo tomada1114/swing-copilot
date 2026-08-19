@@ -38,6 +38,7 @@ CLI_ERROR_CONVERSION_MODULES = {
     "copilot-verify-analysis": "src/swing_copilot/analysis/verify_cli.py",
     "copilot-retro": "src/swing_copilot/retro/cli.py",
     "copilot-track": "src/swing_copilot/tracking/cli.py",
+    "copilot-dashboard": "src/swing_copilot/dashboard/cli.py",
 }
 
 

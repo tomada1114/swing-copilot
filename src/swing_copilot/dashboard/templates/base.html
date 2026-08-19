@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}swing-copilot{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<a class="skip-link" href="#main">本文へ</a>
+<header class="masthead">
+  <a class="wordmark" href="/"><span class="wordmark-a">swing</span><span class="wordmark-b">copilot</span></a>
+
+  {% if chrome.runs %}
+  <details class="switcher">
+    <summary>
+      <span class="sw-eyebrow">run</span>
+      {% if chrome.current %}
+      <span class="mono sw-current">{{ chrome.current.label }}</span>
+      <span class="badge badge--{{ chrome.current.status_tone }}">{{ chrome.current.status }}</span>
+      {% else %}
+      <span class="mono sw-current">選択なし</span>
+      {% endif %}
+      <span class="sw-caret" aria-hidden="true">▾</span>
+    </summary>
+    <div class="sw-menu">
+      {% for r in chrome.runs %}
+      <a class="sw-item{% if r.run_id == chrome.current_run_id %} is-current{% endif %}" href="/runs/{{ r.run_id }}">
+        <span class="mono sw-date">{{ r.label }}</span>
+        <span class="sw-mode">{{ r.mode }}</span>
+        <span class="badge badge--{{ r.status_tone }}">{{ r.status }}</span>
+      </a>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  <nav class="nav">
+    {% if chrome.current_run_id %}
+    <a class="nav-link{% if chrome.nav == 'run' %} is-active{% endif %}" href="/runs/{{ chrome.current_run_id }}">run 概観</a>
+    {% endif %}
+    <a class="nav-link{% if chrome.nav == 'history' %} is-active{% endif %}" href="/history">推移</a>
+  </nav>
+</header>
+
+<main id="main">
+{% block main %}{% endblock %}
+{% block legend %}{% endblock %}
+</main>
+
+<footer class="colophon">
+  <p>正本は DuckDB。この画面は読み取り専用で、run も判断も一切書き換えない。</p>
+</footer>
+</body>
+</html>

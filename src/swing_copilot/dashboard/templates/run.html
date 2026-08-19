@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ view.run.label }} · swing-copilot{% endblock %}
+
+{% block main %}
+<section class="runhead">
+  <div class="runhead-date">
+    <span class="eyebrow">run date</span>
+    <p class="bigdate mono">{{ view.run.label }}</p>
+  </div>
+  <div class="runhead-meta">
+    <span class="badge badge--{{ view.status_badge.tone }}">{{ view.status_badge.text }}</span>
+    <span class="chip">{{ view.run.mode }}</span>
+    <span class="chip mono" title="config_hash">cfg {{ view.run.short_hash }}</span>
+    <span class="chip mono chip--faint" title="run_id">{{ view.run.run_id }}</span>
+  </div>
+  <div class="runhead-counts">
+    <div class="count"><span class="count-n">{{ view.rows|length }}</span><span class="count-l">候補</span></div>
+    <div class="count"><span class="count-n good">{{ view.proceed_count }}</span><span class="count-l">proceed</span></div>
+    <div class="count"><span class="count-n">{{ view.skip_count }}</span><span class="count-l">skip</span></div>
+    <div class="count"><span class="count-n">{{ view.rejection_total }}</span><span class="count-l">落選</span></div>
+  </div>
+</section>
+
+{% if view.no_trade %}
+<p class="banner banner--warning"><strong>本日は取引なし（定性判断）</strong>この run の verdict は no_trade で確定している。</p>
+{% endif %}
+
+{% if view.analysis_pending_note %}
+<p class="banner banner--pending"><strong>分析待ち</strong>{{ view.analysis_pending_note }}</p>
+{% endif %}
+
+<section class="panel">
+  {{ m.sec("レジーム", "regime_snapshots") }}
+  {{ m.hint(view.regime_hint) }}
+  {% if view.regime %}
+  <div class="regime-verdicts">
+    <div><span class="eyebrow">gate</span>{{ m.badge(view.regime.gate) }}</div>
+    <div><span class="eyebrow">drawdown</span>{{ m.badge(view.regime.dd_level) }}</div>
+    <div><span class="eyebrow">data quality</span>{{ m.cell(view.regime.data_quality) }}</div>
+  </div>
+  {{ m.stats(view.regime.stats) }}
+  {% else %}
+  <p class="empty">この run にはレジーム snapshot が記録されていない。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  {{ m.sec("候補と判断", "v_candidates × v_verdict_scorecard") }}
+  {% if view.verdict_hint %}{{ m.hint(view.verdict_hint) }}{% endif %}
+  {{ m.hint(view.outcome_hint) }}
+  {% if view.rows %}
+  <div class="table-scroll">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>銘柄</th><th>判断</th><th class="num">rank</th><th class="num">score</th>
+          {% for c in view.rows[0].score_components %}<th class="num">{{ c.label }}</th>{% endfor %}
+          <th>リスク</th><th>バインド制約</th><th>当否</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in view.rows %}
+        <tr>
+          <th scope="row"><a class="ticker mono" href="/runs/{{ view.run.run_id }}/symbols/{{ row.symbol }}">{{ row.symbol }}</a><span class="strategy">{{ row.strategy_key }}</span></th>
+          <td>{{ m.badge(row.verdict) }}</td>
+          <td class="num">{{ m.cell(row.rank) }}</td>
+          <td class="num">{{ m.cell(row.score) }}</td>
+          {% for c in row.score_components %}<td class="num faint">{{ m.cell(c.value) }}</td>{% endfor %}
+          <td>{{ m.badge(row.risk_status) }}</td>
+          <td class="wrap">{{ m.cell(row.binding_constraint) }}</td>
+          <td>{{ m.outcomes(row.outcomes, row.outcomes_fallback) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">この run は候補も verdict も記録していない。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  {{ m.sec("落選銘柄", "screening_rejections") }}
+  {% if view.rejection_groups %}
+  <p class="panel-lede">{{ view.rejection_total }} 銘柄が候補に載らなかった。段階 → 理由コードの順で畳んである。</p>
+  {% for g in view.rejection_groups %}
+  <details class="reject">
+    <summary>
+      <span class="reject-stage">{{ g.stage_label }}</span>
+      <span class="mono reject-code">{{ g.reason_code }}</span>
+      <span class="reject-count">{{ g.count }}</span>
+      <span class="reject-bar" style="--w: {{ (100 * g.count / view.rejection_total)|round(1) }}%"></span>
+    </summary>
+    <p class="reject-symbols mono">{{ g.symbols|join(" ") }}</p>
+  </details>
+  {% endfor %}
+  {% else %}
+  <p class="empty">この run は落選記録を残していない。</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block legend %}{{ m.legend(view.legend) }}{% endblock %}

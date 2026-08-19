@@ -67,7 +67,7 @@ nav:
       - Project Plan: 02_project_plan.md
       - Basic Design: 03_basic_design.md
       - Detailed Design: 04_detailed_design.md
-      - UI Design: 05_ui_design.md
+      - UI and Dashboard Design: 05_ui_design.md
       - Reliability Roadmap: 06_reliability_roadmap.md
       - Invariant Test Matrix: 07_invariant_test_matrix.md
       - Architecture Review 2026-08: 08_architecture_review_2026-08.md

@@ -1,0 +1,68 @@
+{# Rendering primitives. Every branch here is presentational; the question
+   "is this value missing, and why" was already answered in the view model. #}
+
+{% macro cell(c) -%}
+{% if c.absence %}<span class="null" title="{{ c.title }}">{{ c.text }}</span>
+{%- else %}<span class="val {{ c.tone }}">{{ c.text }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro badge(b) -%}
+<span class="badge badge--{{ b.tone }}"{% if b.title %} title="{{ b.title }}"{% endif %}>{{ b.text }}</span>
+{%- endmacro %}
+
+{# A "how to read this" caption. The text itself lives in
+   dashboard/guidance.py so a definition is never restated in two places. #}
+{% macro hint(h) -%}
+<div class="hint">
+  <p class="hint-summary">{{ h.summary }}</p>
+  {% if h.details %}
+  <details class="hint-more">
+    <summary>{{ h.details_label }}</summary>
+    <ul>
+      {% for line in h.details %}<li>{{ line }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro sec(name, source) -%}
+<h2 class="sec"><span class="sec-name">{{ name }}</span><span class="sec-src">{{ source }}</span></h2>
+{%- endmacro %}
+
+{% macro stats(items) -%}
+<dl class="stats">
+  {% for item in items %}
+  <div class="stat">
+    <dt>{{ item.label }}</dt>
+    <dd>{{ cell(item.value) }}</dd>
+    {% if item.note %}<p class="stat-note">{{ item.note }}</p>{% endif %}
+  </div>
+  {% endfor %}
+</dl>
+{%- endmacro %}
+
+{% macro outcomes(items, fallback) -%}
+{% if items %}
+<ul class="outcomes">
+  {% for o in items %}
+  <li><span class="horizon">{{ o.horizon_days }}d</span>{{ badge(o.classification) }}{{ cell(o.forward_return) }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+{{ cell(fallback) }}
+{% endif %}
+{%- endmacro %}
+
+{% macro legend(tokens) -%}
+{% if tokens %}
+<section class="legend">
+  <h2 class="sec"><span class="sec-name">このページの NULL 語彙</span><span class="sec-src">formatting.NULL_TOKENS</span></h2>
+  <dl>
+    {% for t in tokens %}
+    <div><dt><span class="null">{{ t.label }}</span></dt><dd>{{ t.explanation }}</dd></div>
+    {% endfor %}
+  </dl>
+</section>
+{% endif %}
+{%- endmacro %}

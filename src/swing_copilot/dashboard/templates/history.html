@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}推移 · swing-copilot{% endblock %}
+
+{% block main %}
+<section class="panel">
+  {{ m.sec("判定成績", "v_verdict_scorecard") }}
+  {{ m.hint(view.classification_hint) }}
+  {% if view.panels %}
+  <ul class="chart-legend">
+    <li><span class="swatch swatch--good"></span>HIT</li>
+    <li><span class="swatch swatch--quiet"></span>NEUTRAL</li>
+    <li><span class="swatch swatch--serious"></span>MISS_MILD</li>
+    <li><span class="swatch swatch--critical"></span>MISS_SEVERE</li>
+  </ul>
+  <div class="facets">
+    {% for p in view.panels %}
+    <figure class="facet">
+      <figcaption><span class="facet-side">{{ p.recommendation }}</span><span class="facet-h mono">{{ p.horizon_days }}営業日</span><span class="facet-n">{{ p.total }}件</span></figcaption>
+      <div class="chart-scroll">{{ classification_chart(p) | safe }}</div>
+    </figure>
+    {% endfor %}
+  </div>
+
+  <details class="tableview">
+    <summary>同じ数字を表で見る</summary>
+    <div class="table-scroll">
+      <table class="grid">
+        <thead><tr><th>判断</th><th class="num">horizon</th><th>run date</th><th class="num">件数</th><th>内訳</th></tr></thead>
+        <tbody>
+          {% for p in view.panels %}
+          {% for b in p.bars %}
+          <tr>
+            <td>{{ p.recommendation }}</td>
+            <td class="num mono">{{ p.horizon_days }}d</td>
+            <td class="mono">{{ b.run_date }}</td>
+            <td class="num mono">{{ b.total }}</td>
+            <td class="mono faint">{% for name, count in b.counts %}{{ name }}={{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</td>
+          </tr>
+          {% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% else %}
+  <p class="empty">満期を迎えた verdict がまだ無い。5営業日判定が出るまで、この節は空のままになる。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  {{ m.sec("レジーム変遷", "regime_snapshots") }}
+  {{ m.hint(view.regime_hint) }}
+  {% if view.regime_points %}
+  <div class="chart-scroll">{{ regime_chart(view.regime_points) | safe }}</div>
+  <ul class="chart-legend">
+    <li><span class="swatch swatch--quiet"></span>NORMAL</li>
+    <li><span class="swatch swatch--warning"></span>CAUTION</li>
+    <li><span class="swatch swatch--serious"></span>HIGH</li>
+    <li><span class="swatch swatch--critical"></span>SEVERE</li>
+  </ul>
+  {% else %}
+  <p class="empty">レジーム snapshot がまだ記録されていない。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  {{ m.sec("追跡台帳・建玉中", "v_tracked_positions") }}
+  {{ m.hint(view.ledger_hint) }}
+  {% if view.open_positions %}
+  <div class="table-scroll">
+    <table class="grid">
+      <thead><tr><th>銘柄</th><th>side</th><th>建玉日</th><th class="num">建値</th><th class="num">ストップ</th><th class="num">経過</th><th>run</th></tr></thead>
+      <tbody>
+        {% for row in view.open_positions %}
+        <tr>
+          <th scope="row"><a class="ticker mono" href="/runs/{{ row.run_id }}/symbols/{{ row.symbol }}">{{ row.symbol }}</a></th>
+          <td>{{ m.badge(row.recommendation) }}</td>
+          <td class="mono">{{ m.cell(row.entry_date) }}</td>
+          <td class="num">{{ m.cell(row.entry_price) }}</td>
+          <td class="num">{{ m.cell(row.stop_price) }}</td>
+          <td class="num">{{ m.cell(row.days_held) }}</td>
+          <td class="mono faint">{{ m.cell(row.run_date) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">建玉中の仮想ポジションは無い。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  {{ m.sec("追跡台帳・手仕舞い済みの集計", "v_tracked_positions") }}
+  <div class="table-scroll">
+    <table class="grid">
+      <thead><tr><th>判断</th><th class="num">決済数</th><th class="num">勝ち</th><th class="num">勝率</th><th class="num">平均</th><th class="num">中央値</th></tr></thead>
+      <tbody>
+        {% for s in view.closed_summaries %}
+        <tr>
+          <th scope="row">{{ s.recommendation }}</th>
+          <td class="num mono">{{ s.closed }}</td>
+          <td class="num mono">{{ s.wins }}</td>
+          <td class="num">{{ m.cell(s.win_rate) }}</td>
+          <td class="num">{{ m.cell(s.mean_return) }}</td>
+          <td class="num">{{ m.cell(s.median_return) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+
+{% block legend %}{{ m.legend(view.legend) }}{% endblock %}

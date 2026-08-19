@@ -35,6 +35,33 @@ research.ensure_views(path)     # ビュー未作成の古い DB を修復
 
 ::: swing_copilot.research.frames
 
+## `copilot-dashboard` と閲覧用ダッシュボード
+
+`dashboard/`（`copilot-dashboard`）は、同じ蓄積データをブラウザで俯瞰する
+読み取り専用ビューアである。3画面（run概観・銘柄詳細・推移）とrun切替だけを持ち、
+書き込みルートを一切持たない。画面構成・欠損値の表示規約・起動方法は
+[05. CLI・Markdown・ダッシュボード出力設計](05_ui_design.md)の10節を正とする。
+
+```bash
+uv run copilot-dashboard                                   # 127.0.0.1:8787
+uv run copilot-dashboard --db data/copilot.duckdb --port 9000
+```
+
+```python
+from pathlib import Path
+
+from swing_copilot.dashboard import create_app
+
+app = create_app(db_path=Path("data/copilot.duckdb"), reports_root=Path("reports"))
+```
+
+`create_app()` はDBとreportsディレクトリを注入するアプリケーションファクトリで、
+テストは実データに触れずに全ルートを検証できる。DuckDBへは `swing_copilot.research`
+経由でのみアクセスし（クエリごとに開いて閉じる）、`ensure_views()` はこのプロセスから
+呼ばない——読み書き接続を開くため、無人日次実行のファイルロックを奪いうる。
+ビュー不在は `ResearchError` としてエラーページに変換し、別シェルで一度
+`ensure_views()` を実行するよう案内する。
+
 ## スクリーニング戦略
 
 日次実行では`--strategy`で`config/strategies.yaml`に定義した戦略を選択できる。

@@ -8,10 +8,12 @@ import httpx
 import pytest
 
 from swing_copilot.data.earnings_finnhub import (
+    _MIN_REQUEST_INTERVAL_SECONDS,
     EarningsTiming,
     FinnhubEarningsClient,
     _real_http_get,
 )
+from tests.conftest import ThrottleTimeline
 
 
 class FakeClock:
@@ -190,7 +192,11 @@ def test_timeout_retries_to_total_attempt_ceiling_with_deterministic_backoff():
 
 
 def test_rate_limit_is_applied_before_every_retry_attempt():
-    times = iter([0.0, 0.2, 0.4])
+    # Ticks model a 0.2s request on a clock that the throttle's own sleep
+    # advances (`backoff_fn` is inert so the throttle stays the only thing
+    # under test): attempt 1 throttles at 0.0, attempt 2 re-enters the throttle
+    # 0.2s later and is held until 1.0, attempt 3 re-enters at 1.2.
+    times = iter([0.0, 0.2, 1.2])
     throttle_sleeps: list[float] = []
     attempts = 0
 
@@ -218,6 +224,74 @@ def test_rate_limit_is_applied_before_every_retry_attempt():
     assert event is not None
     assert attempts == 3
     assert throttle_sleeps == pytest.approx([0.8, 0.8])
+
+
+def test_successive_requests_are_issued_at_least_one_interval_apart():
+    """Issue #253: the throttle must count from the request it let through.
+
+    Recording the pre-sleep clock reading dropped the slept interval, so every
+    other request went out early and the effective rate exceeded the 60/minute
+    cap. Asserted on issue instants, not on sleep arguments.
+    """
+    timeline = ThrottleTimeline(request_seconds=0.3)
+
+    def timed_get(*_args, **_kwargs):
+        timeline.issue_request()
+        return _payload()
+
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=timed_get,
+        clock=FakeClock(),
+        timing=EarningsTiming(
+            rate_clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+            backoff_fn=timeline.sleep,
+        ),
+    )
+
+    for _ in range(3):
+        client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+
+    assert timeline.issue_gaps == [pytest.approx(_MIN_REQUEST_INTERVAL_SECONDS)] * 2
+
+
+def test_retried_attempts_keep_the_minimum_issue_interval():
+    """Issue #253: a retry attempt is a request and resets the same clock.
+
+    `before_attempt` fires once per attempt, so the failed attempt counts
+    against the rate limit too; every subsequent request must still be at least
+    one interval behind the one actually issued before it.
+    """
+    timeline = ThrottleTimeline(request_seconds=0.3)
+    attempts = 0
+
+    def flaky_get(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        timeline.issue_request()
+        if attempts == 1:
+            message = "temporary"
+            raise httpx.ConnectError(message)
+        return _payload()
+
+    client = FinnhubEarningsClient(
+        "test-key",
+        http_get=flaky_get,
+        clock=FakeClock(),
+        timing=EarningsTiming(
+            rate_clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+            backoff_fn=timeline.sleep,
+        ),
+    )
+
+    for _ in range(3):
+        client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
+
+    # Four issued requests: the failure, its retry, then one per later fetch.
+    assert attempts == 4
+    assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
 
 
 def test_client_error_is_not_retried():

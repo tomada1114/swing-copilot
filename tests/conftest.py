@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -217,6 +218,54 @@ def plant_non_finite_bars(market_store: MarketStore, df: pd.DataFrame) -> None:
         # Deliberately the unvalidated half of `write_bars`: re-implementing
         # partition merge/replace here would drift from the real writer.
         market_store._write_partition(int(year), working[years == year])  # noqa: SLF001
+
+
+class ThrottleTimeline:
+    """Monotonic clock that only sleeping and request latency advance.
+
+    Models the one timeline an external client's rate limit is actually
+    defined over: `sleep` (throttle wait and retry backoff alike) and each
+    request's round trip both move it forward, and every issued request stamps
+    the instant it went out. That makes the *issue* interval observable, not
+    just the sleep arguments — which is what Issue #253 turned on, since the
+    buggy throttle slept the right amount and still let every other request go
+    out early.
+
+    Shared here rather than per test module on purpose: `data/edgar.py`,
+    `text/news_finnhub.py`, `data/earnings_finnhub.py` and
+    `text/calendar_fred.py` each assert the same invariant, so a change to the
+    float tolerance or to how a gap is defined has to move all four at once.
+    Four verbatim copies had already started to drift. Only the injection
+    shape differs per client (`clock=` / `rate_clock=` / `EarningsTiming` /
+    `FredCalendarTiming`), and that stays in the tests.
+    """
+
+    def __init__(self, request_seconds: float) -> None:
+        self.now = 0.0
+        self.issued_at: list[float] = []
+        self._request_seconds = request_seconds
+
+    def clock(self) -> float:
+        """Read the clock, as the client's injected `rate_clock` would."""
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep, as the client's injected `sleep_fn`/`backoff_fn` would."""
+        self.now += seconds
+
+    def issue_request(self) -> None:
+        """Stamp a request as issued now, then charge its round-trip latency."""
+        self.issued_at.append(self.now)
+        self.now += self._request_seconds
+
+    @property
+    def issue_gaps(self) -> list[float]:
+        """Intervals between consecutive requests actually going out."""
+        return [later - earlier for earlier, later in pairwise(self.issued_at)]
+
+    def gaps_below(self, minimum: float, tolerance: float = 1e-9) -> list[float]:
+        """Return every issue gap shorter than `minimum`, float slop aside."""
+        return [gap for gap in self.issue_gaps if gap < minimum - tolerance]
 
 
 @pytest.fixture

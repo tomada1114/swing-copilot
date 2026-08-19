@@ -171,6 +171,126 @@ class TestEntryFill:
         assert equity_by_day[days[2]] == pytest.approx(expected_equity_on_fill_day)
 
 
+class TestDuplicateBars:
+    """Issue #244: the two bar lookups tie-break duplicates differently.
+
+    A corrected bar appended after the original leaves two rows on one
+    `(symbol, date)`. The fill/exit lookup takes the *first* such row and the
+    as-of lookup behind the mark-to-market takes the *last* -- flipping either
+    one moves the equity curve silently, so both ends are pinned end to end.
+    """
+
+    def test_fill_reads_the_first_row_and_the_close_mark_reads_the_last(
+        self, settings, engine
+    ):
+        days = TRADING_DAYS[:4]
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[0], (100, 101, 99, 100)),
+            bar_row("AAA", days[1], (100, 101, 99, 100)),
+            bar_row("AAA", days[2], (100, 105, 98, 102)),  # fill day, first copy
+            bar_row("AAA", days[2], (200, 205, 198, 202)),  # same day, appended later
+            bar_row("AAA", days[3], (102, 106, 100, 103)),
+        ]
+        bars = bars_frame(rows)
+        candidates_by_day = {days[1]: [_candidate("AAA", atr14=2.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars, lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        expected_entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
+        expected_stop = expected_entry_price - settings.backtest.exit_atr_multiple * 2.0
+        expected_shares = calc_position_size(
+            INITIAL_CASH,
+            expected_entry_price,
+            expected_stop,
+            settings.risk.max_position_pct,
+            settings.risk.max_trade_risk_pct,
+        ).shares
+        cost = (
+            expected_shares
+            * expected_entry_price
+            * (1 + settings.backtest.commission_pct)
+        )
+
+        # The first row's open, not the appended copy's 200.
+        assert result.trades[0].entry_price == pytest.approx(expected_entry_price)
+        # The appended copy's close, not the first row's 102.
+        assert dict(result.equity_curve)[days[2]] == pytest.approx(
+            INITIAL_CASH - cost + expected_shares * 202.0
+        )
+
+
+def _naive_equity(bars, cash, positions, day):
+    """Cash plus every position marked at its newest close on or before `day`.
+
+    Deliberately the pre-#244 full-frame scan rather than the engine's own
+    helper: the point of the assertion below is that the carried basis still
+    equals an *independently* recomputed one.
+    """
+    total = cash
+    for position in positions:
+        rows = bars[(bars["symbol"] == position.symbol) & (bars["date"] <= day)]
+        if not rows.empty:
+            total += position.shares * float(rows.sort_values("date").iloc[-1]["close"])
+    return total
+
+
+class TestEquityBasis:
+    def test_carried_sizing_basis_equals_a_fresh_mark_to_market(
+        self, engine, monkeypatch
+    ):
+        # Issue #244 stopped recomputing the signal day's equity for every fill
+        # day and carries the equity curve's last point instead. That is an
+        # identity, not an approximation -- but only as long as nothing between
+        # the curve append and the next day's fill step touches cash or the
+        # open positions. Assert it holds on every fill day, exactly (`==`, not
+        # `approx`), so a future reordering of the day loop cannot quietly turn
+        # the sizing basis into a stale number.
+        days = LONG_TRADING_DAYS[:12]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days, 100.0),
+            *flat_bars("BBB", days, 50.0),
+            # CCC is missing a session, so its mark has to carry an earlier
+            # close forward and the two computations can disagree if either
+            # one resolves the gap differently.
+            *[row for row in flat_bars("CCC", days, 30.0) if row["date"] != days[8]],
+        ]
+        bars = bars_frame(rows)
+        candidates_by_day = {
+            days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])],
+            days[3]: [_candidate("BBB", atr14=1.0, as_of=days[3])],
+            days[5]: [_candidate("CCC", atr14=1.0, as_of=days[5])],
+        }
+        original = engine._fill_pending_entries  # noqa: SLF001
+        observed: list[tuple[float, float, float]] = []
+
+        def spy(day, signal, bars, pending, state):
+            if signal is not None:
+                observed.append(
+                    (
+                        signal.equity,
+                        _naive_equity(
+                            bars, state.cash, state.open_positions.values(), signal.day
+                        ),
+                        state.cash,
+                    )
+                )
+            original(day, signal, bars, pending, state)
+
+        monkeypatch.setattr(engine, "_fill_pending_entries", spy)
+
+        engine.run(days, bars, lambda d: candidates_by_day.get(d, []), INITIAL_CASH)
+
+        assert [carried for carried, _fresh, _cash in observed] == [
+            fresh for _carried, fresh, _cash in observed
+        ]
+        # The equality would be vacuous if no position were ever open.
+        assert any(carried != cash for carried, _fresh, cash in observed)
+
+
 class TestGapStop:
     def test_gap_below_stop_fills_at_open_not_stop_price(self, engine):
         days = TRADING_DAYS[:5]

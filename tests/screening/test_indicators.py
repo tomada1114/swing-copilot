@@ -15,6 +15,7 @@ from swing_copilot.screening.indicators import (
     percentile_ranks,
     sma,
     symbol_bars,
+    symbol_ohlc_on,
     symbol_window,
     wilder_atr,
     wilder_rsi,
@@ -208,6 +209,103 @@ class TestSymbolBarsMatchesTheNaiveImplementation:
         empty = pd.DataFrame(columns=["symbol", "date", "close"])
 
         assert symbol_bars(empty, "AAA", date(2026, 1, 1)) is None
+
+
+_OHLC = ("open", "high", "low", "close")
+
+
+def _naive_ohlc_on(bars, symbol, day):
+    """`backtest/engine.py`'s pre-#244 `_bar`, kept as the equivalence oracle."""
+    rows = bars[(bars["symbol"] == symbol) & (bars["date"] == day)]
+    if rows.empty:
+        return None
+    row = rows.iloc[0]
+    return {field: float(row[field]) for field in _OHLC}
+
+
+def _naive_latest_ohlc(bars, symbol, as_of):
+    """`backtest/engine.py`'s pre-#244 `_latest_bar`, the second oracle."""
+    rows = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)]
+    if rows.empty:
+        return None
+    row = rows.sort_values("date").iloc[-1]
+    return {field: float(row[field]) for field in _OHLC}
+
+
+def _window_ohlc(bars, symbol, as_of):
+    window = symbol_window(bars, symbol, as_of)
+    return None if window is None else window.ohlc
+
+
+class TestOhlcLookupsMatchTheNaiveScan:
+    """Issue #244's equivalence contract for the two engine bar lookups.
+
+    The simulator asks two different questions of one frame -- "the bar dated
+    exactly `day`" and "the newest bar at or before `as_of`" -- and the scans
+    they replace answered them with *different* tie-breaks when a
+    `(symbol, date)` pair is duplicated. Both halves are pinned here, because
+    an equity curve changes silently if either one flips.
+    """
+
+    @pytest.fixture
+    def duplicated_bars(self):
+        frames = [
+            make_bars("AAA", [100.0 + i for i in range(10)], start=date(2026, 1, 1)),
+            make_bars("BBB", [50.0 + i for i in range(6)], start=date(2026, 1, 3)),
+        ]
+        # AAA 2026-01-05 arrives twice with different prices -- a corrected bar
+        # appended after the original, which is how a duplicate reaches the
+        # engine. The second copy is deliberately far away in price so either
+        # tie-break is unmistakable in the assertions below.
+        duplicate = frames[0].iloc[4].copy()
+        for field in _OHLC:
+            duplicate[field] = float(duplicate[field]) + 1000.0
+        return pd.concat(
+            [frames[1], frames[0], duplicate.to_frame().T], ignore_index=True
+        )
+
+    @pytest.mark.parametrize("symbol", ["AAA", "BBB", "MISSING"])
+    def test_both_lookups_match_the_scan_across_the_whole_range(
+        self, duplicated_bars, symbol
+    ):
+        for offset in range(-2, 14):
+            day = date(2026, 1, 1) + timedelta(days=offset)
+
+            assert symbol_ohlc_on(duplicated_bars, symbol, day) == _naive_ohlc_on(
+                duplicated_bars, symbol, day
+            ), f"exact-day {symbol} @ {day}"
+            assert _window_ohlc(duplicated_bars, symbol, day) == _naive_latest_ohlc(
+                duplicated_bars, symbol, day
+            ), f"as-of {symbol} @ {day}"
+
+    def test_duplicate_rows_resolve_to_the_first_on_the_day_and_the_last_as_of(
+        self, duplicated_bars
+    ):
+        # The asymmetry stated as bare numbers, independent of the oracles:
+        # `iloc[0]` of the masked rows versus `sort_values("date").iloc[-1]`.
+        # `kind="stable"` in the index is what keeps these two apart.
+        duplicated_day = date(2026, 1, 5)
+        exact = symbol_ohlc_on(duplicated_bars, "AAA", duplicated_day)
+        as_of = _window_ohlc(duplicated_bars, "AAA", duplicated_day)
+
+        assert exact is not None
+        assert as_of is not None
+        assert exact["close"] == 104.0
+        assert as_of["close"] == 1104.0
+
+    def test_the_exact_day_lookup_ignores_neighbouring_sessions(self, duplicated_bars):
+        # Immediately before / exactly at / immediately after BBB's first bar.
+        assert symbol_ohlc_on(duplicated_bars, "BBB", date(2026, 1, 2)) is None
+        assert symbol_ohlc_on(duplicated_bars, "BBB", date(2026, 1, 3)) is not None
+        assert symbol_ohlc_on(duplicated_bars, "BBB", date(2026, 1, 4)) is not None
+        # ... and past the last one, where the as-of lookup still answers.
+        assert symbol_ohlc_on(duplicated_bars, "BBB", date(2026, 1, 9)) is None
+        assert _window_ohlc(duplicated_bars, "BBB", date(2026, 1, 9)) is not None
+
+    def test_an_empty_frame_yields_none(self):
+        empty = pd.DataFrame(columns=["symbol", "date", *_OHLC])
+
+        assert symbol_ohlc_on(empty, "AAA", date(2026, 1, 1)) is None
 
 
 _RSI_PERIOD = 14

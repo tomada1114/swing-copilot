@@ -100,6 +100,11 @@ def _trailing_mean(values: np.ndarray, window: int) -> np.ndarray:
     return result
 
 
+#: The price fields `SymbolWindow.ohlc` and `symbol_ohlc_on` return, in the
+#: order the previous `bars[...]` row lookups built their dict.
+_OHLC_FIELDS = ("open", "high", "low", "close")
+
+
 class _SymbolSeries:
     """One symbol's full-history bars plus lazily built indicator columns.
 
@@ -108,20 +113,34 @@ class _SymbolSeries:
     it once instead of once per simulated day.
     """
 
-    __slots__ = ("_closes", "_columns", "dates", "frame")
+    __slots__ = ("_columns", "_values", "dates", "frame")
 
     def __init__(self, frame: pd.DataFrame, dates: np.ndarray) -> None:
         self.frame = frame
         self.dates = dates
-        self._closes: np.ndarray | None = None
+        self._values: dict[str, np.ndarray] = {}
         self._columns: dict[tuple[_IndicatorKind, int], np.ndarray] = {}
 
     @property
     def closes(self) -> np.ndarray:
         """The symbol's closes as a float64 array, oldest first."""
-        if self._closes is None:
-            self._closes = self.frame["close"].to_numpy(dtype=float)
-        return self._closes
+        return self.values("close")
+
+    def values(self, name: str) -> np.ndarray:
+        """Return one raw price column as float64, converting it on first use.
+
+        Lazy per column so a frame that carries only the columns a caller
+        actually reads (a close-only fixture, say) stays usable.
+        """
+        cached = self._values.get(name)
+        if cached is None:
+            cached = self.frame[name].to_numpy(dtype=float)
+            self._values[name] = cached
+        return cached
+
+    def ohlc_at(self, position: int) -> dict[str, float]:
+        """OHLC of the bar at `position` in this symbol's date-sorted history."""
+        return {name: float(self.values(name)[position]) for name in _OHLC_FIELDS}
 
     def column(self, kind: _IndicatorKind, window: int) -> np.ndarray:
         """Return one full-history indicator column, computing it on first use."""
@@ -194,6 +213,18 @@ class SymbolWindow:
         """The close of the last bar at or before `as_of`."""
         return float(self._series.closes[self._cut - 1])
 
+    @property
+    def ohlc(self) -> dict[str, float]:
+        """Open/high/low/close of the last bar at or before `as_of`.
+
+        The replaced scan (`backtest/engine.py`'s `_latest_bar`) masked the
+        frame and took `sort_values("date").iloc[-1]`, i.e. the *last* row of
+        the newest dated group. The index sorts with `kind="stable"`, so rows
+        sharing that date keep their original relative order and row
+        `bar_count - 1` is that same last row (Issue #244).
+        """
+        return self._series.ohlc_at(self._cut - 1)
+
     def sma(self, window: int) -> float:
         """Simple moving average at `as_of`; `NaN` before `window` bars exist."""
         return self._value(_IndicatorKind.SMA, window)
@@ -253,6 +284,26 @@ class _SymbolIndex:
             np.searchsorted(series.dates, np.datetime64(pd.Timestamp(as_of)), "right")
         )
         return SymbolWindow(series, cut) if cut else None
+
+    def ohlc_on(self, symbol: str, day: date) -> dict[str, float] | None:
+        """Return `symbol`'s OHLC on exactly `day`, or `None` if it has no bar.
+
+        `"left"` -- not `"right"` -- is load-bearing. The scan this replaces
+        (`backtest/engine.py`'s `_bar`) took `iloc[0]` of the masked rows, so
+        when a `(symbol, date)` pair is duplicated it read the *first* such row
+        in frame order, while the as-of lookup above reads the *last* one. The
+        stable sort preserves that original relative order inside the tied
+        group, so `searchsorted(..., "left")` lands on the same first row and
+        the asymmetry survives indexing (Issue #244).
+        """
+        series = self._groups.get(symbol)
+        if series is None:
+            return None
+        stamp = np.datetime64(pd.Timestamp(day))
+        first = int(np.searchsorted(series.dates, stamp, "left"))
+        if first >= len(series.dates) or series.dates[first] != stamp:
+            return None
+        return series.ohlc_at(first)
 
 
 _symbol_index_cache: dict[
@@ -337,6 +388,32 @@ def symbol_bars(bars: pd.DataFrame, symbol: str, as_of: date) -> pd.DataFrame | 
     """
     window = symbol_window(bars, symbol, as_of)
     return None if window is None else window.bars
+
+
+def symbol_ohlc_on(
+    bars: pd.DataFrame, symbol: str, day: date
+) -> dict[str, float] | None:
+    """Return `symbol`'s open/high/low/close on exactly `day`, or `None`.
+
+    The exact-day counterpart of `symbol_window`: that one answers "as of this
+    day", this one answers "on this day and no other", which is what a
+    simulator needs when it fills at an open or tests a low against a stop. It
+    shares the same cached per-symbol index, so a caller sweeping one frame
+    across many days pays the grouping cost once (Issue #244), and inherits the
+    same "treat a looked-up frame as immutable" contract.
+
+    Args:
+        bars: Tidy bars (`symbol, date, open, high, low, close, volume, ...`).
+        symbol: Ticker to select.
+        day: The single session to read.
+
+    Returns:
+        `{"open", "high", "low", "close"}`, or `None` when the symbol has no
+        bar dated exactly `day`.
+    """
+    if bars.empty:
+        return None
+    return _symbol_index(bars).ohlc_on(symbol, day)
 
 
 def sma(series: pd.Series, window: int) -> pd.Series:

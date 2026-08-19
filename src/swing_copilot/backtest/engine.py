@@ -51,7 +51,7 @@ from swing_copilot.backtest.metrics import (
 )
 from swing_copilot.backtest.policy import EntryPolicyRequest, as_position
 from swing_copilot.risk.position_sizing import calc_position_size
-from swing_copilot.screening.indicators import symbol_window
+from swing_copilot.screening.indicators import symbol_ohlc_on, symbol_window
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -170,23 +170,25 @@ class _SimState:
     )
     daily_exposure: list[DailyExposure] = field(default_factory=list)
 
-    def equity(self, bars: pd.DataFrame, day: date) -> float:
-        """Account equity as of `day`'s close: cash plus marked positions.
-
-        Args:
-            bars: The whole tidy OHLCV frame.
-            day: Inclusive valuation cutoff; positions without a bar on that
-                exact day carry their newest earlier close forward.
-
-        Returns:
-            Total equity in USD.
-        """
-        return self.cash + _mark_to_market(self, bars, day)
-
     def record_block(self, day: date, reason: str) -> None:
         """Record that `reason` stopped one candidate from filling on `day`."""
         self.entry_block_counts[reason] += 1
         self.entry_block_days[reason].add(day)
+
+
+@dataclass(frozen=True, slots=True)
+class _SignalDay:
+    """The day a batch of pending candidates was screened on, with its equity.
+
+    The two travel together because both are as-of the *same* close: the day
+    the candidates were ranked is the day whose equity sizes them, and at
+    tomorrow's open no newer fact is observable. Carrying the equity here is
+    also what lets the fill step skip re-marking the whole book (Issue #244);
+    see `_fill_pending_entries` for why that is an identity.
+    """
+
+    day: date
+    equity: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,16 +219,18 @@ class _ResultInputs:
 
 
 def _bar(bars: pd.DataFrame, symbol: str, day: date) -> dict[str, float] | None:
-    rows = bars[(bars["symbol"] == symbol) & (bars["date"] == day)]
-    if rows.empty:
-        return None
-    row = rows.iloc[0]
-    return {
-        "open": float(row["open"]),
-        "high": float(row["high"]),
-        "low": float(row["low"]),
-        "close": float(row["close"]),
-    }
+    """Return `symbol`'s bar dated exactly `day`, or `None`.
+
+    Issue #244: this used to mask the whole frame twice per call
+    (`bars["symbol"] == symbol` and `bars["date"] == day`). `date` is an object
+    column, so the second mask is an element-wise Python comparison over every
+    row in the frame -- ~33ms per call on a 508-symbol, 1652-session frame, of
+    which the engine makes tens of thousands. `symbol_ohlc_on` answers from the
+    per-symbol index already cached against this frame (Issue #214), returning
+    the same row: see `_SymbolIndex.ohlc_on` for why the duplicate-row tie-break
+    (`iloc[0]`, the *first* matching row) is preserved.
+    """
+    return symbol_ohlc_on(bars, symbol, day)
 
 
 def _mark_to_market(state: _SimState, bars: pd.DataFrame, day: date) -> float:
@@ -242,17 +246,15 @@ def _mark_to_market(state: _SimState, bars: pd.DataFrame, day: date) -> float:
 def _latest_bar(
     bars: pd.DataFrame, symbol: str, as_of: date
 ) -> dict[str, float] | None:
-    """Return the newest available bar on or before an inclusive cutoff."""
-    rows = bars[(bars["symbol"] == symbol) & (bars["date"] <= as_of)]
-    if rows.empty:
-        return None
-    row = rows.sort_values("date").iloc[-1]
-    return {
-        "open": float(row["open"]),
-        "high": float(row["high"]),
-        "low": float(row["low"]),
-        "close": float(row["close"]),
-    }
+    """Return the newest available bar on or before an inclusive cutoff.
+
+    Issue #244: the indexed lookup replaces the same full-frame masking `_bar`
+    describes, plus a `sort_values("date")` of the surviving rows. `.ohlc` reads
+    the last row of the `as_of` prefix, which is the row that scan's `iloc[-1]`
+    picked.
+    """
+    window = symbol_window(bars, symbol, as_of)
+    return None if window is None else window.ohlc
 
 
 class BacktestEngine:
@@ -318,14 +320,15 @@ class BacktestEngine:
         pending_entries: list[Candidate] = []
         equity_curve: list[tuple[date, float]] = []
         benchmark_curve: list[tuple[date, float]] = []
-        signal_day: date | None = None
+        # The previous iteration's day and its closing equity; `None` until the
+        # first close is recorded, which is also when nothing can be pending.
+        signal: _SignalDay | None = None
 
         for day in trading_days:
-            self._fill_pending_entries(day, signal_day, bars, pending_entries, state)
+            self._fill_pending_entries(day, signal, bars, pending_entries, state)
             self._process_exits(day, bars, state)
             self._update_trailing_stops(day, bars, state)
             pending_entries = candidates_fn(day)
-            signal_day = day
 
             if not state.benchmark_initialized:
                 benchmark_bar = _bar(bars, benchmark_symbol, day)
@@ -337,15 +340,20 @@ class BacktestEngine:
                     state.benchmark_initialized = True
 
             invested = _mark_to_market(state, bars, day)
-            equity_curve.append((day, state.cash + invested))
+            equity = state.cash + invested
+            equity_curve.append((day, equity))
             state.daily_exposure.append(
                 DailyExposure(
                     day=day,
                     invested_usd=invested,
-                    equity_usd=state.cash + invested,
+                    equity_usd=equity,
                     open_position_count=len(state.open_positions),
                 )
             )
+            # The candidates just generated were screened as of this close, and
+            # `equity` is this close's equity: one value, recorded once, read
+            # again tomorrow morning as the sizing basis.
+            signal = _SignalDay(day=day, equity=equity)
             benchmark_bar = _latest_bar(bars, benchmark_symbol, day)
             benchmark_curve.append(
                 (
@@ -414,7 +422,7 @@ class BacktestEngine:
     def _fill_pending_entries(
         self,
         day: date,
-        signal_day: date | None,
+        signal: _SignalDay | None,
         bars: pd.DataFrame,
         pending_entries: list[Candidate],
         state: _SimState,
@@ -423,15 +431,15 @@ class BacktestEngine:
 
         Args:
             day: The fill day.
-            signal_day: The day `pending_entries` were screened on — the
-                as-of date for both the sizing equity and every gate input.
-                `None` only on the very first simulated day, when nothing can
-                be pending yet.
+            signal: The day `pending_entries` were screened on and that day's
+                closing equity — the as-of basis for both the sizing equity and
+                every gate input. `None` only on the very first simulated day,
+                when nothing can be pending yet.
             bars: The whole tidy OHLCV frame.
             pending_entries: Yesterday's ranked candidates.
             state: Mutable simulation state.
         """
-        if not pending_entries or signal_day is None:
+        if not pending_entries or signal is None:
             return
         considered: list[Candidate] = []
         for candidate in sorted(pending_entries, key=lambda c: c.rank):
@@ -444,13 +452,29 @@ class BacktestEngine:
 
         # One basis for the whole day, marked at the signal day's close: the
         # fill happens at today's open, where today's close is still unknown.
+        #
+        # Issue #244: `signal.equity` is read here instead of recomputing
+        # `state.cash + _mark_to_market(state, bars, signal.day)`. That is the
+        # *same number*, not an approximation of it, and the reason is the loop
+        # order. This step runs at the top of the day loop, so `signal.day` is
+        # by construction the immediately preceding iteration's `day`; at the
+        # end of that iteration `run` evaluated exactly that expression, wrote
+        # it to the equity curve, and captured it here. Between that statement
+        # and this one the loop only appends to the exposure and benchmark
+        # curves, so neither `state.cash` nor `state.open_positions` has
+        # changed, and `bars` is immutable for the whole run -- a recomputation
+        # would therefore mark the same positions at the same closes and sum
+        # them over the same dict in the same order, reproducing the carried
+        # float bit for bit. Recomputing it cost one full mark-to-market per
+        # open position per day, on the engine's hottest path.
+        # `TestEquityBasis` pins the identity.
         context = _FillContext(
             day=day,
             bars=bars,
-            equity_basis=state.equity(bars, signal_day),
+            equity_basis=signal.equity,
             state=state,
         )
-        decisions = self._policy_decisions(signal_day, considered, context)
+        decisions = self._policy_decisions(signal.day, considered, context)
 
         for index, candidate in enumerate(considered):
             if len(state.open_positions) >= self._max_concurrent_positions:

@@ -857,7 +857,9 @@ fail-softで、警告ログを残して仮想側を空として続行する。
 
 ```python
 def fetch_company_news(symbol: str, since: "date") -> list["NewsItem"]:
-    """Finnhub company-newsエンドポイントから指定銘柄の直近ニュースを取得する。60コール/分を超えないようレート制限する。"""
+    """Finnhub company-newsエンドポイントから指定銘柄の直近ニュースを取得する。
+    Finnhubの60コール/分制限はクライアント単位ではなくアカウント（APIキー）単位であり、
+    `FinnhubEarningsClient`（3.13節のP4-18追記）と発行レートの予算を共有する。"""
 
 def fetch_recent_filings_text(symbol: str) -> list["FilingText"]:
     """EdgarClient.fetch_recent_filings()の結果から8-K/10-Qの本文テキストを取得する。"""

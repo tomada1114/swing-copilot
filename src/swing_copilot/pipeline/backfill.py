@@ -48,7 +48,7 @@ from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import MarketStore, NonFiniteBarsError
 from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 from swing_copilot.universe_sampling import select_universe_sample
 
@@ -77,8 +77,17 @@ class BackfillError(SwingCopilotError):
     """Raised for fail-fast argument/configuration errors, before any I/O."""
 
 
-#: One line on stderr, exit 1 — a bad argument or an unusable settings file.
-_EXIT_POLICY = ExitPolicy(errors=(BackfillError, ConfigError), code=1)
+#: One line on stderr, exit 1 — a bad argument, an unusable settings file, or
+#: a batch the store refused. `NonFiniteBarsError` belongs here (Issue #250,
+#: folded into #249) because `write_bars`' rejection is batch-wide and runs
+#: before the first partition is touched: nothing was written, so exiting `0`
+#: would let a chained `copilot-backfill ... && copilot-backtest ...` run
+#: against a store that gained no history. It stays **fatal**, exactly as
+#: Issue #227 settled it — this only replaces the traceback with the one
+#: operator-facing line Issue #221 standardized across the `--db` CLIs.
+_EXIT_POLICY = ExitPolicy(
+    errors=(BackfillError, ConfigError, NonFiniteBarsError), code=1
+)
 
 
 class _EdgarClientLike(Protocol):

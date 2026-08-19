@@ -81,6 +81,7 @@ charts as server-side inline SVG, so it works with the machine offline:
 
 ```bash
 uv run copilot-dashboard              # http://127.0.0.1:8787
+just dashboard                        # same, via Just
 ```
 
 Backtest a strategy over a historical window, with risk-adjusted metrics

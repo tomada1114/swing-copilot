@@ -19,6 +19,7 @@ just install   # Install all dependency groups and git hooks
 just fmt       # Apply ruff fixes and formatting (mutating)
 just lint      # Ruff lint/format check + mypy strict
 just test      # Pytest (parallel, `-n auto`) with line and branch coverage >= 95%
+just dashboard # Serve the read-only decision-history dashboard (http://127.0.0.1:8787)
 just docs      # Serve docs locally
 just docs-check # Build MkDocs with --strict
 just build     # Build distribution packages

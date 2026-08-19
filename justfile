@@ -31,6 +31,10 @@ test:
 # Run all checks: format, lint, test
 check: fmt lint test
 
+# Serve the read-only decision-history dashboard (http://127.0.0.1:8787)
+dashboard:
+    uv run copilot-dashboard
+
 # Serve documentation locally
 docs:
     uv run mkdocs serve

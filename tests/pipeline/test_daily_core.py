@@ -1028,6 +1028,32 @@ class TestPriorAnalysisGapDetection:
             f"run_id={prior_id} run_directory={run_dir}"
         )
 
+    def test_a_missing_analysis_result_adds_a_report_notice(self, deps):
+        # #273: `notices` is the path an operator sees who only reads the
+        # Markdown report, not stderr from an unattended run.
+        _archive_run(deps, analyzed=False)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.brief is not None
+        matching = [
+            notice
+            for notice in result.brief.notices
+            if _PRIOR_RUN_DATE.isoformat() in notice
+        ]
+        assert len(matching) == 1
+        assert "--allow-same-day-rerun" in matching[0]
+
+    def test_a_completed_prior_analysis_adds_no_notice(self, deps):
+        _archive_run(deps)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.brief is not None
+        assert not any(
+            "--allow-same-day-rerun" in notice for notice in result.brief.notices
+        )
+
     def test_the_first_run_ever_reports_no_gap(self, deps, state_store, capsys):
         result = run_daily(DailyRunOptions(), deps)
 

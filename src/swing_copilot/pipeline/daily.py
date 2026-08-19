@@ -344,6 +344,10 @@ class _RunContext:
     # screening-derived like the other fields -- computed once inside step 6
     # (analysis export) itself via `_compute_performance_summary()`.
     performance_summary: PerformanceSummary | None = None
+    # #273: earlier runs whose qualitative analysis never landed
+    # (`_prior_analysis_gaps()`), threaded through so `_run_soft_steps` can
+    # turn them into an operator-facing `brief.notices` line.
+    analysis_gaps: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

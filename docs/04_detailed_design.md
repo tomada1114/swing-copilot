@@ -741,6 +741,11 @@ class RiskChecker:
 `data/earnings.py`の`EarningsCalendarClient` Protocolを外部境界とし、
 `FinnhubEarningsClient`が`/calendar/earnings`を10秒タイムアウト、最大3試行、
 1秒間隔の全試行レート制限、1秒・2秒の決定論的指数バックオフで呼ぶ。
+この1秒間隔はアカウント（APIキー）単位の上限であり、Issue #263以降は合成ルート
+`pipeline/daily_composition.py::_finnhub_clients`が1個の
+`ratelimit.MinIntervalThrottle`を`FinnhubNewsClient`と共有注入して、
+2クライアント合計の発行レートを上限以下に保つ（`throttle`未注入時の既定は
+従来どおりインスタンス固有で、後方互換）。
 429/5xxとtransport/timeoutだけを再試行し、4xx・応答型不正は再試行しない。
 応答イベントは要求した包含区間`start <= earnings_date <= end`でも再検証する。
 `pipeline/earnings.py::collect_earnings_calendar`は銘柄ごとの結果を

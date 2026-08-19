@@ -9,6 +9,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 import httpx
 
 from swing_copilot.clock import SystemClock
+from swing_copilot.ratelimit import (
+    FINNHUB_MIN_REQUEST_INTERVAL_SECONDS,
+    MinIntervalThrottle,
+)
 from swing_copilot.retry import retry_external_call
 from swing_copilot.text.base import TextItem
 
@@ -19,7 +23,8 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
 
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
-_MIN_REQUEST_INTERVAL_SECONDS = 1.0  # 60 calls/minute cap
+# 60 calls/minute cap, shared with `data/earnings_finnhub.py` per account.
+_MIN_REQUEST_INTERVAL_SECONDS = FINNHUB_MIN_REQUEST_INTERVAL_SECONDS
 
 
 class _HttpGet(Protocol):
@@ -68,7 +73,12 @@ def _real_http_get(url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
 class FinnhubNewsClient:
     """Throttled Finnhub `company-news` client."""
 
-    def __init__(
+    # PLR0913: the key plus five keyword-only injection seams, each an
+    # independent boundary (HTTP, calendar clock, rate clock, sleep, throttle).
+    # `data/earnings_finnhub.py` groups its timing trio into `EarningsTiming`;
+    # doing the same here would rename this client's existing `rate_clock` /
+    # `sleep_fn` seams, which Issue #263 is explicitly not touching.
+    def __init__(  # noqa: PLR0913
         self,
         api_key: str,
         *,
@@ -76,6 +86,7 @@ class FinnhubNewsClient:
         date_clock: Clock | None = None,
         rate_clock: Callable[[], float] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
+        throttle: MinIntervalThrottle | None = None,
     ) -> None:
         """Create the client.
 
@@ -83,29 +94,37 @@ class FinnhubNewsClient:
             api_key: Finnhub API key.
             http_get: Injectable HTTP GET, used by tests to avoid real calls.
             date_clock: Injectable calendar clock for the query's end date.
-            rate_clock: Injectable monotonic clock for rate-limit tests.
-            sleep_fn: Injectable sleep function for rate-limit tests.
+            rate_clock: Injectable monotonic clock for the client's own
+                throttle. Mutually exclusive with `throttle`, which carries the
+                clock its whole budget is measured on.
+            sleep_fn: Injectable sleep function for rate-limit and retry tests.
+                Still used for retry backoff when `throttle` is injected.
+            throttle: Rate-limit budget to count this client's requests
+                against. Defaults to one private to this instance; pass the
+                same instance to every client on one Finnhub account to bound
+                their combined rate (Issue #263).
+
+        Raises:
+            ValueError: Both `rate_clock` and `throttle` were supplied. A
+                shared budget can only be measured on one clock, so silently
+                dropping the caller's would leave them believing a timeline
+                that never runs.
         """
+        if rate_clock is not None and throttle is not None:
+            msg = (
+                "rate_clock and throttle are mutually exclusive: an injected "
+                "throttle measures its whole budget on its own clock"
+            )
+            raise ValueError(msg)
         self._api_key = api_key
         self._http_get = http_get
         self._date_clock = date_clock or SystemClock()
-        self._rate_clock = rate_clock or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
-        self._last_request_at: float | None = None
-
-    def _throttle(self) -> None:
-        # Record when the request is actually issued (after any wait), not when
-        # the throttle decision started. Recording the pre-sleep reading drops
-        # the slept interval from the next gap calculation and lets the
-        # effective request rate exceed 1/_MIN_REQUEST_INTERVAL_SECONDS.
-        now = self._rate_clock()
-        issued_at = now
-        if self._last_request_at is not None:
-            wait = _MIN_REQUEST_INTERVAL_SECONDS - (now - self._last_request_at)
-            if wait > 0:
-                self._sleep_fn(wait)
-                issued_at = now + wait
-        self._last_request_at = issued_at
+        self._throttle = throttle or MinIntervalThrottle(
+            _MIN_REQUEST_INTERVAL_SECONDS,
+            clock=rate_clock or time.monotonic,
+            sleep_fn=self._sleep_fn,
+        )
 
     def fetch_company_news(
         self, symbol: str, since: date, *, as_of: date
@@ -130,7 +149,7 @@ class FinnhubNewsClient:
         }
         raw_items = retry_external_call(
             lambda: self._http_get(FINNHUB_NEWS_URL, params),
-            before_attempt=self._throttle,
+            before_attempt=self._throttle.before_request,
             sleep_fn=self._sleep_fn,
         )
         fetched_at = self._date_clock.now()

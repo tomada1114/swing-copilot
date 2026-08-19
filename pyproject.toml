@@ -69,8 +69,12 @@ dev = [
     "types-pyyaml>=6.0",
     "pandas-stubs>=2.2",
     "hypothesis>=6.156.1",
+    "boto3-stubs[s3]>=1.35",
 ]
 docs = ["mkdocs-material>=9.7.6", "mkdocstrings[python]>=1.0.4"]
+# Operational tooling that the application itself never imports: `scripts/`
+# only. Kept out of `dependencies` so the wheel stays free of boto3.
+ops = ["boto3>=1.35"]
 
 # --------------------------------------------------------------------------- #
 #  uv

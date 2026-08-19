@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from swing_copilot.analysis.filing_selection import MIN_FILING_CHARS
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
 from swing_copilot.config import Settings
 from swing_copilot.retro.export import (
@@ -585,6 +586,88 @@ class TestBuildRetroInput:
         assert dossier.input_filing_coverage[0].coverage.exhibit_truncated is (
             exhibit_truncated is True
         )
+
+    @pytest.mark.parametrize(
+        ("filing", "counts"),
+        [
+            pytest.param(
+                (4_074, 0, "omitted_symbol_budget"), (0, 1, 1), id="nothing-exported"
+            ),
+            pytest.param(
+                (6_670, 10, "head_fallback"),
+                (1, 0, 1),
+                id="ten-character-head-slice",
+            ),
+            pytest.param(
+                (96_000, MIN_FILING_CHARS, "head_fallback"),
+                (1, 0, 1),
+                id="head-slice-cut-to-the-reserved-minimum",
+            ),
+            pytest.param(
+                (180_000, MIN_FILING_CHARS, "section_priority_partial"),
+                (0, 0, 1),
+                id="sections-shaped-into-the-reserved-minimum",
+            ),
+            pytest.param(
+                (180_000, 120_000, "section_priority_partial"),
+                (0, 0, 0),
+                id="a-normal-sized-excerpt",
+            ),
+            pytest.param(
+                (600_000, MIN_FILING_CHARS + 1, "head_fallback"),
+                (1, 0, 0),
+                id="one-character-above-the-floor",
+            ),
+            pytest.param(
+                (4_074, 4_074, "full"), (0, 0, 0), id="a-short-filing-exported-whole"
+            ),
+        ],
+    )
+    def test_counts_a_filing_too_small_to_analyze_whatever_mode_cut_it(
+        self,
+        populated_store: StateStore,
+        market_store: MarketStore,
+        tmp_path: Path,
+        filing: tuple[int, int, str],
+        counts: tuple[int, int, int],
+    ) -> None:
+        # Issue #267: `omitted_symbol_budget` stopped being the shape budget
+        # starvation takes once Issue #255 reserved every filing a minimum, so
+        # the two rows cut down to that floor read as an ordinary
+        # `head_fallback` / `section_priority_partial` here and the mode
+        # tallies see nothing. The size does. And a filing short enough to fit
+        # whole is not starved, however few characters it carries.
+        original_chars, exported_chars, selection_mode = filing
+        populated_store.replace_run_verdicts(
+            RUN_ID,
+            [_verdict("AAPL", "proceed"), _verdict("MSFT", "skip")],
+            [],
+            [
+                AnalysisSourceCoverageRecord(
+                    run_id=RUN_ID,
+                    symbol="AAPL",
+                    source_id="edgar:third-8k",
+                    original_chars=original_chars,
+                    exported_chars=exported_chars,
+                    is_truncated=exported_chars < original_chars,
+                    selection_mode=selection_mode,
+                    sections=(),
+                    exhibit_truncated=False,
+                )
+            ],
+        )
+
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+
+        coverage = document.input_coverage
+        assert coverage is not None
+        assert (
+            coverage.fallback_filing_count,
+            coverage.omitted_filing_count,
+            coverage.starved_filing_count,
+        ) == counts
 
     def test_cross_tabs_the_human_journal_and_the_cited_sources(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

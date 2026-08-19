@@ -209,6 +209,13 @@ def export_retro_input(
     Raises:
         RetroIngestError: The proposal ledger exists but could not be read.
             Nothing is written in that case.
+        ValidationError: `build_retro_input` refused to hand over a document
+            (Issue #292's readback assertion, or the construction validate
+            above it). Nothing is written in that case either. This is a
+            schema-drift signal aimed at development, not an operator-facing
+            failure mode, so it stays outside `_INGEST_EXIT`'s conversion --
+            the same place the pre-existing construction `ValidationError`
+            has always sat.
         OSError: Writing failed. The previous export is left untouched.
     """
     document = build_retro_input(deps, request)
@@ -263,6 +270,11 @@ def build_retro_input(
         A validated `retro-input-v1` document, digest included. An empty
         database yields a valid document whose metrics are all `None` -- the
         normal state before enough verdicts have matured.
+
+    Raises:
+        ValidationError: The document does not survive the round trip through
+            the file's own bytes -- see the assertion at the end of this
+            function (Issue #292). Nothing is written in that case.
     """
     thresholds = deps.settings.postmortem
     store = deps.state_store
@@ -338,12 +350,39 @@ def build_retro_input(
         ),
         "notes": notes,
     }
-    return RetroInput.model_validate(
+    document = RetroInput.model_validate(
         {
             **unsigned,
             "input_digest": retro_input_digest(unsigned),
         }
     )
+    _assert_readable_back(document)
+    return document
+
+
+def _assert_readable_back(document: RetroInput) -> None:
+    """State the invariant here: what gets written can be read again.
+
+    `write_retro_input` writes `model_dump(mode="json")` -- every default
+    materialized -- while the digest above is signed over the hand-built
+    `unsigned` dict. Since Issue #289 the verification hashes the parsed
+    document's `fields_set` (`exclude_unset`), so a top-level field added to
+    `RetroInput` but forgotten in `unsigned` no longer disturbs construction:
+    the export would succeed and leave a dossier whose file carries the
+    materialized field, whose `fields_set` on re-read therefore differs from
+    the signed one, and whose digest can never verify again (Issue #292).
+
+    Re-validating the full-key dump -- the exact bytes the file will hold --
+    turns that "writable but unreadable forever" dossier back into a failure
+    at write time. It deliberately tightens only this side: the reader's drop
+    rules are untouched, so `exclude_unset` never becomes a way to make an
+    unreadable file readable.
+
+    Raises:
+        ValidationError: The written form does not parse back, digest
+            included.
+    """
+    RetroInput.model_validate(document.model_dump(mode="json"))
 
 
 def _signal_entries(

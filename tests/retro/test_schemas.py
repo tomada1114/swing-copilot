@@ -292,6 +292,34 @@ class TestRetroInput:
         assert rehydrated["input_coverage"]["starved_filing_count"] == 0
         assert retro_input_digest(rehydrated) == archived_digest
 
+    def test_a_dossier_from_before_verdict_mix_was_required_fails_to_parse(
+        self,
+    ) -> None:
+        # Issue #293: unlike the generation gaps above, this one is not
+        # rescued. `aggregates.verdict_mix` (Issue #139) has no default, so
+        # the one archived dossier written before it existed --
+        # `reports/retro/2026-07-30/retro_input.json` -- cannot be read back,
+        # even though #276's `exclude_unset` digest reproduction covers every
+        # other generation gap: that mechanism can only absorb fields whose
+        # default is the "not measured" form, and `verdict_mix` is required.
+        # Pin that the failure is the missing field itself, surfaced before
+        # pydantic ever reaches the digest model-validator -- not a digest
+        # mismatch. Reading this generation is a decided non-goal (see
+        # docs/04_detailed_design.md §3.23.4), not something to patch with a
+        # legacy default.
+        payload = _unsigned_payload()
+        del payload["aggregates"]["verdict_mix"]
+        archived_digest = canonical_json_digest(payload, excluded_field="input_digest")
+
+        with pytest.raises(ValidationError) as excinfo:
+            RetroInput.model_validate({**payload, "input_digest": archived_digest})
+
+        errors = excinfo.value.errors()
+        assert len(errors) == 1
+        assert errors[0]["type"] == "missing"
+        assert errors[0]["loc"] == ("aggregates", "verdict_mix")
+        assert errors[0]["msg"] == "Field required"
+
     @pytest.mark.parametrize(
         "build_coverage",
         [

@@ -17,6 +17,7 @@ import pytest
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
+    HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.report.incomplete_runs import (
     IncompleteRunKind,
@@ -203,6 +204,39 @@ class TestNonActionableKinds:
         found = find_incomplete_runs(_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.SAME_DAY_SUPERSEDED
+        assert not found[0].is_actionable
+
+    def test_a_replay_stamped_directory_is_never_a_gap(
+        self, state_store: StateStore, reports_root: Path
+    ) -> None:
+        # Issue #254: a `--as-of` replay stamps the export it writes. Nobody
+        # was going to answer it, so the missing result is the expected state
+        # -- and the daily preflight, this CLI, and the dashboard banner all
+        # have to agree about that, which is why the stamp is read here.
+        directory = _write_run(reports_root, date(2026, 8, 14), _UNFINISHED)
+        (directory / HISTORICAL_REPLAY_FILENAME).write_text("{}", encoding="utf-8")
+        _insert_run(state_store, _UNFINISHED, date(2026, 8, 14))
+
+        found = find_incomplete_runs(_database(state_store), reports_root)
+
+        assert found[0].kind is IncompleteRunKind.HISTORICAL_REPLAY
+        assert not found[0].is_actionable
+
+    def test_a_replay_stamp_wins_over_a_completed_sibling(
+        self, state_store: StateStore, reports_root: Path
+    ) -> None:
+        # Both reasons are non-actionable, but the stamp is a fact about this
+        # directory rather than about the date, so it is the precise one.
+        _write_run(reports_root, date(2026, 8, 3), _SAME_DAY_FIRST, has_result=True)
+        directory = _write_run(reports_root, date(2026, 8, 3), _SAME_DAY_SECOND)
+        (directory / HISTORICAL_REPLAY_FILENAME).write_text("{}", encoding="utf-8")
+        _insert_run(state_store, _SAME_DAY_FIRST, date(2026, 8, 3))
+        _insert_run(state_store, _SAME_DAY_SECOND, date(2026, 8, 3))
+
+        found = find_incomplete_runs(_database(state_store), reports_root)
+
+        assert [run.run_id for run in found] == [_SAME_DAY_SECOND]
+        assert found[0].kind is IncompleteRunKind.HISTORICAL_REPLAY
         assert not found[0].is_actionable
 
 

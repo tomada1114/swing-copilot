@@ -67,6 +67,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   残すため、パスは書き込み前に控える）——統括は非ゼロ終了を「何も生成されなかった」と
   読むため、「失敗したのに 7 件だけ残っている」状態を作ってはならない
 
+- 過去 run の定性分析フェーズが未完のまま終わったことを、翌 run のプリフライトで検知して
+  記録するようにした（Issue #254）。`copilot-daily` の成功と、その後スキルが行う
+  `analysis_result.json` の書き出し→`copilot-ingest-analysis` の完了は別ライフサイクル
+  であり、後者が欠落しても `runs` には何も残らず誰も気づけなかった（実測: 08-14 の run
+  ディレクトリに `analysis_result.json` が無いまま `.md` が `copilot-daily` 直後の
+  6KB で止まっていた）。#118 の同日重複ガードの直後で、走査は **#129 の
+  `find_incomplete_runs()` をそのまま再利用する**（`since=` 引数はこのプリフライト用に
+  設計されている）。直近1件だけを引く独自クエリでは、同じ日付に run ディレクトリが2つあり
+  分析が**古い方の兄弟**にあるケースを誤検知するが、`find_incomplete_runs()` はそれを
+  `SAME_DAY_SUPERSEDED` として既に分類している。報告するのは `ANALYSIS_MISSING` のみで
+  （`dashboard/queries.py` と同じ絞り込み）、対象は `run_date` より厳密に前かつ直近7日以内。
+  検知するのは **live かつ非リプレイの run だけ**である。`--dry-run` は専用DB・専用ツリー
+  (`reports/dry_run`)を持つ使い捨てモードだがステップ6はそこにも `analysis_input.json` を
+  書くため、gate が無いと数日空けた2回目の dry run が1回目を欠落として報告してしまう。
+  `--as-of` リプレイは実行中の報告を抑止するだけでは足りず(残った run ディレクトリを次の
+  live run が見分けられない)、リプレイが自分の export に `historical_replay.json` を並べて
+  置く。**マーカーの解釈は `find_incomplete_runs` 側**にあり、`IncompleteRunKind.HISTORICAL_REPLAY`
+  (非アクショナブル)として分類するので、日次プリフライト・`copilot-history incomplete`・
+  ダッシュボードのバナーが同じディレクトリについて食い違わない。**注意: マーカー導入前に
+  作られたリプレイディレクトリにはマーカーが無いため、導入後の最初の7日間(lookback 窓の
+  長さ)は過去のリプレイに対する偽の `ANALYSIS_GAP[...]` が出得る**——自然に解消するが、
+  Issue #273 がこのタグで分岐する前提としてシグナルは最初の1週間だけ信頼できない。
+  **fail-soft** で、過去日の欠落も検知処理自体の失敗も当日の run を止めない——stderr への
+  書き込みも `try` で囲う(`copilot-daily 2>&1 | head` のような閉じたパイプの
+  `BrokenPipeError` が `start_run()` 以前に日次 run を丸ごと殺さないため)。2経路は独立に
+  失敗し、レコードを先に構築してから emit するので、stderr が書けなくても
+  `runs.metadata_json` の記録は残る。露出は
+  `sys.stderr` へ直接書く行頭一致のタグ
+  `ANALYSIS_GAP[missing_analysis_result]: run_date=... run_id=... run_directory=...`
+  （`logger.warning` ではない: フォーマッタが timestamp/level を前置するとタグが行頭から
+  始まらず、`--log-level ERROR` では消える。`PREFLIGHT_ABORT[...]` と同じ扱いに揃えた）と、
+  新しい run の `runs.metadata_json.prior_analysis_gaps` の2経路で、**スキーマ変更は無い**。
+  タグを消費する側は Issue #273。書き戻す担い手として自然な `copilot-ingest-analysis` は
+  DB・ネットワークに触れない inert boundary として設計されているため、そこに DuckDB
+  書き込みを持ち込む案は採らず、読み取り側（翌 run のプリフライト）で検知する形にした
+
 - 蓄積された日次分析結果を閲覧する読み取り専用ローカルダッシュボード
   `copilot-dashboard` を追加した。FastAPI + Jinja2 のサーバレンダリングで、
   run 概観（`/runs/{run_id}`）・銘柄詳細（`/runs/{run_id}/symbols/{symbol}`）・

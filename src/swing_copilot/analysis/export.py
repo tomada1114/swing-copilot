@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ANALYSIS_INPUT_FILENAME",
     "ANALYSIS_RESULT_FILENAME",
+    "HISTORICAL_REPLAY_FILENAME",
     "ExportCandidate",
     "ExportRequest",
     "TextExportLimits",
@@ -70,6 +71,12 @@ __all__ = [
 
 ANALYSIS_INPUT_FILENAME = "analysis_input.json"
 ANALYSIS_RESULT_FILENAME = "analysis_result.json"
+#: Marker a `--as-of` replay leaves beside its own `analysis_input.json`
+#: (Issue #254). A replay's export is written for a day whose analysis
+#: already happened (or never will), and no skill session answers it, so the
+#: directory would otherwise be indistinguishable from a live run whose
+#: qualitative phase died -- and every later run would report it as a gap.
+HISTORICAL_REPLAY_FILENAME = "historical_replay.json"
 _UNKNOWN_FORM_TYPE = "unknown"
 
 

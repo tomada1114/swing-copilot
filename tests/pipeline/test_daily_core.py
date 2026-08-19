@@ -6,10 +6,14 @@ tests/test_e2e_smoke.py.
 
 from __future__ import annotations
 
+import itertools
 import json
+import logging
+import sys
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -29,6 +33,7 @@ from swing_copilot.pipeline.daily import (
     _select_symbols,
     run_daily,
 )
+from swing_copilot.pipeline.daily_runner import _ANALYSIS_GAP_LOOKBACK_DAYS
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -912,6 +917,335 @@ class TestSameDayRerunGuard:
             run_daily(DailyRunOptions(is_dry_run=True), holiday_deps)
 
         assert holiday_run_date.isoformat() in str(exc_info.value)
+
+
+_PRIOR_RUN_DATE = _LIVE_RUN_DATE - timedelta(days=1)
+_GAP_TAG = "ANALYSIS_GAP[missing_analysis_result]:"
+#: Keeps every archived run's `started_at` distinct and ordered.
+_ARCHIVE_SEQUENCE = itertools.count()
+
+
+def _archive_run(
+    deps,
+    run_date=_PRIOR_RUN_DATE,
+    status="success",
+    *,
+    exported=True,
+    analyzed=True,
+):
+    """Recreate one finished run's `runs` row and its `reports/` artifacts.
+
+    Consecutive calls get strictly later `started_at` values, so two runs
+    archived for the same date are ordered by the order they were archived in.
+    """
+    run_id = uuid4()
+    run_dir = Path(deps.output_dir) / run_date.isoformat() / str(run_id)
+    run_dir.mkdir(parents=True)
+    (Path(deps.output_dir) / run_date.isoformat() / f"{run_id}.md").write_text(
+        "# report", encoding="utf-8"
+    )
+    if exported:
+        (run_dir / "analysis_input.json").write_text("{}", encoding="utf-8")
+    if analyzed:
+        (run_dir / "analysis_result.json").write_text("{}", encoding="utf-8")
+    started_at = datetime(
+        run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC
+    ) + timedelta(minutes=next(_ARCHIVE_SEQUENCE))
+    with deps.state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
+            [str(run_id), run_date, status, started_at],
+        )
+    return run_id, run_dir
+
+
+def _stored_gaps(state_store, run_id):
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        row = conn.execute(
+            "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
+        ).fetchone()
+    return json.loads(row[0]).get("prior_analysis_gaps")
+
+
+def _gap_lines(capsys):
+    """The stderr lines that actually start with the machine-readable tag."""
+    return [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith(_GAP_TAG)
+    ]
+
+
+class _BrokenStderr:
+    """A stderr whose every write fails, like a closed `| head` pipe."""
+
+    def write(self, _text):
+        msg = "Broken pipe"
+        raise BrokenPipeError(32, msg)
+
+    def flush(self):
+        return None
+
+
+class TestPriorAnalysisGapDetection:
+    """#254: an earlier run's unfinished qualitative phase must not stay silent."""
+
+    def test_a_completed_prior_analysis_is_not_reported(
+        self, deps, state_store, capsys
+    ):
+        _archive_run(deps)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_missing_analysis_result_warns_on_stderr_and_is_recorded(
+        self, deps, state_store, capsys
+    ):
+        prior_id, run_dir = _archive_run(deps, analyzed=False)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        # Fail-soft: the gap is an earlier day's fact, never today's abort.
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) == [
+            {
+                "reason": "missing_analysis_result",
+                "run_id": str(prior_id),
+                "run_date": _PRIOR_RUN_DATE.isoformat(),
+                "run_directory": str(run_dir),
+            }
+        ]
+        # The tag has to sit at column zero to be greppable the way
+        # PREFLIGHT_ABORT[...] is; a logging formatter would prefix it.
+        lines = _gap_lines(capsys)
+        assert len(lines) == 1
+        assert lines[0] == (
+            f"{_GAP_TAG} run_date={_PRIOR_RUN_DATE.isoformat()} "
+            f"run_id={prior_id} run_directory={run_dir}"
+        )
+
+    def test_the_first_run_ever_reports_no_gap(self, deps, state_store, capsys):
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    @pytest.mark.parametrize(
+        "analyzed_first",
+        [True, False],
+        ids=["analysis-in-the-earlier-sibling", "analysis-in-the-later-sibling"],
+    )
+    def test_a_same_day_sibling_holding_the_analysis_is_not_a_gap(
+        self, deps, state_store, capsys, analyzed_first
+    ):
+        # A same-day double start (what #118 now blocks at the door) leaves two
+        # directories for one date. The day's analysis lives in whichever
+        # sibling answered, and which of the two started first does not change
+        # that -- `find_incomplete_runs` keys `SAME_DAY_SUPERSEDED` on the
+        # date, so both orders must come out the same.
+        _archive_run(deps, analyzed=analyzed_first)
+        _archive_run(deps, analyzed=not analyzed_first)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_failed_and_running_prior_runs_are_not_gaps(
+        self, deps, state_store, capsys
+    ):
+        # A failed run handed the skill nothing, and a `running` row is work
+        # that never reached its own terminal state -- neither is evidence
+        # that a qualitative analysis went missing.
+        _archive_run(deps, status="failed", analyzed=False)
+        _archive_run(deps, status="running", analyzed=False)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_prior_run_that_exported_nothing_is_not_a_gap(
+        self, deps, state_store, capsys
+    ):
+        # No analysis_input.json means no candidates or no text to analyse:
+        # there was never an analysis owed for that day.
+        _archive_run(deps, exported=False, analyzed=False)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_degraded_prior_run_is_still_checked(self, deps, state_store):
+        prior_id, _ = _archive_run(deps, status="degraded", analyzed=False)
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        gaps = _stored_gaps(state_store, result.run_id)
+        assert [gap["run_id"] for gap in gaps] == [str(prior_id)]
+
+    def test_todays_own_unanswered_directory_is_not_a_gap(
+        self, deps, state_store, capsys
+    ):
+        # An `--allow-same-day-rerun` sibling of today has an export but no
+        # answer yet: today's analysis is not due until this run's own skill
+        # session ends.
+        _archive_run(deps, run_date=_LIVE_RUN_DATE, analyzed=False)
+
+        result = run_daily(DailyRunOptions(allow_same_day_rerun=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_gap_exactly_at_the_lookback_boundary_is_still_reported(
+        self, deps, state_store, capsys
+    ):
+        # The window is inclusive at its far edge: `since` is exactly
+        # `run_date - _ANALYSIS_GAP_LOOKBACK_DAYS`, so that day still counts.
+        # Expressed through the constant, so changing the number moves the
+        # boundary rather than silently changing what "in the window" means.
+        prior_id, _ = _archive_run(
+            deps,
+            run_date=_LIVE_RUN_DATE - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS),
+            analyzed=False,
+        )
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        gaps = _stored_gaps(state_store, result.run_id)
+        assert [gap["run_id"] for gap in gaps] == [str(prior_id)]
+        assert len(_gap_lines(capsys)) == 1
+
+    def test_a_gap_one_day_older_than_the_lookback_window_is_not_reported(
+        self, deps, state_store, capsys
+    ):
+        # Bounded on purpose: a gap nobody backfilled must stop being
+        # re-reported forever. `copilot-history incomplete` still lists it.
+        _archive_run(
+            deps,
+            run_date=_LIVE_RUN_DATE - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS + 1),
+            analyzed=False,
+        )
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_historical_replay_reports_nothing(self, deps, state_store, capsys):
+        # A replay writes an analysis_input.json no skill session will answer;
+        # counting replays would make the next live run record a false gap.
+        _archive_run(deps, run_date=AS_OF - timedelta(days=1), analyzed=False)
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_dry_run_never_reports_its_own_throwaway_exports(
+        self, deps, state_store, capsys
+    ):
+        # `--dry-run` gets its own database and `reports/dry_run` tree, but
+        # step 6 still exports there and no skill answers it. Two dry runs a
+        # few days apart must not make the second report the first.
+        _archive_run(deps, analyzed=False)
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_directory_left_by_a_replay_is_not_a_gap(self, deps, state_store, capsys):
+        # The `--as-of` guard only silences the replay itself; the directory
+        # it leaves behind outlives it, so the replay stamps its own export
+        # and every later live run skips what it stamped.
+        _, run_dir = _archive_run(deps, analyzed=False)
+        (run_dir / "historical_replay.json").write_text("{}", encoding="utf-8")
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+
+    def test_a_gap_just_inside_the_lookback_window_is_reported(
+        self, deps, state_store, capsys
+    ):
+        prior_id, _ = _archive_run(
+            deps,
+            run_date=_LIVE_RUN_DATE - timedelta(days=_ANALYSIS_GAP_LOOKBACK_DAYS - 1),
+            analyzed=False,
+        )
+
+        result = run_daily(DailyRunOptions(), deps)
+
+        gaps = _stored_gaps(state_store, result.run_id)
+        assert [gap["run_id"] for gap in gaps] == [str(prior_id)]
+        assert len(_gap_lines(capsys)) == 1
+
+    def test_an_unwritable_stderr_costs_the_line_but_not_the_record(
+        self, deps, state_store, monkeypatch, caplog
+    ):
+        # `copilot-daily 2>&1 | head -20` closes the pipe early. The warning
+        # is worth less than the run: a BrokenPipeError here would otherwise
+        # kill the batch before `start_run` and leave no `runs` row at all.
+        # The two exposure routes fail independently, so the durable one still
+        # carries the gap the scan did find.
+        prior_id, run_dir = _archive_run(deps, analyzed=False)
+        monkeypatch.setattr(sys, "stderr", _BrokenStderr())
+
+        with caplog.at_level(logging.ERROR):
+            result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) == [
+            {
+                "reason": "missing_analysis_result",
+                "run_id": str(prior_id),
+                "run_date": _PRIOR_RUN_DATE.isoformat(),
+                "run_directory": str(run_dir),
+            }
+        ]
+        assert any(
+            "could not be written to stderr" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_a_failing_check_never_stops_todays_run(
+        self, deps, state_store, monkeypatch, caplog, capsys
+    ):
+        _archive_run(deps, analyzed=False)
+
+        def explode(*_args, **_kwargs):
+            msg = "reports tree unreadable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.daily_runner.find_incomplete_runs", explode
+        )
+
+        with caplog.at_level(logging.ERROR):
+            result = run_daily(DailyRunOptions(), deps)
+
+        assert result.status == RunStatus.SUCCESS
+        assert _stored_gaps(state_store, result.run_id) is None
+        assert _gap_lines(capsys) == []
+        assert any(
+            "prior-run analysis gap check failed" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 class TestFundamentalsStepSkipped:

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
+    HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
@@ -1206,6 +1207,71 @@ class TestOutputFailureContract:
         assert result.report_path.is_file()
         assert result.analysis_input_path is not None
         assert _step_status(state_store, result.run_id, "8_output") == "failed"
+
+
+class TestHistoricalReplayMarker:
+    """#254: a replay stamps the export nobody is going to answer."""
+
+    def test_a_live_replay_stamps_its_own_run_directory(self, base_deps):
+        # The path the marker exists for: `copilot-daily --as-of <date>` in
+        # live mode writes into the same `reports/` tree the next live run
+        # scans. Without the stamp that run cannot tell a replay's export from
+        # a live run whose qualitative phase died, and would report the
+        # replayed day as a gap for as long as the lookback window reaches it.
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
+
+        assert result.analysis_input_path is not None
+        marker = result.analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME
+        assert json.loads(marker.read_text(encoding="utf-8")) == {
+            "run_id": str(result.run_id),
+            "as_of": result.run_date.isoformat(),
+        }
+
+    def test_a_dry_run_replay_is_stamped_too(self, base_deps):
+        # `--dry-run` writes into its own tree, but the stamp keys off
+        # `--as-of`, not the mode, so both replays are marked the same way.
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.analysis_input_path is not None
+        assert (
+            result.analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME
+        ).is_file()
+
+    def test_a_current_day_run_leaves_no_marker(self, base_deps):
+        # No `--as-of`: this export is exactly the one a skill session owes an
+        # answer to, so stamping it would silence the signal it exists for.
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
+
+        assert result.analysis_input_path is not None
+        assert not (
+            result.analysis_input_path.parent / HISTORICAL_REPLAY_FILENAME
+        ).exists()
+
+    def test_a_marker_write_failure_never_fails_the_replay(
+        self, base_deps, monkeypatch, caplog
+    ):
+        def _raise(*_args, **_kwargs):
+            msg = "marker disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(daily_runner, "write_json_atomically", _raise)
+        deps = replace(base_deps, news_client=FakeNewsClient())
+
+        with caplog.at_level(logging.ERROR):
+            result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.status is RunStatus.SUCCESS
+        assert result.analysis_input_path is not None
+        assert any(
+            "historical replay marker write failed" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 class TestDryRunSuppressesNotification:

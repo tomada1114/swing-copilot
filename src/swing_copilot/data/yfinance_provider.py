@@ -64,19 +64,25 @@ def _empty_bars_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(BARS_COLUMNS))
 
 
-def _is_finite(value: object) -> bool:
-    """Whether one OHLCV cell is a real, finite number.
+def _finite_value(value: object) -> float | None:
+    """One OHLCV cell as a real, finite number, or `None` if it is not usable.
 
     Mirrors `MarketStore._reject_non_finite_bars`' notion of "usable", so the
     two layers cannot disagree about what counts as a broken value: a
     non-numeric cell is non-finite here too, and fails at this boundary
     instead of as a `ValueError` out of `float()`/`int()`.
+
+    The parsed number is handed back rather than a bool so the caller builds
+    the row out of it. Re-reading the raw cell would reopen the same hole one
+    field over: `int("2100.5")` raises `ValueError` on a numeric *string*
+    `Volume` that `float()` accepted, which is exactly the escape this guard
+    exists to close.
     """
     try:
         numeric = float(value)  # type: ignore[arg-type] # any numeric-like cell
     except TypeError, ValueError:
-        return False
-    return math.isfinite(numeric)
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _symbol_bars(
@@ -106,7 +112,14 @@ def _symbol_bars(
         if not (start <= bar_date < end) or pd.isna(fields["Close"].loc[timestamp]):
             continue
         values = {name: fields[name].loc[timestamp] for name in _REQUIRED_FIELDS}
-        invalid = [name for name in _REQUIRED_FIELDS if not _is_finite(values[name])]
+        numeric: dict[str, float] = {}
+        invalid: list[str] = []
+        for name in _REQUIRED_FIELDS:
+            parsed = _finite_value(values[name])
+            if parsed is None:
+                invalid.append(name)
+            else:
+                numeric[name] = parsed
         if invalid:
             detail = ", ".join(f"{name}={values[name]}" for name in invalid)
             return [], f"non-finite OHLCV value on {bar_date.isoformat()} ({detail})"
@@ -114,11 +127,11 @@ def _symbol_bars(
             {
                 "symbol": symbol,
                 "date": bar_date,
-                "open": float(values["Open"]),
-                "high": float(values["High"]),
-                "low": float(values["Low"]),
-                "close": float(values["Close"]),
-                "volume": int(values["Volume"]),
+                "open": numeric["Open"],
+                "high": numeric["High"],
+                "low": numeric["Low"],
+                "close": numeric["Close"],
+                "volume": int(numeric["Volume"]),
             }
         )
     return rows, None

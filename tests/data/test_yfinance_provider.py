@@ -285,6 +285,27 @@ class TestNonFiniteValues:
 
         assert {failure.symbol for failure in result.failures} == {"MSFT"}
 
+    def test_a_numeric_string_volume_does_not_escape_as_a_value_error(self):
+        """`float("2100.5")` accepts what `int("2100.5")` rejects.
+
+        The finiteness check parses each cell once and the row is built from
+        that number, so a numeric string cannot pass validation and then blow
+        up in `int()` — the same escape out of `get_daily_bars` this class
+        pins shut for NaN.
+        """
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: self._fixture("Volume", "2100.5"),
+            sleep_fn=lambda _delay: None,
+        )
+
+        result = provider.get_daily_bars(
+            ["AAPL", "MSFT"], date(2026, 7, 15), date(2026, 7, 18)
+        )
+
+        assert result.failures == ()
+        msft = result.bars[result.bars["symbol"] == "MSFT"]
+        assert msft["volume"].tolist() == [2000, 2100]
+
     def test_an_all_nan_row_is_still_skipped_rather_than_failing_the_symbol(self):
         """The deliberate asymmetry: no `Close` means no trading row here."""
         fixture = _frame(

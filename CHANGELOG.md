@@ -51,7 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   台帳と成績は #190 の skip シャドウ追跡があるため必ず `recommendation` で層別する。
   チャートはサーバ側生成のインライン SVG で、JS ライブラリ・CDN・外部フォントを
   読み込まず完全オフラインで動作する。依存に `fastapi` / `jinja2` / `uvicorn` を
-  追加した（`[tool.uv] exclude-newer` は据え置き）
+  追加した（`[tool.uv] exclude-newer` は据え置き）。各セクションには
+  `dashboard/guidance.py` に集約した「読み方」キャプションを添える——とくに当否は、
+  説明がないと下落した `skip` が失敗に見えるが、`retro/evaluate.py` は分類を
+  verdict 自身の主張に対して定義しており、proceed でも skip でも HIT は
+  「その判断が正しかった」を意味する。閾値は設定キー名で示し、数値は焼き込まない
+  （ダッシュボードは `settings.yaml` を読まないため）
 
 - 非有限 OHLCV の store 側防御層を追加した（Issue #227）。`MarketStore.write_bars()`
   は `open` / `high` / `low` / `close` / `volume` に NaN・±inf（および数値化できない値）

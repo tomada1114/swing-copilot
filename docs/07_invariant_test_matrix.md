@@ -96,6 +96,8 @@
 | `data/edgar.py` | 添付ダウンロードにも 10 リクエスト/秒の throttle を適用する | Exhibit 取得だけがレート制限を迂回する | `tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download` |
 | `analysis/filing_selection.py` | 予算逼迫時は主文書と EX-99.1 を supplement より優先して配分する | 数倍大きい supplemental package が予算を食い、プレスリリースが削られる | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_budget_pressure_serves_the_press_release_before_a_supplement` |
 | `analysis/filing_selection.py` | 割当超過の Exhibit は末尾切りではなく、定型文から落として markdown テーブルを最後まで残す | 末尾に置かれる財務諸表・非 GAAP 調整表が真っ先に落ちる（Issue #157 の GOOG 申告） | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_a_far_over_allocation_keeps_the_tables_after_everything_else` |
+| `analysis/filing_selection.py` | 各開示は最低保証字数を確保してから、余りを優先順に配る（優先順位は読める量を決め、読めるかどうかは決めない） | per-filing 上限に達する開示 2 件で 1 銘柄予算が尽き、3 件目が 10 字（HST）や 0 字（UDR）のまま「分析済み」になる | `tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_small_third_filing_survives_two_ceiling_filling_filings` |
+| `analysis/filing_selection.py` | 保証すら全件に配れないときは割り当て順に保証を配り、尽きたら 0 にする | 窮迫時の配分が実装詳細で変わり、同じ入力から同じ出力が出ない | `tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_ceiling_too_small_for_every_guarantee_serves_them_in_priority_order` |
 | `analysis/filing_selection.py` | Exhibit 選別は `selection_mode` / `sections_json` へ Exhibit 語彙で記録され、P8 から読める | 「開示が切れた」までしか分からず、どの Exhibit が削られたか追跡できない | `tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_exhibit_coverage_survives_the_analysis_source_coverage_round_trip` |
 
 ## 自社材料の供給量の申告

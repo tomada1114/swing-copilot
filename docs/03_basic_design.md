@@ -20,7 +20,7 @@
 
 ## 2. システム全体構成
 
-swing-copilotは、利用者がローカルマシンで手動実行するコマンドを起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェックを経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。定性分析（ニュース解釈・開示解釈・スクリーニング評価）はこのプロセスの外にあり、日次バッチが書き出した`analysis_input.json`をClaude Codeスキルが読み、その回答を`copilot-ingest-analysis`が検証してレポートへ反映する。Discord通知はオプションであり、自動発注は行わない。
+swing-copilotは、1日1回起動されるコマンド（平日は無人の定時実行、随時は手動実行）を起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェックを経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。定性分析（ニュース解釈・開示解釈・スクリーニング評価）はこのプロセスの外にあり、日次バッチが書き出した`analysis_input.json`をClaude Codeスキルが読み、その回答を`copilot-ingest-analysis`が検証してレポートへ反映する。Discord通知はオプションであり、自動発注は行わない。
 
 採用するアーキテクチャパターンは次の通り。
 
@@ -30,7 +30,7 @@ swing-copilotは、利用者がローカルマシンで手動実行するコマ�
 - **Repository + step Unit of Work**: `MarketStore`/`StateStore`は同じDuckDBを使う論理repositoryとし、日次バッチの各ステップをトランザクション境界にする。Parquetを跨ぐ処理は自然キーupsertと原子的renameで再実行可能にする。
 - **明示的composition root**: CLI起動時に設定から具体adapterを組み立てて注入する。import副作用による自動検出やentry-point plugin探索はP1〜P2では行わない。
 
-この構成は、1人保守・ローカル手動実行というNFR-02に対して、外部サービス差し替えとテスト容易性だけを確保し、分散システムの運用負荷を持ち込まないための選択である。
+この構成は、1人保守・常時稼働サーバーなしというNFR-02に対して、外部サービス差し替えとテスト容易性だけを確保し、分散システムの運用負荷を持ち込まないための選択である。
 
 ```mermaid
 flowchart TD
@@ -119,7 +119,7 @@ flowchart TD
     PAPER -.-> DUCKDB
 ```
 
-実行環境はローカルマシンのみであり、利用者が1日1回`uv run copilot-daily`を手動実行する。`data/`（Parquet/DuckDB）と`reports/`（生成Markdown）はローカルへ永続化する。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
+日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。`reports/`（生成Markdown）は実行環境に残る成果物である。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
 
 ---
 
@@ -176,7 +176,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant Local as ローカルマシン（手動実行）
+    participant Local as 実行環境（定時／手動）
     participant D as pipeline/daily.py
     participant DP as DataProvider
     participant EDG as data/edgar.py
@@ -337,14 +337,19 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 | 環境 | 用途 | 実行方法 |
 |---|---|---|
-| ローカルマシン | 開発・デバッグ・日々の運用のすべてを同一方法で実行 | 利用者が任意のタイミングで1日1回`uv run copilot-daily`を手動実行する（`.env`から環境変数をロード） |
+| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `0 23 * * 1-5`（UTC、= JST 火〜土 8:00）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `/swing-daily`（`uv run copilot-daily`と定性分析スキル）→ 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
+| ローカルマシン | 開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード） |
+
+どちらの環境も同じコードを同じ手順で動かす。実行環境ごとの分岐はパイプラインに持たせない。
 
 ### 8.2 永続化
 
-すべてのデータはローカルファイルシステムのパスにそのまま永続化される。実行環境がステートレスに破棄されることはないため、永続化のためのコミット操作は不要である。
-- `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）
-- `reports/<run_date>/<run_id>.md`（run別生成Markdown）
-- `reports/latest.md`（最新runの便宜コピー）
+データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。
+
+- 同期対象（R2が正本）: `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない
+- 同期対象外（ローカル／ランナー限り）: `reports/<run_date>/<run_id>.md`（run別生成Markdown）、`reports/latest.md`（最新runの便宜コピー）。GitHub Actions上の実行はこれをworkflow artifactとして保存する
+- 並行書き込みガードは`manifest.json`の単調増加`generation`による楽観ロックだけである。`push`はリモートのgenerationが`pull`時点と一致するときにのみ成功するので、**書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない**
+- 実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する
 
 ### 8.3 実行時間
 

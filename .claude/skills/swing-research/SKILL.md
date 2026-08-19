@@ -28,9 +28,9 @@ canonical な使い方・データ辞書・NULL の意味論は
 1. **必ず `swing_copilot.research` 経由で読む。** 生の `duckdb.connect()` を
    `data/copilot.duckdb` に向けて開かない。research の各関数はクエリ毎に
    read-only 接続を即開閉するので、これだけでロック規律が守られる
-2. **接続・REPL を掴んだまま放置しない。** この作業コピーは 18:30 の無人日次
-   実行の実行環境でもある。長い対話セッション中も、クエリはスクリプト単位で
-   `uv run python` を使い捨てにするのが安全
+2. **接続・REPL を掴んだまま放置しない。** DuckDB のファイルロックは排他なので、
+   掴んだままだと次の `just data-pull` / `just data-push` が失敗する。長い対話
+   セッション中も、クエリはスクリプト単位で `uv run python` を使い捨てにする
 3. **何も書かない。** DB・`config/**`・`analysis_result.json`・`reports/latest.md`
    に触れない。分析メモを残すのはユーザーが求めたときだけで、置き場所は
    `reports/research/<as_of>-<slug>.md`（新規ファイルのみ、上書き不可）
@@ -39,6 +39,9 @@ canonical な使い方・データ辞書・NULL の意味論は
 
 ## 手順
 
+0. **`just data-pull` でローカルコピーを最新にする。** `data/` の正本は R2 に
+   あり、日次実行は GitHub Actions が書いている。取得せずに読むと、直近の run が
+   丸ごと欠けた古い世代を集計してしまう。読むだけなので `just data-push` はしない
 1. **問いを1文に固定する**（例:「score 上位群は下位群より 20 日リターンが
    良いか」）。曖昧な依頼はまず問いへ言い換えてユーザーに見せる
 2. `uv run python` のワンショットスクリプトで `research.scorecard()` 等を読む。

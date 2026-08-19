@@ -243,6 +243,12 @@ uv run copilot-daily <ユーザー指定の引数>
 
 引数（対象日、dry-run/live 等）はユーザーの指示に従う。指定が無ければ引数なしで実行。
 
+**`data/` の同期は実行形態で担当が変わる。** 正本は R2 にある。
+対話セッション（ローカル）では、このコマンドの前に `just data-pull`、Step 6 の
+ingest まで終えたあとに `just data-push` を実行する。無人実行（GitHub Actions）
+ではワークフローが前後で pull/push を行うので、**スキルからは実行しない**
+（分析セッションには R2 の資格情報を渡していない）。
+
 **終了コード 2（preflight abort）は stderr の機械可読プレフィックスで分岐する。**
 stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式で、
 `<reason>` により意味が正反対になる。プレフィックスを読まずに「分析済み」と
@@ -805,8 +811,8 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 
 ## 無人実行（headless）時の方針
 
-平日の定時に Claude Desktop の Routines から **無人起動**される運用がある
-（ルーティンの構成は `CLAUDE.md` の "Scheduled Daily Run" を参照。スケジュール
+平日の定時に GitHub Actions から **無人起動**される運用がある
+（ワークフローの構成は `CLAUDE.md` の "Scheduled Daily Run" を参照。スケジュール
 自体はこのスキルの外で管理される）。対話セッションでは従来どおり
 ユーザーに確認しながら進めてよいが、headless では以下に従う。
 

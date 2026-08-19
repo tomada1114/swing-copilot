@@ -26,31 +26,37 @@ above). This repo additionally ships Claude Code configuration:
 
 ## Scheduled Daily Run
 
-`/swing-daily` runs unattended on weekdays via a **local Claude Desktop Routine**
-(`swing-copilot-daily`), which replaced the former launchd agent: folder = this
-repository, cron `30 18 * * 1-5`, mode `Auto`, branch `main`, model Opus,
-**Worktree off**. The routine's Instructions live in the Claude Desktop app and
-are deliberately not mirrored here, to avoid drift.
+`/swing-daily` runs unattended on weekdays in GitHub Actions
+(`.github/workflows/swing-daily.yml`): cron `0 23 * * 1-5` UTC — JST Tue–Sat
+8:00, two to three hours after the US close — plus `workflow_dispatch` for a
+manual run. Those are the only two triggers; the repository is public, so no
+path a third party can pull. Nothing is retried automatically: a failed or
+skipped day is re-dispatched by hand, and #277's preflight makes the gap
+visible in the next run.
 
-Worktree stays off because `data/`, `.env`, and `.venv` are untracked — a clean
-checkout would lose the API keys and the cached price/filing history and refetch
-everything. So **this working copy is the execution environment**: keep it on
-`main` and clean, and do feature work in a `git worktree` elsewhere. A scheduled
-run aborts on its own if the branch is not `main`, or if `src`, `config`,
-`pyproject.toml`, or `uv.lock` has uncommitted changes. A local routine only
-fires while the machine is awake and online; unlike launchd, a missed run is
-never retried later.
+The canonical `data/` lives in a private Cloudflare R2 bucket, not in any
+working copy. The workflow pulls it before the analysis and pushes it back
+only on success, so a failed day leaves the remote on the previous generation.
 
-Two consequences for feature work done in a worktree:
+### Working with the data locally
 
-- A worktree has no `data/`, `.env`, or `.venv`. If a task there needs the
-  cached price/filing history (e.g. regenerating a backtest report), **copy**
-  the main checkout's `data/` into the worktree (`cp -R`); never symlink it,
-  and never open the main checkout's `data/copilot.duckdb` from a worktree —
-  its file lock is exclusive and a held handle can fail the 18:30 routine.
-- After a PR merges to `main`, fast-forward this working copy
-  (`git fetch --prune && git pull --ff-only`) so the next scheduled run
-  executes the merged code instead of a stale checkout.
+- Read-only work (`swing-research`, the dashboard): `just data-pull`, then read
+  the local copy. `just data-status` says whether it still matches the remote.
+- Anything that writes (`swing-track` manual closes, `swing-retro`, a live
+  `copilot-daily`): `just data-pull` → work → `just data-push`, in one sitting.
+  The optimistic lock in `scripts/data_sync.py` — a monotonic `generation` in
+  `manifest.json` — is the only concurrent-write guard, so do not leave a
+  pulled copy unpushed, and do not start a local write around JST 8:00 while
+  the scheduled run holds the generation.
+- Never open `data/copilot.duckdb` as a read-write DuckDB connection for
+  exploration, and never hold any connection across think-time. The file lock
+  is exclusive between a read-write process and everything else, so a held
+  handle fails the next `just data-pull` / `data-push`. Sync always moves the
+  file as bytes, never through DuckDB.
+- A `git worktree` has no `data/`, `.env`, or `.venv`. Run `just install`
+  there, copy `.env` in by hand (it holds the R2 and API credentials, and it is
+  untracked), and get the history with `just data-pull` — never by copying or
+  symlinking another checkout's `data/`.
 
 `AGENTS.md` is the canonical cross-tool contract for domain invariants,
 source-of-truth precedence, test expectations, and the Japanese/English
@@ -61,9 +67,9 @@ stderr's first line carries a machine-readable tag the `swing-daily` skill
 branches on — never assume exit 2 means "already ran":
 
 - `PREFLIGHT_ABORT[same_day_rerun]:` — a `status='success'` run already exists
-  for the resolved `run_date` (Issue #118: the `swing-copilot-daily` routine
-  only fires once, but a cron edit or manual re-run of a completed day would
-  otherwise write a second `verdicts` set). It exits before creating a `runs`
+  for the resolved `run_date` (Issue #118: the schedule fires once per weekday,
+  but a manual dispatch or a re-run of a completed day would otherwise write a
+  second `verdicts` set). It exits before creating a `runs`
   row or `reports/` directory. The skill summarizes the existing run and
   terminates without writing `analysis_result.json`.
   `--allow-same-day-rerun` bypasses the guard for an intentional re-run.
@@ -80,10 +86,10 @@ read-only, one connection per query, joined views included. Use the
 `swing-research` skill for these questions; `docs/09_research_guide.md` is the
 canonical how-to and data dictionary. Never open a raw read-write
 `duckdb.connect()` against `data/copilot.duckdb` for exploration, and never
-hold any connection across think-time: this working copy is the unattended
-execution environment, and DuckDB's file lock is exclusive between a
-read-write process and everything else, so a held connection can make the
-18:30 routine fail its whole day. Improvement work discovered while analyzing
+hold any connection across think-time: DuckDB's file lock is exclusive between
+a read-write process and everything else, so a held connection fails the next
+`just data-pull` / `data-push` and strands the local copy on a stale
+generation. Improvement work discovered while analyzing
 follows `docs/08_architecture_review_2026-08.md`'s principles (no config
 changes on point estimates alone; route proposals through issues or
 `swing-retro`).

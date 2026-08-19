@@ -58,7 +58,8 @@ app = create_app(db_path=Path("data/copilot.duckdb"), reports_root=Path("reports
 `create_app()` はDBとreportsディレクトリを注入するアプリケーションファクトリで、
 テストは実データに触れずに全ルートを検証できる。DuckDBへは `swing_copilot.research`
 経由でのみアクセスし（クエリごとに開いて閉じる）、`ensure_views()` はこのプロセスから
-呼ばない——読み書き接続を開くため、無人日次実行のファイルロックを奪いうる。
+呼ばない——読み書き接続を開くため、`just data-pull` / `data-push` のファイルロックを
+奪いうる。
 ビュー不在は `ResearchError` としてエラーページに変換し、別シェルで一度
 `ensure_views()` を実行するよう案内する。
 

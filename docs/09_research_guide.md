@@ -190,7 +190,8 @@ research.query(
 - **接続は関数呼び出しの内側だけ**: 各関数はクエリごとに read-only 接続を開いて
   即閉じる。DuckDB のファイルロックは read-write プロセスと排他なので、生の
   `duckdb.connect()` を開いたまま保持するノートブックは（read-only でも）
-  18:30 の無人日次実行をブロックする。必ずこのモジュール経由で読むこと。
+  `just data-pull` / `just data-push` を失敗させ、ローカルコピーを古い世代に
+  取り残す。必ずこのモジュール経由で読むこと。
 - **書けない**: read-only 接続なので INSERT/UPDATE/DDL は失敗する。これは仕様。
   修正・取り込みは従来どおり `storage` リポジトリと各 CLI の責務。
 - **古い DB**: ビュー導入前のファイルを読むと `ResearchError` がヒント付きで出る。

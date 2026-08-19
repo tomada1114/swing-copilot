@@ -54,9 +54,18 @@ jobs:
       # 最小権限: 分析セッションには R2 の資格情報を渡さない。
       # API キーはステップの env: で渡す (settings JSON への secrets 埋め込みは
       # 値に含まれる文字次第で JSON が壊れるため不可)。
-      # 権限モードは claude_args で CLI に直接渡す (settings の defaultMode は
-      # SDK 経由の起動には効かない)。リポジトリの .claude/settings.json
-      # (guard/format/stop_check フック) は project スコープとして別途読まれる。
+      # 権限は claude_args で CLI に直接渡す (settings の defaultMode や
+      # permissions は SDK 経由の起動には効かない)。リポジトリの
+      # .claude/settings.json (guard/format/stop_check フックと
+      # ./scripts/timebox.sh の許可) は project スコープとして別途読まれる。
+      #
+      # dontAsk: 承認待ちで止まらず、許可されていないツール呼び出しは拒否して続行する。
+      # 許可するのは swing-daily スキルが実際に使うコマンドだけで、`uv run` 全体には
+      # 広げない (`uv run python ...` が任意コード実行になり、ニュース・開示という
+      # 信頼できないテキストを読むセッションで injection 耐性が消えるため)。
+      # 同じ理由で、実行経路になるファイル (src/、scripts/、config/、ビルド定義、
+      # .claude/、.github/) への書き込みを拒否する。スキルが書くのは
+      # reports/<run_id>/ 配下の断片と scratchpad の一時ファイルだけ。
       - name: Run swing-daily
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         env:
@@ -69,7 +78,13 @@ jobs:
           # Claude GitHub App は未インストールなので、OIDC 交換ではなく
           # workflow の GITHUB_TOKEN を渡す。Claude は GitHub へ書き込まない。
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model opus --permission-mode bypassPermissions"
+          claude_args: >-
+            --model opus
+            --permission-mode dontAsk
+            --allowedTools
+            "Bash(uv run copilot-daily:*),Bash(uv run copilot-verify-analysis:*),Bash(uv run copilot-ingest-analysis:*),Bash(uv run copilot-history:*),Bash(uv run copilot-export-slices:*),Bash(./scripts/timebox.sh:*),Write,Edit"
+            --disallowedTools
+            "WebFetch,WebSearch,Write(src/**),Edit(src/**),Write(scripts/**),Edit(scripts/**),Write(config/**),Edit(config/**),Write(.claude/**),Edit(.claude/**),Write(.github/**),Edit(.github/**),Write(pyproject.toml),Edit(pyproject.toml),Write(justfile),Edit(justfile)"
           prompt: |
             これは GitHub Actions 上の無人実行 (headless) です。
             `.claude/skills/swing-daily/SKILL.md` の「無人実行（headless）時の方針」に

@@ -1061,6 +1061,12 @@ def write_text_atomically(destination: Path, content: str) -> None: ...
 - **保証すら全件に配れない場合**: 1銘柄予算が保証合計に満たないときは、**割り当て順に保証を配り、尽きた時点で以降は0**とする（＝従来の`omitted_symbol_budget`）。優先順位は「余りの配分」と「窮迫時の保証の配分」の両方に同じ順序で効く。この縮退はテストで固定してある。
 - **変えないもの**: `max_filing_chars` / `max_filing_chars_per_symbol`の値、取得段の安全弁`_MAX_EXHIBIT_CHARS_PER_FILING`、`selection_mode`のenum、`coverage`の意味、provenance/CON-03の検査経路。新しいconfigキーも追加しない（最低保証は`filing_selection.py`のモジュール定数。Issue #267でP8の飢餓検知と共有するため公開名`MIN_FILING_CHARS`へ改めた）。
 
+**Issue #268実装時追記（最低保証を満たせないconfigのfail-fast検証）**: 上記の最低保証は「1銘柄予算が保証合計に足りていれば」全開示に行き渡る。足りていない設定は開示の内容によらず**毎回**後続開示を`omitted_symbol_budget`にするので、実行時に吸収する縮退ではなく**invalid limit**として`config.py`の`AnalysisConfig`で起動時に拒否する（AGENTS.md「Reject ... invalid limits」）。
+
+- **検証条件**: `max_filing_chars_per_symbol >= max_filings_per_symbol × min(max_filing_chars, MIN_FILING_CHARS)`。右辺の`min(...)`は`_reserve_minimum_chars()`が実際に確保する額（`min(len(content_text), max_filing_chars, MIN_FILING_CHARS)`）のうち、config段で分かる2項だけを取ったものである。`max_filing_chars`が`MIN_FILING_CHARS`より小さい設定では1開示がそもそもそれ以上受け取れないので、`MIN_FILING_CHARS`を無条件に掛けると整合的な小予算まで弾いてしまう。既存の`max_filing_chars_per_symbol >= max_filing_chars`検査は残す——`max_filings_per_symbol: 1`のときは新条件が旧条件を含まないため。
+- **定数の共有**: `filing_selection.py`の`_MIN_FILING_CHARS`を`MIN_FILING_CHARS`へ改名して公開し、`config.py`が直接importする（Issue #267の`retro/export.py::_is_starved()`も同じ定数をimportする。下記5.3）。`analysis/news_supply.py::DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS`と同じ依存方向（config → analysis）で、循環importは生じない。定数を2箇所に複製しないので乖離しようがない。パッケージ公開API（`swing_copilot.__init__.__all__`）へは足さない。
+- **現行の既定値**: 240,000 >= 3 × min(120,000, 8,000) = 24,000 で通る。しきい値に触れていないので、既定設定の挙動は変わらない。
+
 **calendar_events（run単位）**: `pipeline/daily.py`のステップ5が収集した`TextItem`のうち`symbol is None`・`source_type == "calendar"`のものは、どの候補にも属さないため`ExportRequest.calendar_events`として別出しし、`_calendar_event_inputs()`が公開日時の新しい順に`max_calendar_events`件・各`max_calendar_chars`文字へ切り詰めて`context.calendar_events`へ載せる。候補側`news`/`filings`のフィルタは`item.symbol == candidate.symbol`のため、symbolを持たないcalendarイベントは元々どの候補にもマッチしない。
 
 #### 3.16.1 ニュース選別順（FR-07、Issue #83 / #87）
@@ -1762,7 +1768,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `collect`は各runの開示`coverage`を`analysis_source_coverage`へverdictと同じトランザクションで完全置換する。`input_coverage`は開示数、切り詰め（export段の`truncated_filing_count`と取得段の`exhibit_truncated_filing_count`。Issue #157、上記3.15）・fallback・銘柄予算による省略数と、**飢餓件数**（`starved_filing_count`。下記）と、重大外し銘柄の`with_gap` / `without_gap` / `unknown`をコードで数える。`with_gap`はどちらの段の切り詰めでも立ち、`without_gap`は全行が「gap無し」かつ`exhibit_truncated`記録済みのときだけ立つ（未記録を含めば`unknown`）。各サプライズにも当時の`input_filing_coverage`を付ける。この集計は「情報不足と外しの併存」を切り分ける観測であり、情報不足が外しを引き起こしたという因果判定ではない。過去の`analysis-input-v2`はcoverage不明として`unknown`へ数える。
 
-**`starved_filing_count`（Issue #267）**: 「その開示は分析済みと呼べる量が渡っていたか」に答える唯一の数である。`retro/export.py::_is_starved()`が`exported_chars <= MIN_FILING_CHARS`かつ`exported_chars < original_chars`の行を数える。`selection_mode`ではなく**文字数**で判定するのは、modeが量を持たないためである——10字の`head_fallback`と100,000字の`head_fallback`は同じmodeであり、しかもIssue #255が全開示に最低保証を与えて以降、飢餓した開示は`omitted_symbol_budget`ですらなくなった（この検知が`omitted_filing_count`だけを見ていたために生じた見落としが本Issue）。第2条件が誤検知を防ぐ側で、原文が元々短く全文入った開示（実測4,074字・6,670字の8-K）は、字数が少なくとも欠落が無いので飢餓ではない。境界は保証ちょうどを**含む**: 240,000字の銘柄予算に対して保証分しか渡らなかったのは「譲る余りが無かった」ことの結果であって十分な読み込みではない。残る境目——保証をわずかに超える原文が保証まで切られた場合——は計上されるが、それも実際に保証しか配られていない状態であり、比率しきい値という第2の定数を増やしてまで除外しない。`MIN_FILING_CHARS`を`filing_selection.py`の公開定数へ上げて共有するのは、**床と警報を同じ数にする**ためである（別々に持つと片方の変更でもう片方が黙って鳴らなくなる）。`_has_gap`は変更しない: `exported_chars < original_chars`はexport段の`is_truncated`の定義そのものなので、飢餓行は既にgapとして数えられている。`InputCoverageSummary`への追加は既定0（=未計測）で、`retro_input_digest()`の`_drop_legacy_defaults`が0を落とすため、追加以前に書かれたdossierの`input_digest`は当日から検証を通り続ける。
+**`starved_filing_count`（Issue #267）**: 「その開示は分析済みと呼べる量が渡っていたか」に答える唯一の数である。`retro/export.py::_is_starved()`が`exported_chars <= MIN_FILING_CHARS`かつ`exported_chars < original_chars`の行を数える。`selection_mode`ではなく**文字数**で判定するのは、modeが量を持たないためである——10字の`head_fallback`と100,000字の`head_fallback`は同じmodeであり、しかもIssue #255が全開示に最低保証を与えて以降、飢餓した開示は`omitted_symbol_budget`ですらなくなった（この検知が`omitted_filing_count`だけを見ていたために生じた見落としが本Issue）。第2条件が誤検知を防ぐ側で、原文が元々短く全文入った開示（実測4,074字・6,670字の8-K）は、字数が少なくとも欠落が無いので飢餓ではない。境界は保証ちょうどを**含む**: 240,000字の銘柄予算に対して保証分しか渡らなかったのは「譲る余りが無かった」ことの結果であって十分な読み込みではない。残る境目——保証をわずかに超える原文が保証まで切られた場合——は計上されるが、それも実際に保証しか配られていない状態であり、比率しきい値という第2の定数を増やしてまで除外しない。`filing_selection.py`の公開定数`MIN_FILING_CHARS`（Issue #268で公開化。上記3.16）をそのまま参照するのは、**床と警報を同じ数にする**ためである（別々に持つと片方の変更でもう片方が黙って鳴らなくなる）。`_has_gap`は変更しない: `exported_chars < original_chars`はexport段の`is_truncated`の定義そのものなので、飢餓行は既にgapとして数えられている。`InputCoverageSummary`への追加は既定0（=未計測）で、`retro_input_digest()`の`_drop_legacy_defaults`が0を落とすため、追加以前に書かれたdossierの`input_digest`は当日から検証を通り続ける。
 
 `collect`は各候補の`news_supply`（Issue #130）も`verdicts`のnullable列へ同じトランザクションで取り込む（Issue #154）。levelだけでなく3つの件数も持つのは、後から別のしきい値で再採点するときに`reports/`の再走査を要らなくするため。`aggregates.news_supply`と各サプライズの`news_supply`は既定`null`のoptionalで、`input_digest`はこの既定を落として計算するため、Issue #154以前のdossierも検証を通り続ける。しきい値が緩すぎたか厳しすぎたかのうち、コードが数えられるのは「`sparse`/`none`でどれだけ`proceed`が出たか」までで、「`sufficient`なのに材料が無かった」（偽陰性）はサプライズdossierの`news_supply`を見たスキルの再読に委ねる。
 
@@ -2524,6 +2530,7 @@ analysis:
   max_news_chars_per_item: 4000    # 1記事あたりのエクスポート文字数
   max_filing_chars: 120000         # 1開示あたりのエクスポート上限（文字数）
   max_filing_chars_per_symbol: 240000  # 1銘柄の全開示合計上限
+                                   # （max_filings_per_symbol × min(max_filing_chars, 8000)以上。Issue #268）
   filing_lookback_days: 90         # 開示「収集」の遡及日数（roadmap §5 P6-26）
   max_filings_per_symbol: 3        # 1銘柄あたりの開示件数（同上）
   max_calendar_events: 20          # context.calendar_eventsに載せるrun単位の件数上限

@@ -129,11 +129,20 @@ _EARNINGS_ITEM_PATTERN = re.compile(r"item\s+2\.02", re.IGNORECASE)
 #: (10%), and only a filing that would otherwise be starved ever holds one --
 #: a filing shorter than this reserves its own length and no more.
 #:
-#: Public because it is also the line the retrospective reads a starved export
-#: by (`retro/export.py::_is_starved`, Issue #267): the floor and the alarm
-#: have to be the same number, or raising one would quietly stop the other
-#: from firing. It is a module constant, not configuration -- see design
-#: §3.16's Issue #255 addendum.
+#: Public rather than module-private because two other modules have to hold
+#: the same number, and each imports it rather than restating it:
+#:
+#: * `config.py` validates `max_filing_chars_per_symbol` against it at load
+#:   time (Issue #268). A per-symbol ceiling that cannot cover
+#:   `max_filings_per_symbol` reservations starves every filing past the first
+#:   no matter what this module does, and that is an invalid limit to reject
+#:   before any external I/O rather than a degradation to absorb.
+#: * `retro/export.py::_is_starved` reads a starved export by it (Issue #267).
+#:   The floor and the alarm have to be the same number, or raising one would
+#:   quietly stop the other from firing.
+#:
+#: It stays a module constant, not configuration -- see design §3.16's Issue
+#: #255 addendum.
 MIN_FILING_CHARS = 8_000
 
 

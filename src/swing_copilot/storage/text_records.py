@@ -79,12 +79,21 @@ def latest_filing_dates(
     Issue #258) detect a new filing without reintroducing the per-symbol
     network call it exists to avoid.
 
-    Two properties the caller must plan around:
+    Three properties the caller must plan around:
 
-    - Coverage is whatever text collection covered, i.e. the run's held +
-      candidate symbols (`_TEXT_SYMBOL_LIMIT`), not the whole universe. This
-      is a *trigger* for an early refresh, never the only refresh rule; the
-      elapsed-days rule is what covers every remaining symbol.
+    - Coverage is whatever text collection covered, i.e. each past run's held
+      + candidate symbols (`_TEXT_SYMBOL_LIMIT`), not the whole universe.
+      This is a *trigger* for an early refresh, never the only refresh rule;
+      the elapsed-days rule is what covers every remaining symbol. In
+      particular a symbol that becomes a candidate for the first time today
+      has never had its filings collected, so the trigger cannot help it.
+    - `text_items` persists across runs, so this is not scoped to one run's
+      30 symbols: it can return a filing for any symbol text collection has
+      *ever* touched. The caller's retry window is a week wide, so the set
+      that can still be armed on a given day is drawn from roughly a week of
+      collection sets -- on the order of 150-210 symbols, not 30 -- of which
+      the ones actually armed are those whose newest collected filing is
+      both inside that window and not yet ingested.
     - Text collection runs after the fundamentals step within a run, so a
       filing collected today is first acted on by tomorrow's run.
 

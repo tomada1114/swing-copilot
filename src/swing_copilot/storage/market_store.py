@@ -176,20 +176,67 @@ ON CONFLICT (accession_no) DO UPDATE SET
 #:   "when did we last poll this symbol" would make the two impossible to
 #:   reason about separately.
 #:
-#: `last_fetched_at` is *metadata* (real wall-clock fetch time), never a
-#: point-in-time value: nothing derived from it may stand in for `as_of`.
+#: The row carries two *different* facts, and conflating them is what the
+#: second column exists to prevent:
+#:
+#: - `last_fetched_at`: the real wall-clock instant the network fetch
+#:   happened. Answers "did we already ask EDGAR about this symbol today?",
+#:   which is the same-day rerun skip P6-25 added.
+#: - `fetched_through`: how *current* that fetch left us, i.e. the newest
+#:   `filed_at` it was allowed to see (`min(now, as_of)`). Answers "is this
+#:   symbol's data stale?", which is the weekly backstop.
+#:
+#: They diverge exactly when `--as-of` replays a past date: such a run really
+#: did poll EDGAR today (so it should not re-poll on a same-day rerun) but
+#: only obtained filings up to a past date (so it must not make the symbol
+#: look fresh to tomorrow's real run). One column could only ever serve one
+#: of those, and whichever it served, the other became a bug.
+#:
+#: A third column, `consecutive_empty`, counts fetches in a row that returned
+#: no record at all. It is what lets the refresh rule retry an empty answer
+#: quickly (a universe-wide empty response must not freeze fundamentals for a
+#: week) while still *converging*: a symbol that will never have XBRL facts --
+#: a delisted shell, a foreign private issuer filing 20-F, a trust -- backs
+#: off to the ordinary weekly cadence instead of costing one request a day
+#: forever.
+#:
+#: All three are *metadata*, never point-in-time values: nothing derived from
+#: any of them may stand in for `as_of` when reading `fundamentals`.
 _CREATE_FUNDAMENTALS_FETCH_LOG_TABLE = """
 CREATE TABLE IF NOT EXISTS fundamentals_fetch_log (
-    symbol           VARCHAR PRIMARY KEY,
-    last_fetched_at  TIMESTAMPTZ NOT NULL
+    symbol            VARCHAR PRIMARY KEY,
+    last_fetched_at   TIMESTAMPTZ NOT NULL,
+    fetched_through   TIMESTAMPTZ,
+    consecutive_empty INTEGER
 )
 """
 
+#: `fetched_through` and `consecutive_empty` were added after the table's
+#: first revision, so a database created by an earlier one needs them added in
+#: place -- the same additive discipline `storage/schema.py` documents for
+#: `StateStore` tables. DuckDB cannot add a `NOT NULL` column, so both are
+#: nullable; readers treat a NULL horizon as "unknown" (the symbol is due,
+#: never "fresh") and a NULL counter as zero.
+_ALTER_FUNDAMENTALS_FETCH_LOG_STATEMENTS = (
+    "ALTER TABLE fundamentals_fetch_log "
+    "ADD COLUMN IF NOT EXISTS fetched_through TIMESTAMPTZ",
+    "ALTER TABLE fundamentals_fetch_log "
+    "ADD COLUMN IF NOT EXISTS consecutive_empty INTEGER",
+)
+
 _UPSERT_FUNDAMENTALS_FETCH_LOG = """
-INSERT INTO fundamentals_fetch_log (symbol, last_fetched_at)
-VALUES (?, ?)
+INSERT INTO fundamentals_fetch_log (
+    symbol, last_fetched_at, fetched_through, consecutive_empty
+) VALUES (?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
-    last_fetched_at = EXCLUDED.last_fetched_at
+    last_fetched_at = EXCLUDED.last_fetched_at,
+    -- A NULL horizon means "this fetch produced nothing, so it moved no
+    -- data": keep whatever the last productive fetch reached, rather than
+    -- letting a fruitless retry restart the staleness clock.
+    fetched_through = COALESCE(
+        EXCLUDED.fetched_through, fundamentals_fetch_log.fetched_through
+    ),
+    consecutive_empty = EXCLUDED.consecutive_empty
 """
 
 
@@ -210,6 +257,50 @@ class FundamentalsRecord:
     shares: float | None
     source_url: str
     fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalsFetchState:
+    """One symbol's row in `fundamentals_fetch_log`, as calendar days.
+
+    See `_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE` for why the two dates are
+    separate facts rather than one, and what the counter buys.
+    """
+
+    #: Day the last network fetch actually happened (wall clock).
+    last_fetched_on: date
+    #: Day up to which that fetch could see filings (`min(now, as_of)`).
+    #: `None` on a row written before the column existed -- read as "unknown",
+    #: i.e. treat the symbol as due, never as fresh.
+    fetched_through_on: date | None
+    #: How many fetches in a row have come back with no record. `0` once a
+    #: fetch returns anything.
+    consecutive_empty: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalsFetchStamp:
+    """One symbol's bookkeeping to write after a fetch.
+
+    A batch mixes symbols whose fetch produced records with symbols whose
+    fetch came back empty, and the two carry different counters, so the write
+    takes whole rows rather than one value applied to a symbol list.
+    """
+
+    symbol: str
+    #: Wall-clock instant of the fetch. Drives the same-day rerun skip, so it
+    #: is the real instant even on a replay -- the replay did poll EDGAR.
+    last_fetched_at: datetime
+    #: Newest filing instant the fetch was allowed to see
+    #: (`min(last_fetched_at, as_of)`). Drives the staleness rule, so a
+    #: past-`as_of` replay records the horizon it reached, not the wall clock.
+    #: `None` when the fetch produced no record: it moved no data, so it must
+    #: leave the stored horizon exactly where it was rather than restarting
+    #: the staleness clock. The upsert keeps the previous value in that case.
+    fetched_through: datetime | None
+    #: `0` when the fetch returned records; otherwise the previous value plus
+    #: one, which is what backs the retry off toward the weekly cadence.
+    consecutive_empty: int
 
 
 def _empty_bars_frame() -> pd.DataFrame:
@@ -299,6 +390,8 @@ class MarketStore:
         conn = self._database.connect()
         conn.execute(_CREATE_FUNDAMENTALS_TABLE)
         conn.execute(_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE)
+        for statement in _ALTER_FUNDAMENTALS_FETCH_LOG_STATEMENTS:
+            conn.execute(statement)
         if self._has_partition_files():
             glob = str(self.parquet_root / "year=*" / "*.parquet")
             conn.execute(
@@ -488,68 +581,125 @@ class MarketStore:
             return None
         return FundamentalsRecord(*row)
 
-    def read_fundamentals_fetch_dates(self, symbols: Sequence[str]) -> dict[str, date]:
-        """Read when each symbol's fundamentals were last fetched from EDGAR.
+    def read_fundamentals_fetch_state(
+        self, symbols: Sequence[str]
+    ) -> dict[str, FundamentalsFetchState]:
+        """Read each symbol's EDGAR fetch bookkeeping.
 
         Feeds the weekly/incremental refresh rule in `pipeline/daily.py`'s
-        fundamentals step (`docs/03_basic_design.md` 8.3). The value is
-        bookkeeping *metadata* — the real wall-clock day the network fetch
-        happened — and is never a point-in-time cutoff: what a caller may
-        read out of `fundamentals` is still governed solely by `as_of`
-        against `filed_at`.
+        fundamentals step (`docs/03_basic_design.md` 8.3). Both values are
+        bookkeeping *metadata* and neither is a point-in-time cutoff: what a
+        caller may read out of `fundamentals` is still governed solely by
+        `as_of` against `filed_at`.
 
         Args:
             symbols: Tickers to look up; an empty sequence returns `{}`
                 without touching the database.
 
         Returns:
-            `{symbol: last fetch day}`, omitting every symbol that has never
-            been fetched (which the caller must read as "fetch it now", not
-            as "fetched long ago").
+            `{symbol: state}`, omitting every symbol that has never been
+            fetched (which the caller must read as "fetch it now", not as
+            "fetched long ago").
         """
         if not symbols:
             return {}
         placeholders = ",".join("?" for _ in symbols)
         with self.get_connection() as conn:
             rows = conn.execute(
-                f"SELECT symbol, CAST(last_fetched_at AS DATE) "  # noqa: S608 - placeholders only, values are bound
+                f"SELECT symbol, CAST(last_fetched_at AS DATE), "  # noqa: S608 - placeholders only, values are bound
+                f"CAST(fetched_through AS DATE), consecutive_empty "
                 f"FROM fundamentals_fetch_log WHERE symbol IN ({placeholders})",
                 list(symbols),
             ).fetchall()
-        return dict(rows)
+        return {
+            symbol: FundamentalsFetchState(
+                last_fetched_on=last_fetched_on,
+                fetched_through_on=fetched_through_on,
+                consecutive_empty=consecutive_empty or 0,
+            )
+            for symbol, last_fetched_on, fetched_through_on, consecutive_empty in rows
+        }
 
     def record_fundamentals_fetches(
-        self, symbols: Sequence[str], fetched_at: datetime
+        self, stamps: Sequence[FundamentalsFetchStamp]
     ) -> None:
-        """Stamp `symbols` as fetched from EDGAR at `fetched_at`, atomically.
+        """Write one row per polled symbol, atomically.
 
         Recorded for every symbol whose network fetch *succeeded*, including
-        one that legitimately yielded no record (no XBRL facts in the
-        lookback window) — that is precisely the case a `fundamentals`-row
-        timestamp cannot represent, and leaving it unrecorded would re-fetch
-        the symbol on every run forever.
+        one that yielded no record — that is precisely the case a
+        `fundamentals`-row timestamp cannot represent, and leaving it
+        unrecorded would re-fetch the symbol on every run forever. An empty
+        answer is distinguished by its `consecutive_empty`, not by being
+        omitted.
 
-        A symbol whose fetch raised must not be passed here, so the next run
+        A symbol whose fetch raised must not be stamped, so the next run
         retries it.
 
         Args:
-            symbols: Tickers to stamp; an empty sequence is a no-op.
-            fetched_at: Wall-clock fetch instant, from the injected `Clock`.
-                Never `as_of` — a past `as_of` would make the record claim a
-                fetch that did not happen then (P6-25).
+            stamps: Rows to write; an empty sequence is a no-op.
         """
-        if not symbols:
+        if not stamps:
             return
         with self.get_connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                for symbol in symbols:
-                    conn.execute(_UPSERT_FUNDAMENTALS_FETCH_LOG, [symbol, fetched_at])
+                for stamp in stamps:
+                    conn.execute(
+                        _UPSERT_FUNDAMENTALS_FETCH_LOG,
+                        [
+                            stamp.symbol,
+                            stamp.last_fetched_at,
+                            stamp.fetched_through,
+                            stamp.consecutive_empty,
+                        ],
+                    )
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
             else:
                 conn.execute("COMMIT")
+
+    def read_latest_filing_dates(
+        self, symbols: Sequence[str], forms: Sequence[str], as_of: date
+    ) -> dict[str, date]:
+        """Read each symbol's newest ingested filing date, visible at `as_of`.
+
+        Answers only "what is the most recent filing we already hold?", which
+        is what the fundamentals refresh trigger needs to tell a filing that
+        has landed from one still pending. Deliberately *not* built on
+        `read_filing_dates()`: that helper exists for the backtest earliest
+        calendar, so it materializes every quarter's date and collapses
+        corrections to the earliest filing per fiscal period. Both properties
+        are wrong here (an amended filing's later date is exactly what proves
+        the period landed) and materializing ~500 symbols' full history to
+        take a maximum is wasted work. `MAX` in SQL, one row per symbol.
+
+        Args:
+            symbols: Tickers to look up; an empty sequence returns `{}`
+                without touching the database.
+            forms: SEC form types that count, matched exactly.
+            as_of: Point-in-time cutoff. A filing accepted *on* `as_of` is
+                visible; one accepted the next day is not.
+
+        Returns:
+            `{symbol: newest visible filing date}`, omitting symbols with no
+            visible filing.
+        """
+        if not symbols or not forms:
+            return {}
+        symbol_placeholders = ",".join("?" for _ in symbols)
+        form_placeholders = ",".join("?" for _ in forms)
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT symbol, MAX(CAST(filed_at AS DATE)) "  # noqa: S608 - placeholders only, values are bound
+                f"FROM fundamentals "
+                f"WHERE symbol IN ({symbol_placeholders}) "
+                f"AND form IN ({form_placeholders}) "
+                f"AND CAST(filed_at AS DATE) <= ? "
+                f"GROUP BY symbol",
+                [*symbols, *forms, as_of],
+            ).fetchall()
+        return dict(rows)
 
     def read_filing_dates(
         self, symbols: Sequence[str], forms: Sequence[str], as_of: date

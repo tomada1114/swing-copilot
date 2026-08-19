@@ -24,6 +24,7 @@ from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
     _compose_dependencies,
     _configure_logging,
+    _finnhub_clients,
     _parse_args,
     _preflight,
     _required_features,
@@ -165,6 +166,36 @@ def fake_universe(monkeypatch):
         "swing_copilot.data.edgar.edgar.set_identity", lambda _identity: None
     )
     return members
+
+
+class TestFinnhubClients:
+    """Issue #263: one API key is one metered account, so one throttle."""
+
+    def test_both_clients_share_one_account_wide_throttle(self):
+        # Asserted on the throttle object's identity because sharing *is* the
+        # contract here: the two clients' combined issue rate can only be
+        # bounded by one budget, and the composition root is where a second
+        # `MinIntervalThrottle` would silently reappear. The rate behavior it
+        # buys is fixed in `tests/test_ratelimit.py`.
+        news_client, earnings_client = _finnhub_clients(
+            _isolated_secrets(finnhub_api_key="finnhub-key"), DailyRunOptions()
+        )
+
+        assert news_client is not None
+        assert earnings_client is not None
+        assert news_client._throttle is earnings_client._throttle  # noqa: SLF001
+
+    def test_skip_text_drops_the_news_client_but_keeps_earnings(self):
+        news_client, earnings_client = _finnhub_clients(
+            _isolated_secrets(finnhub_api_key="finnhub-key"),
+            DailyRunOptions(skip_text=True),
+        )
+
+        assert news_client is None
+        assert earnings_client is not None
+
+    def test_no_api_key_builds_no_client_at_all(self):
+        assert _finnhub_clients(_isolated_secrets(), DailyRunOptions()) == (None, None)
 
 
 @pytest.mark.usefixtures("fake_universe")

@@ -11,6 +11,10 @@ import httpx
 
 from swing_copilot.clock import SystemClock
 from swing_copilot.data.earnings import EarningsEvent
+from swing_copilot.ratelimit import (
+    FINNHUB_MIN_REQUEST_INTERVAL_SECONDS,
+    MinIntervalThrottle,
+)
 from swing_copilot.retry import retry_external_call
 
 if TYPE_CHECKING:
@@ -19,7 +23,8 @@ if TYPE_CHECKING:
     from swing_copilot.clock import Clock
 
 FINNHUB_EARNINGS_URL = "https://finnhub.io/api/v1/calendar/earnings"
-_MIN_REQUEST_INTERVAL_SECONDS = 1.0
+# 60 calls/minute cap, shared with `text/news_finnhub.py` per account.
+_MIN_REQUEST_INTERVAL_SECONDS = FINNHUB_MIN_REQUEST_INTERVAL_SECONDS
 
 
 class _HttpGet(Protocol):
@@ -43,6 +48,23 @@ class EarningsTiming:
     sleep_fn: Callable[[float], None] = time.sleep
     backoff_fn: Callable[[float], None] = time.sleep
 
+    def throttle_fields_set(self) -> tuple[str, ...]:
+        """Name the throttle-owned fields this instance overrides.
+
+        `rate_clock` and `sleep_fn` configure the client's own throttle, while
+        `backoff_fn` drives retry backoff regardless. An injected throttle owns
+        the first two, so the client uses this to reject a combination whose
+        halves would silently contradict each other.
+        """
+        return tuple(
+            name
+            for name, injected, default in (
+                ("rate_clock", self.rate_clock, time.monotonic),
+                ("sleep_fn", self.sleep_fn, time.sleep),
+            )
+            if injected is not default
+        )
+
 
 class FinnhubEarningsClient:
     """Finnhub `/calendar/earnings` implementation."""
@@ -54,6 +76,7 @@ class FinnhubEarningsClient:
         http_get: _HttpGet = _real_http_get,
         clock: Clock | None = None,
         timing: EarningsTiming | None = None,
+        throttle: MinIntervalThrottle | None = None,
     ) -> None:
         """Create an offline-injectable client.
 
@@ -61,30 +84,43 @@ class FinnhubEarningsClient:
             api_key: Finnhub API key.
             http_get: Injectable JSON GET boundary.
             clock: Audit timestamp source.
-            timing: Injectable rate-limit and retry timing functions.
+            timing: Injectable rate-limit and retry timing functions. Its
+                `rate_clock`/`sleep_fn` configure this client's own throttle
+                and are mutually exclusive with `throttle`; `backoff_fn` drives
+                retry backoff either way and stays free to inject.
+            throttle: Rate-limit budget to count this client's requests
+                against. Defaults to one private to this instance; pass the
+                same instance to every client on one Finnhub account to bound
+                their combined rate (Issue #263).
+
+        Raises:
+            ValueError: `throttle` was supplied together with a `timing` that
+                overrides `rate_clock` or `sleep_fn`. A shared budget can only
+                be measured on one clock, so silently dropping the caller's
+                would leave them believing a timeline that never runs.
         """
+        dead_timing_fields = (
+            timing.throttle_fields_set()
+            if timing is not None and throttle is not None
+            else ()
+        )
+        if dead_timing_fields:
+            msg = (
+                f"EarningsTiming.{'/'.join(dead_timing_fields)} and throttle are "
+                "mutually exclusive: an injected throttle measures its whole "
+                "budget on its own clock (backoff_fn stays injectable)"
+            )
+            raise ValueError(msg)
         self._api_key = api_key
         self._http_get = http_get
         self._clock = clock or SystemClock()
         resolved_timing = timing or EarningsTiming()
-        self._rate_clock = resolved_timing.rate_clock
-        self._sleep_fn = resolved_timing.sleep_fn
         self._backoff_fn = resolved_timing.backoff_fn
-        self._last_request_at: float | None = None
-
-    def _throttle(self) -> None:
-        # Record when the request is actually issued (after any wait), not when
-        # the throttle decision started. Recording the pre-sleep reading drops
-        # the slept interval from the next gap calculation and lets the
-        # effective request rate exceed 1/_MIN_REQUEST_INTERVAL_SECONDS.
-        now = self._rate_clock()
-        issued_at = now
-        if self._last_request_at is not None:
-            wait = _MIN_REQUEST_INTERVAL_SECONDS - (now - self._last_request_at)
-            if wait > 0:
-                self._sleep_fn(wait)
-                issued_at = now + wait
-        self._last_request_at = issued_at
+        self._throttle = throttle or MinIntervalThrottle(
+            _MIN_REQUEST_INTERVAL_SECONDS,
+            clock=resolved_timing.rate_clock,
+            sleep_fn=resolved_timing.sleep_fn,
+        )
 
     def fetch_next_earnings(
         self, symbol: str, start: date, end: date
@@ -98,7 +134,7 @@ class FinnhubEarningsClient:
         }
         payload = retry_external_call(
             lambda: self._http_get(FINNHUB_EARNINGS_URL, params),
-            before_attempt=self._throttle,
+            before_attempt=self._throttle.before_request,
             sleep_fn=self._backoff_fn,
         )
         calendar = payload.get("earningsCalendar")

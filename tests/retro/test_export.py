@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from swing_copilot.analysis.filing_selection import MIN_FILING_CHARS
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
@@ -1224,6 +1225,54 @@ class TestExportRetroInput:
             export_retro_input(_deps(populated_store, market_store), request)
 
         assert first.path.read_text(encoding="utf-8") == original
+
+
+class TestWriteReadRoundTrip:
+    """Issue #292: what the export writes, the export can read back.
+
+    Since #289 verifies the digest against the `exclude_unset` dump, a field
+    the hand-built `unsigned` dict forgot is absent from the constructed
+    document's `fields_set` too, so the export used to succeed while the file
+    it wrote -- where every default is materialized -- could never be parsed
+    again. Injecting a next-generation `RetroInput` reproduces exactly that
+    and pins the failure to write time instead of read time.
+    """
+
+    @staticmethod
+    def _schema_with_a_field_the_export_forgot() -> type[RetroInput]:
+        """Add a top-level field `build_retro_input`'s `unsigned` never sets.
+
+        Its default is non-droppable on purpose: `_drop_legacy_defaults`
+        cannot recognize `0` as "absent", which is the same property Issue
+        #276 hit with `exhibit_truncated_filing_count`.
+        """
+
+        class _RetroInputWithAForgottenField(RetroInput):
+            forgotten_metric_count: int = 0
+
+        return _RetroInputWithAForgottenField
+
+    def test_refuses_to_write_a_document_it_could_not_read_back(
+        self,
+        populated_store: StateStore,
+        market_store: MarketStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "swing_copilot.retro.export.RetroInput",
+            self._schema_with_a_field_the_export_forgot(),
+        )
+        request = _request(tmp_path)
+
+        with pytest.raises(
+            ValidationError, match="input_digest does not match canonical retro input"
+        ):
+            export_retro_input(_deps(populated_store, market_store), request)
+
+        assert not (
+            retro_output_dir(request.reports_root, AS_OF) / RETRO_INPUT_FILENAME
+        ).exists()
 
 
 class TestUnknownRun:

@@ -294,8 +294,59 @@ class TestSharedFinnhubThrottle:
 
         # Calls alternate news, earnings, news, ... so the even-indexed issues
         # are the news client's and the odd-indexed ones the earnings client's.
-        assert timeline.issued_at[0::2] == [pytest.approx(t) for t in (0.0, 1.0, 2.0)]
-        assert timeline.issued_at[1::2] == [pytest.approx(t) for t in (0.3, 1.3, 2.3)]
-        assert timeline.gaps_below(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS) == [
-            pytest.approx(gap) for gap in (0.3, 0.7, 0.3, 0.7, 0.3)
+        # Each round advances by one full interval: the request that is
+        # already spaced out by `_REQUEST_SECONDS` only waits the remainder.
+        interval = FINNHUB_MIN_REQUEST_INTERVAL_SECONDS
+        assert timeline.issued_at[0::2] == [
+            pytest.approx(t) for t in (0.0, interval, 2 * interval)
         ]
+        assert timeline.issued_at[1::2] == [
+            pytest.approx(t)
+            for t in (
+                _REQUEST_SECONDS,
+                interval + _REQUEST_SECONDS,
+                2 * interval + _REQUEST_SECONDS,
+            )
+        ]
+        assert timeline.gaps_below(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS) == [
+            pytest.approx(gap)
+            for gap in (
+                _REQUEST_SECONDS,
+                interval - _REQUEST_SECONDS,
+                _REQUEST_SECONDS,
+                interval - _REQUEST_SECONDS,
+                _REQUEST_SECONDS,
+            )
+        ]
+
+    def test_steady_state_interval_keeps_every_60s_window_at_or_under_60_calls(self):
+        """Issue #283: the constant must leave headroom under Finnhub's cap.
+
+        A bare `1.0` second interval is exactly `60/60`, so 61 issued requests
+        can span exactly 60 seconds end to end (instants 0, 1, ..., 60) -- a
+        rolling 60-second window covering that whole span holds 61 requests,
+        one over the account's 60-calls/minute limit. This runs the throttle
+        for real (no request latency, so the interval alone is on trial) and
+        checks every window anchored at an issued instant; reverting
+        `FINNHUB_MIN_REQUEST_INTERVAL_SECONDS` to `1.0` reproduces that 61-in-60
+        window and fails the assertion below.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.0)
+        throttle = MinIntervalThrottle(
+            FINNHUB_MIN_REQUEST_INTERVAL_SECONDS,
+            clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+        issued: list[float] = []
+        for _ in range(180):
+            throttle.before_request()
+            issued.append(timeline.now)
+
+        window_seconds = 60.0
+        tolerance = 1e-9
+        max_calls_in_any_window = max(
+            sum(1 for t in issued if start <= t <= start + window_seconds + tolerance)
+            for start in issued
+        )
+
+        assert max_calls_in_any_window <= 60

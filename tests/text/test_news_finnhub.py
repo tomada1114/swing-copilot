@@ -225,7 +225,8 @@ class TestRateLimiting:
         client.fetch_company_news("AAPL", date(2027, 1, 1), as_of=date(2027, 1, 10))
         client.fetch_company_news("MSFT", date(2027, 1, 1), as_of=date(2027, 1, 10))
 
-        assert sleeps == [0.7]
+        # Interval 1.05s (Issue #283) minus the 0.3s already elapsed.
+        assert sleeps == [pytest.approx(0.75)]
 
     def test_no_throttle_when_calls_are_already_spaced_out(self):
         sleeps: list[float] = []
@@ -298,7 +299,13 @@ class TestRetries:
 
         assert len(result) == 1
         assert calls == 2
-        assert sleeps == [1.0]
+        # RETRY_DELAYS_SECONDS[0] backoff, then the throttle's own wait for
+        # the retried attempt (interval minus the 1.0s the fake clock already
+        # advanced between the two rate_clock reads).
+        assert sleeps == [
+            pytest.approx(1.0),
+            pytest.approx(_MIN_REQUEST_INTERVAL_SECONDS - 1.0),
+        ]
 
     def test_retried_attempts_keep_the_minimum_issue_interval(self):
         """Issue #253: a retry attempt is a request and resets the same clock.

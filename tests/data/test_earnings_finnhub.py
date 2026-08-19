@@ -195,7 +195,7 @@ def test_rate_limit_is_applied_before_every_retry_attempt():
     # Ticks model a 0.2s request on a clock that the throttle's own sleep
     # advances (`backoff_fn` is inert so the throttle stays the only thing
     # under test): attempt 1 throttles at 0.0, attempt 2 re-enters the throttle
-    # 0.2s later and is held until 1.0, attempt 3 re-enters at 1.2.
+    # 0.2s later and is held until one interval, attempt 3 re-enters at 1.2.
     times = iter([0.0, 0.2, 1.2])
     throttle_sleeps: list[float] = []
     attempts = 0
@@ -223,7 +223,12 @@ def test_rate_limit_is_applied_before_every_retry_attempt():
 
     assert event is not None
     assert attempts == 3
-    assert throttle_sleeps == pytest.approx([0.8, 0.8])
+    assert throttle_sleeps == pytest.approx(
+        [
+            _MIN_REQUEST_INTERVAL_SECONDS - 0.2,
+            (2 * _MIN_REQUEST_INTERVAL_SECONDS) - 1.2,
+        ]
+    )
 
 
 def test_successive_requests_are_issued_at_least_one_interval_apart():

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,10 +19,15 @@ from tests.analysis.test_slices import candidate_payload, mixed_payload
 if TYPE_CHECKING:
     from pathlib import Path
 
+#: The console script's body, run in a fresh interpreter. Importing `main` is
+#: what the `copilot-export-slices` entry point itself does, so this exercises
+#: the same code path without depending on the wheel being installed.
+_ENTRY_POINT = "from swing_copilot.analysis.slice_cli import main; main()"
+
 
 @pytest.fixture
 def workdir(tmp_path: Path) -> Path:
-    """A run directory holding an exported input with three candidates."""
+    """A run directory holding an exported input with four candidates."""
     directory = tmp_path / "reports" / AS_OF.isoformat() / RUN_ID
     directory.mkdir(parents=True)
     _dump(directory / ANALYSIS_INPUT_FILENAME, mixed_payload())
@@ -45,19 +53,23 @@ def test_main_writes_every_slice_and_lists_them_with_their_body_size(
     assert [line.split("\t")[1:3] for line in lines[:-1]] == [
         ["news", "AAPL"],
         ["news", "MSFT"],
+        ["news", "NVDA"],
         ["filings", "AAPL"],
         ["screening", "AAPL"],
         ["screening", "MSFT"],
         ["screening", "NVDA"],
+        ["screening", "TSLA"],
     ]
-    assert lines[-1] == "6 slice(s) written: news=2 filings=1 screening=3"
+    assert lines[-1] == "8 slice(s) written: news=3 filings=1 screening=4"
     assert sorted(path.name for path in out_dir.iterdir()) == [
         "slice-filings-AAPL.json",
         "slice-news-AAPL.json",
         "slice-news-MSFT.json",
+        "slice-news-NVDA.json",
         "slice-screening-AAPL.json",
         "slice-screening-MSFT.json",
         "slice-screening-NVDA.json",
+        "slice-screening-TSLA.json",
     ]
 
 
@@ -70,7 +82,7 @@ def test_main_accepts_the_run_directory_instead_of_the_input_file(
         main([str(workdir), "--out-dir", str(out_dir)])
 
     assert exit_info.value.code == 0
-    assert capsys.readouterr().out.splitlines()[-1].startswith("6 slice(s) written")
+    assert capsys.readouterr().out.splitlines()[-1].startswith("8 slice(s) written")
 
 
 def test_the_listed_paths_are_absolute_and_hold_the_written_slice(
@@ -97,6 +109,42 @@ def test_rerunning_the_export_rewrites_the_same_bytes(
     second = [path.read_bytes() for _, path in export_slices(workdir, out_dir)]
 
     assert first == second
+
+
+def test_two_fresh_interpreters_write_the_same_bytes(
+    workdir: Path, tmp_path: Path
+) -> None:
+    """Fix the property Issue #261 actually depends on: across processes.
+
+    Two builds inside one process share a hash seed and every module-level
+    object, so they cannot see the failure mode that matters -- a set or dict
+    ordering that differs from run to run and silently changes a slice's
+    bytes, invalidating a body hash that was supposed to prove "unchanged".
+    Running the entry point twice, in separate interpreters under different
+    `PYTHONHASHSEED` values, is what makes that observable.
+    """
+    written: list[dict[str, bytes]] = []
+    for seed, name in (("0", "first"), ("524287", "second")):
+        out_dir = tmp_path / name
+        result = subprocess.run(  # noqa: S603 - fixed interpreter, static code
+            [
+                sys.executable,
+                "-c",
+                _ENTRY_POINT,
+                str(workdir / ANALYSIS_INPUT_FILENAME),
+                "--out-dir",
+                str(out_dir),
+            ],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        written.append({path.name: path.read_bytes() for path in out_dir.iterdir()})
+
+    assert written[0] == written[1]
+    assert len(written[0]) == 8
 
 
 def test_a_missing_input_document_fails_without_writing_anything(

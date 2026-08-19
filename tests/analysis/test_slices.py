@@ -23,9 +23,18 @@ if TYPE_CHECKING:
 
 
 def candidate_payload(
-    symbol: str, *, news: bool = True, filings: bool = True, **overrides: Any
+    symbol: str,
+    *,
+    news: bool = True,
+    filings: bool = True,
+    supply: bool = True,
+    **overrides: Any,
 ) -> dict[str, Any]:
-    """One candidate shaped like `input_payload()`'s, with sources optional."""
+    """One candidate shaped like `input_payload()`'s, with sources optional.
+
+    `supply=False` drops `news_supply` entirely, which is how an input
+    archived before Issue #130 -- and only that -- looks.
+    """
     template = input_payload()["candidates"][0]
     payload: dict[str, Any] = {
         **template,
@@ -49,11 +58,13 @@ def candidate_payload(
     }
     if not news:
         payload["news_supply"] = {
-            "collected_items": 0,
+            "collected_items": 12,
             "exported_items": 0,
             "symbol_mention_items": 0,
             "level": "none",
         }
+    if not supply:
+        payload.pop("news_supply", None)
     payload.update(overrides)
     return payload
 
@@ -65,6 +76,7 @@ def mixed_payload() -> dict[str, Any]:
             candidate_payload("AAPL"),
             candidate_payload("MSFT", filings=False),
             candidate_payload("NVDA", news=False, filings=False),
+            candidate_payload("TSLA", news=False, filings=False, supply=False),
         ]
     )
 
@@ -86,23 +98,48 @@ def test_build_slices_covers_each_expert_only_where_it_has_sources() -> None:
     assert [(document.kind, document.symbol) for document in documents] == [
         ("news", "AAPL"),
         ("news", "MSFT"),
+        ("news", "NVDA"),
         ("filings", "AAPL"),
         ("screening", "AAPL"),
         ("screening", "MSFT"),
         ("screening", "NVDA"),
+        ("screening", "TSLA"),
     ]
 
 
-def test_every_candidate_gets_a_screening_slice_even_without_any_text() -> None:
-    """`screening_assessment` is required for every symbol at ingest."""
+def test_a_candidate_without_news_still_gets_the_measured_supply_record() -> None:
+    """Issue #130: "suppressed" and "never existed" must stay distinguishable.
+
+    Gating the news slice on a non-empty `news[]` would hide `news_supply`
+    from the one expert that declares it, which is the distinction the field
+    was added to preserve.
+    """
+    payload = input_payload(candidates=[candidate_payload("NVDA", news=False)])
+
+    news_slice = slice_by(build_slices(payload), "news", "NVDA")
+
+    assert news_slice["candidate"] == {
+        "symbol": "NVDA",
+        "news": [],
+        "news_supply": {
+            "collected_items": 12,
+            "exported_items": 0,
+            "symbol_mention_items": 0,
+            "level": "none",
+        },
+    }
+
+
+def test_a_candidate_with_neither_news_nor_supply_gets_no_news_slice() -> None:
+    """The other side of the boundary: nothing measured, nothing to read."""
     payload = input_payload(
-        candidates=[candidate_payload("NVDA", news=False, filings=False)]
+        candidates=[candidate_payload("TSLA", news=False, filings=False, supply=False)]
     )
 
     documents = build_slices(payload)
 
     assert [(document.kind, document.symbol) for document in documents] == [
-        ("screening", "NVDA")
+        ("screening", "TSLA")
     ]
 
 
@@ -207,10 +244,12 @@ def test_slice_filenames_cannot_be_mistaken_for_analysis_work_fragments() -> Non
     assert [document.filename for document in documents] == [
         "slice-news-AAPL.json",
         "slice-news-MSFT.json",
+        "slice-news-NVDA.json",
         "slice-filings-AAPL.json",
         "slice-screening-AAPL.json",
         "slice-screening-MSFT.json",
         "slice-screening-NVDA.json",
+        "slice-screening-TSLA.json",
     ]
     with pytest.raises(ValueError, match=r"extra_forbidden|Extra inputs"):
         AnalysisFragment.model_validate(documents[0].payload)

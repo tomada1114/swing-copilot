@@ -39,14 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `analysis_input.json` から専門家×銘柄のスライスを手で切っており、2026-08-13 の
   実走では 21 件に 5.2 分を費やしたうえ、欠落・重複ミスの温床でもあった。
   グルーピングは SKILL.md Step 2 の担当割り当てをそのまま写す（`news` は `news`
-  が非空の銘柄、`filings` は `filings` が非空の銘柄、`screening` は全銘柄、
-  run 単位の context は screening スライスのみ）。出力は
+  が非空**または `news_supply` を持つ**銘柄、`filings` は `filings` が非空の銘柄、
+  `screening` は全銘柄、run 単位の context は screening スライスのみ）。news 側を
+  `news[]` の非空だけで切らないのは `news_supply`（Issue #130）のためである——
+  `level: "none"` はニュース 0 件の銘柄にこそ付くので、非空を条件にすると
+  「抑制された」と「そもそも無かった」を分ける唯一の記録が、それを申告する当の
+  担当者へ届かなくなる。出力は
   `slice-<kind>-<SYMBOL>.json` で、`analysis_work/` の断片と取り違えないよう
   `slice-` を付ける。**決定論性を要件として固定した**（同一入力 → バイト同一出力。
   Issue #261 が本文ハッシュでの流用判定の前提にする）: 値は parse 済みモデルの
   再シリアライズではなく元 JSON からの逐語コピー、トップレベルのキー順固定、
   入れ子は元の順序、UTF-8・LF・末尾改行 1 個、生成時刻やパスなど実行環境依存の値を
-  payload に入れない。各スライスは書き出し前に strict スキーマ `InputSlice`
+  payload に入れない。この性質はプロセスを跨いで成り立つ必要があるため、回帰テストは
+  `PYTHONHASHSEED` を変えた 2 つの別インタプリタでエントリポイントを実行して
+  出力バイトを比較する（同一プロセス内の 2 回では、ハッシュ種とモジュール状態を
+  共有するため実行間の順序差を検出できない）。各スライスは書き出し前に strict スキーマ `InputSlice`
   （`extra="forbid"`、`kind` ごとに `candidate` が持てるキー集合を固定）で検証する
   ので、担当外のフィールドが紛れ込んだスライスはサブエージェントへ渡る前に落ちる。
   `--out-dir` は必須である——既定値を入力の隣に置くと、スキル規約が scratchpad 配下と

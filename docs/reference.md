@@ -288,9 +288,14 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   `analysis_work/<kind>-<SYMBOL>.json`の断片と名前の形が似るため`slice-`を付ける——
   両者はスキーマが違い、マージされるのは断片だけである
 - グルーピングは`swing-daily`スキル Step 2 の担当割り当てをそのまま写す:
-  `news`は`news`が非空の銘柄、`filings`は`filings`が非空の銘柄、`screening`は
-  全銘柄。run単位のcontextブロックはscreeningスライスにだけ入る（それを読むと
-  規約に書かれているのは`interpret-screening`だけである）
+  `news`は`news`が非空**または`news_supply`を持つ**銘柄、`filings`は`filings`が
+  非空の銘柄、`screening`は全銘柄。run単位のcontextブロックはscreeningスライスに
+  だけ入る（それを読むと規約に書かれているのは`interpret-screening`だけである）
+- news側を`news[]`の非空だけで切らないのは`news_supply`のためである（Issue #130）。
+  あれは自社材料がどれだけ供給されたかの記録で、`level: "none"`はまさにニュースが
+  0件の銘柄に付く。非空を条件にすると、その記録を申告する当の担当者へスライスが
+  1件も渡らず、「抑制された」と「そもそも無かった」が区別できなくなる。news も
+  `news_supply` も持たない銘柄にだけ news スライスが無い
 - `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
   scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
   呼び出し側に必ず宣言させる
@@ -301,7 +306,9 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   失敗時はスライスを1件も書かない
 
 **決定論性が本コマンドの要件**である（同一入力→バイト同一出力。Issue #261 が
-本文ハッシュでの流用判定の前提にする）。そのために、値は`analysis_input.json`の
+本文ハッシュでの流用判定の前提にする。この性質はプロセスを跨いで成り立つ必要が
+あるため、回帰テストは同一プロセス内の2回ではなく、`PYTHONHASHSEED`を変えた
+2つの別インタプリタでエントリポイントを実行して出力バイトを比較する）。そのために、値は`analysis_input.json`の
 **JSONそのもの**から逐語コピーする——parse済みモデルを再シリアライズすると日時表記や
 キー順が書き換わり、provenance検査が突き合わせる文字列と一致しなくなる。
 トップレベルのキー順は`run_id` / `as_of` / `input_digest` / `kind` / `context` /

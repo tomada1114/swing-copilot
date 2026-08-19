@@ -272,6 +272,49 @@ copilot-verify-analysis <WORKDIR>/analysis_result.json          # ingestのdry-r
 `copilot-daily`がコード側で書くファイルで、スキルが取り違えうるのはresult側だから
 であり、identityの照合自体は`validate_artifact_identity()`をそのまま通している。
 
+## `copilot-export-slices`と入力スライスの決定論生成
+
+`analysis/slices.py`と`analysis/slice_cli.py`（`copilot-export-slices`）は、
+`analysis_input.json`から**専門家×銘柄**の入力スライスを切り出す。統括スキルが
+1.4MBの入力を読みながら21件を手で切っていた工程（2026-08-13の実走で5.2分）を
+決定論的なコードへ置き換えたものである（Issue #260）。
+
+```bash
+copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad>/slices
+copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクトリでもよい
+```
+
+- 出力は`slice-<kind>-<SYMBOL>.json`（`<kind>`は`news` / `filings` / `screening`）。
+  `analysis_work/<kind>-<SYMBOL>.json`の断片と名前の形が似るため`slice-`を付ける——
+  両者はスキーマが違い、マージされるのは断片だけである
+- グルーピングは`swing-daily`スキル Step 2 の担当割り当てをそのまま写す:
+  `news`は`news`が非空の銘柄、`filings`は`filings`が非空の銘柄、`screening`は
+  全銘柄。run単位のcontextブロックはscreeningスライスにだけ入る（それを読むと
+  規約に書かれているのは`interpret-screening`だけである）
+- `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
+  scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
+  呼び出し側に必ず宣言させる
+- 標準出力は「絶対パス / kind / 銘柄 / `source_chars`」のタブ区切り＋総数行。
+  `source_chars`はそのスライスが載せている本文の文字数で、統括はこれを
+  1エージェントあたりの文字数上限（開示は240,000文字）に突き合わせる
+- 終了コードは`0`（生成成功）/`1`（入力が読めない・スキーマ違反・書き込み失敗）。
+  失敗時はスライスを1件も書かない
+
+**決定論性が本コマンドの要件**である（同一入力→バイト同一出力。Issue #261 が
+本文ハッシュでの流用判定の前提にする）。そのために、値は`analysis_input.json`の
+**JSONそのもの**から逐語コピーする——parse済みモデルを再シリアライズすると日時表記や
+キー順が書き換わり、provenance検査が突き合わせる文字列と一致しなくなる。
+トップレベルのキー順は`run_id` / `as_of` / `input_digest` / `kind` / `context` /
+`candidate`に固定し、入れ子は元文書の順序をそのまま保つ。書き出しは
+`io_atomic.write_json_atomically()`（UTF-8・`indent=2`・`sort_keys=False`・
+末尾改行1個・LF・同一ディレクトリの一時ファイル＋`os.replace`）で、生成時刻・
+パス・ホストなど実行環境依存の値をペイロードへ入れない。
+
+スライスは書かれる前に`InputSlice`（`extra="forbid"`）で検証される。`kind`ごとに
+`candidate`が持てるキーの集合をスキーマ側で固定してあるので、担当外のフィールド
+——他の専門家の長文テキストやrun単位のcontext——が紛れ込んだスライスは、
+サブエージェントへ渡る前に落ちる。
+
 ## `copilot-retro`とverdictの当否評価
 
 `retro/cli.py`（`copilot-retro`）は振り返り機構のCLIで、`collect`/`evaluate`/

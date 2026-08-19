@@ -36,6 +36,7 @@ CLI_ERROR_CONVERSION_MODULES = {
     "copilot-dd-forward": "src/swing_copilot/regime/dd_forward_cli.py",
     "copilot-ingest-analysis": "src/swing_copilot/analysis/cli.py",
     "copilot-verify-analysis": "src/swing_copilot/analysis/verify_cli.py",
+    "copilot-export-slices": "src/swing_copilot/analysis/slice_cli.py",
     "copilot-retro": "src/swing_copilot/retro/cli.py",
     "copilot-track": "src/swing_copilot/tracking/cli.py",
     "copilot-dashboard": "src/swing_copilot/dashboard/cli.py",

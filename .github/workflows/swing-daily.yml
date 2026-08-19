@@ -1,0 +1,105 @@
+name: Swing Daily
+
+# 手動起動のみ。パブリックリポジトリなので issue_comment などの
+# 第三者が引ける経路は付けない。定時起動は別途 cron を足すまで行わない。
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run: ライブ DB に触れない試走 / live: 本番の日次実行"
+        type: choice
+        options:
+          - dry-run
+          - live
+        default: dry-run
+
+permissions:
+  contents: read
+
+# 実行中の分析は絶対に殺さない (途中で落ちると R2 への push が走らず、
+# その日の分析がまるごと失われる)。後続は待たせる。
+concurrency:
+  group: swing-daily
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    name: Daily analysis (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    # swing-daily スキル内部の全体上限が 45 分。データ取得・ingest・
+    # R2 の pull/push を足した余裕として 90 分を取る。
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      # dev グループは要らない。ops は data_sync.py の boto3。
+      - name: Install dependencies
+        run: uv sync --locked --group ops
+
+      # R2 が data/ の正本。分析より先に引く。
+      - name: Pull data from R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: uv run --group ops python scripts/data_sync.py pull
+
+      # 最小権限: 分析セッションには R2 の資格情報を渡さない。
+      # API キーは action の `settings` 入力経由で Claude Code に渡す
+      # (composite action の内側は呼び出し側の env をそのまま見られないため、
+      # docs/configuration.md が案内する `settings.env` を使う)。
+      # `permissions.defaultMode` は無人実行で承認プロンプトを出さないための設定。
+      # リポジトリの .claude/settings.json (guard/format/stop_check フック) は
+      # project スコープとして別途読まれるので、そのまま生きる。
+      - name: Run swing-daily
+        uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model opus"
+          settings: |
+            {
+              "permissions": { "defaultMode": "bypassPermissions" },
+              "env": {
+                "FINNHUB_API_KEY": "${{ secrets.FINNHUB_API_KEY }}",
+                "FRED_API_KEY": "${{ secrets.FRED_API_KEY }}",
+                "DISCORD_WEBHOOK_URL": "${{ secrets.DISCORD_WEBHOOK_URL }}",
+                "EDGAR_IDENTITY": "${{ secrets.EDGAR_IDENTITY }}"
+              }
+            }
+          prompt: |
+            これは GitHub Actions 上の無人実行 (headless) です。
+            `.claude/skills/swing-daily/SKILL.md` の「無人実行（headless）時の方針」に
+            従ってください。ユーザーに質問することはできません。判断が割れる分岐は
+            常に保守側 (skip / withhold / 中断) を選んでください。
+
+            ${{ inputs.mode == 'dry-run' && 'swing-daily スキル (`/swing-daily`) を実行してください。ただし `copilot-daily` は `--dry-run` を付けて起動します (`uv run copilot-daily --dry-run`)。dry-run はライブの DuckDB を開かず、`data/copilot_dry_run.duckdb` と `reports/dry_run` にだけ書きます。' || 'swing-daily スキル (`/swing-daily`) を引数なしで実行してください (`uv run copilot-daily`)。これは本番の日次実行です。' }}
+
+            最後に、どこまで進んだか、打ち切った組、縮退・欠落の理由、
+            人間が翌朝確認すべき点を要約して報告してください。
+
+      # 失敗した日は push しない = リモート正本は前日のまま。
+      # dry-run はライブ DB を触らないので push する対象が無い。
+      - name: Push data to R2
+        if: ${{ success() && inputs.mode == 'live' }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: uv run --group ops python scripts/data_sync.py push
+
+      # 失敗した日ほどレポートを見たいので always()。
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swing-daily-reports-${{ inputs.mode }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14

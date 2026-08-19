@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -41,6 +43,17 @@ CLI_ERROR_CONVERSION_MODULES = {
     "copilot-track": "src/swing_copilot/tracking/cli.py",
     "copilot-dashboard": "src/swing_copilot/dashboard/cli.py",
 }
+#: The deadline watcher `swing-daily` background-launches, and the single
+#: allowlisted shape of its invocation (#264).
+TIMEBOX_SCRIPT = PROJECT_ROOT / "scripts/timebox.sh"
+DAILY_SKILL = PROJECT_ROOT / ".claude/skills/swing-daily/SKILL.md"
+CLAUDE_SETTINGS = PROJECT_ROOT / ".claude/settings.json"
+TIMEBOX_COMMAND = "./scripts/timebox.sh"
+TIMEBOX_ALLOW_ENTRY = f"Bash({TIMEBOX_COMMAND}:*)"
+TIMEBOX_INVOCATION = re.compile(
+    rf"^\s*{re.escape(TIMEBOX_COMMAND)} (\d+)\s*$",
+    re.MULTILINE,
+)
 
 
 def test_invariant_matrix_maps_every_requirement_and_review_fix_to_real_tests():
@@ -305,6 +318,73 @@ def test_storage_defaults_stay_inside_the_directory_the_guard_watches():
     for default in (DEFAULT_DB_PATH, DEFAULT_PARQUET_ROOT):
         assert not default.is_absolute()
         assert (PROJECT_ROOT.resolve() / default).parent == _REPO_DATA_DIR
+
+
+def _run_timebox(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed repo script, static arguments
+        [str(TIMEBOX_SCRIPT), *arguments],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_timebox_watcher_marks_the_deadline_and_stays_directly_executable():
+    """`swing-daily` background-launches the watcher and waits for its marker.
+
+    The completion notification *is* the wave's deadline, so both halves of the
+    contract are pinned here: the file stays executable (it is invoked as
+    `./scripts/timebox.sh`, not through an interpreter) and it announces the
+    deadline with the single `TIMEBOX_REACHED` line the skill looks for.
+    """
+    result = _run_timebox("1")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "TIMEBOX_REACHED"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [(), ("0",), ("-5",), ("abc",), ("1.5",), ("900", "extra")],
+    ids=["missing", "zero", "negative", "non-numeric", "fractional", "too-many"],
+)
+def test_timebox_watcher_fails_loudly_on_an_unusable_timebox(arguments):
+    """An unusable argument must fail fast instead of waiting forever or not at all.
+
+    A silent 0-second or non-numeric watcher would fire immediately and cancel a
+    wave that had barely started, so the skill's fallback rule needs a visible
+    failure to key on.
+    """
+    result = _run_timebox(*arguments)
+
+    assert result.returncode == 2
+    assert "TIMEBOX_REACHED" not in result.stdout
+    assert result.stderr.strip()
+
+
+def test_daily_skill_watcher_stays_in_its_allowlisted_script_form():
+    """#264: the watcher stays one allowlisted script call, with its fallback intact.
+
+    Expanded back into a `date`/`sleep` one-liner, the command would prefix-match
+    no allowlist entry, so an unattended run would block on approval and the
+    cancellation mechanism itself would become the reason a wave overruns. The
+    fallback for a watcher that still cannot start is what keeps that failure
+    survivable, so it must survive too.
+    """
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+    allow = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))["permissions"][
+        "allow"
+    ]
+    timeboxes = {int(seconds) for seconds in TIMEBOX_INVOCATION.findall(skill_text)}
+
+    assert timeboxes, "the skill must show how to launch the watcher"
+    assert all(seconds > 0 for seconds in timeboxes)
+    assert "date +%s" not in skill_text
+    assert [entry for entry in allow if "timebox" in entry] == [TIMEBOX_ALLOW_ENTRY]
+    assert "ウォッチャを起動できない場合" in skill_text
+    assert "**再試行せず**" in skill_text
 
 
 def _is_protocol_or_abc(base: ast.expr) -> bool:

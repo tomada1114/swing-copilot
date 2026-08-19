@@ -17,7 +17,8 @@
       "Bash(uv run pre-commit:*)",
       "Bash(uv sync:*)",
       "Bash(uv lock:*)",
-      "Bash(uv build)"
+      "Bash(uv build)",
+      "Bash(./scripts/timebox.sh:*)"
     ],
     "deny": [
       "Read(.env)",

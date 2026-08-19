@@ -34,6 +34,10 @@ from swing_copilot.pipeline.daily import (
 )
 from swing_copilot.pipeline.daily_runner import run_daily
 from swing_copilot.pipeline.progress import ProgressReporter
+from swing_copilot.ratelimit import (
+    FINNHUB_MIN_REQUEST_INTERVAL_SECONDS,
+    MinIntervalThrottle,
+)
 from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.terminal_report import (
     TerminalPaths,
@@ -134,6 +138,37 @@ def _required_features(options: DailyRunOptions, settings: Settings) -> set[str]
     return features
 
 
+def _finnhub_clients(
+    secrets: Secrets, options: DailyRunOptions
+) -> tuple[FinnhubNewsClient | None, FinnhubEarningsClient | None]:
+    """Build the Finnhub clients behind one account-wide throttle.
+
+    Finnhub's 60 calls/minute cap applies to the account behind the API key,
+    not to a client object. Two clients each keeping their own interval state
+    would together be free to exceed it, so the composition root hands both the
+    same budget (Issue #263).
+
+    Args:
+        secrets: Loaded secrets; no client is built without a Finnhub key.
+        options: Parsed run options; `skip_text` drops the news client only.
+
+    Returns:
+        The news client (`None` when text is skipped or no key is configured)
+        and the earnings client (`None` when no key is configured).
+    """
+    if not secrets.finnhub_api_key:
+        return None, None
+    throttle = MinIntervalThrottle(FINNHUB_MIN_REQUEST_INTERVAL_SECONDS)
+    news_client = (
+        None
+        if options.skip_text
+        else FinnhubNewsClient(secrets.finnhub_api_key, throttle=throttle)
+    )
+    return news_client, FinnhubEarningsClient(
+        secrets.finnhub_api_key, throttle=throttle
+    )
+
+
 def _compose_dependencies(
     options: DailyRunOptions, settings: Settings, strategies: StrategiesConfig
 ) -> DailyDependencies:
@@ -168,16 +203,7 @@ def _compose_dependencies(
     edgar_client = (
         EdgarClient(secrets.edgar_identity) if secrets.edgar_identity else None
     )
-    news_client = (
-        FinnhubNewsClient(secrets.finnhub_api_key)
-        if secrets.finnhub_api_key and not options.skip_text
-        else None
-    )
-    earnings_client = (
-        FinnhubEarningsClient(secrets.finnhub_api_key)
-        if secrets.finnhub_api_key
-        else None
-    )
+    news_client, earnings_client = _finnhub_clients(secrets, options)
     calendar_client = (
         FredCalendarClient(secrets.fred_api_key)
         if secrets.fred_api_key and not options.skip_text

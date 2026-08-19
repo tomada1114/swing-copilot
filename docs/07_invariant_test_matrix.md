@@ -196,3 +196,22 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 | `data/earnings_finnhub.py` | リトライを挟んでも発行間隔の下限が保たれる | 失敗試行を発行として数えず、後続の待機を過小評価する | `tests/data/test_earnings_finnhub.py::test_retried_attempts_keep_the_minimum_issue_interval` |
 | `text/calendar_fred.py` | 連続する発行時刻の間隔が 120 リクエスト/分の下限を下回らない | 待機前の時刻を記録し、enrichment 2件が 0.5 秒未満で続く | `tests/text/test_calendar_fred.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart` |
 | `text/calendar_fred.py` | リトライを挟んでも発行間隔の下限が保たれる | 失敗試行を発行として数えず、後続の待機を過小評価する | `tests/text/test_calendar_fred.py::TestRateLimiting::test_retried_attempts_keep_the_minimum_issue_interval` |
+
+## レート制限の単位はアカウント（Issue #263）
+
+Finnhub の 60 calls/分は API キーの**アカウント**に対する上限であり、
+クライアントオブジェクト単位ではない。`FinnhubNewsClient` と
+`FinnhubEarningsClient` は同一キーを使うため、合成ルート
+（`pipeline/daily_composition.py::_finnhub_clients`）が 1 個の
+`ratelimit.MinIntervalThrottle` を両者へ注入し、**2クライアント合計**の発行
+間隔を上限以下に保つ。注入しない既定は従来どおりインスタンス固有であり、
+既存の呼び出し元の挙動は変わらない（EDGAR / FRED は別アカウント・別上限
+なので共有しない）。固定するのは Issue #253 と同じく「実際にリクエストが出た
+時刻の間隔」であって、どちらのクライアントが sleep したかではない。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `ratelimit.py` | 共有スロットルを注入した2クライアントを交互に呼んでも発行間隔が 60 calls/分の下限を下回らない | クライアントごとに `_last_request_at` を持ち、合計レートが上限の約2倍になる | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_keeps_alternating_clients_one_interval_apart` |
+| `ratelimit.py` | 片方のクライアントのリトライ試行も共有予算を消費する | 失敗試行をアカウントのリクエストとして数えず、もう一方を早く通す | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_survives_a_retry_inside_one_client` |
+| `ratelimit.py` | 未注入時はインスタンス固有のままで、既存呼び出し元の挙動が変わらない | 既定を暗黙のグローバル共有にし、単体利用のクライアントに無関係な待機を課す | `tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_without_a_shared_budget_each_client_still_throttles_only_itself` |
+| `pipeline/daily_composition.py` | 日次実行の2つの Finnhub クライアントは同一スロットルを共有する | 生成箇所で別々に `MinIntervalThrottle` を作り、共有が静かに失われる | `tests/pipeline/test_cli.py::TestFinnhubClients::test_both_clients_share_one_account_wide_throttle` |

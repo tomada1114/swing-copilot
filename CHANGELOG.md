@@ -213,6 +213,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 同一 API キーを使う `FinnhubNewsClient` と `FinnhubEarningsClient` が
+  スロットル状態を共有せず、アカウント単位（60 calls/分）の上限を
+  2クライアント合計では守れない設計だった問題を修正した（Issue #263）。
+  新モジュール `swing_copilot/ratelimit.py` の `MinIntervalThrottle`
+  （= 1インスタンスが1つのレート予算）を両クライアントの `throttle=` 引数で
+  注入可能にし、合成ルート `pipeline/daily_composition.py::_finnhub_clients`
+  が1個を共有注入する。未注入時の既定は従来どおりインスタンス固有なので、
+  既存の呼び出し元（`retro/cli.py` の news クライアント単体利用を含む）の
+  挙動は変わらない。現状の日次パイプラインはニュース取得と決算取得を直列に
+  実行するため実害は出ていなかったが、片方がバーストした場合や将来この2ステップを
+  並列化した場合に 429・最悪アカウント BAN を招きうる。上限値は
+  `FINNHUB_MIN_REQUEST_INTERVAL_SECONDS` として1箇所に持ち、
+  「たまたま等しい2つの定数」ではなく「1アカウントの1上限」であることを示す。
+  EDGAR / FRED は別アカウント・別上限なので共有しない。固定した不変条件は
+  Issue #253 と同じく「実際にリクエストが出た時刻の間隔」であり、
+  2クライアントを交互に呼んだときの発行間隔と、片方のリトライ試行も共有予算を
+  消費することを fake clock / fake sleep で検証する
+
 - `--db` の兄弟 `bars/` を暗黙に解決する CLI のうち、`copilot-backtest` 以外の4本に
   検証が無かった穴を塞いだ（Issue #221）。Issue #217 / PR #220 が `backtest/cli.py` に
   入れた fail-fast を `storage/market_store.py` の `resolve_parquet_root()` と

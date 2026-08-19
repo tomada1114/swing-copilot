@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
+from swing_copilot.analysis.filing_selection import MIN_FILING_CHARS
 from swing_copilot.analysis.schemas import (
     FilingCoverage,
     FilingSectionCoverage,
@@ -735,6 +736,10 @@ def _input_coverage_summary(
     it has no exhibit gap. A row written before the column existed carries
     `None`, which is "not recorded"; such a symbol falls through to the
     `unknown` remainder rather than being claimed as complete.
+
+    The per-mode tallies alongside it say how a filing was cut;
+    `starved_filing_count` says whether what survived was worth calling an
+    input at all (`_is_starved`, Issue #267).
     """
     severe_keys = {
         (outcome.run_id, outcome.symbol)
@@ -770,6 +775,7 @@ def _input_coverage_summary(
         omitted_filing_count=sum(
             row.selection_mode == "omitted_symbol_budget" for row in coverages
         ),
+        starved_filing_count=sum(_is_starved(row) for row in coverages),
         severe_miss_symbol_count_with_gap=len(with_gap),
         severe_miss_symbol_count_without_gap=len(without_gap),
         severe_miss_symbol_count_unknown=len(severe_keys - with_gap - without_gap),
@@ -779,6 +785,45 @@ def _input_coverage_summary(
 def _has_gap(record: AnalysisSourceCoverageRecord) -> bool:
     """Whether this filing row reports a known gap, at either stage."""
     return record.is_truncated or record.exhibit_truncated is True
+
+
+def _is_starved(record: AnalysisSourceCoverageRecord) -> bool:
+    """Whether this filing reached the analysis context too small to be read.
+
+    Measured in characters rather than by `selection_mode`, because the mode
+    does not carry the size. `omitted_symbol_budget` used to be a workable
+    proxy -- a starved filing was one that got nothing at all -- but Issue
+    #255 gave every filing a reserved minimum, so the same starvation now
+    exports as a `head_fallback` (or a `section_priority_partial`) of roughly
+    `MIN_FILING_CHARS`, which that check does not see. Reading the count keeps
+    the detector honest across all five modes and across any later change to
+    how the budget is divided.
+
+    Two conditions, and the second is what keeps it from crying wolf:
+
+    * `exported_chars <= MIN_FILING_CHARS` -- the filing got no more than the
+      floor Issue #255 guarantees, out of a 240,000-character per-symbol
+      ceiling. Exactly the floor counts: a reservation is what a filing is
+      handed when there was nothing left to share, not an adequate read.
+    * `exported_chars < original_chars` -- something was actually left behind.
+      A short 8-K (the observed ones ran 4,074 and 6,670 characters) exported
+      whole is complete input, not a degraded one, however few characters it
+      is; calling that starved would fire on the routine case and drown the
+      real one.
+
+    The pair leaves one honest edge: a filing barely longer than the floor and
+    cut to it is counted, though little was lost. It *was* allocated nothing
+    but its reservation, which is the condition being counted, and the
+    alternative -- a second ratio threshold -- buys that edge with a constant
+    nothing else justifies.
+
+    This adds no case to `_has_gap`: `exported_chars < original_chars` is how
+    `is_truncated` is computed at export, so a starved row is already a gap.
+    """
+    return (
+        record.exported_chars <= MIN_FILING_CHARS
+        and record.exported_chars < record.original_chars
+    )
 
 
 def _filing_coverage(record: AnalysisSourceCoverageRecord) -> FilingCoverage:

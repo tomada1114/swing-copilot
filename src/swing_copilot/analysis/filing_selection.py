@@ -128,7 +128,13 @@ _EARNINGS_ITEM_PATTERN = re.compile(r"item\s+2\.02", re.IGNORECASE)
 #: reservations can withhold at most 24,000 of the 240,000 per-symbol default
 #: (10%), and only a filing that would otherwise be starved ever holds one --
 #: a filing shorter than this reserves its own length and no more.
-_MIN_FILING_CHARS = 8_000
+#:
+#: Public because it is also the line the retrospective reads a starved export
+#: by (`retro/export.py::_is_starved`, Issue #267): the floor and the alarm
+#: have to be the same number, or raising one would quietly stop the other
+#: from firing. It is a module constant, not configuration -- see design
+#: §3.16's Issue #255 addendum.
+MIN_FILING_CHARS = 8_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +187,7 @@ def select_filing_inputs(
 ) -> list[FilingInput]:
     """Return newest-first filing inputs under both character ceilings.
 
-    Every filing first reserves `_MIN_FILING_CHARS` of the per-symbol ceiling
+    Every filing first reserves `MIN_FILING_CHARS` of the per-symbol ceiling
     (or its whole length, when shorter), and only the budget left over is
     consumed in priority order -- earnings 8-K, then 10-Q, then everything
     else, each tier newest first. Priority therefore decides who gets the bulk
@@ -252,7 +258,7 @@ def _reserve_minimum_chars(
 
     A filing reserves the smallest of its own collected length (a short filing
     needs no more than all of it), the per-filing ceiling (it could not export
-    more anyway), and `_MIN_FILING_CHARS`. The reservations are taken in
+    more anyway), and `MIN_FILING_CHARS`. The reservations are taken in
     allocation order out of one shared ceiling, so when the ceiling cannot
     cover them all, the filings ahead in priority order keep their minimum and
     the ones behind reserve what is left and then nothing -- the same order
@@ -271,7 +277,7 @@ def _reserve_minimum_chars(
     reserved: list[int] = []
     remaining = per_symbol_chars
     for length in lengths:
-        share = min(length, per_filing_chars, _MIN_FILING_CHARS, remaining)
+        share = min(length, per_filing_chars, MIN_FILING_CHARS, remaining)
         reserved.append(share)
         remaining -= share
     return reserved

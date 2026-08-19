@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from swing_copilot.analysis.filing_selection import (
-    _MIN_FILING_CHARS,
+    MIN_FILING_CHARS,
     _allocate_section_chars,
     _shape_exhibit,
     select_filing_inputs,
@@ -1111,7 +1111,7 @@ class TestPerSymbolMinimumGuarantee:
     exactly twice -- so two filings that each fill the per-filing ceiling
     consumed the whole symbol budget and the third exported at 10 characters
     (HST, 2026-08-14) or 0 (UDR). Every filing therefore reserves
-    `_MIN_FILING_CHARS` (or its own length, when shorter) before the leaders
+    `MIN_FILING_CHARS` (or its own length, when shorter) before the leaders
     are served beyond that reservation.
     """
 
@@ -1173,7 +1173,7 @@ class TestPerSymbolMinimumGuarantee:
         )
 
         annual = _input_of(inputs, "edgar:10k")
-        assert len(annual.text) >= _MIN_FILING_CHARS
+        assert len(annual.text) >= MIN_FILING_CHARS
         assert _selection_mode(annual) == "head_fallback"
         assert sum(len(entry.text) for entry in inputs) <= 240_000
 
@@ -1205,10 +1205,10 @@ class TestPerSymbolMinimumGuarantee:
         ]
 
         inputs = select_filing_inputs(
-            items, per_filing_chars=100_000, per_symbol_chars=_MIN_FILING_CHARS + 4_000
+            items, per_filing_chars=100_000, per_symbol_chars=MIN_FILING_CHARS + 4_000
         )
 
-        assert len(_input_of(inputs, "edgar:new").text) == _MIN_FILING_CHARS
+        assert len(_input_of(inputs, "edgar:new").text) == MIN_FILING_CHARS
         assert len(_input_of(inputs, "edgar:mid").text) == 4_000
         assert _input_of(inputs, "edgar:old").text == ""
         assert (

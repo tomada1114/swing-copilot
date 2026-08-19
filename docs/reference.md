@@ -145,7 +145,7 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
-開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする。
+開示は1件`max_filing_chars`文字、1銘柄合計`max_filing_chars_per_symbol`文字までとする（後者は`max_filing_chars`以上、かつ`max_filings_per_symbol × min(max_filing_chars, MIN_FILING_CHARS)`以上でなければ`Settings`の読み込み時に拒否される。Issue #268）。
 10-Q/10-Q-Aは財務諸表、MD&A、リスク要因、法的手続を章優先で構成し、抽出不能時のみ
 先頭スライスへ縮退する。8-Kは主文書に加えてExhibit 99系（プレスリリース本文、
 合計500,000字の安全弁まで）を同じ本文へ連結して取り込むため、`coverage`の`original_chars`は
@@ -861,9 +861,30 @@ UNKNOWNのまま全期間を塞ぐ結果を黙って出す代わりに、実行�
 
 ## 候補ストリームキャッシュ（`--candidate-cache`）
 
-`copilot-backtest`の実行時間の大半はスクリーニングであり、エンジン走行では
-ない。そこで候補生成をエンジン走行から切り離し、`--candidate-cache PATH`で
+候補生成（スクリーニング）は`copilot-backtest`の中でもっとも重い工程であり、
+同時に、グリッド・シナリオ・CLI実行をまたいで使い回せる唯一の中間生成物でも
+ある。そこで候補生成をエンジン走行から切り離し、`--candidate-cache PATH`で
 Parquetへ永続化できるようにした。
+
+!!! note "「大半はスクリーニング」という目安の履歴"
+
+    この節はかつて「実行時間の大半はスクリーニングであり、エンジン走行では
+    ない」と断定していたが、その比率は2度動いている。#214/#242でATRの
+    O(n²)再平滑化を1パス読みへ移した結果、支配項はエンジン走行——`_bar`/
+    `_latest_bar`によるフルフレームmasking——へ移った。#244でこの2つを
+    銘柄別索引の参照へ移し、支配項は再び候補生成側へ戻っている。実測
+    （合成データ・オフライン・同一マシン）は次のとおり:
+
+    | 計測対象 | 変更前 | 変更後 |
+    |---|---|---|
+    | `_bar` 1呼び出し（508銘柄×1,652セッション＝839,216行） | 32.81ms | 0.0153ms |
+    | `_latest_bar` 1呼び出し（同上） | 29.56ms | 0.0120ms |
+    | エンジン走行のみ（101銘柄×500セッション＝50,500行） | 37.72秒 | 0.23〜0.25秒 |
+    | エンジン走行のみ（509銘柄×1,652セッション＝840,868行） | 約34分（外挿） | 1.05〜1.11秒 |
+
+    キャッシュを置く理由は「常にスクリーニングが大半だから」ではなく、
+    **再利用できるのが候補ストリームだけだから**である。どちらが支配的かは
+    銘柄数・期間・マシンで動くので、必要なら都度計測する。
 
 ```bash
 copilot-backtest grid --strategy default --start 2020-01-02 --end 2026-07-30 \

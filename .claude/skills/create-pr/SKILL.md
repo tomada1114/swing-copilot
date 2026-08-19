@@ -47,7 +47,8 @@ Run the full quality check suite. This is the prerequisite for PR creation.
 just verify
 ```
 
-`just verify` is non-mutating and runs `lint -> test -> docs-check -> smoke`.
+`just verify` is non-mutating and runs `lint -> docs-check -> smoke -> test`
+(fail-fast: the cheap gates come first).
 **If any step fails, abort PR creation** and report the failure.
 
 After it succeeds, run `git status --short` again. Any change means the pushed

@@ -315,6 +315,15 @@ class InputCoverageSummary(_StrictModel):
     counts cannot see (Issues #157/#163). It defaults to 0 so retrospective
     dossiers archived before it existed keep parsing; 0 there means "not
     counted", not "none occurred".
+
+    `starved_filing_count` is the one number that answers "was this filing too
+    small to call analyzed", across every selection mode (Issue #267).
+    `omitted_filing_count` and `fallback_filing_count` report *how* a filing
+    was cut, and neither is that question: a `head_fallback` of 10 characters
+    and a `head_fallback` of 100,000 are the same mode, and since Issue #255
+    gave every filing a minimum reservation, the starved ones mostly stopped
+    being `omitted_symbol_budget` at all. It also defaults to 0 for archived
+    dossiers, with the same "not counted" reading.
     """
 
     filing_count: int = Field(ge=0)
@@ -322,6 +331,7 @@ class InputCoverageSummary(_StrictModel):
     exhibit_truncated_filing_count: int = Field(default=0, ge=0)
     fallback_filing_count: int = Field(ge=0)
     omitted_filing_count: int = Field(ge=0)
+    starved_filing_count: int = Field(default=0, ge=0)
     severe_miss_symbol_count_with_gap: int = Field(ge=0)
     severe_miss_symbol_count_without_gap: int = Field(ge=0)
     severe_miss_symbol_count_unknown: int = Field(ge=0)
@@ -592,6 +602,9 @@ def _drop_legacy_defaults(value: object) -> object:
                 # existed -- and on any window that still has neither.
                 or (key == "failure_class_history" and child is None)
                 or (key == "aggregates_by_config" and child == [])
+                # Issue #267: the starved-export count, absent from every
+                # dossier archived before it was counted.
+                or (key == "starved_filing_count" and child == 0)
             )
         }
     if isinstance(value, list):

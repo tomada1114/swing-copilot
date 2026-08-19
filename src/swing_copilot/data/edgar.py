@@ -385,12 +385,18 @@ class EdgarClient:
         self._last_request_at: float | None = None
 
     def _throttle(self) -> None:
+        # Record when the request is actually issued (after any wait), not when
+        # the throttle decision started. Recording the pre-sleep reading drops
+        # the slept interval from the next gap calculation and lets the
+        # effective request rate exceed 1/_MIN_REQUEST_INTERVAL_SECONDS.
         now = self._clock()
+        issued_at = now
         if self._last_request_at is not None:
             wait = _MIN_REQUEST_INTERVAL_SECONDS - (now - self._last_request_at)
             if wait > 0:
                 self._sleep_fn(wait)
-        self._last_request_at = now
+                issued_at = now + wait
+        self._last_request_at = issued_at
 
     def _with_retries[T](self, operation: Callable[[], T]) -> T:
         """Run one EDGAR boundary operation with a bounded retry policy."""

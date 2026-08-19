@@ -114,6 +114,36 @@ _EX_99_PREFIX = "ex-99"
 #: item an issuer files its quarterly results under. Matched only in the
 #: primary document, where the item list lives.
 _EARNINGS_ITEM_PATTERN = re.compile(r"item\s+2\.02", re.IGNORECASE)
+#: Characters every filing may reserve out of the per-symbol ceiling before any
+#: filing is served beyond that reservation (Issue #255). Allocation order
+#: alone let the two leading filings each take the whole per-filing ceiling --
+#: the per-symbol default is exactly twice the per-filing one -- so a symbol's
+#: third filing exported at 10 characters (HST) or 0 (UDR) while the analysis
+#: context counted it as read. The value is an absolute character count, not a
+#: share of the ceiling, because what it has to cover is absolute: the 8-K
+#: bodies actually starved that way ran 6,670 and 4,074 characters, and a
+#: dividend- or officer-change 8-K is a primary document plus a short exhibit,
+#: not a proportion of anything. 8,000 clears both observed bodies with room
+#: and stays cheap at the other end: under `max_filings_per_symbol: 3` the
+#: reservations can withhold at most 24,000 of the 240,000 per-symbol default
+#: (10%), and only a filing that would otherwise be starved ever holds one --
+#: a filing shorter than this reserves its own length and no more.
+#:
+#: Public rather than module-private because two other modules have to hold
+#: the same number, and each imports it rather than restating it:
+#:
+#: * `config.py` validates `max_filing_chars_per_symbol` against it at load
+#:   time (Issue #268). A per-symbol ceiling that cannot cover
+#:   `max_filings_per_symbol` reservations starves every filing past the first
+#:   no matter what this module does, and that is an invalid limit to reject
+#:   before any external I/O rather than a degradation to absorb.
+#: * `retro/export.py::_is_starved` reads a starved export by it (Issue #267).
+#:   The floor and the alarm have to be the same number, or raising one would
+#:   quietly stop the other from firing.
+#:
+#: It stays a module constant, not configuration -- see design §3.16's Issue
+#: #255 addendum.
+MIN_FILING_CHARS = 8_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,11 +196,16 @@ def select_filing_inputs(
 ) -> list[FilingInput]:
     """Return newest-first filing inputs under both character ceilings.
 
-    The per-symbol ceiling is consumed in priority order -- earnings 8-K, then
-    10-Q, then everything else, each tier newest first -- so a filing late in
-    that order is the one that runs out of budget and exports as
-    `omitted_symbol_budget`. The returned list is independent of that order:
-    it is always the filings in document order, newest first.
+    Every filing first reserves `MIN_FILING_CHARS` of the per-symbol ceiling
+    (or its whole length, when shorter), and only the budget left over is
+    consumed in priority order -- earnings 8-K, then 10-Q, then everything
+    else, each tier newest first. Priority therefore decides who gets the bulk
+    of the ceiling, never whether a filing is exported at all (Issue #255).
+    When the ceiling cannot even cover every reservation, the reservations
+    themselves are handed out in that same priority order until the budget is
+    gone and the rest export as `omitted_symbol_budget`. The returned list is
+    independent of both orders: it is always the filings in document order,
+    newest first.
 
     Args:
         items: This symbol's collected text items; non-filing sources are
@@ -195,13 +230,23 @@ def select_filing_inputs(
             index,
         ),
     )
+    reserved = _reserve_minimum_chars(
+        [len(filings[index].content_text) for index in allocation_order],
+        per_filing_chars=per_filing_chars,
+        per_symbol_chars=per_symbol_chars,
+    )
     remaining = per_symbol_chars
+    # What the filings still waiting behind this one hold back. It shrinks as
+    # each of them is reached, so the last one served is capped by `remaining`
+    # alone and no reserved character goes unused.
+    withheld = sum(reserved)
     selected: dict[int, FilingInput] = {}
-    for index in allocation_order:
+    for position, index in enumerate(allocation_order):
+        withheld -= reserved[position]
         item = filings[index]
         form_type = form_types[index]
         selection = select_filing_text(
-            item, form_type, min(per_filing_chars, remaining)
+            item, form_type, min(per_filing_chars, remaining - withheld)
         )
         selected[index] = FilingInput(
             source_id=item.source_id,
@@ -213,6 +258,38 @@ def select_filing_inputs(
         )
         remaining -= len(selection.text)
     return [selected[index] for index in range(len(filings))]
+
+
+def _reserve_minimum_chars(
+    lengths: Sequence[int], *, per_filing_chars: int, per_symbol_chars: int
+) -> list[int]:
+    """Reserve each filing's minimum share of the per-symbol ceiling.
+
+    A filing reserves the smallest of its own collected length (a short filing
+    needs no more than all of it), the per-filing ceiling (it could not export
+    more anyway), and `MIN_FILING_CHARS`. The reservations are taken in
+    allocation order out of one shared ceiling, so when the ceiling cannot
+    cover them all, the filings ahead in priority order keep their minimum and
+    the ones behind reserve what is left and then nothing -- the same order
+    that decides the slack, applied to the floor.
+
+    Args:
+        lengths: Collected length of each filing, in allocation order.
+        per_filing_chars: Ceiling on one filing's exported excerpt.
+        per_symbol_chars: Ceiling on every exported excerpt for this symbol
+            together.
+
+    Returns:
+        Characters reserved per filing, in allocation order, summing to at
+        most `per_symbol_chars`.
+    """
+    reserved: list[int] = []
+    remaining = per_symbol_chars
+    for length in lengths:
+        share = min(length, per_filing_chars, MIN_FILING_CHARS, remaining)
+        reserved.append(share)
+        remaining -= share
+    return reserved
 
 
 def _allocation_tier(item: TextItem, form_type: str) -> int:

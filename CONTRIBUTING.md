@@ -54,7 +54,7 @@ uv run ruff format .
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src scripts tests
-uv run pytest --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
+uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
 uv run mkdocs build --strict
 uv build && uv run python scripts/smoke_test.py
 ```

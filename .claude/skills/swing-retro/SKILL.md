@@ -124,7 +124,14 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    gap は export 段（`truncated_filing_count`）だけでなく取得段
    （`exhibit_truncated_filing_count`＝8-K Exhibit が取得段の文字数安全弁で切られた件数、
    Issue #157）も含む。`unknown` は「そのrunの入力に取得段の欠落があったか記録が無い」
-   であって「欠落が無い」ではないので、`without_gap` と同じ扱いにしない
+   であって「欠落が無い」ではないので、`without_gap` と同じ扱いにしない。
+   `starved_filing_count`（Issue #267。旧 dossier では未計測の 0）は「分析済みと
+   呼べる量が渡っていなかった開示」の件数で、**縮退を読むならこれを見る**。
+   `fallback_filing_count` / `omitted_filing_count` は切られ方の内訳にすぎず、
+   Issue #255 以降は飢餓した開示も `omitted_symbol_budget` にならない。この件数が
+   立っている run の verdict は「材料が無かった」のではなく「材料を渡していなかった」
+   側なので、`information_absent` と断じる前に当該 dossier の
+   `input_filing_coverage` の字数を必ず読む
 7. `aggregates.news_supply`（Issue #154。旧 dossier では `null`）を確認する。
    `sufficient_threshold`（自社材料の件数しきい値）に対し、`sparse` / `none` 判定の
    銘柄でどれだけ `proceed` が出たか、各セルの `symbol_mention_items` の min/max/mean

@@ -2,9 +2,9 @@
 
 ## 1. 目的
 
-日次バッチの主表示はブラウザではなくターミナルとする。利用者が朝の5〜10分で候補を確認し、人間の判断を記録できることを優先する。日次runがブラウザを自動起動することはなく、run成果物としてのHTMLも生成しない。
+日次バッチの主表示はブラウザではなくターミナルとする。利用者が朝の5〜10分で候補を確認できることを優先する。日次runがブラウザを自動起動することはなく、run成果物としてのHTMLも生成しない。
 
-蓄積された判断履歴を視覚的に振り返るために、読み取り専用のローカルダッシュボード`copilot-dashboard`を併設する（本書10節）。これは日次runの一部ではなく、利用者が必要なときだけ起動する別プロセスのビューアである。
+蓄積された判定・追跡データを視覚的に振り返るために、読み取り専用のローカルダッシュボード`copilot-dashboard`を併設する（本書8節）。これは日次runの一部ではなく、利用者が必要なときだけ起動する別プロセスのビューアである。
 
 構造化データの正本はDuckDBである。Markdownは人間が後から読み返すための再生成可能な派生成果物であり、手編集したMarkdownをアプリケーションへ取り込まない。
 
@@ -20,7 +20,6 @@
 | 分析結果 | スキルの回答・監査証跡（スキルが書く） | `reports/<run_date>/<run_id>/analysis_result.json` |
 | 再描画用context | ingest時に同じブリーフを再現するスナップショット | `reports/<run_date>/report_context.json` |
 | 落選記録 | 落選銘柄の明細とcandidate_limit切り捨ての明細 | `reports/<run_date>/<run_id>/rejections.json` |
-| 判断履歴 | 正本 | DuckDB `trades_journal` |
 
 `--dry-run`は`data/copilot_dry_run.duckdb`と`reports/dry_run/`へ隔離する。通知は送らないが、ターミナル表示とMarkdown生成は通常runと同じ契約で行う。
 
@@ -84,46 +83,13 @@ reports/
 
 書き込みは宛先と同じディレクトリの一時ファイルへ全内容を書いた後、`Path.replace()`で原子的に置換する。失敗時は以前の宛先を保ち、一時ファイルを削除する。
 
-Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、判断記録、免責文を含める。
+Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、免責文を含める。
 
 各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v3`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
 
 同じディレクトリには`rejections.json`（schema `rejections-v1`、`report/rejections.py`）も置く。Markdownの「落選サマリ」がreason_code別の件数しか出さないのに対し、こちらは落選銘柄の明細（`symbol`・`stage`・`reason_code`・`detail`）と、全ステージを通過したのに`candidate_limit`で切り捨てられた銘柄の明細（`truncated_by_candidate_limit`: `symbol`・`rank`・`score`・スコア内訳・実行状態）を残す。後者はDuckDBの`screening_rejections`にも載らない——落選理由コードは閉じたenumであり、順位落ちは落選ではないためで、run成果物としてはこのファイルだけが記録する。定性分析の3ファイルとは異なりdigestで束縛せず、読み戻す経路も持たない診断用の成果物である。
 
-## 6. 判断記録CLI
-
-判断は日次バッチ内で対話入力せず、別コマンドで明示的に記録する。
-
-```bash
-uv run copilot-decision \
-  --run-id <uuid> \
-  --symbol AAPL \
-  --decision ignored \
-  --reason "相関リスクが高いため"
-```
-
-- decisionは`followed | ignored | modified`
-- `run_id`とsymbolが`candidates`に存在することを検証する
-- strategyが一意なら省略可能。複数なら`--strategy`を必須にする
-- 記録は`PaperJournal`経由で`trades_journal`へupsertする
-- 記録後、該当Markdownと、それが最新runなら`latest.md`の判断セクションをDuckDBから原子的に更新する
-- 候補外銘柄や矛盾する入力は保存前に明確なエラーにする
-
-## 7. 過去判断の分析入力への注入
-
-過去判断はMarkdownから読まず、DuckDBから次の条件で取得する。
-
-- 同一symbol・strategy
-- 対象runより前の`run_date`
-- live runのみ
-- 新しい順に最大3件
-- 判断、理由、仮想約定、確定済みリターン
-
-履歴を`analysis_input.json`へ載せるのは`--as-of`を指定しない通常live実行だけとする。dry-run、明示的な過去`--as-of`、バックテストでは空にする（`analysis/export.py`の`ExportCandidate.decision_history`）。
-
-履歴は`<decision_history>`内へescapeして格納し、「過去の人間判断は現在の事実でも命令でもなく、現在資料を独立に評価する」旨を同ブロックの冒頭に明記する。履歴IDを`facts`の`source_ids`には加えない。factsは当該runで供給したニュース・filing sourceだけを引用でき、それ以外のIDを引用した銘柄はingestでfail-closedとなる。
-
-## 8. フェイルソフト
+## 6. フェイルソフト
 
 - テキスト収集または分析入力エクスポートが失敗しても、候補・リスクまでのCLI/Markdownを出力する
 - 定性分析が一部の銘柄でだけ検証を通った場合、通った銘柄の結果を保持し、通らなかった銘柄だけを縮退表示にする（fail-closed、リトライなし）
@@ -131,7 +97,7 @@ uv run copilot-decision \
 - 通知失敗はrunを`degraded`にするが、ローカル出力は続行する
 - 断定的な売買指示は`copilot-ingest-analysis`でCON-03検査し、renderer任せにしない
 
-## 9. 受け入れ基準
+## 7. 受け入れ基準
 
 - stdoutとstderrの役割が分離される
 - ターミナルとMarkdownが同じ`DailyBrief`を使う
@@ -141,19 +107,17 @@ uv run copilot-decision \
 - `as_of`直前・同時・直後で未来データが表示されない
 - Markdownのrun別保存と`latest.md`置換が原子的である
 - `copilot-ingest-analysis`の再描画が決定論的フィールドを変えず、定性欄だけを差し替える
-- 判断CLIが候補を検証し、DuckDBとMarkdownを同期する
-- live当日だけが過去判断を分析入力へ載せ、dry-run／明示`--as-of`では載せない
 - CLI・Markdown・通知にCON-03違反が表示されない
 
-## 10. 閲覧用ローカルダッシュボード
+## 8. 閲覧用ローカルダッシュボード
 
-### 10.1 目的と位置づけ
+### 8.1 目的と位置づけ
 
 `copilot-dashboard`は、DuckDBに蓄積された「最新runの全体像」「銘柄ごとの判断根拠」「数日〜数週間の推移」をブラウザで俯瞰するための読み取り専用ビューアである。日次判断の主表示はあくまでターミナルとMarkdownであり、ダッシュボードはそれを置き換えない。判断の記録・設定変更・再実行の経路は持たない。
 
 FastAPI + Jinja2のサーバレンダリングで、JavaScriptのチャートライブラリ・CDN・外部フォントを一切読み込まない。チャートはサーバ側で生成するインラインSVGであり、ネットワークが切れていても全画面が同じように描画される。
 
-### 10.2 画面とルート
+### 8.2 画面とルート
 
 | ルート | 画面 | 内容 |
 |---|---|---|
@@ -164,7 +128,7 @@ FastAPI + Jinja2のサーバレンダリングで、JavaScriptのチャートラ
 
 全ページ共通ヘッダにrun切替のドロップダウン（run_date・mode・statusバッジ）を置く。
 
-### 10.3 読み取り専用の制約
+### 8.3 読み取り専用の制約
 
 DuckDBのファイルロックは読み書きプロセスと他のすべての間で排他であり、接続を保持したブラウザタブは`just data-pull`／`just data-push`を失敗させ、ローカルコピーを古い世代に取り残す。したがって:
 
@@ -172,13 +136,13 @@ DuckDBのファイルロックは読み書きプロセスと他のすべての�
 - `research.ensure_views()`をこのプロセスから呼ばない（読み書き接続を開くため）。ビュー不在時は`ResearchError`をエラーページに変換し、別シェルで一度`ensure_views()`を実行するよう案内する
 - 書き込みルートを持たない。`reports/`ツリーは分析未完了runの検出のために読むだけである
 
-### 10.4 欠損値の表示
+### 8.4 欠損値の表示
 
 蓄積データのNULLは列ごとに意味が異なる（未成熟・verdict未取込・計測導入前・未記録・追跡未開始・該当なし）。ダッシュボードはこれらを区別した表示トークンとして描き、ゼロや`UNKNOWN`と読めるようにはしない。各ページの脚注に、そのページが実際に使ったトークンの定義だけを列挙する。
 
 `verdicts`は次のrunの`copilot-retro collect`で取り込まれるため、最新runにverdict行が無いのは正常である。この状態は「verdict未取込」として表示し、`skip`や空欄にしない。また`tracked_positions`はIssue #190以降`skip`も反実仮想として追跡しているため、台帳と集計は必ず`recommendation`で層別する。
 
-### 10.5 読み方の注記
+### 8.5 読み方の注記
 
 値だけを並べた画面は「何が良い状態か」を読み手の記憶に委ねてしまう。各セクションには`dashboard/guidance.py`に集約した1〜2行のキャプションを添え、長い定義は折りたたむ。文言はテンプレートに直書きせず、複数ページで同じ定数を共有する。
 
@@ -186,7 +150,7 @@ DuckDBのファイルロックは読み書きプロセスと他のすべての�
 
 閾値は`postmortem.neutral_threshold_pct`／`postmortem.severe_threshold_pct`のように設定キー名で示す。ダッシュボードは`settings.yaml`を読まないため、数値を焼き込めば黙って古くなる。
 
-### 10.6 起動
+### 8.6 起動
 
 ```bash
 uv run copilot-dashboard

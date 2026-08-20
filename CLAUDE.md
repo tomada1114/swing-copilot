@@ -17,9 +17,8 @@ above). This repo additionally ships Claude Code configuration:
   lightweight feedback loop, not completion evidence; use `just verify` before
   a PR or final completion claim
 - `.claude/skills/` — `create-pr`, `smart-commit`, and `merge-dependabot`
-  workflow skills, plus the trading loop (`swing-daily`, `swing-track`,
-  `swing-retro`, `swing-deepdive`) and read-only data analysis
-  (`swing-research`)
+  workflow skills, plus the trading loop (`swing-daily`, `swing-retro`,
+  `swing-deepdive`) and read-only data analysis (`swing-research`)
 - `.claude/settings.json` — shared permission allowlist for local build,
   lint, and test commands; personal preferences (model, output style, extra
   permissions) belong in `.claude/settings.local.json`, never here
@@ -42,8 +41,8 @@ only on success, so a failed day leaves the remote on the previous generation.
 
 - Read-only work (`swing-research`, the dashboard): `just data-pull`, then read
   the local copy. `just data-status` says whether it still matches the remote.
-- Anything that writes (`swing-track` manual closes, `swing-retro`, a live
-  `copilot-daily`): `just data-pull` → work → `just data-push`, in one sitting.
+- Anything that writes (`swing-retro`, a live `copilot-daily`): `just data-pull`
+  → work → `just data-push`, in one sitting.
   The optimistic lock in `scripts/data_sync.py` — a monotonic `generation` in
   `manifest.json` — is the only concurrent-write guard, so do not leave a
   pulled copy unpushed, and do not start a local write around JST 8:00 while
@@ -62,9 +61,9 @@ only on success, so a failed day leaves the remote on the previous generation.
 source-of-truth precedence, test expectations, and the Japanese/English
 language policy. Do not duplicate or weaken those rules here.
 
-`copilot-daily` exits `2` (preflight abort) for two different reasons, and
-stderr's first line carries a machine-readable tag the `swing-daily` skill
-branches on — never assume exit 2 means "already ran":
+`copilot-daily` exits `2` (preflight abort), and stderr's first line carries
+a machine-readable tag the `swing-daily` skill branches on — never assume
+exit 2 means "already ran":
 
 - `PREFLIGHT_ABORT[same_day_rerun]:` — a `status='success'` run already exists
   for the resolved `run_date` (Issue #118: the schedule fires once per weekday,
@@ -73,10 +72,6 @@ branches on — never assume exit 2 means "already ran":
   row or `reports/` directory. The skill summarizes the existing run and
   terminates without writing `analysis_result.json`.
   `--allow-same-day-rerun` bypasses the guard for an intentional re-run.
-- `PREFLIGHT_ABORT[account_equity_unset]:` — `risk.account_equity_usd` is
-  unset while closed positions exist; continuing would only produce
-  circuit-breaker-forced rejections. This is a configuration problem the
-  skill must report to the user, **not** an "already analyzed" summary.
 
 ## Reading the Accumulated Data
 

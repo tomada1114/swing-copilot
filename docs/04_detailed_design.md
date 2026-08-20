@@ -66,9 +66,6 @@ swing-copilot/
 │   ├── backtest/
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
 │   │   └── runner.py         # FR-10
-│   ├── paper/
-│   │   ├── journal.py        # FR-11 ペーパートレード記録
-│   │   └── cli.py            # copilot-decision
 │   └── pipeline/
 │       └── daily.py          # FR-12 オーケストレータ（CLI: uv run copilot-daily）
 ├── data/                     # Parquet/DuckDB（ローカルファイルシステムに永続化）
@@ -439,18 +436,20 @@ class StateStore:
         """1回のスクリーニングの4つの結果（候補・落選・順位落ち・シグナルヒット）を
         単一トランザクションで記録する。"""
 
-    def get_open_positions(self, is_paper: bool = True) -> list["Position"]:
-        """現在オープン中のポジション一覧を返す（通常run専用、時点履歴ではない）。"""
+    def get_verdict_positions(
+        self, status: str | None = None, recommendations: Sequence[str] | None = None,
+    ) -> tuple["VerdictPosition", ...]:
+        """追跡中の仮想ポジションを返す（3.24節、statusで絞り込み可能。
+        現在状態専用で時点履歴ではない）。"""
 ```
 
 **エラー処理**: DuckDB書き込みはステップ単位のトランザクションとし、失敗時はロールバックして呼び出し元へ例外を伝播する。`runs`/`run_steps`自体の記録失敗は標準エラーへ構造化ログを出し、非ゼロ終了する。
 
-`positions`は現在状態を訂正更新する台帳であり、各訂正がいつ可視になったかを復元する
-履歴テーブルではない。したがって`get_open_positions()`へ`as_of`条件を後付けして
-`entry_date`/`close_date`だけで過去状態を推測してはならない。`copilot-daily
---as-of`はこの読み出しを呼ばず、保有銘柄の取得対象追加・セクター/相関/
-ポートフォリオヒート文脈・MAE/MFE更新から現在ポジションを除外し、レポートへ
-`NO_POSITION_DATA`警告を表示する。通常runは従来どおり現在のopen positionを使う。
+`verdict_positions`は現在状態を訂正更新する台帳であり、各訂正がいつ可視になったかを復元する
+履歴テーブルではない。したがって`get_verdict_positions()`へ`as_of`条件を後付けして
+`entry_date`/`exit_date`だけで過去状態を推測してはならない。`copilot-daily
+--as-of`はこの読み出しを呼ばず（`_held_symbols(is_historical=True)`が常に空集合を返す。3.14節）、
+レポートへ`NO_POSITION_DATA`警告を表示する。通常runは従来どおり現在のopenポジションを使う。
 
 **`storage/json_guard.py::dumps_safe()`（P1-04、roadmap §5、Issue #13）**: `storage/`配下でJSONカラム（`signals.metrics_json`、`candidates.metrics_json`、`screening_rejections.detail`、`risk_assessments.reasons_json`/`warnings_json`/`sizing_warnings_json`）へ書き込むすべての`json.dumps`呼び出しは`dumps_safe()`を経由する。
 
@@ -821,8 +820,7 @@ rejectした段が保持する**。`check()`は sizing/regime → 決算ガー�
 「次回決算日が分からない」であり、無言で落とすとオペレータから見えなくなるためである。
 
 **P4-19（roadmap §5、Issue #28）**:
-`risk/circuit_breaker.py`はクローズ済みペーパートレードの実現損益だけを使い、
-含み損益は参照しない。`as_of`の米東部時間（`America/New_York`）における日次、
+`risk/circuit_breaker.py::evaluate_circuit_breaker()`は呼び出し元が渡すクローズ済みトレード（`RealizedTrade`）の実現損益だけを使い、含み損益は参照しない汎用関数である。2026-08の実売買記録撤去により日次runにはもう実現損益が存在しないため、日次パイプラインの`RiskChecker`は`circuit_breaker=None`（未評価）で呼ばれる——呼ぶのは`backtest/policy.py`（3.19節のIssue #184追記）のみで、run自身のシミュレーション上の決済済みトレードを渡す。`as_of`の米東部時間（`America/New_York`）における日次、
 月曜開始の週次、月次境界で再集計し、損失率が2%/5%/8%に達すると`HALTED`とする。
 直近2件が連続して負けなら、最後の負けの`close_at`から厳密に24時間未満を
 `COOLDOWN`とし、損益0は連敗をリセットする。優先順位は
@@ -836,14 +834,11 @@ rejectした段が保持する**。`check()`は sizing/regime → 決算ガー�
 
 ニュース取得・EDGAR新着開示取得（およびこれらに続くFR-08の分析入力エクスポート）の対象銘柄は、保有銘柄＋当日のスクリーニング候補銘柄の合計最大30銘柄に限定する（NFR-03: 35分以内の実現方針）。経済指標カレンダー取得（FRED）は銘柄に依存しないため対象外。
 
-ここでの「保有銘柄」は、`positions`の実オープンポジション（`get_open_positions(is_paper=True)`）と、
-verdict追跡台帳`verdict_positions`の`status='open'`かつ`recommendation='proceed'`な仮想ポジション（3.24節）の**和集合**である（Issue #190以降シャドウ追跡される`skip`側は含めない——notionalにも保有されておらず、含めると保有優先のテキスト予算が落選銘柄へ向く）
-（`pipeline/daily_runner.py::_held_symbols()`）。実売買を始める前は`positions`が常に空で、
-実質的に注視している銘柄は仮想台帳にしか存在しない——台帳を読まなければ保有銘柄の
+ここでの「保有銘柄」は、verdict追跡台帳`verdict_positions`の`status='open'`かつ`recommendation='proceed'`な仮想ポジション（3.24節）である（Issue #190以降シャドウ追跡される`skip`側は含めない——notionalにも保有されておらず、含めると保有優先のテキスト予算が落選銘柄へ向く）
+（`pipeline/daily_runner.py::_held_symbols()`）。実質的に注視している銘柄は仮想台帳にしか存在しない——台帳を読まなければ保有銘柄の
 ニュース収集が一度も発火せず、Finnhubの`company-news`は遡及取得できないため欠落が
-恒久的なデータ損失になる。逆に和集合にしておけば、実売買が始まっても両方が覆われる。
-この和集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
-だけであり、risk stepへ渡す`portfolio`は従来どおり実ポジションのみである。
+恒久的なデータ損失になる。この保有集合が影響するのは収集・分析の対象集合（`_select_symbols()` / `_text_target_symbols()`）
+だけであり、risk stepへ渡す`portfolio`は常に空リストである（2026-08の実売買記録撤去により、日次runがサイジング・集中度・相関を評価する対象の実ポジションは存在しない。3.13節）。
 `_select_symbols()`は`--limit`の有無にかかわらずこの保有集合を必ず合流させる
 （Issue #212。3.21節の実装時追記）。
 
@@ -923,15 +918,16 @@ class CandidateInput(_StrictModel):
     symbol: str
     score_breakdown: str          # analysis/context.py が整形したコード計算済みの値
     risk_constraints: str
-    decision_history: str | None
+    prior_verdicts: str | None
     news: list[NewsInput]
+    news_supply: NewsSupply | None
     filings: list[FilingInput]
 
 class CalendarEventInput(_StrictModel):
     """source_id / published_at / title / summary / url / provider（symbolを持たない）"""
 
 class AnalysisContextBlocks(_StrictModel):
-    """run単位の文脈: market_regime / performance_summary / calendar_events"""
+    """run単位の文脈: market_regime / calendar_events"""
 
 class AnalysisInput(_StrictModel):
     schema_version: Literal["analysis-input-v2", "analysis-input-v3"]
@@ -1001,7 +997,7 @@ class AnalysisResult(_StrictModel):
 - **判定はexport前のテキストに対して行う**: `head_fallback`の先頭スライスは末尾のマーカーを落としうるが、Exhibitの欠落は「収集された開示の性質」であってexportの切り方とは独立だからである。
 - **`false`の意味は「マーカーが無い」**であって「欠落が無い」ではない。マーカー導入前に収集した開示、Exhibitのダウンロードに失敗した開示、提出者自身が本文を省略した開示はいずれも`false`になる。`FilingSectionCoverage`の3フィールドが`null`のときと同じ精神である。既定`false`により過去の`analysis-input-v2`/`v3`アーカイブは引き続きparseでき（`input_digest`検証は`mode="before"`で生JSONを対象にするため、フィールド追加でダイジェストは変わらない）、スキーマ版は`analysis-input-v3`に据え置く。
 - **予算超過で丸ごと落とすExhibitにもマーカーを付ける**: `remaining <= 0`でループを抜ける経路は、そのExhibitのテキストが1文字も入らないためマーカーを書く先が無く、放置すると「上限が効いていない」と申告してしまう。抜ける直前にマーカー単体をブロックとして追加する（直前のExhibitが自身の切り詰めで既にマーカーを持つ場合は二重に付けない）。
-- **永続化**: `analysis_source_coverage`に`exhibit_truncated BOOLEAN`（nullable）を追加し、`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で既存DBへも遅延追加する。**backfillしない**——既存行には「そのrunの開示がマーカーを含んでいたか」を語る材料が無いので、`NULL`＝未記録のまま残す（`positions.exit_reason`や`verdict_positions.no_trade`のbackfillは「既存行が既に持っていた事実の言い直し」だったが、ここはそれに当たらない）。`retro/collect.py`はpydanticの`model_fields_set`を見て、**アーカイブが実際に記載していた場合だけ**値を保存する（既定`false`をそのまま保存すると「未記載」が「切り詰め無しと記録済み」に化ける）。
+- **永続化**: `analysis_source_coverage`に`exhibit_truncated BOOLEAN`（nullable）を追加し、`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で既存DBへも遅延追加する。**backfillしない**——既存行には「そのrunの開示がマーカーを含んでいたか」を語る材料が無いので、`NULL`＝未記録のまま残す（`verdict_positions.no_trade`のbackfillは「既存行が既に持っていた事実の言い直し」だったが、ここはそれに当たらない）。`retro/collect.py`はpydanticの`model_fields_set`を見て、**アーカイブが実際に記載していた場合だけ**値を保存する（既定`false`をそのまま保存すると「未記載」が「切り詰め無しと記録済み」に化ける）。
 - **P8の集計**: `retro/export.py::_input_coverage_summary()`の`severe_miss_symbol_count_with_gap`は`is_truncated`と`exhibit_truncated`のどちらかが立てばgapとして数える。`without_gap`（＝入力は完全だったと積極的に主張する側）は、その銘柄の全行について**gapが無く、かつ`exhibit_truncated`が記録済み**であることを要求し、未記録の行を含む銘柄は`unknown`へ落とす。`exhibit_truncated_filing_count`（既定0、過去のretroアーカイブ互換）で取得段の切り詰め件数自体も出す。復元経路`retro/export.py::_filing_coverage()`は`NULL`をスキーマ既定の`false`（＝未記録）へ畳む。
 
 **Issue #163実装時追記（件数上限で落ちたExhibitも`coverage`から読めるようにする）**: #157が塞いだのは文字数上限（`_MAX_EXHIBIT_CHARS_PER_FILING`）だけで、`_MAX_EXHIBITS_PER_FILING`（3件）を超える4本目以降の`EX-99*`は`_earnings_exhibits()`のスライスで**予算経路に入る前に**落ちていたため、マーカーも警告も残らず`exhibit_truncated: false`のままだった。同じ層に同じ誤読（`false`＝欠落なし）が残る形なので、#157と同じマーカー方式で塞ぐ。
@@ -1028,8 +1024,6 @@ class AnalysisResult(_StrictModel):
 def format_market_regime(snapshot: RegimeSnapshot, exposure: ExposureDecision) -> str: ...
 def format_score_breakdown(candidate: Candidate) -> str: ...          # P1-01複合スコア内訳
 def format_risk_constraints(risk_assessment: RiskAssessment) -> str: ...  # P1-03サイジング内訳
-def format_performance_summary(summary: PerformanceSummary | None) -> str: ...  # P1-06実現損益
-def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str: ...
 def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str: ...  # Issue #191
 
 # analysis/export.py
@@ -1042,12 +1036,11 @@ class TextExportLimits:
 
 @dataclass(frozen=True, slots=True)
 class ExportCandidate:
-    """candidate / risk_assessment / text_items / decision_history /
-    prior_verdicts"""
+    """candidate / risk_assessment / text_items / prior_verdicts"""
 
 @dataclass(frozen=True, slots=True)
 class ExportRequest:
-    """as_of / generated_at / regime / exposure / performance / candidates /
+    """as_of / generated_at / regime / exposure / candidates /
     limits / calendar_events（run単位のcalendar TextItem。既定は空）"""
 
 def build_analysis_input(request: ExportRequest) -> AnalysisInput: ...
@@ -1060,15 +1053,15 @@ def write_json_atomically(destination: Path, payload: object) -> None: ...
 def write_text_atomically(destination: Path, content: str) -> None: ...
 ```
 
-**改修原則4「判断はコード、叙述はスキル」（roadmap §5 P2-12の継承）**: `format_score_breakdown()`（P1-01）・`format_risk_constraints()`（P1-03）・`format_performance_summary()`（P1-06）は、いずれも「これはコードの決定論的計算結果であり分析側が再計算・上書きできない」旨を本文へ明記した純関数である。`format_risk_constraints()`は`not_calculable`や拒否判定でも空にせず常に描画する——「コードが既にREJECTと言っている」という信号自体が、保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採る）の前提情報だからである。逆に`format_score_breakdown()`と`format_performance_summary()`は構成要素が欠けていればプレースホルダを置かず`""`を返し、`export.py`が`None`へ落とす。
+**改修原則4「判断はコード、叙述はスキル」（roadmap §5 P2-12の継承）**: `format_score_breakdown()`（P1-01）・`format_risk_constraints()`（P1-03）は、いずれも「これはコードの決定論的計算結果であり分析側が再計算・上書きできない」旨を本文へ明記した純関数である。`format_risk_constraints()`は`not_calculable`や拒否判定でも空にせず常に描画する——「コードが既にREJECTと言っている」という信号自体が、保守的不一致ルール（定量シグナルと矛盾する定性解釈は保守側を採る）の前提情報だからである。逆に`format_score_breakdown()`は構成要素が欠けていればプレースホルダを置かず`""`を返し、`export.py`が`None`へ落とす。
 
 **情報密度（Issue #191）**: `format_score_breakdown()`は加重後の内訳に続けて、加重前の生値（`close` / `rsi14` / `sma50` / `sma200` / `avg_volume`、および`atr14/close`から導出する`atr14_pct`）を「参考情報（コード計算・上書き不可）」として同じ`<score_breakdown>`要素の中へ追記する。正規化は大きさを潰すため、加重値だけではRSI14が28なのか44なのかを分析側が区別できない——押し目の深さという定性的読みがまさに依存する情報である。スキーマ変更ではなく文字列ブロックの追記とするのは、生値も加重値と同じ「コードが計算し分析側が書き換えられない値」であり、両側の契約を変えずに済むためである。生値は加重値と違い**フィールド単位で**劣化する（当該シグナルが未設定なら当該行だけ落ちる）。
 
-`format_prior_verdicts()`は同一銘柄・戦略の過去`verdicts`と、成熟済みの`verdict_outcomes`（`HIT`/`MISS_*`と`forward_return_pct`）を対にして`<prior_verdicts>`ブロックへ整形する。`format_decision_history()`（人間の記帳）とは別読みである——`trades_journal`は人間が記録したときにしか行を持たないため、そこへLEFT JOINすると「記帳された銘柄でしか自分の過去判断が見えない」という、本件が最も対象としない場合だけが残る。過去の理由文はスキルが書いた散文なので`format_decision_history()`と同じくエスケープしデータとして枠付けし、過去runの`source_ids`は持ち帰らない（当該runのIDではなく、`validate.py`が拒否すべき provenance 主張を誘発するため）。**Issue #209**: 対にする`verdict_outcomes`はステップ6の直前に更新済みなので、D日に満期を迎えた当否もD日の`<prior_verdicts>`に載る。成熟していない（または当日`retro_evaluate`が予算超過でスキップされた）verdictの表示は従来どおり「未確定（評価期間が未到来）」で、未評価であることを示す新しいフィールドは追加しない。
+`format_prior_verdicts()`は同一銘柄・戦略の過去`verdicts`と、成熟済みの`verdict_outcomes`（`HIT`/`MISS_*`と`forward_return_pct`）を対にして`<prior_verdicts>`ブロックへ整形する。過去の理由文はスキルが書いた散文なのでエスケープしデータとして枠付けし、過去runの`source_ids`は持ち帰らない（当該runのIDではなく、`validate.py`が拒否すべき provenance 主張を誘発するため）。**Issue #209**: 対にする`verdict_outcomes`はステップ6の直前に更新済みなので、D日に満期を迎えた当否もD日の`<prior_verdicts>`に載る。成熟していない（または当日`retro_evaluate`が予算超過でスキップされた）verdictの表示は従来どおり「未確定（評価期間が未到来）」で、未評価であることを示す新しいフィールドは追加しない。
 
-**レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・判断履歴は候補ごとの`news`/`filings`/`decision_history`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
+**レジームの分離（roadmap §5 P3-15の継承）**: `format_market_regime()`はGate・Distribution Day水準・Exposure Ceiling・データ品質を決定論的な`<market_regime>`ブロックへ整形し、`AnalysisInput.context`（run単位のフィールド）へ載せる。ニュース本文・開示本文・過去判断は候補ごとの`news`/`filings`/`prior_verdicts`フィールドに残るため、未信頼テキストがコード計算済みのレジームを装うことはできない。レジーム判定そのものを分析側へ委ねない。
 
-**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、**まず各開示へ最低保証字数を確保したうえで**、残りを決算関連8-K（`EX-99*`添付を持つ、または主文書がItem 2.02を名指しするもの）→ 10-Q/10-Q-A → その他様式の順に割り当てる（Issue #191／#255。優先順位が決めるのは「どれだけ読めるか」であって「読めるかどうか」ではない。割り当て順のみを変え、返却順は従来どおり新しい順。最低保証の詳細は下記のIssue #255実装時追記）。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。判断履歴と過去verdictはdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。過去verdictの読み出しは`as_of < run_date`の**厳密な**不等号なので、当日の verdict が当日の入力へ還流することはない。なお`verdicts`表へ書くのは`retro_collect`ステップ、`verdict_outcomes`表へ書くのは`retro_evaluate`ステップであり、**どちらもステップ6のエクスポートより前**に、`collect` → `evaluate`の順で走る（Issue #207 / #209。当初は両方とも後段にあり、D日のエクスポートがD-2日までのverdictしか見られず直近2営業日が黙って空白になっていた——さらに当否ラベル側は、D日に満期を迎えたoutcomeがスキルへ届くのがD+1日のrunになっていた）。したがってD日のエクスポートには、`copilot-ingest-analysis`済みであるD-1日のrunのverdictまでと、D日に満期を迎えたoutcomeまでが載る。満期判定は注入された`ctx.run_date`基準のままで、順序を変えても壁時計には寄せない。エクスポートの時間予算判定は`retro_collect`の開始**前**に一度だけ確定させ、`retro_evaluate`はその判定の後に走る——エクスポートはスキルへの唯一の受け渡し口なので、前段の帳簿作業や評価が長引いたことがエクスポートをスキップする理由になってはならない（両ステップ自身はそれぞれ予算超過でスキップされうる。その場合`<prior_verdicts>`の当否欄は従来どおり単に埋まらないだけで、`analysis/context.py`の契約は変えない）。
+**書き出し規約**: `write_json_atomically()`は宛先と同じディレクトリの一時ファイルへ書いてから`os.replace()`する。失敗時は旧宛先を保持し、一時ファイルを削除する（Parquet/Markdownと同じ置換契約）。ニュースは3.16.1節の選別順で`max_news_items`件・各`max_news_chars`文字までとする。開示は1件`max_filing_chars`、1銘柄合計`max_filing_chars_per_symbol`を上限とし、**まず各開示へ最低保証字数を確保したうえで**、残りを決算関連8-K（`EX-99*`添付を持つ、または主文書がItem 2.02を名指しするもの）→ 10-Q/10-Q-A → その他様式の順に割り当てる（Issue #191／#255。優先順位が決めるのは「どれだけ読めるか」であって「読めるかどうか」ではない。割り当て順のみを変え、返却順は従来どおり新しい順。最低保証の詳細は下記のIssue #255実装時追記）。ニュースも開示も無い候補を除外しない——`screening_assessment`と`verdict`はどの候補にも等しく必要だからである。過去verdictはdry-run/`--as-of`再実行では空tupleとし、通常live当日だけ注入する（時点整合性の不変条件）。過去verdictの読み出しは`as_of < run_date`の**厳密な**不等号なので、当日の verdict が当日の入力へ還流することはない。なお`verdicts`表へ書くのは`retro_collect`ステップ、`verdict_outcomes`表へ書くのは`retro_evaluate`ステップであり、**どちらもステップ6のエクスポートより前**に、`collect` → `evaluate`の順で走る（Issue #207 / #209。当初は両方とも後段にあり、D日のエクスポートがD-2日までのverdictしか見られず直近2営業日が黙って空白になっていた——さらに当否ラベル側は、D日に満期を迎えたoutcomeがスキルへ届くのがD+1日のrunになっていた）。したがってD日のエクスポートには、`copilot-ingest-analysis`済みであるD-1日のrunのverdictまでと、D日に満期を迎えたoutcomeまでが載る。満期判定は注入された`ctx.run_date`基準のままで、順序を変えても壁時計には寄せない。エクスポートの時間予算判定は`retro_collect`の開始**前**に一度だけ確定させ、`retro_evaluate`はその判定の後に走る——エクスポートはスキルへの唯一の受け渡し口なので、前段の帳簿作業や評価が長引いたことがエクスポートをスキップする理由になってはならない（両ステップ自身はそれぞれ予算超過でスキップされうる。その場合`<prior_verdicts>`の当否欄は従来どおり単に埋まらないだけで、`analysis/context.py`の契約は変えない）。
 
 10-Q/10-Q-Aが上限を超える場合、先頭スライスではなく Part I Item 1（財務諸表）50,000字、Part I Item 2（MD&A）40,000字、Part II Item 1A（リスク要因）20,000字、Part II Item 1（法的手続）10,000字を基準配分し、短い章の余りを他章へ決定論的に再配分する。edgartoolsの章取得が失敗する、または対象章を1つも得られない場合だけ、従来の先頭スライスへfail-softで戻し`selection_mode=head_fallback`を記録する。他様式は当面先頭スライスを維持する。これは1開示を複数回のモデル呼び出しへ分割する設計ではなく、1つの入力を重要章優先で構成する変更である。
 
@@ -1319,9 +1312,9 @@ class DiscordNotifier:
         """
 ```
 
-MarkdownはDuckDBの正本ではない。判断記録後は`paper/cli.py`が`trades_journal`を更新し、生成ファイル内のmarker付き判断セクションを正本から再描画する。過去判断を分析入力へ載せる条件とdelimiterは`docs/05_ui_design.md` 7章を正とする。
+MarkdownはDuckDBの正本ではない。`copilot-ingest-analysis`が検証済み分析結果から生成ファイルの定性欄を正本から再描画する（3.17節）。過去判断を分析入力へ載せる条件は`docs/05_ui_design.md` 7章を正とする。
 
-**P1-05（roadmap §5、REQ-008）**: `DailyBriefContext`は実行時の戦略キーを保持する`strategy_key: str`フィールドを持つ（`pipeline/daily.py`の`_run_step_output()`が`deps.strategy_key`をそのまま渡す。1回の実行は常に単一戦略のため、`Candidate`側は候補ごとの戦略キーを持たない）。`BriefCandidate`は`past_decisions: tuple[BriefPastDecision, ...] = ()`を追加で持ち、`_candidate_brief()`が`state_store.get_decision_history(candidate.symbol, context.brief.strategy_key, context.brief.run_date, limit=3)`（分析入力の判断履歴と同じ関数、`mode='live'`かつ`run_date < before_date`で point-in-time 安全・新しい順）の結果をそのままフィールドマッピングする。`BriefPastDecision`は`run_date` / `decision` / `reason_memo` / `realized_return_pct`の4フィールドのfrozen dataclass。`markdown_report.py::_candidate_section()`は各候補の`## <SYMBOL>`節内に「過去判断」小節（`### 過去判断`、日付/判断/理由/実現損益率のテーブル）を追加描画するが、`past_decisions`が空のときは見出しごと省略する（Facts/定性リスクフラグ/Sourcesと同じ0件時の描画方針）。terminal（`terminal_report.py`）は本節の対象外（変更なし）。
+**P1-05（roadmap §5、REQ-008）**: `DailyBriefContext`は実行時の戦略キーを保持する`strategy_key: str`フィールドを持つ（`pipeline/daily.py`の`_run_step_output()`が`deps.strategy_key`をそのまま渡す。1回の実行は常に単一戦略のため、`Candidate`側は候補ごとの戦略キーを持たない）。
 
 **P7（スキル移行、公開データ形状変更）**: `DailyBriefContext`は`news_summaries`/`filing_analyses`を持たず、検証済みの`analysis: ValidatedAnalysis | None`を1つ受け取る（`copilot-daily`は常に`None`を渡すため、日次runのレポートは定性欄が「分析待ち」になる）。`BriefLlm`は`BriefAnalysis`へ置き換わり、`degraded: bool` / `conclusion: str` / `facts` / `risk_flags` / `sources` / `filings` / `verdict` / `verdict_summary` / `strengths` / `concerns`を持つfrozen dataclassとなった。`BriefFilingAnalysis`は`filing_type` / `filed_at` / `facts` / `interpretation` / `red_flags` / `yoy_changes` / `sources`（`guidance_direction`と`is_near_stale`は3.17節の注記のとおり廃止）。
 
@@ -1354,7 +1347,7 @@ def run_backtest(
 - `copilot-backtest`は`end`以前の最新`universe_membership`を優先する。ただし日ごとの歴史的membershipは復元しないため、履歴が無い場合のcurrent-universeフォールバックを含め、単一構成銘柄集合を全期間へ適用する限界と生存者バイアスを結果へ必ず表示する。
 - 最終日後に残るpositionは最終日以前の最新観測価格で売却コスト込み清算し、`final_equity`は清算後cashと一致させる。途中の欠損日も最新終値を繰り越して時価評価する。SPY benchmarkも同じ欠損規約とし、整数株購入後の残cashをcurveへ含める。
 
-**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入、`paper.journal.PaperJournal._win_rate`と同じ規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。`Trade.pnl`は約定価格へ織り込み済みの両側slippageに加え、`commission_usd`へ記録したentry/exit両側commissionを控除した純損益とし、全トレードの合計が清算後cashの増減と一致する。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
+**P2-07実装時追記（roadmap §5 P2-07）**: `BacktestResult`は`backtest/metrics.py`の純関数（`compute_sharpe`/`compute_max_drawdown_pct`/`compute_win_rate`/`compute_profit_factor`/`compute_expectancy_per_trade`/`compute_avg_r_multiple`/`compute_reliability_warnings`）で算出したリスク調整後指標を追加で保持する: `trade_count`（`len(trades)`）、`sharpe`（日次リターンから年率化、rf=0、√252、日次リターンが1件以下または分散0ならNone）、`max_drawdown_pct`（ピークからの最大下落率、fraction表現。例: 0.15 = 15%）、`win_rate`（fraction、pnl==0はneutral扱いで分母のみに算入する規約）、`profit_factor`（総益/総損絶対値、損失0ならNone）、`expectancy_per_trade`（トレード平均pnl）、`avg_r_multiple`（`pnl / ((entry - initial_stop) * shares)`の平均、stop未記録または`entry - initial_stop <= 0`のトレードは除外）、`warnings`（trade_count閾値・ルックアヘッド疑いの文言タプル）。`Trade.pnl`は約定価格へ織り込み済みの両側slippageに加え、`commission_usd`へ記録したentry/exit両側commissionを控除した純損益とし、全トレードの合計が清算後cashの増減と一致する。R-multiple算出のため`Trade`に`initial_stop_price: float | None = None`（エントリー時点のストップ、トレーリング更新の影響を受けない）を追加した。新規閾値は`backtest.*`（`insufficient_trade_count_threshold=30`, `preliminary_trade_count_threshold=100`, `lookahead_suspicion_win_rate=0.90`, `lookahead_suspicion_max_drawdown=0.01`、後者2つは要検証）で設定可能。
 
 **P2-08実装時追記（roadmap §5 P2-08）**: バックテストを日常道具として実行するCLIエントリポイント`copilot-backtest`（`backtest/cli.py`、`pyproject.toml`の`[project.scripts]`で`copilot-backtest = "swing_copilot.backtest.cli:main"`として登録）を追加した。
 
@@ -1417,94 +1410,6 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **永続化**: `--candidate-cache PATH`でストリームをParquetへ保存し、CLI実行をまたいで再利用する。列は`as_of`/`symbol`/`rank`/`signal_names_json`/`metrics_json`/`execution_state`/`execution_distance`で、行は`(as_of, rank)`昇順、`cache_key`はpyarrowのschema metadataへ格納する。JSON列は`storage/json_guard.dumps_safe`を通すのでNaN/Infは書き込み前に拒否され、`float`はJSONの往復でビット一致する。書き込みは同一ディレクトリの一時ファイル＋`os.replace`（REQ-008、`market_store._write_partition`と同型）で、失敗時は旧キャッシュを保持し一時ファイルを消す。読めないキャッシュは`CandidateStreamError`だが、CLIはこれをミス扱いにして再生成する（キャッシュ破損でバックテストを落とさない）。保存→読込→注入した結果が素通しの`run_backtest`と`BacktestResult`レベルで完全一致することをテストで保証している。
 
-### 3.20 `paper/journal.py`（FR-11, CON-04）
-
-> **P2-5実装時の訂正（2026-07-22）**: 以下の`signal_id: int`/`position_id: int`
-> は本節のpseudocodeが`storage/schema.py`のスキーマ確定前に書かれた記述であり、
-> `signal_id`列はどこにも存在せず、`positions.position_id`は`UUID`である。
-> 実装はスキーマを正本とし、`record_decision`の自然キーは
-> `trades_journal`の`UNIQUE (run_id, symbol, strategy_key)`制約に合わせて
-> `(run_id, symbol, strategy_key)`とした（`docs/goal-prompts/
-> swing-copilot-p2-report-paper-wrapup/decisions.md`参照）。
-
-```python
-from uuid import UUID
-
-class PaperJournal:
-    """ペーパートレードの記帳。人間の判断（追随/見送り/修正）と仮想約定を記録する。
-    StateStoreをラップし、positions/trades_journalへの2つ目の接続は持たない。"""
-
-    def record_decision(
-        self, run_id: UUID, symbol: str, strategy_key: str, decision: str,
-        reason_memo: str | None, virtual_fill_price: float | None,
-    ) -> None:
-        """
-        decisionは "followed" | "ignored" | "modified"。
-        trades_journalを(run_id, symbol, strategy_key)で自然キーupsertする
-        （同一キーの再記録は行を更新し、重複挿入しない）。
-        CON-04（ペーパートレード検証ゲート）の実績データ元となる。
-        """
-
-    def close_position(
-        self, position_id: UUID, close_date: "date", close_price: float,
-        exit_reason: str,
-    ) -> None:
-        """
-        オープン中のペーパーポジションをクローズし、positionsを更新する。
-        exit_reasonは必須引数（P1-06/REQ-001/020）で
-        {stop_loss, target, time_stop, manual, other}の5値以外は拒否する
-        （"unknown"は移行専用のsentinelで、closeの入力としては拒否される）。
-        exit_reasonの検証はpositionを読む前に行う（フェイルファスト）。
-        position_idが存在しない、既にクローズ済み、close_dateが
-        entry_dateより前、close_priceが正でない、またはexit_reasonが
-        不正な場合はPositionNotClosableError（SwingCopilotError派生）を
-        送出する——サイレントなno-opにしない。いずれの拒否でもpositionの
-        状態は変化しない。
-        """
-
-    def summarize_performance(
-        self, market_store: "MarketStore", as_of: "date"
-    ) -> "PerformanceSummary":
-        """
-        クローズ済みペーパートレードの集計P&L・勝率・期待値・profit_factor・
-        R-multiple・平均MAE/MFE・exit_reason別/戦略別内訳と、同期間（最古のクローズ済み
-        entry_date..as_of）のSPYバイ&ホールドリターンを返す（P1-06,
-        backtest/engine.pyのbenchmarkと同じ考え方を実トレードへ適用）。
-        クローズ済み0件のときは全てのレート/比率フィールドがNone（例外は
-        発生させない）。SPY足が不足する場合はspy_return_pctがNone。
-        """
-```
-
-```python
-@dataclass(frozen=True, slots=True)
-class PerformanceBreakdownRow:
-    key: str              # exit_reasonの値、strategy_key、または未連携行の"unknown"
-    trade_count: int
-    win_rate: float | None    # trade_count==0のときのみNone（実際には起こらない）
-    avg_pnl_usd: float | None
-
-
-@dataclass(frozen=True, slots=True)
-class PerformanceSummary:
-    closed_trade_count: int
-    total_pnl_usd: float      # 0件なら0.0（空集合の合計として well-defined）
-    win_rate: float | None    # 0件ならNone（未定義）。pnl>0=勝ち、pnl==0=中立
-                               # （分母には入るが勝ち数には数えない）、pnl<0=負け、
-                               # という固定の分類基準を採用（win_rateとprofit_factor
-                               # で共通）
-    spy_return_pct: float | None       # SPY足が不足する場合はNone
-    expectancy_usd: float | None       # 全クローズ済みトレードのpnl平均。0件ならNone
-    profit_factor: float | None        # 総益/総損の絶対値。損失トレードが0件ならNone
-    avg_r_multiple: float | None       # pnl/((entry-stop)*shares)の算出可能トレード平均
-    r_multiple_omitted_count: int      # R-multiple省略件数（stop未記録、または
-                                        # entry-stop<=0という防御的拡張）
-    r_multiple_omitted_warning: str | None  # 省略0件ならNone
-    by_exit_reason: tuple[PerformanceBreakdownRow, ...]  # exit_reason別内訳
-    by_strategy: tuple[PerformanceBreakdownRow, ...]     # 戦略別内訳
-                                        # （trades_journal.position_id経由。
-                                        # 未連携ポジションは"unknown"キー）
-```
-
 ### 3.21 `pipeline/daily.py`（FR-12）
 
 公開互換面は`pipeline/daily.py`に残す。`run_daily(options, deps)`と
@@ -1527,7 +1432,7 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 `prototype` data tier（現行`yfinance`）のCLIブリーフとMarkdownには非公式データに
 基づく試作結果であることを明示する。ブラウザ自動起動は行わない。
 
-**P8-117実装時追記（Issue #117）**: `daily_composition.py::main()`は`_compose_dependencies()`と`run_daily()`の間に**preflightフェーズ**（`_preflight(deps, options)`）を挟む。`account_equity_usd`（`config/settings.yaml`の`risk.account_equity_usd`）が未設定のとき、`RiskChecker`が全候補を`not_calculable`にする挙動自体は3.13節どおり不変だが、決済済みポジション（`state_store.get_closed_positions(is_paper=True)`）が1件以上あると`evaluate_circuit_breaker`もequity不明のまま損失規律を評価できず`HALTED`を返し、全候補が`CIRCUIT_BREAKER_HALTED`でreject される（サーキットブレーカーのfail-closed自体は正しく、`risk/circuit_breaker.py`は無変更）。この組み合わせではrunを続けても「全候補rejectのレポートとverdict」を生成するだけなので、`exceptions.PreflightAbort`を送出してrun作成前に中止する。`main()`はこれを捕捉し、メッセージをstderrへ書いたうえで**終了コード2**（0=成功、1=失敗とは別の「意図的な中止」）でプロセスを終える——`runs`への行も`reports/`ディレクトリも作られない。決済済みが0件なら`logger.warning`を1回出すだけで続行し、同じ文言を`report/markdown_report.py`の既存`## Warnings`節にも1行載せる（`pipeline/daily.py::ACCOUNT_EQUITY_UNSET_NOTICE`を`daily_composition.py`のログと`daily_runner.py`の`notices`タプルで共有）。明示`--as-of`（ヒストリカル再生）は中止判定をスキップする——3.12節のとおり現在のポジション状態を一切読まないため空ポートフォリオが保証されており、警告のみ出す。`PreflightAbort`と終了コード2の枠組みは#118が同じ箇所へ同日重複起動ガードを追加する土台になる。
+**P8-117実装時追記（Issue #117）**: `daily_composition.py::main()`は`_compose_dependencies()`と`run_daily()`の間に**preflightフェーズ**（`_preflight(deps)`）を挟む。`account_equity_usd`（`config/settings.yaml`の`risk.account_equity_usd`）が未設定のとき、`RiskChecker`が全候補を`not_calculable`にする挙動自体は3.13節どおり不変であり、`_preflight()`は`logger.warning`を1回出すだけで続行する。同じ文言を`report/markdown_report.py`の既存`## Warnings`節にも1行載せる（`pipeline/daily.py::ACCOUNT_EQUITY_UNSET_NOTICE`を`daily_composition.py`のログと`daily_runner.py`の`notices`タプルで共有）。**2026-08実装時追記（実売買記録撤去）**: 決済済みポジションが1件以上あるとサーキットブレーカーがequity不明のまま`HALTED`を返し全候補をrejectするため`exceptions.PreflightAbort`（終了コード2）でrun作成前に中止していた旧分岐は、`positions`テーブルの撤去により日次runに実現損益という概念自体が無くなったため削除した（`exceptions.PreflightAbortReason`のコメントに経緯を残す）。`PreflightAbort`と終了コード2の枠組み自体は残り、#118の同日重複起動ガード（次項）が唯一の送出元になる。
 
 **P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`run_date = latest.date()`）ため、同日重複起動の判定は`main()`側のpreflightではなく**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`_preflight()`と`run_daily()`の両方を同じ`ExitPolicy`（`cli_support.py::run_cli()`。Issue #193で11本のCLIから定型を集約した）へ通し、どちらから送出されても同じ終了コード2と同じ`PREFLIGHT_ABORT[<reason>]:`行への変換を行う。中止メッセージには既存runの`run_id`とレポートパスを含める——`swing-daily`スキルがこれを再入シグナルとして使う（Step 1）。`failed`/`running`/`degraded`は「成功済み」に数えない（`degraded`も含めて`status='success'`のみを見る、本チケットの確定判断）。`--allow-same-day-rerun`（`DailyRunOptions.allow_same_day_rerun`）を指定した場合のみ判定をスキップする。明示`--as-of`（ヒストリカル再生）にも同じ判定を適用する——`run_date = fetch_cutoff = options.as_of`となり同じコードパスを通るため、特別扱いは不要。`swing-daily/SKILL.md`のStep 0は`<WORKDIR>/analysis_result.json`に加えて`reports/<as_of>/*/analysis_result.json`のglobも確認し、Step 1は終了コード2を受けたら既存verdictを要約して`analysis_result.json`を書かずに正常終了する。
 
@@ -1543,12 +1448,10 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 
 ユニバースはステップ1より前のcomposition時に`resolve_daily_universe()`で確定する。明示`--as-of`はDuckDB履歴の`<= as_of`選択だけを許可し、履歴が無ければrunを開始せずCLIが非ゼロ終了する。live更新の失敗で既存履歴へフォールバックした場合だけ、`DailyDependencies.universe_warning`を介して非表示の監査step`0_universe`を`failed`として記録し、以降のステップは続行してレポートwarningと`RunStatus.DEGRADED`を出す。
 
-明示`--as-of`では、現在状態しか持たない`get_open_positions()`をrun開始時にも
-risk step内にも呼ばない。同じ理由で`verdict_positions`の仮想オープンポジション
-（3.14節の保有集合のもう一方）も読まない——台帳も「現在の」建玉状態であり、
+明示`--as-of`では、`_held_symbols(is_historical=True)`が`verdict_positions`の仮想オープン
+ポジションを読まず、常に空集合を返す——台帳は「現在の」建玉状態であり、
 `as_of`時点の状態を再現できないため、読めば時点可視性が壊れる。保有集合を空として
-価格・テキスト対象へ追加せず、risk stepへ
-現在ポジションを渡さず、`mae_mfe` stepも`skipped`にする。これは空のポートフォリオを
+価格・テキスト対象へ追加しない。これは空のポートフォリオを
 過去の事実として確定する意味ではなく、`NO_POSITION_DATA` noticeで時点状態が不明で
 あることを明示する縮退である。同様に決算予定は`collect_earnings_calendar(...,
 is_historical=True)`が外部call前に無効化する。通常runの両経路は変更しない。
@@ -1689,7 +1592,7 @@ def main(argv: list[str] | None = None) -> None:
 
 ### 3.22 `report/history_cli.py` / `storage/history_queries.py`（P1-05）
 
-`copilot-decision`（`paper/cli.py`）が判断記録の書き込み専用CLIであるのに対し、`copilot-history`はその読み出し専用の対となるCLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
+`copilot-history`は蓄積データの読み出し専用CLI（`report/history_cli.py::main`、`pyproject.toml`の`[project.scripts]`で`copilot-history = "swing_copilot.report.history_cli:main"`として登録）。書き込みを一切行わない（REQ-007）ことを`storage/history_queries.py`側の`SELECT`専用モジュール分割で強制し、テストでは各サブコマンド実行前後の全対象テーブルのスナップショット一致を直接アサートする。
 
 ```text
 uv run copilot-history runs [--limit N] [--db PATH]
@@ -1697,17 +1600,15 @@ uv run copilot-history run --run-id <UUID> [--db PATH]
 uv run copilot-history symbol <SYMBOL> [--db PATH]
 uv run copilot-history rejections --run-id <UUID> [--db PATH]
 uv run copilot-history incomplete [--reports-dir PATH] [--since YYYY-MM-DD] [--db PATH]
-uv run copilot-history performance [--db PATH]
 ```
 
 | サブコマンド | 表示内容 | 裏付けるクエリ |
 |---|---|---|
-| `runs` | 直近N件のrun一覧（run_id, run_date, 候補数, 落選数, 判断数） | `history_queries.list_runs()`（`candidates`/`screening_rejections`/`trades_journal`をLEFT JOINしCOALESCEで0埋め、0件のrunも消えない） |
-| `run --run-id` | 1runの候補・リスク・判断詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
-| `symbol` | 1銘柄の候補化・判断・実現損益の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
+| `runs` | 直近N件のrun一覧（run_id, run_date, 候補数, 落選数） | `history_queries.list_runs()`（`candidates`/`screening_rejections`をLEFT JOINしCOALESCEで0埋め、0件のrunも消えない） |
+| `run --run-id` | 1runの候補・リスク詳細 | `history_queries.get_run_detail()`（未知の`run_id`は`None`を返し、CLI側が非ゼロ終了・トレースバックなしのメッセージへ変換） |
+| `symbol` | 1銘柄の候補化の時系列（戦略横断） | `history_queries.get_symbol_timeline()`（一度も候補化されていない銘柄は`None`） |
 | `rejections --run-id` | P1-02 `screening_rejections`台帳 | `history_queries.get_rejections()` |
 | `incomplete` | 分析フェーズが完了していないrun（run_date, run_id, 分類, `runs.status`, 同日の完了run, パス） | `report/incomplete_runs.py::find_incomplete_runs()`（`reports/`走査＋`history_queries.get_run_statuses()`） |
-| `performance` | `PaperJournal.summarize_performance()`の全フィールド（win_rate/expectancy/profit_factor/avg_r_multiple/平均MAE・MFE/可能性注記/exit_reason別・戦略別内訳/SPY buy-and-hold） | `paper/journal.py`（3.20節） |
 
 DB/run/銘柄いずれも記録が0件のときは例外を出さず「記録なし」（または`"<SYMBOL>の記録はありません"`）を表示して終了コード0で終わる。`--run-id`に未知のUUID、またはUUIDとして構文的に不正な文字列を渡した場合は「指定されたrun_idは見つかりません: `<値>`」を表示して非ゼロ終了するが、Pythonのトレースバックは出さない（`HistoryCommandError`を`SystemExit`へ変換）。
 
@@ -1845,7 +1746,6 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 | tracked_performance（Issue #190） | 追跡台帳（3.24）の実現成績を`proceed`/`skip`/`all`で層別。勝率・PF・期待値・平均R・保有日数中央値・手仕舞い理由内訳 | `metric:tracked_performance:{proceed,skip,all}`。全レート値は`backtest/metrics.py`の共通関数を通る。損益は%単位（シャドウ建玉に株数の決定は存在しないため$100 notionalへ正規化）。窓は**exit_dateが窓内**の建玉（`verdict_outcomes`と同じ「この期間に満期を迎えた」規則） |
 | proceed重大外し率 | proceedのうち`MISS_SEVERE`の割合 | `settings.retro`ではなくコード定数`PROCEED_SEVERE_MISS_WATCH_RATE=0.15`超でフラグ。同runの全候補（skip含む）のベースラインを併記し、ベースラインより悪ければ水準未満でもフラグ |
 | skip的中率 | skipのうち非`NEUTRAL`に占める`HIT` | 絶対閾値ではなく同期間ベースライン比で判定 |
-| 人間整合 | `trades_journal.decision`（followed/ignored/modified）× recommendation × ホライズンのクロス集計 | 観測のみ。新たな実現損益計算は作らず、`verdict_outcomes`のforward_return_pct/classificationをjoinする |
 | ソース貢献 | `(source_type, provider)`別の引用回数とHIT/MISS/NEUTRAL引用数・HIT引用比率 | 観測のみ。引用されないソース・MISSに偏るソースが削減候補になる |
 | news_supply（Issue #154） | 窓内`verdicts`の`news_supply.level` × recommendationのクロス集計。セルごとに件数と`symbol_mention_items`のmin/max/mean、全体に`sufficient_threshold`と未計測件数 | 観測のみ。`verdict_mix`と同じく`verdicts`を直接読むため成熟を待たずに算出できる。旧アーカイブ由来の未計測行は`none`へ畳まず`unrecorded`という第4のlevelとして数える（計測されたゼロと未計測は別の主張） |
 
@@ -1861,7 +1761,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `reports/retro/<as_of>/retro_input.json`へ一時ファイル + `os.replace`で原子的に書き出す。`analysis-input-v3`と同じ規律で、全階層`extra="forbid"`、`schema_version`は`Literal`定数、`input_digest`はcanonical JSONのSHA-256（自身を除外して計算し、model validatorが読み込み時に再検証する）。
 
-内容物（`aggregates`にはIssue #154の`news_supply`クロス集計を含む）: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `human_alignment` / `source_contribution` / `basis_contribution`（Issue #191。根拠タイプ別のverdict件数とHIT比率。`retro-input-v1`の互換のため既定は空リストで、digestは空の既定を無視する——追加以前に書かれたdossierの`input_digest`が当日から検証できなくなるのを避けるため）/ `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
+内容物（`aggregates`にはIssue #154の`news_supply`クロス集計を含む）: `as_of`と`window_start`（集約窓）/ `generated_at`（注入`Clock`由来のwall-clock provenance。`as_of`の代替には決してならない）/ `evaluation`（分類と集約が実際に使った閾値一式。数ヶ月後に読んでも「どの境界がこの数字を作ったか」が分かるよう文書内へコピーする）/ `aggregates` / `signal_performance`（3.21aの`compute_signal_performance()`出力を逐語同梱。`signal_outcomes`の再解釈はしない）/ `source_contribution` / `basis_contribution`（Issue #191。根拠タイプ別のverdict件数とHIT比率。`retro-input-v1`の互換のため既定は空リストで、digestは空の既定を無視する——追加以前に書かれたdossierの`input_digest`が当日から検証できなくなるのを避けるため）/ `input_coverage` / `surprises` / `config_snapshot` / `proposals_ledger` / `notes` / `input_digest`。
 
 `collect`は各runの開示`coverage`を`analysis_source_coverage`へverdictと同じトランザクションで完全置換する。`input_coverage`は開示数、切り詰め（export段の`truncated_filing_count`と取得段の`exhibit_truncated_filing_count`。Issue #157、上記3.15）・fallback・銘柄予算による省略数と、**飢餓件数**（`starved_filing_count`。下記）と、重大外し銘柄の`with_gap` / `without_gap` / `unknown`をコードで数える。`with_gap`はどちらの段の切り詰めでも立ち、`without_gap`は全行が「gap無し」かつ`exhibit_truncated`記録済みのときだけ立つ（未記録を含めば`unknown`）。各サプライズにも当時の`input_filing_coverage`を付ける。この集計は「情報不足と外しの併存」を切り分ける観測であり、情報不足が外しを引き起こしたという因果判定ではない。過去の`analysis-input-v2`はcoverage不明として`unknown`へ数える。
 
@@ -1881,7 +1781,6 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 - 集約指標: `metric:<名前>:<N>d` / `metric:<名前>:composed`
 - verdict_mix: `verdict_mix`（`metric:`接頭辞を持たない素の文字列。ホライズンもベースラインも持たない単一値としてP8-120が採番したもので、他の集約指標と形が違う。スキルは`aggregates.verdict_mix.metric_id`の値をそのまま引き、接頭辞を補ってはならない）
-- 人間整合: `metric:human_alignment:<decision>:<recommendation>:<N>d`
 - ソース貢献: `metric:source_contribution:<source_type>:<provider>`
 - 根拠タイプ貢献: `metric:basis_contribution:<basis>`（`basis`は`analysis.schemas.VerdictBasis`の閉集合＋`untagged`）
 - news_supply: `metric:news_supply`（全体）と`metric:news_supply:<level>:<recommendation>`（セル）
@@ -1945,29 +1844,27 @@ Issue #190以降、`proceed`だけでなく`skip`も**同一の出口ルール**
 
 ```text
 src/swing_copilot/tracking/
-├── cli.py     # copilot-track: update / list / show / stats / close / note
-└── update.py  # 建玉・日次前進・手仕舞い判定・手動クローズ・ノート
+├── cli.py     # copilot-track: update / list / show / stats
+└── update.py  # 建玉・日次前進・手仕舞い判定
 ```
 
-#### 3.24.1 既存3レイヤとの棲み分け
+#### 3.24.1 既存レイヤとの棲み分け
 
 | レイヤ | 問い | 主キー |
 |---|---|---|
 | `verdict_outcomes`（3.23、retro） | その判断は当たったか（5/20営業日の2点分類） | `(run_id, symbol, horizon_days)` |
-| `positions`（3.20、paper。FR-11/CON-04） | **人間が**実際に何を持つと決めたか | `position_id` |
 | `verdict_positions`（本節） | 判断に機械的に従っていたら**いま**どうなっていて、何がそれを閉じるか | `(run_id, symbol)` |
 
-3つは意図的に別テーブルである。retroの当否は満期日で確定する固定2点の観測なので、日々変わるトレーリングストップと保有日数を載せる場所がない。`positions`は人間の意思決定ゲートであり、仮想建玉を混ぜると「紙トレで検証した実績」と「判断に従っていたら」の区別が失われる（FR-11の検証ゲートが壊れる）。逆に本レイヤは人間の決定を一切要求せず、`proceed`が出た時点で自動的に開く。
+2つは意図的に別テーブルである。retroの当否は満期日で確定する固定2点の観測なので、日々変わるトレーリングストップと保有日数を載せる場所がない。本レイヤは人間の決定を一切要求せず、`proceed`が出た時点で自動的に開く。
 
-#### 3.24.2 データモデル（新テーブル3つ）
+#### 3.24.2 データモデル（新テーブル2つ）
 
 | テーブル | 主キー | 役割 |
 |---|---|---|
 | `verdict_positions` | `(run_id, symbol)` | 仮想建玉1件。`recommendation`（どちら側のverdictを影で追っているか。nullable＝`proceed`——導入前に書かれた行は`proceed`しかありえない）/ `no_trade`（verdictの同名フラグをそのまま継承。runの相場環境が当日エントリー非推奨だった中のverdictかどうか）/ `entry_date`（verdictのas_of）/ `entry_price` / `stop_price`（現在のトレーリングストップ、NULL可）/ `days_held` / `status` CHECK `open`\|`closed` / `exit_date` / `exit_price` / `exit_reason` CHECK `stop`\|`max_hold`\|`manual` / `realized_return_pct` / `last_marked_date`（再開位置） |
 | `verdict_position_marks` | `(run_id, symbol, as_of_date)` | 日次スナップショット。`close` / `stop_price` / `unrealized_return_pct` |
-| `verdict_position_notes` | `(run_id, symbol, note_date)` | 判断メモ |
 
-書き込みは`storage/tracking_records.py`のプレーン関数＋`StateStore`の1行デリゲート。1ポジションの前進（position行＋その日に生じた全マーク）は**1トランザクション**で、途中で失敗すれば全ロールバックする——`last_marked_date`だけ進んでマークが無い状態を作らないためである。マーク・ノートはいずれも自然キーの**correction upsert**（`ON CONFLICT DO UPDATE`）で、株価訂正後の再取り込みが黙って無視されることはない。
+書き込みは`storage/tracking_records.py`のプレーン関数＋`StateStore`の1行デリゲート。1ポジションの前進（position行＋その日に生じた全マーク）は**1トランザクション**で、途中で失敗すれば全ロールバックする——`last_marked_date`だけ進んでマークが無い状態を作らないためである。マークは自然キーの**correction upsert**（`ON CONFLICT DO UPDATE`）で、株価訂正後の再取り込みが黙って無視されることはない。
 
 #### 3.24.3 更新セマンティクス（`tracking/update.py`）
 
@@ -1980,7 +1877,7 @@ src/swing_copilot/tracking/
    - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
    - **孤児の削除**: 建玉に先立ち、対応する`verdicts`行が**存在しない**`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、分析対象から外れた銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
    - **区分の追随**（Issue #190）: `proceed`↔`skip`の訂正は孤児では**ない**。両側を同一ルールで追跡している以上、建玉日もエントリー価格も出口ルールも変わらないのでリプレイは依然として正しく、削除すれば訂正のたびにskip側の標本が痩せる。`sync_verdict_position_recommendations`が該当行の`recommendation`だけを`verdicts`側へ追随させ、変更をnoteに出す。
-2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って約定することはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。`verdict_position_notes`（人間の判断メモ）は使わない——PKが`(run_id, symbol, note_date)`で衝突するため。
+2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って約定することはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。
 3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
@@ -1990,10 +1887,6 @@ src/swing_copilot/tracking/
 5. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
 
 手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間はエンジンと同じく`settings.backtest.exit_atr_period`から渡す（Issue #194で配線。`atr_as_of`/`atr_by_date`は既定値を持たず、呼び出し側が必ず設定値を明示する）。
-
-手動操作は2つだけである。`close_manually()`は`exit_reason='manual'`・`exit_price`=`as_of`の終値（バーが無ければ最終マークの終値）でクローズし、`record_note()`は日付付きのメモを残す。存在しない／既にクローズ済みのポジション、エントリー日より前のクローズ、**最終マーク日より前のクローズ**、空メモはいずれも`TrackingError`で拒否する。最終マーク日より前を弾くのは、`exit_date`だけ過去に置かれて日次マーク・`days_held`・再開位置が先の日付を指したままになり、`list`/`show`が自己矛盾した行を表示するのを防ぐためである。
-
-メモ本文は`copilot-track show`がそのまま表示するスキル生成テキストであり、他のスキル出力と同じ**出力境界**として扱う。`record_note()`は空チェックに加えて`analysis/safety.check_display_texts`（中央のCON-03ガード）を通し、売買を命じる表現を含むメモを`TrackingError`で拒否する。`close_manually(note=...)`はこの検査を**書き込み前**に行うので、拒否されたメモが「理由の無いクローズ」だけを残すことはない。スキルへの指示だけでは不十分という原則（`analysis/`と同じ）を、この新しい経路でも再確立するためである。
 
 #### 3.24.4 日次fail-softステップ`track_update`
 
@@ -2310,41 +2203,13 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
 
 P1-03より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かない（既存テーブル形状に対してno-op）ため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS ...`で追加列を後付けする。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK/NOT NULL制約付与を未サポートのため、この経路で追加された列はアプリケーション側でのみ整合性が保証される（既存DBをALTER経由でアップグレードした場合、`CREATE TABLE`側のCHECK制約はDB層では効かない）。
 
-**Issue #192実装時追記（実列昇格とマイグレーション方針）**: JSON列の中にしか無かった値を実列へ昇格する場合、上の「過去行はバックフィルせずNULLのまま」（`text_items.related_symbols`等）とは扱いを変え、**バックフィルする**。既存行がその値を既に保持しており、形が違うだけだからである——`positions.exit_reason`のバックフィルと同じ「既知の事実の言い直し」であって推測ではない。対象は`candidates.score`/`score_*`（`metrics_json`から）、`regime_snapshots`の`dd15_*`/`dd5_*`/gate入力（`detail_json`から）、`exposure_decisions`の4列（同）、`verdict_reasons`/`verdict_reason_sources`（`verdicts.reasons_json`から）。各バックフィルは「書き込み側が必ず埋める列」に対する`WHERE ... IS NULL`でガードするので冪等であり、2回目以降は空振りスキャンで終わる。
+**Issue #192実装時追記（実列昇格とマイグレーション方針）**: JSON列の中にしか無かった値を実列へ昇格する場合、上の「過去行はバックフィルせずNULLのまま」（`text_items.related_symbols`等）とは扱いを変え、**バックフィルする**。既存行がその値を既に保持しており、形が違うだけだからである——`verdict_positions.no_trade`の後付け（3.24.2節）と同じ「既知の事実の言い直し」であって推測ではない。対象は`candidates.score`/`score_*`（`metrics_json`から）、`regime_snapshots`の`dd15_*`/`dd5_*`/gate入力（`detail_json`から）、`exposure_decisions`の4列（同）、`verdict_reasons`/`verdict_reason_sources`（`verdicts.reasons_json`から）。各バックフィルは「書き込み側が必ず埋める列」に対する`WHERE ... IS NULL`でガードするので冪等であり、2回目以降は空振りスキャンで終わる。
 
 これに対し`candidates.execution_state` / `execution_distance`は**バックフィルしない一方向の切断**である。この2つはどの列にもJSONにも永続化されたことがなく、復元するには当時のexecution設定と当時のbarsで再計算するしかない。したがって既存行のNULLは「未記録」を意味し、**`UNKNOWN`（距離が計算不能という測定結果）と読み替えてはならない**。分析ビュー`v_candidates`はスコア側だけ`COALESCE(実列, metrics_json抽出)`のフォールバックを持ち、execution側は素の列を返す（JSONにも無いのでフォールバック先が存在しない）。
 
 `verdict_reasons`のバックフィルだけはSQL文字列ではなく`verdict_records.backfill_verdict_reasons()`（Python）で行う。`reasons_json`の解釈を入れ子JSONのSQLとして二重実装せず、同モジュールの`_reasons_from_json`をそのまま再利用するためである。`init_schema()`がビュー作成の後に呼び、既に行を持つverdictはスキップする。移行の回帰は`tests/storage/test_schema_migration.py`が、**Issue #192より前のDDLで作った実データ入りDB**に対して`init_schema()`を走らせる形で固定している。
 
 ```sql
-CREATE TABLE IF NOT EXISTS positions (
-    position_id   UUID PRIMARY KEY,
-    symbol        VARCHAR NOT NULL,
-    is_paper      BOOLEAN NOT NULL DEFAULT 1,
-    entry_date    DATE NOT NULL,
-    entry_price   DOUBLE NOT NULL,
-    shares        BIGINT NOT NULL,
-    stop_price    DOUBLE,
-    status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
-    close_date    DATE,
-    close_at      TIMESTAMPTZ,
-    close_price   DOUBLE,
-    exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
-        'stop_loss','target','time_stop','manual','other','unknown'
-    )),
-    created_at    TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS position_excursions (
-    position_id    UUID NOT NULL,
-    as_of_date     DATE NOT NULL,
-    mae_per_share  DOUBLE,
-    mfe_per_share  DOUBLE,
-    data_quality   VARCHAR NOT NULL CHECK(data_quality IN ('OK','MISSING_BAR')),
-    created_at     TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (position_id, as_of_date)
-);
-
 CREATE TABLE IF NOT EXISTS earnings_calendar (
     symbol          VARCHAR PRIMARY KEY,
     earnings_date   DATE NOT NULL,
@@ -2379,14 +2244,6 @@ CREATE TABLE IF NOT EXISTS verdict_position_marks (
     stop_price            DOUBLE,
     unrealized_return_pct DOUBLE NOT NULL,
     PRIMARY KEY (run_id, symbol, as_of_date)
-);
-
-CREATE TABLE IF NOT EXISTS verdict_position_notes (
-    run_id     UUID NOT NULL,
-    symbol     VARCHAR NOT NULL,
-    note_date  DATE NOT NULL,
-    note       VARCHAR NOT NULL,
-    PRIMARY KEY (run_id, symbol, note_date)
 );
 
 -- Issue #189: 振り返り自身の記録。それまで failure_class は gitignore 対象の
@@ -2428,43 +2285,13 @@ CREATE TABLE IF NOT EXISTS config_versions (
 );
 ```
 
-`verdict_positions`系3テーブル（3.24節）は新規追加なのでマイグレーション不要で、`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけで足りる——ただし`no_trade`列は導入時点で`verdict_positions`が既に作成済みのDBが存在するため例外で、`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN`（DuckDBの制約上CHECK/NOT NULL無し）に続けて`UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL`を実行する。追加前に存在した行は「`no_trade`のverdictを除外していた」時代に開かれたものだけなので、`FALSE`への後付けは推測ではなく事実の復元であり、`exit_reason`の`unknown`後付け（下段）と同型のパターンである。`positions`（人間の紙トレ）とも`verdict_outcomes`（満期2点の当否分類）とも意図的に別テーブルであり、棲み分けの理由は3.24.1に記す。`stop_price`がNULLになりうるのは、リスク評価がstopを出せず（`CASH_PRIORITY`／`not_calculable`）ATR14も算出できない場合で、そのポジションは最大保有日数のみで手仕舞い判定される。
+`verdict_positions`系2テーブル（3.24節）は新規追加なのでマイグレーション不要で、`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけで足りる——ただし`no_trade`列は導入時点で`verdict_positions`が既に作成済みのDBが存在するため例外で、`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN`（DuckDBの制約上CHECK/NOT NULL無し）に続けて`UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL`を実行する。追加前に存在した行は「`no_trade`のverdictを除外していた」時代に開かれたものだけなので、`FALSE`への後付けは推測ではなく事実の復元である。`verdict_outcomes`（満期2点の当否分類）とも意図的に別テーブルであり、棲み分けの理由は3.24.1に記す。`stop_price`がNULLになりうるのは、リスク評価がstopを出せず（`CASH_PRIORITY`／`not_calculable`）ATR14も算出できない場合で、そのポジションは最大保有日数のみで手仕舞い判定される。
 
 `recommendation`列（Issue #190）も同じ後付けパターンで、`ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS recommendation VARCHAR`に続けて`UPDATE verdict_positions SET recommendation = 'proceed' WHERE recommendation IS NULL`を実行する。追加前に存在した行は`proceed`しか追跡していなかった時代のものだけなので、`no_trade`と同様「事実の復元」である。アプリケーション側も`NULL`を`proceed`として読む（`tracking_records._position`）ので、backfillが走らないDBでも読みは崩れない。
 
 `verdict_outcomes.benchmark_return_pct`（Issue #190）は**backfillしない**。既存行には「その区間でベンチマークが何%動いたか」を語る材料が無く、0を後付けすると「計測済みの横ばい」に化ける。`NULL`＝未計測のままとし、超過リターン版のseparationはその行を寄与ゼロではなく**除外**して扱う。再`evaluate`すればスライスごと置き換わるので値は入る。
 
-`exit_reason`はP1-06で追加した列で、`PaperJournal.close_position()`が受け付ける入力値は`{stop_loss, target, time_stop, manual, other}`の5値のみ（`unknown`はこの5値に含まれず、後方移行専用のsentinel）。オープン中のポジションは`exit_reason IS NULL`のまま。P1-06より前に作成済みのDBには`CREATE TABLE IF NOT EXISTS`が効かないため、`schema.py`の`ALTER_SCHEMA_STATEMENTS`が`ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR`（CHECK制約なし、列レベルDEFAULTなし）に続けて`UPDATE positions SET exit_reason = 'unknown' WHERE status = 'closed' AND exit_reason IS NULL`を実行し、既にクローズ済みの行だけを`unknown`へ後付けする（列レベルDEFAULTにすると、まだクローズしていないオープン中ポジションにも`unknown`が付いてしまい誤りになるため、この2段階の後付けにしている）。両文は毎起動時に実行しても安全な冪等操作。DuckDB（1.5.x時点）は`ADD COLUMN`へのCHECK制約付与を未サポートのため、この経路で追加された列はアプリケーション側（`close_position()`のバリデーション）でのみ整合性が保証される。
-
-P4-19の`close_at`も冪等な`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`で追加する。
-新規決済は指定されたtimezone-aware時刻を保存し、省略時は後方互換のため
-`close_date`当日16:00 ETを保存する。移行前の既存決済は時刻を推測して埋めず
-NULLのまま残し、サーキットブレーカーが`PARTIAL`として安全側に扱う。
-
-P4-20の`position_excursions`は日次パイプラインのfail-softな`mae_mfe` stepで更新する。
-各runは`date <= as_of`のバーだけを読み、MAEを`min(0, low-entry)`、MFEを
-`max(0, high-entry)`へclampした1株あたりドル幅として保存する。同日再実行は
-correction-upsert、複数ポジションの書き込みは1トランザクションである。
-当日バー欠損は既存の累積極値を維持して`MISSING_BAR`を記録し、他銘柄を継続する。
-予期しない保存障害もrun全体を停止せず`DEGRADED`として記録し、後続の出力まで継続する。
-クローズ当日は集計対象に含める。performanceではクローズ済みだけを株数換算して
-平均USD値を求め、平均excursionの絶対額が平均実現損益の絶対額を上回る場合に限り、
-利確時期またはストップ/エントリーに関する「可能性」注記を表示する。
-
 ```sql
-CREATE TABLE IF NOT EXISTS trades_journal (
-    journal_id          UUID PRIMARY KEY,
-    run_id              UUID NOT NULL,
-    symbol              VARCHAR NOT NULL,
-    strategy_key        VARCHAR NOT NULL,
-    position_id         UUID,
-    decision            VARCHAR NOT NULL CHECK(decision IN ('followed','ignored','modified')),
-    reason_memo         VARCHAR,
-    virtual_fill_price  DOUBLE,
-    created_at          TIMESTAMPTZ NOT NULL,
-    UNIQUE (run_id, symbol, strategy_key)
-);
-
 CREATE TABLE IF NOT EXISTS text_items (
     source_id       VARCHAR PRIMARY KEY,
     symbol          VARCHAR,
@@ -2577,7 +2404,6 @@ DuckDBのビュー作成はParquetがまだ0件の初回起動でも失敗しな
 | `ReportContext` | `analysis/snapshot.py` | `report_context.json`の復元結果（frozen dataclass） |
 | `FundamentalsRecord` | `data/edgar.py` | ファンダメンタルズ1レコード |
 | `DailyBrief` | `report/daily_brief.py` | CLIとMarkdownの共通表示値 |
-| `DecisionHistoryEntry` | `storage/paper_records.py` | 分析入力へ載せられる限定的な過去判断 |
 | `Position` / `DailyRunOptions` / `DailyRunResult` | `models.py` | 内部ドメイン値（frozen dataclass） |
 
 ---
@@ -2697,7 +2523,7 @@ notification:
 
 `settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
 
-`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の和集合）だけを価格取得・分析の対象に残す。うちリスク監視の対象になるのは実オープンポジションだけである。保有銘柄の合流は`--limit`未指定（本番経路）でも同じく行う（Issue #212、3.21節）。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
+`copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の仮想台帳の保有集合）だけを価格取得・分析の対象に残す。仮想建玉はサイジング・集中度・相関などのリスク監視には混ぜない（3.13節）。保有銘柄の合流は`--limit`未指定（本番経路）でも同じく行う（Issue #212、3.21節）。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
 ### 5.2 `config/strategies.yaml`（初期値）
 
@@ -2912,19 +2738,18 @@ P1は、`/Users/masuyama/ghq/github.com/tomada1114/uv-template` をプロジェ�
 | P1-10 | `pipeline/daily.py`前半 | 固定`--as-of`のdry-runを2回実行し、別run_id、重複業務データなし、ステップ1〜4を検証 |
 | P1完了基準 | 全体 | `uv run pytest tests/` が通る。`uv run ruff check .` がエラー0件。`uv run mypy .`（strict）がエラー0件。line+branchカバレッジが全体95%以上（`--cov-fail-under=95`、8.4節）であること。 |
 
-### P2: FR-07, FR-08, FR-09, FR-11
+### P2: FR-07, FR-08, FR-09, FR-11（廃止。実売買記録撤去に伴う）
 
 | ステップ | 内容 | 受け入れ基準 |
 |---|---|---|
 | P2-1 | `text/`（FR-07） | source identity、`as_of`境界、rate/retry/timeout、空/部分失敗をfakeで検証し、autouse socket guard下で完走 |
 | P2-2 | `analysis/schemas.py`, `analysis/validate.py`, `analysis/safety.py`（FR-08） | non-empty/known source_id、未知フィールド拒否、`as_of`不一致hard fail、全表示fieldのCON-03、銘柄単位fail-closedを固定JSONで検証 |
-| P2-3 | `analysis/context.py`, `analysis/export.py`, `analysis/snapshot.py`（FR-08） | 決定論的文脈と未信頼本文のフィールド分離、delimiter escape、件数/文字数の切り詰め、原子的置換の失敗時挙動、判断履歴のlive限定注入を検証 |
+| P2-3 | `analysis/context.py`, `analysis/export.py`, `analysis/snapshot.py`（FR-08） | 決定論的文脈と未信頼本文のフィールド分離、delimiter escape、件数/文字数の切り詰め、原子的置換の失敗時挙動、過去verdictのlive限定注入を検証 |
 | P2-4 | `report/daily_brief.py`, `terminal_report.py`, `markdown_report.py`, `discord_notify.py`（FR-09） | 分析あり/未実施/対象外/検証不合格、verdict行の有無、`no_trade`、0候補、特殊文字、attribution、免責、atomic `latest.md`更新をテスト |
-| P2-5 | `paper/journal.py`（FR-11, CON-04） | `PaperJournal.record_decision()`/`close_position()`のユニットテストが通る |
 | P2-6 | `pipeline/daily.py` 全8ステップ結線 | オフラインE2Eでrun_steps全8件とCLI/Markdown再構成を検証。text/分析エクスポート/通知/出力の個別失敗はdegraded、価格/保存/スクリーニング失敗はfailed非ゼロを検証 |
 | P2完了基準 | 全体 | commit済みtreeで`just verify`がgreen。実キーが利用可能なら20銘柄live canaryを1回実行し、無ければオフライン完了として理由を報告する。7営業日連続運用はP3開始前ゲートとして別途行う。 |
 
-P3（ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本番切替）は本書のスコープ外の運用フェーズであり、`docs/00_human_preparation.md`のP3/P4項目と対応する。
+P3（廃止。実売買記録撤去に伴う——旧ペーパートレード検証運用、CON-04ゲート）・P4（EODHD本番切替）は本書のスコープ外の運用フェーズであり、`docs/00_human_preparation.md`のP3/P4項目と対応する。
 
 > **本章は実装順序の履歴である（P7でスキル移行済み）**: 上記P2-2〜P2-4の当初計画はAnthropic API直呼びのLLM統合を前提としていた。P7でその統合を全削除し、定性分析をClaude Codeスキル（`.claude/skills/swing-daily`系）へ移行したため、受け入れ基準を新しい`analysis/`境界のものへ読み替えてある。ロードマップ上の位置づけは`docs/06_reliability_roadmap.md`を参照。
 

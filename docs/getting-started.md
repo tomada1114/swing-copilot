@@ -106,21 +106,24 @@ entries, the report may instead show a "本日は取引なし" (no trade today)
 verdict with a reason. Either way, `swing-daily` never places an order —
 every buy/sell decision is made by a human reading the final report.
 
-## Recording a Decision
+## Tracking Verdicts
 
-To record a decision after reviewing the brief:
+Every `proceed`/`skip` verdict is carried forward as a virtual position under
+the same exit rules the backtest uses (ATR trailing stop, max hold), via
+`copilot-daily`'s own `track_update` fail-soft step — no separate action is
+required after reviewing the brief. To review the ledger or catch up
+manually:
 
 ```bash
-uv run copilot-decision \
-  --run-id <run-id> \
-  --symbol AAPL \
-  --decision followed \
-  --fill-price 225.80 \
-  --reason "出来高増加を確認"
+uv run copilot-track update --as-of 2026-07-28   # catch up manually if needed
+uv run copilot-track list --status open          # unrealized P&L, stop, sessions left
+uv run copilot-track show --symbol AAPL          # verdict reasons and daily marks
+uv run copilot-track stats                       # win rate, PF, expectancy by verdict side
 ```
 
-The command writes to DuckDB and refreshes the generated decision section in
-the run's Markdown file. Do not edit generated Markdown as a source of truth.
+These commands are read-only except for `update`, which only ever replays the
+deterministic exit rules — see [API Reference](reference.md) for the full
+subcommand list.
 
 ## What's Next?
 

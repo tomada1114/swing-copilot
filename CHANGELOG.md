@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- 実売買記録機能（`positions`/`trades_journal` テーブル、`copilot-decision` CLI ＝
+  `src/swing_copilot/paper/` 一式、`PaperJournal`）と、仮想台帳への人間メモ・手動クローズ
+  （`verdict_position_notes` テーブル、`copilot-track note`/`close`、`record_note`/
+  `close_manually`）を撤去した（Issue #298 の公開トラックレコード化に向けて、個人の
+  売買判断はノイズかつ非公開にしたい情報のため）。`init_schema()` が新設の
+  `DROP_SCHEMA_STATEMENTS` で `trades_journal`/`position_excursions`/`positions`/
+  `verdict_position_notes` の4テーブルを次回実行時に自動で消す（`position_excursions`
+  は paper positions 専用で他に読み書きが無く、`paper/` 撤去に伴い孤児化するため併せて
+  撤去）。分析入力（`analysis_input.json`）からは `decision_history`/`performance_summary`
+  を削除し、日次 run の「保有銘柄」判定は `verdict_positions` のみ由来にした。実売買の
+  クローズ実績を入力にしていたサーキットブレーカー部分と preflight ガード
+  `PREFLIGHT_ABORT[account_equity_unset]` も撤去（backtest 自身の実現損益に基づく
+  サーキットブレーカーと `risk.account_equity_usd` によるポジションサイジングは存続）。
+  レポートの `DECISIONS_START`/`END` 判断セクション、`retro` の `human_alignment`
+  クロス集計、`copilot-history performance` サブコマンド、`TrackingError`、
+  `_run_step_excursions`（mae_mfe ステップ）も併せて撤去し、`.claude/skills/swing-track/`
+  を削除した。既存の `exit_reason='manual'` 行と CHECK 制約は台帳の連続性を保つため残す。
+  後方互換シムは無い
+
 ### Added
 
 - 戦略別ランキング成分の**機構**を追加した（Issue #251 段階1）。`ScoreWeights` に

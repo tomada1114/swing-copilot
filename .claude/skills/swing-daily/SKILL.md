@@ -249,10 +249,9 @@ ingest まで終えたあとに `just data-push` を実行する。無人実行�
 ではワークフローが前後で pull/push を行うので、**スキルからは実行しない**
 （分析セッションには R2 の資格情報を渡していない）。
 
-**終了コード 2（preflight abort）は stderr の機械可読プレフィックスで分岐する。**
-stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式で、
-`<reason>` により意味が正反対になる。プレフィックスを読まずに「分析済み」と
-決め打ちしてはならない。
+**終了コード 2（preflight abort）は stderr の機械可読プレフィックスで判定する。**
+stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式。
+プレフィックスを読まずに「分析済み」と決め打ちしてはならない。
 
 **`PREFLIGHT_ABORT[same_day_rerun]`** — 同一 `run_date` に対して成功済みの run が
 既にあることを意味する（同日重複起動ガード #118。`run_date` は最新 bar 由来で
@@ -266,13 +265,6 @@ stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式�
    `analysis_result.json` は書かない。Step 2 以降に進まない
 4. ユーザーが明示的に再実行を求めている場合のみ、`--allow-same-day-rerun` を
    付けて Step 1 を再実行し、通常どおり続行する
-
-**`PREFLIGHT_ABORT[account_equity_unset]`** — `config/settings.yaml` の
-`risk.account_equity_usd` が未設定のまま決済済みポジションが存在する、
-**設定不備による中止**。分析済みではない。この場合は既存レポートを探しに
-行かず、stderr のメッセージを引用して「設定不備で run が中止された。
-`risk.account_equity_usd` を設定するまで日次分析は実行されない」と
-ユーザーに明示報告して終了する。`analysis_result.json` は書かない。
 
 プレフィックスが読み取れない終了コード 2 は、いずれとも断定せず stderr 全文を
 そのまま報告して終了する。終了コード 0/1 は従来どおり続行する。
@@ -361,9 +353,8 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
 - 生成物は `slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` /
   `screening`）で、1 スライス = 1 専門家 × 1 銘柄。`news` が空の銘柄には news
   スライスを、`filings` が空の銘柄には filings スライスを作らず、`screening` は
-  全銘柄に作る。run 単位の context（`market_regime` / `performance_summary` /
-  `calendar_events`）は screening スライスにだけ入る。上表の担当割り当てと同じ規則で
-  ある
+  全銘柄に作る。run 単位の context（`market_regime` / `calendar_events`）は
+  screening スライスにだけ入る。上表の担当割り当てと同じ規則である
 - `news` が空でも `news_supply` を持つ銘柄に news スライスを作らないのは、
   `analyze-news` と AC14 が「`news` が空なら `news_summary: null` を書く」ことを
   求めているためである。今のままエージェントを立てても null が返るだけで、

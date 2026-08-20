@@ -26,9 +26,10 @@ above). This repo additionally ships Claude Code configuration:
 ## Scheduled Daily Run
 
 `/swing-daily` runs unattended on weekdays in GitHub Actions
-(`.github/workflows/swing-daily.yml`): cron `0 23 * * 1-5` UTC — JST Tue–Sat
-8:00, two to three hours after the US close — plus `workflow_dispatch` for a
-manual run. Those are the only two triggers; the repository is public, so no
+(`.github/workflows/swing-daily.yml`): cron `17 1 * * 2-6` UTC — JST Tue–Sat
+10:17, four to five hours after the US close — plus `workflow_dispatch` for a
+manual run. The day-of-week mask is Tue–Sat because the run fires on the UTC
+day *after* the US session it analyzes; `1-5` would miss Friday's session. Those are the only two triggers; the repository is public, so no
 path a third party can pull. Nothing is retried automatically: a failed or
 skipped day is re-dispatched by hand, and #277's preflight makes the gap
 visible in the next run.
@@ -45,8 +46,8 @@ only on success, so a failed day leaves the remote on the previous generation.
   → work → `just data-push`, in one sitting.
   The optimistic lock in `scripts/data_sync.py` — a monotonic `generation` in
   `manifest.json` — is the only concurrent-write guard, so do not leave a
-  pulled copy unpushed, and do not start a local write around JST 8:00 while
-  the scheduled run holds the generation.
+  pulled copy unpushed, and do not start a local write around JST 10:00–11:00
+  while the scheduled run holds the generation.
 - Never open `data/copilot.duckdb` as a read-write DuckDB connection for
   exploration, and never hold any connection across think-time. The file lock
   is exclusive between a read-write process and everything else, so a held

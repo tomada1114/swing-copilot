@@ -331,7 +331,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 | 環境 | 用途 | 実行方法 |
 |---|---|---|
-| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `0 23 * * 1-5`（UTC、= JST 火〜土 8:00）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `/swing-daily`（`uv run copilot-daily`と定性分析スキル）→ 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
+| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `17 1 * * 2-6`（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `/swing-daily`（`uv run copilot-daily`と定性分析スキル）→ 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
 | ローカルマシン | 開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード） |
 
 どちらの環境も同じコードを同じ手順で動かす。実行環境ごとの分岐はパイプラインに持たせない。

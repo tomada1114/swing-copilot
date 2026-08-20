@@ -42,7 +42,6 @@ from swing_copilot.retro.adoption import keep_adopted_rows
 from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
     compute_basis_contribution,
-    compute_human_alignment,
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
@@ -58,7 +57,6 @@ from swing_copilot.retro.ledger import read_ledger
 from swing_copilot.retro.schemas import (
     RETRO_INPUT_SCHEMA_VERSION,
     AggregateMetrics,
-    AlignmentEntry,
     ArchivedFilingCoverage,
     BasisContributionEntry,
     ConfigSnapshot,
@@ -292,7 +290,6 @@ def build_retro_input(
     coverages = store.get_analysis_source_coverages_in_window(window_start, as_of)
     citations = store.get_verdict_citations_in_window(window_start, as_of)
     reason_bases = store.get_verdict_reason_bases_in_window(window_start, as_of)
-    alignment = store.get_verdict_decision_alignment(window_start, as_of)
     signals = compute_signal_performance(
         get_signal_outcomes(store.database, window_start, as_of), thresholds
     )
@@ -320,10 +317,6 @@ def build_retro_input(
             _tracked_ledger_window(store, window_start, as_of),
         ).model_dump(mode="json"),
         "signal_performance": _signal_entries(signals),
-        "human_alignment": [
-            AlignmentEntry(**asdict(cell)).model_dump(mode="json")
-            for cell in compute_human_alignment(alignment)
-        ],
         "source_contribution": [
             SourceContributionEntry(**asdict(row)).model_dump(mode="json")
             for row in compute_source_contribution(citations, outcomes)

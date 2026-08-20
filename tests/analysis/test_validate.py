@@ -171,7 +171,6 @@ class TestProvenance:
             "symbol": "MSFT",
             "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
             "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
-            "decision_history": None,
             "news": [
                 {
                     "source_id": "finnhub:msft-1",
@@ -746,7 +745,6 @@ class TestCon03:
             "symbol": "MSFT",
             "score_breakdown": "<score_breakdown>\n</score_breakdown>\n",
             "risk_constraints": "<risk_constraints>\n</risk_constraints>\n",
-            "decision_history": None,
             "news": [],
             "filings": [],
         }

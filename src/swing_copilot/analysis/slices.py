@@ -96,28 +96,21 @@ _SAFE_SYMBOL: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _CANDIDATE_KEYS_BY_KIND: Final[dict[FragmentKind, tuple[str, ...]]] = {
     "news": ("news", "news_supply"),
     "filings": ("filings",),
-    "screening": (
-        "score_breakdown",
-        "risk_constraints",
-        "decision_history",
-        "prior_verdicts",
-    ),
+    "screening": ("score_breakdown", "risk_constraints", "prior_verdicts"),
 }
 
 #: The subset of the above that every parsable input carries, and that a slice
 #: of that kind therefore must too. `CandidateInput` gives these fields no
 #: default, so a document missing one never reaches slicing at all -- which is
 #: precisely why they belong here: this is the check that catches the *slicing*
-#: dropping a field, and `decision_history` (the human's own journal, nullable
-#: but always present) is worth as much of that protection as the score
-#: breakdown. Only `news_supply` and `prior_verdicts` stay optional: both were
-#: added after `analysis-input-v3` was frozen, so an archived input can
-#: legitimately lack them, and a slice must not invent a key its input never
-#: had.
+#: dropping a field. Only `news_supply` and `prior_verdicts` stay optional:
+#: both were added after `analysis-input-v3` was frozen, so an archived input
+#: can legitimately lack them, and a slice must not invent a key its input
+#: never had.
 _REQUIRED_CANDIDATE_KEYS_BY_KIND: Final[dict[FragmentKind, frozenset[str]]] = {
     "news": frozenset({"news"}),
     "filings": frozenset({"filings"}),
-    "screening": frozenset({"score_breakdown", "risk_constraints", "decision_history"}),
+    "screening": frozenset({"score_breakdown", "risk_constraints"}),
 }
 
 #: Run-wide context per expert. Only the screening skill reads these blocks
@@ -128,7 +121,7 @@ _REQUIRED_CANDIDATE_KEYS_BY_KIND: Final[dict[FragmentKind, frozenset[str]]] = {
 _CONTEXT_KEYS_BY_KIND: Final[dict[FragmentKind, tuple[str, ...]]] = {
     "news": (),
     "filings": (),
-    "screening": ("market_regime", "performance_summary", "calendar_events"),
+    "screening": ("market_regime", "calendar_events"),
 }
 
 
@@ -146,7 +139,6 @@ class SliceContext(_StrictModel):
     """The run-wide blocks one expert is given, or nothing at all."""
 
     market_regime: str | None = None
-    performance_summary: str | None = None
     calendar_events: list[CalendarEventInput] = []
 
 
@@ -162,7 +154,6 @@ class SliceCandidate(_StrictModel):
     symbol: NonBlankText
     score_breakdown: str | None = None
     risk_constraints: str | None = None
-    decision_history: str | None = None
     prior_verdicts: str | None = None
     news: list[NewsInput] | None = None
     news_supply: NewsSupply | None = None
@@ -198,7 +189,7 @@ class InputSlice(_StrictModel):
         """Hold the slice to exactly the fields its expert is assigned.
 
         Presence is judged by what the document set, not by the value: a
-        candidate legitimately has `decision_history: null`, and dropping that
+        candidate legitimately has `prior_verdicts: null`, and dropping that
         key would be a different statement than carrying it.
         """
         provided = self.candidate.model_fields_set - {"symbol"}
@@ -494,10 +485,8 @@ def _source_chars(
     blocks = (
         candidate.score_breakdown,
         candidate.risk_constraints,
-        candidate.decision_history,
         candidate.prior_verdicts,
         raw_context.get("market_regime"),
-        raw_context.get("performance_summary"),
     )
     events: Sequence[Mapping[str, Any]] = raw_context.get("calendar_events", [])
     return sum(len(block or "") for block in blocks) + sum(

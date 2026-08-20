@@ -102,37 +102,27 @@ digestで束縛せず、読み戻す経路も持たない診断用の成果物�
 ## 口座レベルリスク
 
 `risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションと承認候補の
-stopリスクを口座資産に対する百分率で計算する。`RiskChecker.check()`は候補を
-ランキング順に評価し、`risk.max_portfolio_heat_pct`を厳密に超える候補を
-`PORTFOLIO_HEAT_EXCEEDED`で拒否する。stop未記録の保有がある場合は
-`not_calculable`となり、0リスクとして承認しない。
+stopリスクを口座資産に対する百分率で計算する。実売買記録機能一式の撤去
+（2026-08、FR-11/CON-04）に伴い、日次パイプラインは保有中ポジションを常に
+空リストとして渡す——バーチャルなverdict追跡台帳（`verdict_positions`）は
+実際に持っていない建玉なのでここへ代入しない。`RiskChecker.check()`は
+候補をランキング順に評価しながらこの空の基準値へ承認済み候補ぶんの
+stopリスクを順に積み上げ、`risk.max_portfolio_heat_pct`を厳密に超える候補を
+`PORTFOLIO_HEAT_EXCEEDED`で拒否する。
 
 決算近接ガードは`EarningsCalendarClient` Protocolから取得した次回予定日を使い、
 2営業日以内を`EARNINGS_PROXIMITY_BLOCK`、5営業日以内を
 `EARNINGS_PROXIMITY_WARN`とする。予定不明は`EARNINGS_DATE_UNKNOWN`を明示し、
 Finnhubキー未設定時はガード全体を`NO_EARNINGS_DATA`として無効化する。
 
-`risk/circuit_breaker.py`はクローズ済みペーパーポジションの実現損益だけを使い、
-米東部時間の日次・週次（月曜開始）・月次境界で毎回再計算する。既定では損失率が
-2%/5%/8%に達すると`HALTED`、2連敗後は最後の負け決済から24時間
-`COOLDOWN`となる。両状態とも候補へ`CIRCUIT_BREAKER_<state>`を付けて拒否するが、
-市場データ収集とレポート生成は止めない。空の履歴は
-`TRADING_ALLOWED (EMPTY_STATE)`、欠損決済時刻・損益は安全側の
-`HALTED (PARTIAL)`となる。
-
-## MAE/MFE
-
-`paper/excursions.py`の`update_position_excursions()`は、オープン中および
-当日クローズしたペーパーポジションを対象に、`entry_date <= date <= as_of`の
-日足高安だけから1株あたりドル幅を算出する。MAEは`min(0, low-entry)`、
-MFEは`max(0, high-entry)`へclampし、`position_id + as_of_date`で
-correction-upsertする。当日バー欠損は0扱いせず、過去の極値を保ったまま
-`MISSING_BAR`を保存する。
-
-`PaperJournal.summarize_performance()`はクローズ済み取引だけを株数換算し、
-`avg_mae_usd`と`avg_mfe_usd`を返す。平均excursionの絶対額が平均実現損益の
-絶対額より大きいときだけ、利確時期またはストップ/エントリーに関する
-可能性表現の注記を返す。
+`risk/circuit_breaker.py`の`evaluate_circuit_breaker()`は、クローズ済み取引の
+実現損益から米東部時間の日次・週次（月曜開始）・月次境界で状態を再計算する
+純関数（損失率2%/5%/8%到達で`HALTED`、2連敗で24時間`COOLDOWN`）だが、
+実現損益の唯一の入力源だった`positions`が撤去されたため、日次パイプラインは
+`RiskRunContext.circuit_breaker`へ常に`None`を渡す——空の実現損益履歴から
+従来出ていた`TRADING_ALLOWED`と挙動的に同じ値である。このモジュール自体は
+バックテストの`backtest/policy.py`が自前のシミュレーション上の実現損益で
+引き続き使用しており、廃止はされていない。
 
 ## 定性分析の境界（`analysis/`、FR-08・CON-03）
 
@@ -141,8 +131,8 @@ Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイル
 であり、モデルAPIを一切呼ばない。
 
 `analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
-（`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・P1-06実現損益
-サマリ・市場レジーム・過去判断・過去verdict）と、ステップ5で収集済みの未信頼テキストを
+（`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・市場レジーム・
+過去verdict）と、ステップ5で収集済みの未信頼テキストを
 `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）へまとめ、宛先と同じディレクトリの
 一時ファイル＋`os.replace()`で原子的に書き出す。ニュースは
 `settings.analysis.max_news_items_per_symbol`件・各`max_news_chars_per_item`文字、
@@ -180,8 +170,7 @@ Exhibitが取得段の上限（1開示500,000字の安全弁／最大3件）で�
 候補ごとの`prior_verdicts`は、同一銘柄・戦略に対する過去のverdictとその後の当否
 （`HIT`／`MISS_*`と`forward_return_pct`）を対にした不活性ブロックで、
 「同じ種類の根拠で繰り返し外していないか」をスキル自身が見られるようにする
-（Issue #191）。人間の記帳である`decision_history`とは別読みで、
-過去runの`source_id`は持ち帰らない。`score_breakdown`の末尾には加重前の生値
+（Issue #191）。過去runの`source_id`は持ち帰らない。`score_breakdown`の末尾には加重前の生値
 （`close`／`rsi14`／`sma50`／`sma200`／`avg_volume`と導出値`atr14_pct`）が
 「参考情報」として付き、正規化で潰れた大きさを分析側が読めるようにする。
 これらはいずれもコードの計算結果であり、分析側が再計算・上書きできない。
@@ -410,8 +399,8 @@ forward returnを計算しても1件も満期にならず、「評価0 slice」�
 `reports/retro/<as_of>/retro_input.json`をstrictスキーマ`retro-input-v1`で
 原子的に書き出す。含まれるのはseparation（proceed群−skip群の平均リターン）・
 proceed重大外し率（候補全体ベースライン併記、ウォッチ水準0.15超または
-ベースライン超でフラグ）・skip的中率（ベースライン比）・人間整合クロス集計
-（`trades_journal`×verdict×当否）・ソース貢献表・根拠タイプ貢献表（`verdict.reasons[].basis`の閉集合別のverdict件数とHIT比率。タグの無い理由は`untagged`として計上し、タグ付与率そのものを可視化する。Issue #191）・news_supply水準×verdictの
+ベースライン超でフラグ）・skip的中率（ベースライン比）・ソース貢献表・根拠タイプ貢献表
+（`verdict.reasons[].basis`の閉集合別のverdict件数とHIT比率。タグの無い理由は`untagged`として計上し、タグ付与率そのものを可視化する。Issue #191）・news_supply水準×verdictの
 クロス集計（自社材料の供給量しきい値を実績で検証するための観測）・既存`signal_outcomes`の
 シグナル成績・サプライズ銘柄の証拠一式（当時のverdictとreasons、実現パス、
 run以降の鮮度データ）・提案対象になりうる設定のスナップショットと
@@ -473,12 +462,17 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 copilot-track update --as-of 2027-03-21          # 建玉と日次前進
 copilot-track list --status open                 # 含み損益・stop・残営業日
 copilot-track list --recommendation all          # skip のシャドウ建玉も含める
-copilot-track show --symbol AAPL                 # verdict理由・日次マーク・ノート
+copilot-track show --symbol AAPL                 # verdict理由・日次マーク
 copilot-track stats                              # 勝率・PF・期待値をverdict区分別に
 copilot-track stats --recommendation skip        # 1区分だけ
-copilot-track close --run-id <UUID> --symbol AAPL --note "決算をまたがない"
-copilot-track note --run-id <UUID> --symbol AAPL --text "想定内の推移"
 ```
+
+`update`は台帳の唯一の書き込みで、`backtest/exits.py`の手仕舞いルールを
+そのままリプレイした結果しか書かない。このCLIがかつて受け付けていた人間の
+判断メモ（`note`）と手動クローズ（`close`）は、実売買記録機能一式の撤去
+（2026-08）に伴い削除された——台帳を機械的なものに保ち、そのまま公開できる
+記録にするためである。撤去前に記録された`exit_reason='manual'`の行は
+移行データとしてそのまま表示され続ける。
 
 `update`は`verdicts`の`proceed`と`skip`のうち未追跡のものを建玉し、
 保有中を`--as-of`まで1取引日ずつ前進させる。`no_trade`（そのrun全体が当日
@@ -492,9 +486,10 @@ NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
 前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
-手動`close`以外に台帳から消える経路が無いことを利用者に知らせるためである。
-日付引数（`update`/`close`の`--as-of`、`note`の`--date`）を
-省略したときだけ、CLI境界で`SystemClock().today()`を使う。
+手動クローズが撤去された現在、対応するverdictが再取り込みで消えない限り
+台帳から出る経路が無いことを利用者に知らせるためである。
+日付引数（`update`の`--as-of`）を省略したときだけ、
+CLI境界で`SystemClock().today()`を使う。
 
 「バーが1本も無い」がfail-softなのは**銘柄単位**の話であり、`--db`の兄弟
 `bars/`が**ディレクトリごと無い**場合は台帳に触れる前にエラーで落ちる
@@ -506,7 +501,7 @@ NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit
 再取り込みはrunのverdictを丸ごと置き換えるため（`replace_run_verdicts`）、
 分析対象から外れた銘柄の仮想建玉が孤児として残り、取り消された判断の
 損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、対応するverdictが
-消えたポジションはマーク・ノートごと1トランザクションで削除し、削除した銘柄を
+消えたポジションはマークごと1トランザクションで削除し、削除した銘柄を
 noteに出す。`proceed`↔`skip`の訂正は孤児ではない——両側を同じ出口ルールで追跡して
 いるのでリプレイは依然正しく、`recommendation`列だけをverdict側へ追随させて
 その旨をnoteに出す。
@@ -548,34 +543,20 @@ R倍数はエントリー日のマークに残る**当時の**stopから計算�
 `retro_evaluate`の直後に毎日走る。したがって手動実行は取りこぼしの補完と
 即時反映のためのものになる。
 
-台帳のオープン建玉は、`copilot-daily`の「保有銘柄」のもう一方の供給源でもある。
-日次runは実オープンポジション（`positions`）と台帳の`status='open'`**かつ
-`proceed`**の**和集合**を保有銘柄として扱い、ニュース・開示の収集と分析の対象に優先的に含める
-（`docs/04_detailed_design.md` 3.14）。実売買を始める前は`positions`が空なので、
-台帳を読まなければ保有銘柄のニュース収集が一度も発火せず、遡及取得できない
-`company-news`が恒久的に欠ける。ただしこれは収集・分析の対象集合にだけ効き、
-リスク計算（サイジング・集中度・相関）へ渡すポートフォリオは実ポジションのみで、
-仮想建玉は混ざらない。`skip`のシャドウ建玉は保有銘柄に**含めない**——そこには
-notionalにも何も保有されておらず、含めると開示・ニュースの「保有優先」予算が
-定性レイヤが落とした銘柄すべてへ向いてしまう。`--as-of`指定の再現runは台帳を
-読まない（現在状態であり時点再現性が無いため）。台帳の読み取り失敗はfail-softで、警告を出して
-仮想側を空としてrunを続行する。
+台帳のオープン建玉（`status='open'`かつ`proceed`）は、`copilot-daily`の
+「保有銘柄」（ニュース・開示の収集と分析を優先的に対象へ含める held-first の
+供給源、`docs/04_detailed_design.md` 3.14）の唯一の供給源である。実売買記録機能
+一式の撤去（2026-08）により実オープンポジション（`positions`）は存在しなくなった
+ため、日次runは台帳だけを読んで保有銘柄を決める。台帳を読まなければ保有銘柄の
+ニュース収集が一度も発火せず、遡及取得できない`company-news`が恒久的に欠ける。
+ただしこれは収集・分析の対象集合にだけ効き、リスク計算（サイジング・集中度・
+相関）へ渡すポートフォリオは常に空で、仮想建玉は混ざらない。`skip`のシャドウ
+建玉は保有銘柄に**含めない**——そこにはnotionalにも何も保有されておらず、含めると
+開示・ニュースの「保有優先」予算が定性レイヤが落とした銘柄すべてへ向いてしまう。
+`--as-of`指定の再現runは台帳を読まない（現在状態であり時点再現性が無いため）。
+台帳の読み取り失敗はfail-softで、警告を出して仮想側を空としてrunを続行する。
 
-スキルからの書き込みは`close`（`exit_reason='manual'`で確定）と`note`
-（日付キーのcorrection upsert）の2つだけである。存在しない／既にクローズ済みの
-ポジション、エントリー日より前のクローズ、**最終マーク日より前のクローズ**
-（前進済みの日次マーク・`days_held`・再開位置と矛盾するため）、空メモは
-いずれも非0終了で拒否する。
-
-メモ本文（`note --text`と`close --note`）は`copilot-track show`がそのまま表示する
-スキル生成テキストなので、他のスキル出力と同じく`analysis/safety.py`の中央
-CON-03ガードを通す。売買を命じる表現を含むメモは保存されず非0終了になり、
-`close --note`ではポジションを閉じる前に検査するため、拒否されたメモが
-「理由の無いクローズ」を残すこともない。スキルへの指示だけでは不十分、という
-本プロジェクトの原則をこの経路でも守るためである。
-
-retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤであり、
-paperの`positions`（人間が実際に持つと決めたFR-11の検証ゲート）とも混ぜない。
+retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤである。
 棲み分けの理由は`docs/04_detailed_design.md` 3.24.1にある。
 
 > **P7（スキル移行）で廃止**: Anthropic API直呼びのLLM統合（`llm/`パッケージ、

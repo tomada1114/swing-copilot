@@ -8,7 +8,7 @@ developer's local `.env` (never read directly in this suite).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -18,7 +18,7 @@ import pytest
 
 from swing_copilot.config import Secrets, Settings, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, PreflightAbort
-from swing_copilot.models import DailyRunOptions, DataTier, Position, RunMode, RunStatus
+from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
 from swing_copilot.pipeline import daily_composition as daily_module
 from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
@@ -403,25 +403,6 @@ class TestPathsForMode:
         assert db_path != DEFAULT_DB_PATH
 
 
-def _closed_position(**overrides: object) -> Position:
-    fields: dict[str, object] = {
-        "position_id": uuid4(),
-        "symbol": "AAPL",
-        "is_paper": True,
-        "entry_date": date(2027, 1, 1),
-        "entry_price": 100.0,
-        "shares": 10,
-        "status": "closed",
-        "stop_price": 95.0,
-        "close_date": date(2027, 1, 10),
-        "close_at": datetime(2027, 1, 10, 20, 0, tzinfo=UTC),
-        "close_price": 105.0,
-        "exit_reason": "target",
-    }
-    fields.update(overrides)
-    return Position(**fields)  # type: ignore[arg-type]
-
-
 def _equity_settings(settings, account_equity_usd):
     return settings.model_copy(
         update={
@@ -438,111 +419,40 @@ def _preflight_deps(state_store, settings):
 
 
 class TestPreflight:
-    """P8-117: abort before any state is written when continuing is pointless."""
+    """P8-117: warn before any state is written when equity is unconfigured.
 
-    def test_equity_set_neither_warns_nor_aborts(self, settings, state_store, caplog):
-        state_store.upsert_position(_closed_position())
+    The abort this preflight once raised (`account_equity_unset`) went with
+    the real-trade record feature in 2026-08: no daily run has realized P&L
+    to halt over any more, so an unset equity is a warning and nothing else.
+    """
+
+    def test_equity_set_does_not_warn(self, settings, state_store, caplog):
         deps = _preflight_deps(state_store, _equity_settings(settings, 100_000.0))
 
         with caplog.at_level(logging.WARNING):
-            _preflight(deps, DailyRunOptions())
+            _preflight(deps)
 
         assert caplog.records == []
 
-    def test_equity_unset_zero_closed_warns_and_continues(
-        self, settings, state_store, caplog
-    ):
+    def test_equity_unset_warns_and_continues(self, settings, state_store, caplog):
         deps = _preflight_deps(state_store, _equity_settings(settings, None))
 
         with caplog.at_level(logging.WARNING):
-            _preflight(deps, DailyRunOptions())
+            _preflight(deps)
 
         assert any("account_equity_usd" in record.message for record in caplog.records)
 
-    def test_equity_unset_one_closed_aborts(self, settings, state_store):
-        state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
+    def test_it_never_reads_storage(self, settings, state_store, monkeypatch):
+        # `state_store` is still on `DailyDependencies`, but preflight must not
+        # open the database: the one query it used to run is gone with the
+        # positions table it read.
+        def _fail(*_args, **_kwargs):
+            msg = "preflight must not open the database"
+            raise AssertionError(msg)
 
-        with pytest.raises(
-            PreflightAbort, match=r"risk\.account_equity_usd"
-        ) as exc_info:
-            _preflight(deps, DailyRunOptions())
+        monkeypatch.setattr(state_store._database, "connect", _fail)  # noqa: SLF001
 
-        assert "CIRCUIT_BREAKER_HALTED" in str(exc_info.value)
-        # The consuming skill branches on this tag: without it, a config
-        # problem is indistinguishable from "already analyzed today".
-        assert exc_info.value.reason == "account_equity_unset"
-
-    def test_a_close_price_of_none_still_counts_as_one_closed_position(
-        self, settings, state_store
-    ):
-        state_store.upsert_position(_closed_position(close_price=None))
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
-
-        with pytest.raises(PreflightAbort):
-            _preflight(deps, DailyRunOptions())
-
-    def test_dry_run_applies_the_same_rules(self, settings, state_store):
-        state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
-
-        with pytest.raises(PreflightAbort):
-            _preflight(deps, DailyRunOptions(is_dry_run=True))
-
-    def test_historical_as_of_skips_the_abort_but_still_warns(
-        self, settings, state_store, caplog
-    ):
-        state_store.upsert_position(_closed_position())
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
-
-        with caplog.at_level(logging.WARNING):
-            _preflight(deps, DailyRunOptions(as_of=date(2027, 1, 15)))
-
-        assert any("account_equity_usd" in record.message for record in caplog.records)
-
-    def test_abort_does_not_touch_storage(self, settings, state_store):
-        position = _closed_position()
-        state_store.upsert_position(position)
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
-
-        with pytest.raises(PreflightAbort):
-            _preflight(deps, DailyRunOptions())
-
-        assert state_store.get_closed_positions(is_paper=True) == [position]
-
-    def test_main_exits_with_code_two_and_creates_no_run(
-        self, monkeypatch, capsys, settings, state_store
-    ):
-        settings = _equity_settings(settings, None)
-        state_store.upsert_position(_closed_position())
-        run_daily_calls = []
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
-        monkeypatch.setattr(daily_module, "load_settings", lambda: settings)
-        monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
-        monkeypatch.setattr(
-            daily_module,
-            "_compose_dependencies",
-            lambda *_args: _preflight_deps(state_store, settings),
-        )
-        monkeypatch.setattr(
-            daily_module,
-            "run_daily",
-            lambda *_args: run_daily_calls.append(_args),
-        )
-
-        with pytest.raises(SystemExit) as exc_info:
-            main([])
-
-        assert exc_info.value.code == 2
-        assert run_daily_calls == []
-        err = capsys.readouterr().err
-        assert "risk.account_equity_usd" in err
-        # Machine-readable prefix contract with the swing-daily skill: both
-        # abort causes share exit code 2, so stderr must carry the reason.
-        assert "PREFLIGHT_ABORT[account_equity_unset]:" in err
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            count = conn.execute("SELECT count(*) FROM runs").fetchone()
-        assert count == (0,)
+        _preflight(_preflight_deps(state_store, _equity_settings(settings, None)))
 
 
 class TestMain:
@@ -763,10 +673,11 @@ class TestConfigureLoggingRedactsSecrets:
 class TestPreflightAbortStderrContract:
     """The tag `swing-daily` branches on must survive refactors (Issue #193).
 
-    Both abort causes exit `2`, so the reason has to be readable from stderr's
-    first line without parsing prose. `_preflight` raises for the
-    account-equity trap and `run_daily` raises for the same-day rerun guard;
-    the rendered line must be identical either way.
+    An abort exits `2`, so the reason has to be readable from stderr's first
+    line without parsing prose, whichever step raises it. `run_daily` raises
+    for the same-day rerun guard; `_preflight` no longer raises at all since
+    the account-equity abort was removed, but it is still on the path that
+    renders the tag, so both call sites stay covered.
     """
 
     @staticmethod
@@ -781,7 +692,7 @@ class TestPreflightAbortStderrContract:
         monkeypatch.setattr(daily_module, "run_daily", lambda *_args, **_kwargs: None)
 
     @pytest.mark.parametrize("aborting_step", ["_preflight", "run_daily"])
-    @pytest.mark.parametrize("reason", ["account_equity_unset", "same_day_rerun"])
+    @pytest.mark.parametrize("reason", ["same_day_rerun"])
     def test_the_first_stderr_line_carries_the_tagged_reason(
         self, monkeypatch, capsys, aborting_step, reason
     ):

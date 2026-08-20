@@ -27,7 +27,6 @@ from swing_copilot.report.daily_brief import (
     BriefFilingAnalysis,
     BriefFundamentals,
     BriefMarketItem,
-    BriefPastDecision,
     BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
@@ -114,9 +113,6 @@ def _populated_brief() -> DailyBrief:
                     verdict_summary="Guidance was withdrawn.",
                     strengths=("Trend intact",),
                     concerns=("Extended",),
-                ),
-                past_decisions=(
-                    BriefPastDecision(date(2027, 2, 1), "buy", "breakout", 0.05),
                 ),
                 execution_state="FAIR",
                 execution_distance=1.2,

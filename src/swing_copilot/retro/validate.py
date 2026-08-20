@@ -238,7 +238,6 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
         for group in retro_input.aggregates_by_config
         for entry in group.separation
     )
-    ids.update(cell.cell_id for cell in retro_input.human_alignment)
     ids.update(row.contribution_id for row in retro_input.source_contribution)
     ids.update(row.basis_id for row in retro_input.basis_contribution)
     if (news_supply := aggregates.news_supply) is not None:

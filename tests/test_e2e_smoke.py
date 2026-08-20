@@ -42,8 +42,8 @@ from swing_copilot.screening import (
 from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import FundamentalsRecord, MarketStore
-from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
@@ -271,7 +271,6 @@ class TestFiveSymbolEndToEnd:
             "6_analysis_export",
             "7_notify",
             "8_output",
-            "mae_mfe",
             "postmortem",
             "retro_collect",
             "retro_evaluate",
@@ -286,7 +285,6 @@ class TestFiveSymbolEndToEnd:
             "6_analysis_export": "success",
             "7_notify": "success",
             "8_output": "success",
-            "mae_mfe": "skipped",
             "postmortem": "success",
             "retro_collect": "success",
             "retro_evaluate": "success",
@@ -437,79 +435,54 @@ class TestFiveSymbolEndToEnd:
         )
         assert not bars.duplicated(subset=["symbol", "date"]).any()
 
-    def test_live_current_run_includes_bounded_prior_human_decision_context(self, deps):
-        prior_id = deps.state_store.start_run(
-            AS_OF - timedelta(days=2), RunMode.LIVE, "prior"
-        )
-        deps.state_store.record_candidates(
-            [
-                Candidate(
-                    "AAPL",
-                    AS_OF - timedelta(days=2),
-                    ("trend_sma",),
-                    {"close": 100.0},
-                    1,
-                )
-            ],
-            prior_id,
-            "default",
-        )
-        deps.state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=prior_id,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=None,
-                decision="ignored",
-                reason_memo="相関が高かった",
-                virtual_fill_price=None,
-            )
-        )
+    def test_live_current_run_includes_the_symbols_own_prior_verdicts(self, deps):
+        _seed_prior_verdict(deps, AS_OF - timedelta(days=2), "相関が高かった")
 
         result = run_daily(DailyRunOptions(), deps)
 
         assert result.analysis_input_path is not None
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
         aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
-        assert aapl["decision_history"] is not None
-        assert "<decision_history>" in aapl["decision_history"]
-        assert "相関が高かった" in aapl["decision_history"]
+        assert aapl["prior_verdicts"] is not None
+        assert "<prior_verdicts>" in aapl["prior_verdicts"]
+        assert "相関が高かった" in aapl["prior_verdicts"]
 
-    def test_explicit_as_of_run_does_not_include_decision_history(self, deps):
-        prior_id = deps.state_store.start_run(
-            AS_OF - timedelta(days=1), RunMode.LIVE, "prior"
-        )
-        deps.state_store.record_candidates(
-            [
-                Candidate(
-                    "AAPL",
-                    AS_OF - timedelta(days=1),
-                    ("trend_sma",),
-                    {"close": 100.0},
-                    1,
-                )
-            ],
-            prior_id,
-            "default",
-        )
-        deps.state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=prior_id,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=None,
-                decision="ignored",
-                reason_memo="過去の判断",
-                virtual_fill_price=None,
-            )
-        )
+    def test_explicit_as_of_run_does_not_include_prior_verdicts(self, deps):
+        _seed_prior_verdict(deps, AS_OF - timedelta(days=1), "過去の判断")
 
         result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
         assert result.analysis_input_path is not None
         payload = json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
         aapl = next(item for item in payload["candidates"] if item["symbol"] == "AAPL")
-        assert aapl["decision_history"] is None
+        assert aapl["prior_verdicts"] is None
+
+
+def _seed_prior_verdict(
+    deps: DailyDependencies, run_date: date, reason_text: str
+) -> None:
+    """Archive one earlier verdict for AAPL, the way an ingest would have."""
+    prior_id = deps.state_store.start_run(run_date, RunMode.LIVE, "prior")
+    deps.state_store.record_candidates(
+        [Candidate("AAPL", run_date, ("trend_sma",), {"close": 100.0}, 1)],
+        prior_id,
+        "default",
+    )
+    deps.state_store.replace_run_verdicts(
+        prior_id,
+        [
+            VerdictRecord(
+                run_id=prior_id,
+                symbol="AAPL",
+                as_of=run_date,
+                strategy_key="default",
+                recommendation="skip",
+                reasons=(VerdictReasonRecord(text=reason_text, source_ids=()),),
+                no_trade=False,
+            )
+        ],
+        [],
+    )
 
 
 def _archive_ingested_run(output_dir: str, run_date: date) -> None:

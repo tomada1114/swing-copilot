@@ -104,7 +104,6 @@ class TestEvidenceReferences:
                     proposal_payload(
                         evidence_refs=[
                             SEPARATION_METRIC_ID,
-                            "metric:human_alignment:followed:proceed:5d",
                             "metric:source_contribution:news:finnhub",
                             SURPRISE_ID,
                             CITED_SOURCE_ID,

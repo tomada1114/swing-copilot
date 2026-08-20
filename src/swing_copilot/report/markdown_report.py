@@ -20,11 +20,8 @@ if TYPE_CHECKING:
         DailyBrief,
         SignalPerformanceRow,
     )
-    from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 _DISCLAIMER = "本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください。"
-DECISIONS_START = "<!-- decisions:start -->"
-DECISIONS_END = "<!-- decisions:end -->"
 
 
 class LatestMarkdownUpdateError(OSError):
@@ -144,16 +141,6 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
     if brief.notices:
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {notice}" for notice in brief.notices)
-    lines.extend(
-        [
-            "",
-            "## Decisions",
-            "",
-            DECISIONS_START,
-            "_No decisions recorded._",
-            DECISIONS_END,
-        ]
-    )
     lines.extend(["", "---", "", _DISCLAIMER, ""])
     return "\n".join(lines)
 
@@ -189,44 +176,6 @@ def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
         symbols = ", ".join(heat.missing_stop_symbols)
         return f"`not_calculable` (missing stop: {symbols})"
     return f"`not_calculable` ({heat.reason or 'unknown reason'})"
-
-
-def update_markdown_decisions(
-    report_path: Path, decisions: list[TradeDecisionRecord]
-) -> None:
-    """Refresh only the generated decision block from canonical DuckDB rows."""
-    content = report_path.read_text(encoding="utf-8")
-    if content.count(DECISIONS_START) != 1 or content.count(DECISIONS_END) != 1:
-        msg = f"generated decision markers missing or duplicated in {report_path}"
-        raise ValueError(msg)
-    before, remainder = content.split(DECISIONS_START, maxsplit=1)
-    _old, after = remainder.split(DECISIONS_END, maxsplit=1)
-    body = _render_decisions(decisions)
-    _atomic_write(
-        report_path,
-        f"{before}{DECISIONS_START}\n{body}\n{DECISIONS_END}{after}",
-    )
-
-
-def _render_decisions(decisions: list[TradeDecisionRecord]) -> str:
-    if not decisions:
-        return "_No decisions recorded._"
-    lines = [
-        "| Symbol | Strategy | Decision | Fill | Reason |",
-        "|---|---|---|---:|---|",
-    ]
-    for record in decisions:
-        fill = (
-            f"${record.virtual_fill_price:,.2f}"
-            if record.virtual_fill_price is not None
-            else "-"
-        )
-        reason = (record.reason_memo or "-").replace("|", "\\|").replace("\n", " ")
-        lines.append(
-            f"| {record.symbol} | {record.strategy_key} | {record.decision} | "
-            f"{fill} | {reason} |"
-        )
-    return "\n".join(lines)
 
 
 def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
@@ -313,7 +262,6 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
             f"- [{source.source_id}]({source.url})" for source in analysis.sources
         )
     lines.extend(_filing_analysis_sections(candidate))
-    lines.extend(_past_decisions_section(candidate))
     return lines
 
 
@@ -389,31 +337,6 @@ def _filing_analysis_sections(candidate: BriefCandidate) -> list[str]:
         lines.extend(f"- YoY change: {change}" for change in filing.yoy_changes)
         lines.extend(
             f"- Source: [{source.source_id}]({source.url})" for source in filing.sources
-        )
-    return lines
-
-
-def _past_decisions_section(candidate: BriefCandidate) -> list[str]:
-    """REQ-008: 過去判断 subsection.
-
-    Omitted entirely (no heading) when empty, matching this file's
-    established style for optional per-candidate subsections (Facts/定性
-    risk flags/Sources above).
-    """
-    if not candidate.past_decisions:
-        return []
-    lines = [
-        "",
-        "### 過去判断",
-        "",
-        "| Date | Decision | Reason | 実現損益率 |",
-        "|---|---|---|---:|",
-    ]
-    for past in candidate.past_decisions:
-        reason = (past.reason_memo or "-").replace("|", "\\|").replace("\n", " ")
-        lines.append(
-            f"| {past.run_date.isoformat()} | {past.decision} | {reason} | "
-            f"{_percent(past.realized_return_pct)} |"
         )
     return lines
 

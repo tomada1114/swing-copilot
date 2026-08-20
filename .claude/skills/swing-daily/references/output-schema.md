@@ -203,9 +203,8 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   担当対象の source object を要約・再採番・省略しない
 - ニュース／開示スライスには担当銘柄の該当 source object だけが、スクリーニング
   スライスにはその銘柄の決定論的入力（`score_breakdown` / `risk_constraints` /
-  `decision_history` / `prior_verdicts`）と run-wide context（`market_regime` /
-  `performance_summary` / `calendar_events`）だけが入る。担当外の候補や長文テキストは
-  入らない
+  `prior_verdicts`）と run-wide context（`market_regime` / `calendar_events`）
+  だけが入る。担当外の候補や長文テキストは入らない
 - ニューススライスには `news_supply`（元入力にあれば）も逐語コピーされる。自社材料の
   供給量はニュース担当が申告する対象であり、落とすと申告経路が切れる。ただし
   news スライスが作られるのは `news` が非空の銘柄だけである——`news` が空の銘柄は
@@ -230,7 +229,6 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
   "generated_at": "...",
   "context": {
     "market_regime": "...",          // 整形済みテキストブロック or null
-    "performance_summary": "...",    // 同上
     "calendar_events": [             // run単位のマクロ/経済カレンダーイベント。symbolを持たず、
                                       //   どの銘柄からも source_id 引用可（news/filings とは別集合）
       { "source_id": "fred:...", "published_at": "...", "title": "...",
@@ -242,7 +240,6 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
       "symbol": "AAPL",
       "score_breakdown": "...",      // 整形済みテキスト
       "risk_constraints": "...",
-      "decision_history": "... or null",   // live 当日のみ
       "news": [
         { "source_id": "news-...", "published_at": "...", "headline": "...",
           "summary": "...", "url": "...", "provider": "..." }

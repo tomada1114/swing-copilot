@@ -21,7 +21,6 @@ from swing_copilot.storage.audit_records import ScreeningRunMeta
 from swing_copilot.storage.tracking_records import (
     VerdictPosition,
     VerdictPositionMark,
-    VerdictPositionNote,
 )
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 
@@ -235,31 +234,6 @@ class TestAdvanceAtomicity:
         assert len(state_store.get_verdict_position_marks(RUN_ID, SYMBOL)) == 2
 
 
-class TestNotes:
-    def test_a_second_note_on_the_same_day_corrects_the_first(
-        self, state_store: StateStore
-    ) -> None:
-        state_store.upsert_verdict_position_note(
-            VerdictPositionNote(RUN_ID, SYMBOL, DAY_1, "様子見")
-        )
-        corrected = VerdictPositionNote(RUN_ID, SYMBOL, DAY_1, "利確を検討")
-
-        state_store.upsert_verdict_position_note(corrected)
-
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == (corrected,)
-
-    def test_notes_come_back_in_date_order(self, state_store: StateStore) -> None:
-        later = VerdictPositionNote(RUN_ID, SYMBOL, DAY_1, "後")
-        earlier = VerdictPositionNote(RUN_ID, SYMBOL, ENTRY_DATE, "先")
-        state_store.upsert_verdict_position_note(later)
-        state_store.upsert_verdict_position_note(earlier)
-
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == (
-            earlier,
-            later,
-        )
-
-
 class TestLatestMarks:
     def test_only_the_newest_mark_per_position_is_returned(
         self, state_store: StateStore
@@ -456,25 +430,19 @@ class TestVerdictReasons:
 
 
 class TestOrphanReconciliation:
-    def test_a_position_whose_verdict_is_gone_is_deleted_with_its_marks_and_notes(
+    def test_a_position_whose_verdict_is_gone_is_deleted_with_its_marks(
         self, state_store: StateStore
     ) -> None:
         state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
-        state_store.upsert_verdict_position_note(
-            VerdictPositionNote(
-                run_id=RUN_ID, symbol=SYMBOL, note_date=ENTRY_DATE, note="様子見"
-            )
-        )
         # Re-ingesting a corrected result replaces the run's verdicts wholesale
         # and this symbol is no longer analyzed at all: nothing explains the
-        # position any more, so it goes with its marks and notes.
+        # position any more, so it goes with its marks.
 
         deleted = state_store.delete_orphaned_verdict_positions()
 
         assert deleted == ((RUN_ID, SYMBOL),)
         assert state_store.get_verdict_positions() == ()
         assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
 
     def test_a_demoted_verdict_keeps_its_position_and_is_realigned(
         self, state_store: StateStore

@@ -29,7 +29,6 @@ swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fa
 | D3 | SPY/QQQ/^VIX/^TNX は表示専用。市場環境がスクリーニング・リスク判断に一切反映されない | `pipeline/daily.py:778-782` |
 | D4 | スクリーニング落選銘柄は無記録（リスク段階の却下のみ reasons が残る非対称） | `storage/audit_records.py` |
 | D5 | バックテストに Sharpe/最大DD/勝率/PF がなく、実行 CLI も未登録 | `backtest/engine.py:64-73`, `pyproject.toml` |
-| D6 | `PaperJournal.summarize_performance()` が実装済みなのに未接続。判断履歴の読み出し CLI がない | `paper/journal.py`, `paper/cli.py` |
 | D7 | 口座レベルのリスク制御（総リスク量・実現損失上限・決算近接）が皆無 | `risk/checks.py` |
 
 日次 run の出力は terminal/markdown/discord が `DailyBrief` 単一モデルを共有する
@@ -63,10 +62,10 @@ swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fa
 
 | フェーズ | 内容 | 狙い |
 |---|---|---|
-| P1 判断根拠の可視化と数値堅牢性 | スコア内訳、落選記録、制約明示、履歴CLI、実績集計接続 | ユーザーの痛点に直結。以降の全機能の「根拠が見える」土台 |
+| P1 判断根拠の可視化と数値堅牢性 | スコア内訳、落選記録、制約明示 | ユーザーの痛点に直結。以降の全機能の「根拠が見える」土台 |
 | P2 検証ループとLLM強化 | バックテスト指標/CLI、悲観モード、感応度グリッド、ポストモーテム、LLM文脈強化 | 「知見を数値で裏取りする装置」。P5 の前提 |
 | P3 市場レジームゲート | レジームスコア、Distribution Day、Exposure Ceiling、FTD | 最大のドメインギャップ（D3）の解消 |
-| P4 口座レベルリスク規律 | ポートフォリオヒート、決算近接、サーキットブレーカー、MAE/MFE | 候補単体→口座全体への守りの拡張 |
+| P4 口座レベルリスク規律 | 決算近接 | 候補単体→口座全体への守りの拡張 |
 | P5 シグナル拡充（検証済み導入） | Minervini、決算後スコア、実行状態分類、VCP | P2 の装置で裏取りしながら追加 |
 | P6 実運用ギャップ修正 | 実 API 動作確認で発見したリグレッション・境界欠落・会計/表示バグの修正 | P1〜P5 を「テストが通る」から「毎日回る」へ |
 | P7 定性分析のスキル移行 | LLM API 統合の全廃、`analysis/` 境界の新設、Claude Code スキルによる定性分析と `copilot-ingest-analysis` での検証 | 叙述の担い手を API 課金・予算ゲート・キャッシュなしで持てるようにする |
@@ -138,7 +137,7 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **動作確認**: dry-run 実行後、DuckDB に落選行が入ること
   （`uv run python -c "..."` で件数と1行サンプルを表示）、markdown に
   「落選サマリ」節が出ること。全銘柄合格のケースで 0 件でも節が壊れないこと。
-- **Not in scope**: 落選履歴の閲覧 CLI（P1-05）、ユニバース選定段階の記録
+- **Not in scope**: 落選履歴の閲覧 CLI、ユニバース選定段階の記録
 - **依存**: なし
 
 ### P1-03 【並列可/worktree:p1-risk】risk - binding constraint 明示とサイジング内訳
@@ -158,7 +157,7 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **動作確認**: dry-run 実行で候補ごとに制約名が表示されること。
   設定の `max_position_pct` を極端に絞って再実行し、binding constraint が
   `position_cap` に切り替わることを確認。
-- **Not in scope**: ポートフォリオヒート（P4-17）、レジーム連動の上限（P3-14）
+- **Not in scope**: ポートフォリオヒート、レジーム連動の上限（P3-14）
 - **依存**: なし
 
 ### P1-04 【並列可/worktree:p1-risk】risk/storage - 数値堅牢性（Fraction 床計算・NaN/Inf 書き込みガード）
@@ -180,41 +179,25 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 
 ### P1-05 【依存あり/worktree:p1-cli】cli/report - 判断履歴の読み出し（copilot-history）
 
+> **現況**: `copilot-history`（`report/history_cli.py`）として実装済み。ただし
+> `performance` サブコマンド、markdown の「過去判断」節、および実売買ジャーナルの
+> 読み出しは、実売買記録機能一式の撤去（2026-08）に伴い削除された。現存するのは
+> `runs` / `run` / `symbol` / `rejections` / `incomplete` の決定論的run履歴のみ。
+
 - **目的**: D6 の解消（読み出し側）。書き込み専用 CLI に「見る」手段を追加する。
 - **スコープ**: 新 `[project.scripts]` エントリ `copilot-history`（新モジュール、
   例: `paper/history_cli.py` または `report/history_cli.py`）、
   `storage/state_store.py`, `report/markdown_report.py`
 - **主要仕様**:
-  - サブコマンド: `runs`（直近 N 件の run 一覧: as_of・候補数・落選数・判断数）、
-    `run --run-id <id>`（候補+リスク+判断の詳細）、`symbol <SYM>`（銘柄横断の
-    候補化・判断・結果の時系列）、`rejections --run-id <id>`（P1-02 の台帳照会）、
-    `performance`（P1-06 の集計表示）。すべて読み出し専用・Rich テーブル出力。
-  - markdown レポートに「過去判断」節を追加: 各候補銘柄について直近3件の判断
-    （decision, reason, 記録日、クローズ済みなら損益）を LLM を経由せず
-    DuckDB から直接表示する。
+  - サブコマンド: `runs`（直近 N 件の run 一覧: as_of・候補数・落選数）、
+    `run --run-id <id>`（候補+リスクの詳細）、`symbol <SYM>`（銘柄横断の
+    候補化・結果の時系列）、`rejections --run-id <id>`（P1-02 の台帳照会）。
+    すべて読み出し専用・Rich テーブル出力。
 - **動作確認**: `uv run copilot-history runs`、`uv run copilot-history symbol AAPL` 等を
   実行し、既存 DB の内容が表形式で出ること。DB が空でも例外にならず
   「記録なし」表示になること。
-- **Not in scope**: 判断の書き込み・編集（既存 copilot-decision のまま）
-- **依存**: P1-02（rejections 照会）、P1-06（performance 表示）
-
-### P1-06 【並列可/worktree:p1-cli】paper - パフォーマンス集計の接続と拡張
-
-- **目的**: D6 の解消（集計側）。「過去の判断は報われたか」を数値で出す。
-- **スコープ**: `paper/journal.py`, `paper/cli.py`, `models.py`
-- **主要仕様**:
-  - `close` 操作に `exit_reason` を必須化: {stop_loss, target, time_stop, manual, other}。
-    既存レコードは `unknown` として移行。
-  - `summarize_performance()` を拡張: 勝率、期待値（平均損益）、
-    profit_factor（総益/総損の絶対値、損失ゼロ時は None で 0 除算回避）、
-    R-multiple（`pnl / ((entry − stop) × shares)`、stop 未記録なら省略し件数を警告）、
-    exit_reason 別・戦略別の内訳、既存の SPY 対比。
-  - 集計対象はクローズ済みポジションのみ。部分決済は本 Issue の対象外。
-- **動作確認**: テストフィクスチャで手計算値（勝率・PF・R-multiple）と一致すること。
-  `uv run copilot-history performance`（P1-05 完了後）または一時スクリプトで
-  集計が表示されること。
-- **Not in scope**: 部分決済（trim）対応、MAE/MFE（P4-20）
-- **依存**: なし（P1-05 が本 Issue の表示を利用）
+- **Not in scope**: 書き込み・編集経路の追加
+- **依存**: P1-02（rejections 照会）
 
 ---
 
@@ -313,7 +296,7 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
   `llm/filings_analysis.py`
 - **主要仕様**:
   - decision_context にコード側の定量ブロックを注入: スコア内訳（P1-01）、
-    リスク制約（P1-03）、直近実現損益サマリ（P1-06）。
+    リスク制約（P1-03）。
   - 保守的不一致ルールをシステム指示に明記: LLM の定性判断がコードの定量シグナルと
     矛盾する場合、保守側を採択し矛盾自体を両論併記する（定量判定の上書き禁止）。
   - `NewsSummary` に `catalyst_quality` ∈ {high, medium, low, none} を追加。
@@ -331,7 +314,7 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
   `--skip-llm` なしの dry-run（API キーがある場合のみ）で catalyst_quality が
   出力され、CON-03 検査を通過すること。
 - **Not in scope**: 新しい LLM プロバイダ、シナリオ確率分析（swing-copilot には未実装）
-- **依存**: P1-01, P1-03, P1-06（注入データ。先行未完なら該当ブロックを段階的に追加）
+- **依存**: P1-01, P1-03（注入データ。先行未完なら該当ブロックを段階的に追加）
 
 ---
 
@@ -436,24 +419,6 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 
 ---
 
-### P4-17 【並列可/worktree:p4-risk】risk - ポートフォリオヒート上限
-
-- **目的**: 候補単体ではなく口座全体の総リスク量を制御する。
-- **スコープ**: `risk/checks.py`, `config.py`, `paper/journal.py`（保有ポジション参照）,
-  `report/*`
-- **主要仕様**:
-  - `portfolio_heat = Σ((entry − stop) × shares) / account_equity`
-    を保有中ポジション + 承認候補について算出。
-  - config `max_portfolio_heat_pct` 既定 6.0%（出典: breakout-trade-planner /
-    Minervini の 6-8% 帯の保守側、(要検証)）。超過する候補は
-    `PORTFOLIO_HEAT_EXCEEDED` で reject し、現在ヒート値をレポートのリスク節に常時表示。
-  - stop 未記録の保有ポジションがある場合はヒート計算不能として
-    `not_calculable` + 警告（沈黙のゼロ扱いをしない）。
-- **動作確認**: フィクスチャ（保有2銘柄 + 候補3銘柄）で手計算のヒート値と一致し、
-  上限超過候補が理由付き reject になること。dry-run のリスク節にヒート%が出ること。
-- **Not in scope**: 相関を加味したリスク合算（既存相関チェックと将来統合）
-- **依存**: P1-03（内訳表示の枠組み）
-
 ### P4-18 【並列可/worktree:p4-data】data/risk - 決算近接ガード（決算カレンダーアダプタ）
 
 - **目的**: 決算跨ぎの二値的・非対称リスクを機械的に警告・回避する。
@@ -475,47 +440,6 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **依存**: なし
 - **備考**: Finnhub 決算カレンダー API の無料枠での利用可否を実装前に確認し、
   不可なら yfinance の決算日で代替（精度低下を README に注記）。
-
-### P4-19 【依存あり/worktree:p4-risk】risk - サーキットブレーカーと連敗クールダウン
-
-- **目的**: 「今日は新規建玉してよい日か」という口座レベルの規律ゲートを追加する。
-- **スコープ**: `risk/circuit_breaker.py`（新規）、`paper/journal.py`,
-  `pipeline/daily.py`, `report/*`, `config.py`
-- **主要仕様**（出典: drawdown-circuit-breaker）:
-  - 集計対象は**確定済み実現損益のみ**（含み損益は使わない）。
-  - 閾値（config、既定は出典値 (要検証)）: 日次実現損失 2.0% → HALTED（翌 ET 営業日まで）、
-    週次 5.0% → HALTED（翌月曜 ET まで）、月次 8.0% → HALTED（翌月初 ET まで）、
-    直近 2 件連続負け → COOLDOWN（直近負け決済から 24 時間）。
-    損益ゼロは「勝ち」扱いで連敗リセット（非対称定義）。
-  - 期間境界は America/New_York 基準で as_of から導出（`zoneinfo`、Clock 注入規約に従う）。
-  - 複数発火時は HALTED > COOLDOWN > TRADING_ALLOWED の厳格側。発火ルールは全件記録。
-  - ジャーナルが空/未整備なら TRADING_ALLOWED + `data_quality=EMPTY_STATE`
-    （新規ユーザーをブロックしない）。
-  - パイプラインでは HALTED/COOLDOWN でも情報収集とレポートは実行し、
-    新規候補に `CIRCUIT_BREAKER_<state>` の reject/warning を付す。レポート先頭の
-    Exposure Ceiling ブロック（P3-14）と並べて表示。
-- **動作確認**: フィクスチャジャーナル（日次 −2.1% / 連敗 2 件 / 境界ちょうど）で
-  3 状態を再現し、dry-run のレポートにバナーが出ること。ET 境界（日付のみの
-  タイムスタンプ含む）の境界テスト。
-- **Not in scope**: 実弾口座残高との照合（paper journal の口座額を使用）
-- **依存**: P1-06（exit_reason・実現損益の整備）
-
-### P4-20 【依存あり/worktree:p4-risk】paper/pipeline - MAE/MFE 日次トラッキング
-
-- **目的**: 「ストップが緩い/利確が早い」を数値で言えるようにする。
-- **スコープ**: `paper/journal.py`, `pipeline/daily.py`, `storage/paper_records.py`
-- **主要仕様**:
-  - 日次パイプラインでオープンポジションの当日高値・安値から
-    MAE（最大逆行、≤0 に clamp）/ MFE（最大順行、≥0 に clamp）を更新・永続化。
-  - `date <= as_of` の価格のみ使用。データ欠損日はスキップし品質フラグを残す。
-  - performance 集計（P1-06）に平均 MAE/MFE を追加し、ヒューリスティック注記:
-    平均 MFE が実現損益に対して大きい → 「利確が早すぎる可能性」、
-    平均 MAE が大きい → 「ストップが緩い/エントリーが早い可能性」
-    （断定せず可能性表現、出典: weekly-performance-digest）。
-- **動作確認**: 既知の価格系列フィクスチャで手計算の MAE/MFE と一致。
-  dry-run 後に `copilot-history performance` で MAE/MFE が表示されること。
-- **Not in scope**: intraday 粒度（日足の高安のみ）
-- **依存**: P1-06
 
 ---
 
@@ -844,6 +768,8 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 > `export.py` と strict スキーマ `retro-input-v1`、`RetroConfig`
 > （`max_surprises`）、`prepare` umbrella が入った。予約済みの
 > `approval_mode` は挙動を変えないまま誤解を招くため Issue #178 で削除した。
+> `trades_journal` × verdict クロス集計（人間整合 `human_alignment`）は
+> 実売買記録機能一式の撤去（2026-08）に伴い削除された。
 > 設計の現況は `docs/04_detailed_design.md` 3.23.3〜3.23.4 節を正とする。
 
 - **目的**: 振り返りスキルに渡す証拠 dossier を strict スキーマで出力する。
@@ -852,8 +778,8 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 - **主要仕様**:
   - 集約: separation（proceed 群−skip 群の平均 forward return、最重要）、
     proceed 重大外し率（ウォッチ 15% (要検証)・候補全体ベースライン併記）、
-    skip 的中率（ベースライン比）、`trades_journal` × verdict クロス集計、
-    ソース貢献表（`text_items` join）。サンプル 20 件未満は「暫定」。
+    skip 的中率（ベースライン比）、ソース貢献表（`text_items` join）。
+    サンプル 20 件未満は「暫定」。
   - サプライズ選定: MISS_SEVERE 両方向、上限超過は |return| 降順で切り
     件数明示。各銘柄に当時の verdict・reasons・実現パスと、run 以降の
     鮮度データ（既存 text アダプタで取得、`analysis.*` 予算と timeout/

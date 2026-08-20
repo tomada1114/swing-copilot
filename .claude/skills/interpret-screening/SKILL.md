@@ -52,11 +52,9 @@ description: >
 
 ## 手順
 
-1. 入力 JSON を読み、`context.market_regime` / `context.performance_summary` /
-   `context.calendar_events`（マクロ／経済カレンダーイベント）を把握する
-   （当日の市場環境の前提になる）。
-2. 銘柄ごとに `score_breakdown`, `risk_constraints`, あれば `decision_history`
-   と `prior_verdicts` を読む。
+1. 入力 JSON を読み、`context.market_regime` / `context.calendar_events`
+   （マクロ／経済カレンダーイベント）を把握する（当日の市場環境の前提になる）。
+2. 銘柄ごとに `score_breakdown`, `risk_constraints`, あれば `prior_verdicts` を読む。
    - `score_breakdown` 末尾の「参考情報（コード計算・上書き不可）」には、加重前の
      生値（RSI14 / SMA50 / SMA200 / ATR14 比率 / 終値 / 平均出来高）が入る。
      加重後の内訳だけでは RSI14 が 28 なのか 44 なのか区別できないため、

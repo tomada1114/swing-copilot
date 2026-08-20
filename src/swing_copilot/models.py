@@ -71,11 +71,10 @@ class Position:
     close_date: date | None = None
     close_at: datetime | None = None
     close_price: float | None = None
-    # P1-06: why the position was closed. Input values accepted by
-    # `PaperJournal.close_position()` are exactly {stop_loss, target,
-    # time_stop, manual, other}; "unknown" is a migration-only sentinel
-    # backfilled onto closed rows that predate this column (never a valid
-    # close_position() input). `None` means the position is still open.
+    # P1-06 (historical): why the position was closed. The writer
+    # (`PaperJournal`) was removed in 2026-08 along with real-trade
+    # recording; `backtest/policy.py::as_position()` is the only remaining
+    # constructor and never sets this, so it is always `None`.
     exit_reason: str | None = None
 
 

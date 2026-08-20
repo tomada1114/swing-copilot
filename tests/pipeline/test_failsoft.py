@@ -31,12 +31,10 @@ from swing_copilot.analysis.export import (
 )
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, Position, RunStatus
-from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline import daily_runner
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
-    _run_step_risk,
     run_daily,
 )
 from swing_copilot.report.markdown_report import (
@@ -46,6 +44,7 @@ from swing_copilot.report.markdown_report import (
 from swing_copilot.report.rejections import REJECTIONS_FILENAME
 from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.retro.evaluate import EvaluateSummary, evaluate_verdicts
+from swing_copilot.risk.checks import calculate_portfolio_heat
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -159,22 +158,6 @@ class ExplodingPostmortemStateStore(StateStore):
     @property
     def database(self):
         msg = "state store connectivity failure"
-        raise RuntimeError(msg)
-
-
-class ExplodingPerformanceSummaryStateStore(StateStore):
-    """A real `StateStore`, except `get_closed_positions_with_strategy()` always raises.
-
-    P2-12: `PaperJournal.summarize_performance()` reaches this method first;
-    overriding just it simulates an unexpected storage failure at that one
-    seam, proving `_compute_performance_summary()`'s defensive try/except
-    degrades gracefully (the export step still succeeds) rather than crashing
-    the run.
-    """
-
-    def get_closed_positions_with_strategy(self, is_paper=True, as_of=None):
-        del is_paper, as_of
-        msg = "closed-positions query failure"
         raise RuntimeError(msg)
 
 
@@ -462,36 +445,6 @@ class TestPostmortemFailureDegrades:
         assert result.status == RunStatus.SUCCESS
         assert result.exit_code == 0
         assert _step_status(state_store, result.run_id, "postmortem") == "success"
-
-
-class TestMaeMfeFailureDegrades:
-    def test_excursion_storage_failure_does_not_abort_output(
-        self,
-        base_deps: DailyDependencies,
-        state_store: StateStore,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        def _raise(
-            _state_store: StateStore,
-            _market_store: MarketStore,
-            _as_of: date,
-        ) -> None:
-            msg = "excursion storage unavailable"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(daily_module, "update_position_excursions", _raise)
-
-        result = run_daily(DailyRunOptions(is_dry_run=True), base_deps)
-
-        assert result.status == RunStatus.DEGRADED
-        assert result.exit_code == 0
-        assert result.report_path is not None
-        assert result.report_path.is_file()
-        assert _step_status(state_store, result.run_id, "mae_mfe") == "failed"
-        assert _step_status(state_store, result.run_id, "8_output") == "success"
-        assert "MAE/MFE: unexpected error" in result.report_path.read_text(
-            encoding="utf-8"
-        )
 
 
 class MutableMonotonic:
@@ -900,36 +853,6 @@ class TestPartialTextStillExportsEveryCandidate:
         ]
 
 
-class TestHeldSymbolGetsTextCoverage:
-    def test_held_symbol_absent_from_todays_candidates_still_gets_text_coverage(
-        self, base_deps, state_store
-    ):
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol="TSLA",
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-            )
-        )
-        deps = replace(base_deps, news_client=FakeNewsClient())
-
-        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
-
-        assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            rows = conn.execute(
-                "SELECT symbol FROM text_items WHERE source_type = 'news'"
-            ).fetchall()
-        symbols_covered = {row[0] for row in rows}
-        # TSLA is held but not part of `universe`/today's screening candidates.
-        assert "TSLA" in symbols_covered
-        assert {"AAPL", "MSFT"} <= symbols_covered
-
-
 def _seed_virtual_position(
     state_store: StateStore, symbol: str, recommendation: str = "proceed"
 ) -> None:
@@ -968,11 +891,11 @@ def _candidate_symbols(state_store: StateStore, run_id: UUID) -> set[str]:
 
 
 class TestVirtualLedgerPositionsCountAsHeld:
-    """The verdict ledger is the second source of "held" (design 3.14/3.24).
+    """The verdict ledger is the only source of "held" (design 3.14/3.24).
 
-    Real trading has not started, so `positions` is empty and the only record
+    Since the real-trade record feature was removed (2026-08) the only record
     of a notional holding is the tracked virtual position. Held-symbol news
-    must fire off that ledger too, because company-news cannot be backfilled.
+    must fire off that ledger, because company-news cannot be backfilled.
     """
 
     def test_a_virtual_open_position_gets_the_same_text_coverage_as_a_holding(
@@ -984,7 +907,7 @@ class TestVirtualLedgerPositionsCountAsHeld:
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        # NVDA is in neither `universe` nor `positions`: only the ledger.
+        # NVDA is not in `universe` at all: only the ledger holds it.
         assert "NVDA" in _news_covered_symbols(state_store)
 
     def test_a_skip_shadow_position_is_not_treated_as_held(
@@ -1001,28 +924,6 @@ class TestVirtualLedgerPositionsCountAsHeld:
 
         assert result.status == RunStatus.SUCCESS
         assert "NVDA" not in _news_covered_symbols(state_store)
-
-    def test_real_and_virtual_positions_are_unioned_not_replaced(
-        self, base_deps, state_store
-    ):
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol="TSLA",
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-            )
-        )
-        _seed_virtual_position(state_store, "NVDA")
-        deps = replace(base_deps, news_client=FakeNewsClient())
-
-        result = run_daily(DailyRunOptions(is_dry_run=True), deps)
-
-        assert result.status == RunStatus.SUCCESS
-        assert {"TSLA", "NVDA"} <= _news_covered_symbols(state_store)
 
     def test_a_virtual_position_survives_the_universe_limit_like_a_holding(
         self, base_deps, state_store
@@ -1052,16 +953,21 @@ class TestVirtualLedgerPositionsCountAsHeld:
         _seed_virtual_position(state_store, "NVDA")
         seen: list[list[Position]] = []
 
-        def _spy(deps, request):
-            seen.append(list(request.portfolio))
-            return _run_step_risk(deps, request)
+        def _spy(portfolio, account_equity):
+            seen.append(list(portfolio))
+            return calculate_portfolio_heat(portfolio, account_equity)
 
-        monkeypatch.setattr(daily_runner, "_run_step_risk", _spy)
+        # String target: `daily.py` imports the helper by name, so the binding
+        # to rebind lives in that module's namespace, not `risk.checks`'.
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.daily.calculate_portfolio_heat", _spy
+        )
 
         result = run_daily(DailyRunOptions(is_dry_run=True), base_deps)
 
         assert result.status == RunStatus.SUCCESS
-        # Sizing, concentration, and correlation see the real book only.
+        # Sizing, concentration, correlation and portfolio heat all see an
+        # empty book: the ledger is a collection input, never a holding.
         assert seen == [[]]
 
     def test_a_historical_replay_leaves_the_held_set_empty(
@@ -1069,7 +975,7 @@ class TestVirtualLedgerPositionsCountAsHeld:
     ):
         _seed_virtual_position(state_store, "NVDA")
 
-        held = daily_runner._held_symbols(base_deps, [], is_historical=True)  # noqa: SLF001
+        held = daily_runner._held_symbols(base_deps, is_historical=True)  # noqa: SLF001
 
         assert held == set()
 
@@ -1078,36 +984,25 @@ class TestVirtualLedgerPositionsCountAsHeld:
     ):
         _seed_virtual_position(state_store, "NVDA")
 
-        held = daily_runner._held_symbols(base_deps, [], is_historical=False)  # noqa: SLF001
+        held = daily_runner._held_symbols(base_deps, is_historical=False)  # noqa: SLF001
 
         assert held == {"NVDA"}
 
-    def test_an_unreadable_ledger_warns_and_keeps_the_real_positions(
+    def test_an_unreadable_ledger_warns_and_holds_nothing(
         self, base_deps, state_store, monkeypatch, caplog
     ):
-        def _raise(_status=None):
+        def _raise(_status=None, _recommendations=None):
             msg = "ledger unreadable"
             raise RuntimeError(msg)
 
         monkeypatch.setattr(state_store, "get_verdict_positions", _raise)
-        portfolio = [
-            Position(
-                position_id=uuid4(),
-                symbol="TSLA",
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-            )
-        ]
 
         with caplog.at_level(logging.WARNING):
             held = daily_runner._held_symbols(  # noqa: SLF001
-                base_deps, portfolio, is_historical=False
+                base_deps, is_historical=False
             )
 
-        assert held == {"TSLA"}
+        assert held == set()
         assert "verdict tracking ledger unreadable" in caplog.text
 
 
@@ -1394,69 +1289,11 @@ class TestCalendarEventsReachAnalysisInput:
         assert self._exported(result)["context"]["calendar_events"] == []
 
 
-class TestPerformanceSummaryReachesAnalysisInput:
-    """P2-12 (REQ-003): P1-06's PaperJournal.summarize_performance() wiring."""
-
+class TestAnalysisInputFileLocation:
     @staticmethod
     def _exported(result):
         assert result.analysis_input_path is not None
         return json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
-
-    def test_closed_paper_trade_performance_reaches_the_exported_context(
-        self, base_deps, state_store
-    ):
-        position = Position(
-            position_id=uuid4(),
-            symbol="AAPL",
-            is_paper=True,
-            entry_date=AS_OF - timedelta(days=30),
-            entry_price=100.0,
-            shares=10,
-            status="open",
-            stop_price=95.0,
-        )
-        state_store.upsert_position(position)
-        PaperJournal(state_store).close_position(
-            position.position_id, AS_OF - timedelta(days=5), 110.0, "target"
-        )
-        deps = replace(base_deps, news_client=FakeNewsClient())
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        assert result.status == RunStatus.SUCCESS
-        performance = self._exported(result)["context"]["performance_summary"]
-        assert "<performance_summary>" in performance
-        assert "クローズ済み取引数: 1" in performance
-
-    def test_no_closed_trades_yet_omits_the_performance_block_without_failing(
-        self, base_deps
-    ):
-        deps = replace(base_deps, news_client=FakeNewsClient())
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        assert result.status == RunStatus.SUCCESS
-        assert self._exported(result)["context"]["performance_summary"] is None
-
-    def test_summarize_performance_failure_degrades_gracefully_not_fatally(
-        self, base_deps, tmp_path
-    ):
-        exploding_state_store = ExplodingPerformanceSummaryStateStore(
-            Database(tmp_path / "copilot.duckdb")
-        )
-        deps = replace(
-            base_deps,
-            state_store=exploding_state_store,
-            news_client=FakeNewsClient(),
-        )
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        # The performance-summary lookup failure is swallowed by
-        # `_compute_performance_summary()`'s own try/except, so the export
-        # step still succeeds -- it just omits the performance block.
-        assert result.status == RunStatus.SUCCESS
-        assert self._exported(result)["context"]["performance_summary"] is None
 
     def test_exported_file_lands_beside_the_markdown_report(self, base_deps, tmp_path):
         deps = replace(base_deps, news_client=FakeNewsClient())

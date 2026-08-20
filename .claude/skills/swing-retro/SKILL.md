@@ -98,7 +98,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    （2 値は後段で result に逐語転記する。不一致は run ごと hard fail）
 3. 読む順序: `aggregates`（verdict_mix → separation 3 版 → tracked_performance →
    proceed 重大外し率 → skip 的中率 → news_supply）→
-   `signal_performance` → `human_alignment` → `source_contribution` →
+   `signal_performance` → `source_contribution` →
    `basis_contribution` → `failure_class_history` → `aggregates_by_config` →
    `surprises` → `config_snapshot` → `notes`。`verdict_mix` は他の指標より先に読む——
    proceed が出ていない窓では `separation` / 重大外し率が `value: null` で沈黙するが、

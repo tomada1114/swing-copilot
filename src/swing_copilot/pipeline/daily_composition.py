@@ -236,44 +236,24 @@ def _compose_dependencies(
     )
 
 
-def _preflight(deps: DailyDependencies, options: DailyRunOptions) -> None:
-    """Abort before any run state is written when continuing would be pointless.
+def _preflight(deps: DailyDependencies) -> None:
+    """Warn before any run state is written when equity is unconfigured.
 
-    `account_equity_usd is None` already makes `RiskChecker` return
-    `not_calculable` for every candidate (by design, unchanged here). The
-    additional trap this closes: once a single closed position exists,
-    `evaluate_circuit_breaker` also cannot evaluate loss discipline without
-    an equity figure and returns `HALTED`, rejecting every candidate too --
-    at that point a run only produces a report and verdict full of
-    algorithmically-forced rejections. Historical replay (`options.as_of is
-    not None`) never sees current position state (`daily_runner.py`'s
-    `_HISTORICAL_POSITION_NOTICE`), so its portfolio is always empty and the
-    abort would never fire anyway; it is skipped explicitly rather than
-    relying on that to stay true.
+    `account_equity_usd is None` makes `RiskChecker` return `not_calculable`
+    for every candidate (by design, unchanged here), so the run still produces
+    a usable screening report and is allowed to continue.
+
+    This used to abort the run outright once a closed position existed, because
+    the realized-P&L circuit breaker then returned `HALTED` and rejected every
+    candidate on top. That abort went with the real-trade record feature in
+    2026-08: with `positions` removed there is no realized P&L in a daily run,
+    the breaker no longer runs here, and no such state can arise.
 
     Args:
-        deps: Composed dependencies; only `state_store` and `settings` are
-            read, and `state_store` is never queried when `account_equity_usd`
-            is set.
-        options: Parsed CLI options for this run.
-
-    Raises:
-        PreflightAbort: `account_equity_usd` is unset and at least one closed
-            (paper) position already exists for a live run.
+        deps: Composed dependencies; only `settings` is read.
     """
-    if deps.settings.risk.account_equity_usd is not None:
-        return
-    if options.as_of is None:
-        closed = deps.state_store.get_closed_positions(is_paper=True)
-        if closed:
-            msg = (
-                "preflight abort: config/settings.yaml の risk.account_equity_usd が"
-                f"未設定のまま決済済みポジションが{len(closed)}件あります。この状態では"
-                "サーキットブレーカーが全候補を CIRCUIT_BREAKER_HALTED で reject するため、"
-                "run を中止しました。"
-            )
-            raise PreflightAbort(msg, reason="account_equity_unset")
-    logger.warning(ACCOUNT_EQUITY_UNSET_NOTICE)
+    if deps.settings.risk.account_equity_usd is None:
+        logger.warning(ACCOUNT_EQUITY_UNSET_NOTICE)
 
 
 class _SecretRedactionFilter(logging.Filter):
@@ -335,7 +315,7 @@ def main(argv: list[str] | None = None) -> None:
     deps = run_cli(
         lambda: _compose_dependencies(options, settings, strategies), _UNIVERSE_EXIT
     )
-    run_cli(lambda: _preflight(deps, options), _PREFLIGHT_EXIT)
+    run_cli(lambda: _preflight(deps), _PREFLIGHT_EXIT)
     result = run_cli(lambda: run_daily(options, deps), _PREFLIGHT_EXIT)
     paths = TerminalPaths(
         report=result.report_path,

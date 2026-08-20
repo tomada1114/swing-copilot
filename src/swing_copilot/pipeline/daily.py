@@ -46,8 +46,6 @@ from swing_copilot.models import (
     RunStatus,
     StepStatus,
 )
-from swing_copilot.paper.excursions import update_position_excursions
-from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.pipeline.earnings import collect_earnings_calendar
 from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.pipeline.progress import NullProgressReporter, ProgressReporter
@@ -79,13 +77,6 @@ from swing_copilot.risk.checks import (
     RiskChecker,
     RiskRunContext,
     calculate_portfolio_heat,
-)
-from swing_copilot.risk.circuit_breaker import (
-    CircuitBreakerResult,
-    CircuitThresholds,
-    RealizedTrade,
-    evaluate_circuit_breaker,
-    evaluation_time_for_as_of,
 )
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import (
@@ -124,7 +115,6 @@ if TYPE_CHECKING:
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.models import DailyRunResult, Position
-    from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
@@ -179,7 +169,8 @@ _FUNDAMENTALS_INGESTED_FORMS = ("10-K", "10-Q")
 #: How many symbols a fundamentals `run_steps.detail` enumerates before it
 #: summarizes the rest as a count (`_summarize_symbols`).
 _FUNDAMENTALS_DETAIL_SYMBOL_LIMIT = 10
-_DECISION_HISTORY_LIMIT = 3
+#: How many of a symbol's earlier verdicts the export feeds back (Issue #191).
+_PRIOR_VERDICT_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
 _RETRO_NOTE_DETAIL_LIMIT = 3
 #: P8-117: shared between `daily_composition.py`'s preflight warning log and
@@ -276,36 +267,6 @@ class DailyDependencies:
     progress: ProgressReporter = field(default_factory=NullProgressReporter)
 
 
-def _compute_performance_summary(
-    deps: DailyDependencies, as_of: date
-) -> PerformanceSummary | None:
-    """P2-12 (REQ-003): compute P1-06's portfolio-wide summary once per run.
-
-    Called from step 6 (analysis export) itself, inside its existing NFR-03
-    time-budget gate -- not a new gate. Defensive:
-    `PaperJournal.summarize_performance()` reads real store/market data and
-    could raise on an unexpected storage failure; a failure here must degrade
-    the (already fail-soft) export step by omitting the performance block,
-    never crash the whole run.
-
-    Args:
-        deps: Run dependencies (`state_store`/`market_store`).
-        as_of: Point-in-time cutoff for the summary.
-
-    Returns:
-        The computed summary, or `None` if it could not be computed.
-    """
-    try:
-        return PaperJournal(deps.state_store).summarize_performance(
-            deps.market_store, as_of
-        )
-    except Exception:
-        logger.exception(
-            "summarize_performance failed; continuing without performance context"
-        )
-        return None
-
-
 @dataclass(frozen=True, slots=True)
 class _StepOutcome:
     success: bool
@@ -334,16 +295,11 @@ class _RunContext:
     truncated: list[TruncatedCandidate]
     risk_assessments: list[RiskAssessment]
     portfolio_heat: PortfolioHeatResult
-    circuit_breaker: CircuitBreakerResult
     earnings_guard_notice: str | None
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
     ftd_snapshot: FtdSnapshot
-    # P2-12 (REQ-003): portfolio-wide P1-06 performance summary. Not
-    # screening-derived like the other fields -- computed once inside step 6
-    # (analysis export) itself via `_compute_performance_summary()`.
-    performance_summary: PerformanceSummary | None = None
     # #273: earlier runs whose qualitative analysis never landed
     # (`_prior_analysis_gaps()`), threaded through so `_run_soft_steps` can
     # turn them into an operator-facing `brief.notices` line.
@@ -355,7 +311,6 @@ class _RiskStepRequest:
     """Point-in-time inputs for one risk step."""
 
     candidates: list[Candidate]
-    portfolio: list[Position]
     run_id: UUID
     as_of: date
     exposure: ExposureDecision
@@ -1191,46 +1146,26 @@ def _run_step_screening(
 def _run_step_risk(
     deps: DailyDependencies,
     request: _RiskStepRequest,
-) -> tuple[
-    _StepOutcome,
-    list[RiskAssessment],
-    PortfolioHeatResult,
-    CircuitBreakerResult,
-    str | None,
-]:
-    closed = deps.state_store.get_closed_positions(
-        is_paper=True,
-        as_of=request.as_of,
-    )
-    circuit_config = deps.settings.risk
-    circuit_breaker = evaluate_circuit_breaker(
-        [
-            RealizedTrade(
-                position.close_at,
-                (
-                    (position.close_price - position.entry_price) * position.shares
-                    if position.close_price is not None
-                    else None
-                ),
-            )
-            for position in closed
-        ],
-        circuit_config.account_equity_usd,
-        request.as_of,
-        evaluation_time_for_as_of(request.as_of),
-        CircuitThresholds(
-            circuit_config.circuit_daily_loss_pct,
-            circuit_config.circuit_weekly_loss_pct,
-            circuit_config.circuit_monthly_loss_pct,
-            circuit_config.circuit_consecutive_losses,
-            circuit_config.circuit_cooldown_hours,
-        ),
-    )
+) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult, str | None]:
+    # The account holds nothing this process knows about: the real-trade record
+    # feature (FR-11/CON-04's `positions`) was removed in 2026-08, so sizing,
+    # concentration, correlation and portfolio heat are all computed against an
+    # empty book. The virtual verdict ledger is deliberately *not* substituted
+    # here -- a position nobody actually took must never reach risk as if the
+    # account held it (`daily_runner._held_symbols` says the same thing from
+    # the collection side).
+    portfolio: list[Position] = []
+    # The realized-P&L circuit breaker had exactly one input source, closed
+    # rows in `positions`, and it went with them. `None` is the checker's
+    # existing "not evaluated" value, behaviourally identical to
+    # `TRADING_ALLOWED` in `RiskChecker._apply_circuit_breaker`, which is what
+    # an empty journal produced before. The breaker itself survives in
+    # `backtest/policy.py`, fed by the simulator's own realized trades.
     earnings = collect_earnings_calendar(
         deps.earnings_client,
         sorted(
             {
-                *(position.symbol for position in request.portfolio),
+                *(position.symbol for position in portfolio),
                 *(candidate.symbol for candidate in request.candidates),
             }
         ),
@@ -1247,18 +1182,18 @@ def _run_step_risk(
             earnings_guard=EarningsGuardInput(
                 earnings.is_enabled, earnings.lookups_by_symbol
             ),
-            circuit_breaker=circuit_breaker,
+            circuit_breaker=None,
         ),
     )
     assessments = checker.check(
         request.candidates,
-        request.portfolio,
+        portfolio,
         deps.settings.risk.account_equity_usd,
         request.exposure,
     )
     deps.state_store.record_risk_assessments(assessments, request.run_id)
     base_heat = calculate_portfolio_heat(
-        request.portfolio,
+        portfolio,
         deps.settings.risk.account_equity_usd,
     )
     final_heat = (
@@ -1266,13 +1201,7 @@ def _run_step_risk(
         if base_heat.status == "calculated" and assessments
         else base_heat
     )
-    return (
-        _StepOutcome(True),
-        assessments,
-        final_heat,
-        circuit_breaker,
-        earnings.notice,
-    )
+    return _StepOutcome(True), assessments, final_heat, earnings.notice
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -1520,21 +1449,21 @@ def _run_step_analysis_export(
     ctx: _RunContext,
     text_items: list[TextItem] | None,
     *,
-    include_decision_history: bool,
+    include_prior_verdicts: bool,
 ) -> tuple[_StepOutcome, Path | None, str | None]:
     """Export `analysis_input.json` for the qualitative-analysis skill.
 
     No model is called here, so this step is cheap and unconditional -- it is
-    skipped only when there is genuinely nothing to analyze. `include_decision_history`
-    carries the existing point-in-time invariant: prior human decisions are
-    injected only for a live run of the current day, never for a `--dry-run`
-    or an `--as-of` replay.
+    skipped only when there is genuinely nothing to analyze.
+    `include_prior_verdicts` carries the existing point-in-time invariant: the
+    analysis layer's own earlier judgements are injected only for a live run of
+    the current day, never for a `--dry-run` or an `--as-of` replay.
 
     Args:
         deps: Run dependencies.
         ctx: Screening/risk state for this run.
         text_items: Step 5's collected text, or `None` if it produced none.
-        include_decision_history: Whether prior decisions may be injected.
+        include_prior_verdicts: Whether prior verdicts may be injected.
 
     Returns:
         The step outcome and, on success, the exported file's absolute path.
@@ -1552,13 +1481,10 @@ def _run_step_analysis_export(
             None,
         )
 
-    ctx = replace(
-        ctx, performance_summary=_compute_performance_summary(deps, ctx.run_date)
-    )
     try:
         payload = build_analysis_input(
             _export_request(
-                deps, ctx, text_items, include_decision_history=include_decision_history
+                deps, ctx, text_items, include_prior_verdicts=include_prior_verdicts
             )
         )
         path = write_analysis_input(
@@ -1579,7 +1505,7 @@ def _export_request(
     ctx: _RunContext,
     text_items: list[TextItem],
     *,
-    include_decision_history: bool,
+    include_prior_verdicts: bool,
 ) -> ExportRequest:
     """Group one run's export inputs, one `ExportCandidate` per candidate.
 
@@ -1603,7 +1529,6 @@ def _export_request(
         generated_at=deps.clock.now(),
         regime_snapshot=ctx.regime_snapshot,
         exposure_decision=ctx.exposure_decision,
-        performance_summary=ctx.performance_summary,
         candidates=tuple(
             ExportCandidate(
                 candidate=candidate,
@@ -1611,23 +1536,13 @@ def _export_request(
                 text_items=tuple(
                     item for item in text_items if item.symbol == candidate.symbol
                 ),
-                decision_history=tuple(
-                    deps.state_store.get_decision_history(
-                        candidate.symbol,
-                        deps.strategy_key,
-                        ctx.run_date,
-                        _DECISION_HISTORY_LIMIT,
-                    )
-                )
-                if include_decision_history
-                else (),
                 prior_verdicts=deps.state_store.get_prior_verdicts(
                     candidate.symbol,
                     deps.strategy_key,
                     ctx.run_date,
-                    _DECISION_HISTORY_LIMIT,
+                    _PRIOR_VERDICT_LIMIT,
                 )
-                if include_decision_history
+                if include_prior_verdicts
                 else (),
             )
             for candidate in ctx.candidates
@@ -1807,43 +1722,6 @@ def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome
     )
 
 
-def _run_step_excursions(deps: DailyDependencies, as_of: date) -> _StepOutcome:
-    """Update daily MAE/MFE snapshots without making the run fatal."""
-    summary = update_position_excursions(deps.state_store, deps.market_store, as_of)
-    if not summary.missing_symbols:
-        return _StepOutcome(True)
-    return _StepOutcome(
-        True,
-        "MAE_MFE_MISSING_BAR: " + ", ".join(summary.missing_symbols),
-    )
-
-
-def _run_mae_mfe_soft_step(
-    deps: DailyDependencies,
-    run_id: UUID,
-    as_of: date,
-    *,
-    is_historical: bool,
-) -> _StepOutcome:
-    """Execute and audit MAE/MFE without crossing the fatal boundary."""
-    started_at = time.perf_counter()
-    logger.debug("step mae_mfe starting")
-    if is_historical:
-        outcome = _StepOutcome(
-            True,
-            "skipped: historical replay does not use current position state",
-            is_skipped=True,
-        )
-    else:
-        try:
-            outcome = _run_step_excursions(deps, as_of)
-        except Exception as exc:
-            logger.exception("MAE/MFE step raised unexpectedly")
-            outcome = _StepOutcome(False, f"unexpected error: {exc}")
-    _record_step(deps, run_id, "mae_mfe", outcome, started_at)
-    return outcome
-
-
 def _run_text_soft_step(
     options: DailyRunOptions,
     deps: DailyDependencies,
@@ -1886,7 +1764,6 @@ def _run_step_output(
         max_position_pct=deps.settings.risk.max_position_pct,
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
-        circuit_breaker=output.run.circuit_breaker,
         ftd_snapshot=output.run.ftd_snapshot,
         portfolio_heat=output.run.portfolio_heat,
         max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
@@ -1894,7 +1771,7 @@ def _run_step_output(
         data_tier=deps.data_tier.value,
     )
     try:
-        brief = build_daily_brief(context, deps.market_store, deps.state_store)
+        brief = build_daily_brief(context, deps.market_store)
     except Exception as exc:
         return _StepOutcome(False, f"brief construction failed: {exc}"), None, None
     try:

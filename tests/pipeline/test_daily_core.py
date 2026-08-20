@@ -22,7 +22,7 @@ import pytest
 from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.exceptions import PreflightAbort
-from swing_copilot.models import DailyRunOptions, Position, RunMode, RunStatus
+from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline.daily import (
     _FUNDAMENTALS_EMPTY_BACKOFF_DAYS,
     _FUNDAMENTALS_REFRESH_INTERVAL_DAYS,
@@ -47,8 +47,8 @@ from swing_copilot.storage.market_store import (
     FundamentalsRecord,
     MarketStore,
 )
-from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.state_store import StateStore
+from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 
@@ -249,6 +249,31 @@ def deps(settings, market_store, state_store, tmp_path):
     )
 
 
+def _seed_virtual_position(
+    state_store: StateStore, symbol: str, *, entry_date: date
+) -> None:
+    """Open one `proceed` virtual position -- the only kind of holding left.
+
+    Since the real-trade record feature was removed (2026-08) the verdict
+    tracking ledger is the sole source of "held" for `_held_symbols()`.
+    """
+    state_store.upsert_verdict_position(
+        VerdictPosition(
+            run_id=uuid4(),
+            symbol=symbol,
+            strategy_key="default",
+            recommendation="proceed",
+            no_trade=False,
+            entry_date=entry_date,
+            entry_price=100.0,
+            stop_price=95.0,
+            days_held=1,
+            status="open",
+            last_marked_date=entry_date,
+        )
+    )
+
+
 class TestHappyPath:
     def test_completes_all_eight_steps_successfully(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -271,7 +296,6 @@ class TestHappyPath:
             "6_analysis_export",
             "7_notify",
             "8_output",
-            "mae_mfe",
             "postmortem",
             "retro_collect",
             "retro_evaluate",
@@ -443,8 +467,8 @@ class TestIdempotency:
             ).fetchone()
         # 8 pre-existing steps + local postmortem, MAE/MFE, the two retro
         # (collect/evaluate) steps, and verdict tracking.
-        assert first_steps == (13,)
-        assert second_steps == (13,)
+        assert first_steps == (12,)
+        assert second_steps == (12,)
 
 
 class TestFatalStepFailure:
@@ -657,17 +681,8 @@ class TestSymbolLimit:
                 self.requested_symbols.append(tuple(symbols))
                 return super().get_daily_bars(symbols, start, end)
 
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol="AAPL",
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-                stop_price=95.0,
-            )
+        _seed_virtual_position(
+            state_store, "AAPL", entry_date=AS_OF - timedelta(days=5)
         )
         provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
         zero_limit_deps = replace(deps, data_provider=provider)
@@ -694,17 +709,8 @@ class TestSymbolLimit:
                 self.requested_symbols.append(tuple(symbols))
                 return super().get_daily_bars(symbols, start, end)
 
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol="OLDCO",
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-                stop_price=95.0,
-            )
+        _seed_virtual_position(
+            state_store, "OLDCO", entry_date=AS_OF - timedelta(days=5)
         )
         provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT", "OLDCO"], AS_OF))
         full_universe_deps = replace(deps, data_provider=provider)
@@ -735,17 +741,8 @@ class TestSymbolLimit:
                 self.requested_symbols.append(tuple(symbols))
                 return super().get_daily_bars(symbols, start, end)
 
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol="AAPL",
-                is_paper=True,
-                entry_date=AS_OF + timedelta(days=entry_offset),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-                stop_price=95.0,
-            )
+        _seed_virtual_position(
+            state_store, "AAPL", entry_date=AS_OF + timedelta(days=entry_offset)
         )
         provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
         historical_deps = replace(deps, data_provider=provider)
@@ -759,7 +756,7 @@ class TestSymbolLimit:
         assert "AAPL" not in provider.requested_symbols[0]
         assert result.brief is not None
         assert any(
-            "historical replay does not use current position state" in notice
+            "historical replay does not use current ledger state" in notice
             for notice in result.brief.notices
         )
 
@@ -2646,17 +2643,8 @@ class TestFundamentalsHeldFirstOrder:
     @pytest.fixture
     def make_deps(self, settings, market_store, state_store, tmp_path):
         """Factory for a live run holding `_HELD_SYMBOL` outside the universe."""
-        state_store.upsert_position(
-            Position(
-                position_id=uuid4(),
-                symbol=_HELD_SYMBOL,
-                is_paper=True,
-                entry_date=AS_OF - timedelta(days=5),
-                entry_price=100.0,
-                shares=10,
-                status="open",
-                stop_price=95.0,
-            )
+        _seed_virtual_position(
+            state_store, _HELD_SYMBOL, entry_date=AS_OF - timedelta(days=5)
         )
 
         def _make(edgar_client, monotonic):
@@ -3062,66 +3050,3 @@ class TestScreeningTruncations:
                 [str(result.run_id)],
             ).fetchone()
         assert count == (0,)
-
-
-class TestPastDecisionsThreading:
-    """P1-05 REQ-008 strategy_key threading test.
-
-    `deps.strategy_key` must reach `DailyBriefContext` and scope each
-    candidate's `past_decisions` -- not merely coincidentally match the
-    shared "default" value.
-    """
-
-    def test_strategy_key_threads_into_past_decisions_end_to_end(
-        self, deps, state_store
-    ):
-        custom_deps = replace(
-            deps,
-            strategy_key="growth_v2",
-            strategies_config=TWO_STRATEGIES_CONFIG,
-        )
-        # A decision recorded under a different strategy_key than this run's
-        # own must not surface in `past_decisions`.
-        wrong_strategy_run = state_store.start_run(
-            AS_OF - timedelta(days=5), RunMode.LIVE, "cfg"
-        )
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=wrong_strategy_run,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=None,
-                decision="followed",
-                reason_memo="wrong strategy decision",
-                virtual_fill_price=100.0,
-            )
-        )
-        right_strategy_run = state_store.start_run(
-            AS_OF - timedelta(days=3), RunMode.LIVE, "cfg"
-        )
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=right_strategy_run,
-                symbol="AAPL",
-                strategy_key="growth_v2",
-                position_id=None,
-                decision="ignored",
-                reason_memo="correct strategy decision",
-                virtual_fill_price=None,
-            )
-        )
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), custom_deps)
-
-        assert result.status == RunStatus.SUCCESS
-        assert result.brief is not None
-        aapl = next(c for c in result.brief.candidates if c.symbol == "AAPL")
-        assert len(aapl.past_decisions) == 1
-        assert aapl.past_decisions[0].decision == "ignored"
-        assert aapl.past_decisions[0].reason_memo == "correct strategy decision"
-
-        assert result.report_path is not None
-        report_text = result.report_path.read_text(encoding="utf-8")
-        assert "### 過去判断" in report_text
-        assert "correct strategy decision" in report_text
-        assert "wrong strategy decision" not in report_text

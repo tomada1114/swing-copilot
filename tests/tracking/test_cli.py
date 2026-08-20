@@ -1,8 +1,7 @@
-"""`copilot-track` CLI surface: update / list / show / stats / close / note."""
+"""`copilot-track` CLI surface: update / list / show / stats."""
 
 from __future__ import annotations
 
-from datetime import date
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -17,6 +16,7 @@ from swing_copilot.tracking import cli as cli_module
 from swing_copilot.tracking.cli import main
 from tests.tracking.conftest import (
     DAY_1,
+    DAY_2,
     ENTRY_DATE,
     RUN_ID,
     SYMBOL,
@@ -50,6 +50,31 @@ def db_path(tmp_path: Path) -> Path:
 
 def _store(db_path: Path) -> StateStore:
     return StateStore(Database(db_path))
+
+
+#: `DAY_2`'s open, deliberately far below any trailing stop the `DAY_1` close
+#: could have produced, so `evaluate_exit`'s gap rule fills at exactly this
+#: price. Entry is `FLAT_CLOSE` (100.00), which makes the realized result an
+#: exact -10.00% no matter how the stop moved on the way.
+_GAP_DOWN_OPEN = 90.0
+
+
+def _close_by_stop(db_path: Path) -> None:
+    """Close the seeded position the only way the ledger closes anything."""
+    market_store = MarketStore(Database(db_path), parquet_root=db_path.parent / "bars")
+    write_bars(
+        market_store,
+        [
+            bar(
+                DAY_2,
+                open_price=_GAP_DOWN_OPEN,
+                high=_GAP_DOWN_OPEN,
+                low=_GAP_DOWN_OPEN - 1.0,
+                close=_GAP_DOWN_OPEN,
+            )
+        ],
+    )
+    main(["update", "--as-of", DAY_2.isoformat(), "--db", str(db_path)])
 
 
 class TestUpdateCommand:
@@ -213,19 +238,7 @@ class TestListCommand:
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        main(
-            [
-                "close",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--as-of",
-                DAY_1.isoformat(),
-                "--db",
-                str(db_path),
-            ]
-        )
+        _close_by_stop(db_path)
         capsys.readouterr()
 
         main(["list", "--status", "open", "--db", str(db_path)])
@@ -234,25 +247,10 @@ class TestListCommand:
 
 
 class TestShowCommand:
-    def test_it_prints_the_verdict_reasons_marks_and_notes(
+    def test_it_prints_the_verdict_reasons_and_marks(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        main(
-            [
-                "note",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--text",
-                "想定内の推移",
-                "--date",
-                DAY_1.isoformat(),
-                "--db",
-                str(db_path),
-            ]
-        )
         capsys.readouterr()
 
         main(
@@ -262,7 +260,6 @@ class TestShowCommand:
         out = capsys.readouterr().out
         assert "押し目が浅い" in out
         assert DAY_1.isoformat() in out
-        assert "想定内の推移" in out
 
     def test_a_position_whose_verdict_row_is_gone_still_renders(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
@@ -307,120 +304,14 @@ class TestShowCommand:
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        main(
-            [
-                "close",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--as-of",
-                DAY_1.isoformat(),
-                "--db",
-                str(db_path),
-            ]
-        )
+        _close_by_stop(db_path)
         capsys.readouterr()
 
         main(["show", "--symbol", SYMBOL, "--db", str(db_path)])
 
         out = capsys.readouterr().out
         assert "手仕舞い" in out
-        assert "+2.00%" in out
-
-
-class TestCloseCommand:
-    def test_it_records_a_manual_exit_with_the_note(
-        self, db_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        capsys.readouterr()
-
-        main(
-            [
-                "close",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--as-of",
-                DAY_1.isoformat(),
-                "--note",
-                "決算をまたぎたくない",
-                "--db",
-                str(db_path),
-            ]
-        )
-
-        assert "手仕舞い" in capsys.readouterr().out
-        state_store = _store(db_path)
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
-        assert position.exit_reason == "manual"
-        assert [
-            note.note for note in state_store.get_verdict_position_notes(RUN_ID, SYMBOL)
-        ] == ["決算をまたぎたくない"]
-
-    def test_closing_an_untracked_position_exits_with_the_reason(
-        self, db_path: Path
-    ) -> None:
-        with pytest.raises(SystemExit, match="存在しない"):
-            main(
-                [
-                    "close",
-                    "--run-id",
-                    str(RUN_ID),
-                    "--symbol",
-                    SYMBOL,
-                    "--as-of",
-                    DAY_1.isoformat(),
-                    "--db",
-                    str(db_path),
-                ]
-            )
-
-
-class TestNoteCommand:
-    def test_an_omitted_date_falls_back_to_the_system_clock(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        monkeypatch.setattr(SystemClock, "today", lambda _self: date(2027, 4, 1))
-
-        main(
-            [
-                "note",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--text",
-                "上昇一服",
-                "--db",
-                str(db_path),
-            ]
-        )
-
-        notes = _store(db_path).get_verdict_position_notes(RUN_ID, SYMBOL)
-        assert [note.note_date for note in notes] == [date(2027, 4, 1)]
-
-    def test_a_note_on_an_untracked_position_exits_with_the_reason(
-        self, db_path: Path
-    ) -> None:
-        with pytest.raises(SystemExit, match="存在しない"):
-            main(
-                [
-                    "note",
-                    "--run-id",
-                    str(RUN_ID),
-                    "--symbol",
-                    SYMBOL,
-                    "--text",
-                    "所感",
-                    "--db",
-                    str(db_path),
-                ]
-            )
+        assert "-10.00%" in out
 
 
 class TestRecommendationDisplayFilter:
@@ -510,28 +401,17 @@ class TestStatsCommand:
         self, db_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["update", "--as-of", DAY_1.isoformat(), "--db", str(db_path)])
-        main(
-            [
-                "close",
-                "--run-id",
-                str(RUN_ID),
-                "--symbol",
-                SYMBOL,
-                "--as-of",
-                DAY_1.isoformat(),
-                "--db",
-                str(db_path),
-            ]
-        )
+        _close_by_stop(db_path)
         capsys.readouterr()
 
         main(["stats", "--recommendation", "proceed", "--db", str(db_path)])
 
         out = capsys.readouterr().out
-        # Entry 100.00 -> manual close at the 102.00 mark: one win, +2.00%.
-        assert "+100.00%" in out
-        assert "+2.00%" in out
-        assert "manual=1" in out
+        # Entry 100.00 -> gap through the stop, filled at the 90.00 open:
+        # one loss, -10.00%, and the only exit reason is the mechanical stop.
+        assert "+0.00%" in out
+        assert "-10.00%" in out
+        assert "stop=1" in out
 
     def test_a_single_stratum_can_be_selected(
         self, db_path: Path, capsys: pytest.CaptureFixture[str]

@@ -80,7 +80,7 @@ deepdive は**そのゲートの外**で動くため、ここに書き込むと�
 
 セッション本体が `analysis_input.json` を読み、対象銘柄ごとに必要な範囲だけを取り出す。
 
-- `symbol` / `score_breakdown` / `risk_constraints` / `decision_history`
+- `symbol` / `score_breakdown` / `risk_constraints`
 - `news[]`（`source_id` / `published_at` / `headline` / `summary` / `provider`）
 - `filings[]`（`source_id` / `form_type` / `filed_at` / `text` / `coverage`）
 - run 単位の `context.market_regime` / `context.calendar_events`

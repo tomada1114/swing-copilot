@@ -217,7 +217,6 @@ def _request(
         generated_at=GENERATED_AT,
         regime_snapshot=_snapshot(),
         exposure_decision=_exposure(),
-        performance_summary=None,
         candidates=(candidate,),
         limits=limits,
         calendar_events=calendar_events,
@@ -484,15 +483,10 @@ class TestBuildAnalysisInput:
 
         assert payload.candidates[0].filings[0].form_type == "unknown"
 
-    def test_an_empty_decision_history_exports_null_not_an_empty_string(self):
+    def test_an_empty_prior_verdict_list_exports_null_not_an_empty_string(self):
         payload = build_analysis_input(_request())
 
-        assert payload.candidates[0].decision_history is None
-
-    def test_an_absent_performance_summary_exports_null(self):
-        payload = build_analysis_input(_request())
-
-        assert payload.context.performance_summary is None
+        assert payload.candidates[0].prior_verdicts is None
         assert payload.context.market_regime is not None
 
     def test_no_calendar_items_exports_an_empty_list(self):

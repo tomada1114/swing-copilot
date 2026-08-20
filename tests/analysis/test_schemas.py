@@ -424,9 +424,7 @@ class TestInputRoundTrip:
 
 class TestCalendarEventsContext:
     def test_calendar_events_default_to_an_empty_list(self):
-        context = AnalysisContextBlocks.model_validate(
-            {"market_regime": None, "performance_summary": None}
-        )
+        context = AnalysisContextBlocks.model_validate({"market_regime": None})
         assert context.calendar_events == []
 
     def test_an_unknown_calendar_event_field_is_rejected(self):

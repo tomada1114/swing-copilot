@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from swing_copilot.analysis.context import (
-    format_decision_history,
     format_market_regime,
-    format_performance_summary,
     format_prior_verdicts,
     format_risk_constraints,
     format_score_breakdown,
@@ -42,12 +40,10 @@ if TYPE_CHECKING:
     from datetime import date, datetime
     from uuid import UUID
 
-    from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate
-    from swing_copilot.storage.paper_records import DecisionHistoryEntry
     from swing_copilot.storage.verdict_records import PriorVerdictRecord
     from swing_copilot.text.base import TextItem
 
@@ -109,11 +105,9 @@ class ExportCandidate:
     candidate: Candidate
     risk_assessment: RiskAssessment
     text_items: tuple[TextItem, ...]
-    # Empty for dry-run/`--as-of` reruns: prior human decisions are only
-    # injected for a live run of the current day (point-in-time invariant).
-    decision_history: tuple[DecisionHistoryEntry, ...] = ()
-    # The analysis layer's own earlier judgements on this symbol (Issue
-    # #191), gated by the same point-in-time rule as `decision_history`.
+    # The analysis layer's own earlier judgements on this symbol (Issue #191).
+    # Empty for dry-run/`--as-of` reruns: past verdicts are only injected for a
+    # live run of the current day (point-in-time invariant).
     prior_verdicts: tuple[PriorVerdictRecord, ...] = ()
 
 
@@ -127,7 +121,6 @@ class ExportRequest:
     generated_at: datetime
     regime_snapshot: RegimeSnapshot
     exposure_decision: ExposureDecision
-    performance_summary: PerformanceSummary | None
     candidates: tuple[ExportCandidate, ...]
     limits: TextExportLimits
     # Run-wide macro/economic-calendar `TextItem`s (`symbol is None`), disjoint
@@ -150,10 +143,8 @@ def build_analysis_input(request: ExportRequest) -> AnalysisInput:
     market_regime = format_market_regime(
         request.regime_snapshot, request.exposure_decision
     )
-    performance = format_performance_summary(request.performance_summary)
     context = AnalysisContextBlocks(
         market_regime=market_regime or None,
-        performance_summary=performance or None,
         calendar_events=_calendar_event_inputs(request.calendar_events, request.limits),
     )
     candidates = [_candidate_input(item, request.limits) for item in request.candidates]
@@ -198,14 +189,12 @@ def write_analysis_input(payload: AnalysisInput, output_dir: str | Path) -> Path
 
 
 def _candidate_input(item: ExportCandidate, limits: TextExportLimits) -> CandidateInput:
-    history = format_decision_history(item.decision_history)
     prior_verdicts = format_prior_verdicts(item.prior_verdicts)
     news = _news_inputs(item.text_items, limits, item.candidate.symbol)
     return CandidateInput(
         symbol=item.candidate.symbol,
         score_breakdown=format_score_breakdown(item.candidate),
         risk_constraints=format_risk_constraints(item.risk_assessment),
-        decision_history=history or None,
         prior_verdicts=prior_verdicts or None,
         news=news,
         news_supply=measure_news_supply(

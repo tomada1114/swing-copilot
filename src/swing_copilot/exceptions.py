@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Literal
 
 #: Why a run was intentionally aborted before any state was written. A closed
-#: vocabulary because the unattended `swing-daily` skill branches on it: a
-#: `same_day_rerun` is summarized as "already analyzed today", while an
-#: `account_equity_unset` must surface as a configuration problem — the two
-#: share exit code 2 but demand opposite reactions.
-PreflightAbortReason = Literal["account_equity_unset", "same_day_rerun"]
+#: vocabulary, kept as a `Literal` even at one member, because the unattended
+#: `swing-daily` skill branches on the tag rather than on prose: today a
+#: `same_day_rerun` is summarized as "already analyzed today". The
+#: `account_equity_unset` cause went with the real-trade record removal
+#: (2026-08) -- no daily run has realized P&L to halt over any more.
+PreflightAbortReason = Literal["same_day_rerun"]
 
 
 class SwingCopilotError(Exception):
@@ -29,12 +30,9 @@ class PreflightAbort(SwingCopilotError):  # noqa: N818 - named "Abort" per P8-11
     signal, not a failure, and #118 (which raises the same exception from a
     later preflight condition) depends on this exact name.
 
-    `reason` distinguishes the abort causes that share exit code 2, and
-    `main()` prefixes stderr with the machine-readable
-    `PREFLIGHT_ABORT[<reason>]:` so the consuming skill never has to infer
-    the cause from prose (which silently misclassified an
-    `account_equity_unset` abort as "already analyzed" before this field
-    existed).
+    `reason` names the abort cause, and `main()` prefixes stderr with the
+    machine-readable `PREFLIGHT_ABORT[<reason>]:` so the consuming skill never
+    has to infer it from prose.
     """
 
     def __init__(self, message: str, *, reason: PreflightAbortReason) -> None:

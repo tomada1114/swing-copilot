@@ -560,7 +560,6 @@ class TestRetroInput:
             },
         }
         payload["signal_performance"] = []
-        payload["human_alignment"] = []
         payload["source_contribution"] = []
         payload["surprises"] = {"max_surprises": 5, "dropped_count": 0, "items": []}
         payload["notes"] = []

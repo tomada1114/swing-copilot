@@ -1,17 +1,14 @@
 """`copilot-track`: the verdict-tracking ledger's command line.
 
-Six subcommands, in the order a morning review uses them:
+Four subcommands, in the order a morning review uses them:
 
 * `update` opens a virtual position for every new verdict and carries the open
   ones forward to `--as-of`.
 * `list` shows the ledger: unrealized P&L, the stop that would close each
   position, how many sessions are left before max-hold, and realized results.
-* `show` pairs one position with the verdict's reasons, its daily marks, and
-  its notes.
+* `show` pairs one position with the verdict's reasons and its daily marks.
 * `stats` reports the realized record -- win rate, profit factor, expectancy,
   average R, holding period, exit-reason mix -- stratified by verdict side.
-* `close` records a human overriding the mechanical exit rules.
-* `note` records a dated judgement memo.
 
 Since Issue #190 the ledger also shadow-tracks `skip` verdicts, so that
 `stats` can put "buy only the proceeds" next to "buy every screened
@@ -20,8 +17,12 @@ candidate" under identical exit rules. `list` and `show` therefore default to
 morning review that suddenly listed every rejected candidate as a position
 would read as a suggestion to buy them.
 
-`close` and `note` are the only writes a skill may make here. Nothing in this
-CLI rewrites configuration, code, or any deterministic screening/sizing value,
+`update` is the only write here, and it writes exactly what replaying the
+backtest's exit rules produces. The human judgement memos and manual closes
+this CLI once accepted were removed in 2026-08: the ledger is mechanical, so
+that the record it holds can be published. Existing `exit_reason = 'manual'`
+rows predate that removal and are still displayed. Nothing in this CLI
+rewrites configuration, code, or any deterministic screening/sizing value,
 and none of it reaches the network.
 """
 
@@ -54,12 +55,7 @@ from swing_copilot.storage.market_store import (
 )
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.tracking_records import CLOSED, OPEN, PROCEED, SKIP
-from swing_copilot.tracking.update import (
-    TrackingError,
-    close_manually,
-    record_note,
-    update_tracking,
-)
+from swing_copilot.tracking.update import update_tracking
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -76,7 +72,6 @@ _NOT_AVAILABLE = "—"
 #: Every failure this command converts follows the argparse convention: the
 #: message itself is the exit status (printed to stderr, exit 1).
 _CONFIG_EXIT = ExitPolicy(errors=(ConfigError,))
-_TRACKING_EXIT = ExitPolicy(errors=(TrackingError,))
 _BARS_EXIT = ExitPolicy(errors=(ParquetRootNotFoundError,))
 
 #: What a bars-root-less ledger run produced instead of failing (Issue #221).
@@ -150,20 +145,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     stats_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
-    close_parser = subparsers.add_parser("close", help="手動で手仕舞いを記録する")
-    close_parser.add_argument("--run-id", type=UUID, required=True)
-    close_parser.add_argument("--symbol", required=True)
-    close_parser.add_argument("--as-of", type=date.fromisoformat)
-    close_parser.add_argument("--note")
-    close_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
-
-    note_parser = subparsers.add_parser("note", help="判断メモを記録する")
-    note_parser.add_argument("--run-id", type=UUID, required=True)
-    note_parser.add_argument("--symbol", required=True)
-    note_parser.add_argument("--text", required=True)
-    note_parser.add_argument("--date", dest="note_date", type=date.fromisoformat)
-    note_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
-
     return parser.parse_args(argv)
 
 
@@ -176,8 +157,7 @@ def _market_store(state_store: StateStore, db_path: Path) -> MarketStore:
 
     The root's absence is fatal here (Issue #221): with no bars at all,
     `update` marks nothing and advances nothing, then reports "新規 0 / 更新 0
-    / 手仕舞い 0" as if the ledger were simply quiet -- and `close` would
-    record a manual exit at a price it could not read.
+    / 手仕舞い 0" as if the ledger were simply quiet.
     """
     parquet_root = run_cli(
         lambda: resolve_parquet_root(db_path, consequence=_MISSING_BARS_CONSEQUENCE),
@@ -421,10 +401,6 @@ def _print_position_detail(
         )
     console.print(mark_table)
 
-    notes = state_store.get_verdict_position_notes(position.run_id, position.symbol)
-    for note in notes:
-        console.print(f"  note {note.note_date.isoformat()}: {note.note}")
-
 
 def _verdict_reasons(
     state_store: StateStore, position: VerdictPosition
@@ -437,54 +413,15 @@ def _verdict_reasons(
     return tuple(str(reason["text"]) for reason in reasons)
 
 
-def _run_close(
-    state_store: StateStore, args: argparse.Namespace, console: Console
-) -> None:
-    closed = run_cli(
-        lambda: close_manually(
-            state_store,
-            _market_store(state_store, args.db),
-            run_id=args.run_id,
-            symbol=args.symbol,
-            as_of=_resolve_as_of(args.as_of),
-            note=args.note,
-        ),
-        _TRACKING_EXIT,
-    )
-    console.print(
-        f"{closed.symbol} を {_fmt_date(closed.exit_date)} "
-        f"@ {_fmt_price(closed.exit_price)} で手仕舞い "
-        f"({_fmt_pct(closed.realized_return_pct)})"
-    )
-
-
-def _run_note(
-    state_store: StateStore, args: argparse.Namespace, console: Console
-) -> None:
-    note_date = _resolve_as_of(args.note_date)
-    run_cli(
-        lambda: record_note(
-            state_store,
-            run_id=args.run_id,
-            symbol=args.symbol,
-            note_date=note_date,
-            note=args.text,
-        ),
-        _TRACKING_EXIT,
-    )
-    console.print(f"{args.symbol} に {note_date.isoformat()} 付けのノートを記録した")
-
-
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: dispatch to one of the six subcommands.
+    """CLI entry point: dispatch to one of the four subcommands.
 
     Args:
         argv: Argument vector, defaulting to `sys.argv[1:]`.
 
     Raises:
-        SystemExit: Argument parsing failed, the settings file named by
-            `--settings` is missing or invalid, or a manual write named a
-            position that cannot be acted on.
+        SystemExit: Argument parsing failed, or the settings file named by
+            `--settings` is missing or invalid.
     """
     args = _parse_args(argv)
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
@@ -496,12 +433,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_list(state_store, args, console)
     elif args.command == "show":
         _run_show(state_store, args, console)
-    elif args.command == "stats":
-        _run_stats(state_store, args, console)
-    elif args.command == "close":
-        _run_close(state_store, args, console)
     else:
-        _run_note(state_store, args, console)
+        _run_stats(state_store, args, console)
 
 
 if __name__ == "__main__":  # pragma: no cover

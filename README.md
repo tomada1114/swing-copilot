@@ -36,23 +36,11 @@ The final decision-support brief is written to stdout. Generated Markdown is
 stored under `reports/<run-date>/<run-id>.md`, with `reports/latest.md` as a
 convenience copy. DuckDB remains the source of truth.
 
-Record a human decision against an audited candidate with:
-
-```bash
-uv run copilot-decision \
-  --run-id <run-id> \
-  --symbol AAPL \
-  --decision ignored \
-  --reason "相関リスクが高いため"
-```
-
-Review past runs, candidates, rejections, and paper-trading performance
-read-only with:
+Review past runs, candidates, and rejections read-only with:
 
 ```bash
 uv run copilot-history runs
 uv run copilot-history symbol AAPL
-uv run copilot-history performance
 ```
 
 For ad-hoc analysis in Python (notebooks, scripts), `swing_copilot.research`

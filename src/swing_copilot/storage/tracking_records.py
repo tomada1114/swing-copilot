@@ -1,18 +1,22 @@
-"""`verdict_positions` / `_marks` / `_notes` repository (verdict tracking).
+"""`verdict_positions` / `verdict_position_marks` repository (verdict tracking).
 
 The ledger behind `copilot-track`: one virtual position per verdict --
-`proceed` *and*, since Issue #190, `skip` -- its daily marks, and the human's
-notes. Written only by `tracking/`. Both sides are carried under identical
-exit rules so "buy only the proceeds" and "buy every screened candidate"
-become the same measurement taken twice; the skip side is a research
-population, never a suggestion, so the CLI keeps it out of the default view.
+`proceed` *and*, since Issue #190, `skip` -- and its daily marks. Written only
+by `tracking/`. Both sides are carried under identical exit rules so "buy only
+the proceeds" and "buy every screened candidate" become the same measurement
+taken twice; the skip side is a research population, never a suggestion, so
+the CLI keeps it out of the default view.
 
-Write discipline, following `paper_records.upsert_position_excursions`:
+Everything here is mechanical: the human judgement memos this repository once
+also held were removed in 2026-08, so the ledger can be published as a track
+record without carrying anyone's personal trading notes.
+
+Write discipline:
 
 * One position's advance -- the position row plus every mark it produced -- is
   a single transaction. A failure part way through rolls the whole advance
   back, so a position never keeps a `last_marked_date` whose mark is missing.
-* Marks and notes are correction upserts on their natural key, never
+* Marks are correction upserts on their natural key, never
   `ON CONFLICT DO NOTHING`: re-running a day against corrected bars must
   update the stored figures rather than silently keep the stale ones.
 * The ledger is derived state, so a correction that removes a `proceed`
@@ -63,13 +67,6 @@ _UPSERT_MARK = """
         close = EXCLUDED.close,
         stop_price = EXCLUDED.stop_price,
         unrealized_return_pct = EXCLUDED.unrealized_return_pct
-"""
-
-_UPSERT_NOTE = """
-    INSERT INTO verdict_position_notes (run_id, symbol, note_date, note)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT (run_id, symbol, note_date) DO UPDATE SET
-        note = EXCLUDED.note
 """
 
 _POSITION_COLUMNS = """
@@ -146,16 +143,6 @@ class VerdictPositionMark:
     close: float
     stop_price: float | None
     unrealized_return_pct: float
-
-
-@dataclass(frozen=True, slots=True)
-class VerdictPositionNote:
-    """One dated judgement memo the human (via a skill) left on a position."""
-
-    run_id: UUID
-    symbol: str
-    note_date: date
-    note: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,9 +385,9 @@ def delete_orphaned_verdict_positions(
     since Issue #190 -- both sides are tracked, so the row is realigned by
     `sync_verdict_position_recommendations` rather than destroyed.
 
-    The position, its marks, and its notes go in one transaction: a position
-    whose marks survived it would reappear in `list`'s "last close" column
-    without a row to explain itself.
+    The position and its marks go in one transaction: a position whose marks
+    survived it would reappear in `list`'s "last close" column without a row
+    to explain itself.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -419,11 +406,7 @@ def delete_orphaned_verdict_positions(
             return ()
         conn.execute("BEGIN TRANSACTION")
         for run_id, symbol in orphans:
-            for table in (
-                "verdict_position_notes",
-                "verdict_position_marks",
-                "verdict_positions",
-            ):
+            for table in ("verdict_position_marks", "verdict_positions"):
                 conn.execute(
                     f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
                     [str(run_id), symbol],
@@ -680,35 +663,6 @@ def get_earliest_verdict_position_marks(
         )
         for row in rows
     }
-
-
-def upsert_verdict_position_note(database: Database, note: VerdictPositionNote) -> None:
-    """Correction-upsert one dated note on a tracked position."""
-    with database.connect() as conn:
-        conn.execute(
-            _UPSERT_NOTE,
-            [str(note.run_id), note.symbol, note.note_date, note.note],
-        )
-
-
-def get_verdict_position_notes(
-    database: Database, run_id: UUID, symbol: str
-) -> tuple[VerdictPositionNote, ...]:
-    """Return one position's notes in date order."""
-    with database.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT note_date, note
-            FROM verdict_position_notes
-            WHERE run_id = ? AND symbol = ?
-            ORDER BY note_date
-            """,
-            [str(run_id), symbol],
-        ).fetchall()
-    return tuple(
-        VerdictPositionNote(run_id=run_id, symbol=symbol, note_date=row[0], note=row[1])
-        for row in rows
-    )
 
 
 def get_verdict_reasons_json(

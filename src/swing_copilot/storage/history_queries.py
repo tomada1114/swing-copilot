@@ -1,7 +1,7 @@
 """Read-only history queries backing `copilot-history` (P1-05).
 
 Plain functions taking `Database` directly, mirroring the
-`audit_records.py`/`paper_records.py` split-out-module pattern: every
+`audit_records.py` split-out-module pattern: every
 function here is `SELECT`-only (REQ-007 — `copilot-history` never writes),
 kept out of `state_store.py` so that module stays under the project's
 300-line guideline and so its own write surface is unambiguous.
@@ -14,15 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from swing_copilot.storage import paper_records
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date, datetime
     from uuid import UUID
 
     from swing_copilot.storage.database import Database
-    from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +30,6 @@ class RunSummary:
     run_date: date
     candidate_count: int
     rejection_count: int
-    decision_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,13 +55,12 @@ class RunRiskRow:
 
 @dataclass(frozen=True, slots=True)
 class RunDetail:
-    """Full detail for one run: candidates + risk + decisions (REQ-003)."""
+    """Full detail for one run: candidates + risk (REQ-003)."""
 
     run_id: UUID
     run_date: date
     candidates: tuple[RunCandidateRow, ...]
     risk_assessments: tuple[RunRiskRow, ...]
-    decisions: tuple[TradeDecisionRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,18 +103,6 @@ class SymbolCandidacyRow:
 
 
 @dataclass(frozen=True, slots=True)
-class SymbolDecisionRow:
-    """One recorded decision for a symbol, across any strategy (REQ-004)."""
-
-    run_id: UUID
-    run_date: date
-    strategy_key: str
-    decision: str
-    reason_memo: str | None
-    realized_return_pct: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class SignalOutcomeRow:
     """One `signal_outcomes` row, read back for the P2-11 markdown aggregation."""
 
@@ -134,11 +117,10 @@ class SignalOutcomeRow:
 
 @dataclass(frozen=True, slots=True)
 class SymbolTimeline:
-    """One symbol's cross-run candidacy/decision timeline (REQ-004)."""
+    """One symbol's cross-run candidacy timeline (REQ-004)."""
 
     symbol: str
     candidacies: tuple[SymbolCandidacyRow, ...]
-    decisions: tuple[SymbolDecisionRow, ...]
 
 
 def _extract_score(metrics_json: str) -> float | None:
@@ -161,16 +143,15 @@ def list_runs(database: Database, limit: int) -> list[RunSummary]:
 
     Returns:
         Newest-`run_date`-first `RunSummary` rows. A run with zero
-        candidates, rejections, or decisions still appears with `0` in that
-        column (LEFT JOIN against subqueries), never silently dropped.
+        candidates or rejections still appears with `0` in that column
+        (LEFT JOIN against subqueries), never silently dropped.
     """
     with database.connect() as conn:
         rows = conn.execute(
             """
             SELECT r.run_id, r.run_date,
                    COALESCE(c.candidate_count, 0),
-                   COALESCE(sr.rejection_count, 0),
-                   COALESCE(tj.decision_count, 0)
+                   COALESCE(sr.rejection_count, 0)
             FROM runs r
             LEFT JOIN (
                 SELECT run_id, COUNT(*) AS candidate_count
@@ -180,10 +161,6 @@ def list_runs(database: Database, limit: int) -> list[RunSummary]:
                 SELECT run_id, COUNT(*) AS rejection_count
                 FROM screening_rejections GROUP BY run_id
             ) sr ON sr.run_id = r.run_id
-            LEFT JOIN (
-                SELECT run_id, COUNT(*) AS decision_count
-                FROM trades_journal GROUP BY run_id
-            ) tj ON tj.run_id = r.run_id
             ORDER BY r.run_date DESC, r.started_at DESC
             LIMIT ?
             """,
@@ -195,7 +172,6 @@ def list_runs(database: Database, limit: int) -> list[RunSummary]:
             run_date=row[1],
             candidate_count=row[2],
             rejection_count=row[3],
-            decision_count=row[4],
         )
         for row in rows
     ]
@@ -429,13 +405,11 @@ def get_run_detail(database: Database, run_id: UUID) -> RunDetail | None:
         )
         for row in risk_rows
     )
-    decisions = tuple(paper_records.get_trade_decisions(database, run_id))
     return RunDetail(
         run_id=run_id,
         run_date=run_row[0],
         candidates=candidates,
         risk_assessments=risk_assessments,
-        decisions=decisions,
     )
 
 
@@ -498,7 +472,7 @@ def get_truncations(database: Database, run_id: UUID) -> list[TruncationRow]:
 
 
 def get_symbol_timeline(database: Database, symbol: str) -> SymbolTimeline | None:
-    """Return one symbol's cross-run candidacy/decision timeline (REQ-004).
+    """Return one symbol's cross-run candidacy timeline (REQ-004).
 
     Args:
         database: Shared DuckDB connection owner.
@@ -507,9 +481,8 @@ def get_symbol_timeline(database: Database, symbol: str) -> SymbolTimeline | Non
     Returns:
         `None` if `symbol` was never recorded as a candidate in any run
         (REQ-004 boundary: the caller renders "<SYM>の記録はありません").
-        A symbol's decisions are still merged in even when they came from a
-        strategy/run other than the one that most recently listed it as a
-        candidate -- this is a cross-run, cross-strategy view by design.
+        Every run that listed the symbol is merged in, whatever strategy
+        produced it -- this is a cross-run, cross-strategy view by design.
     """
     with database.connect() as conn:
         candidacy_rows = conn.execute(
@@ -524,23 +497,6 @@ def get_symbol_timeline(database: Database, symbol: str) -> SymbolTimeline | Non
         ).fetchall()
         if not candidacy_rows:
             return None
-        decision_rows = conn.execute(
-            """
-            SELECT t.run_id, r.run_date, t.strategy_key, t.decision, t.reason_memo,
-                   CASE
-                     WHEN p.status = 'closed' AND p.entry_price > 0
-                          AND p.close_price IS NOT NULL
-                     THEN (p.close_price - p.entry_price) / p.entry_price
-                     ELSE NULL
-                   END AS realized_return_pct
-            FROM trades_journal t
-            JOIN runs r ON r.run_id = t.run_id
-            LEFT JOIN positions p ON p.position_id = t.position_id
-            WHERE t.symbol = ?
-            ORDER BY r.run_date DESC, t.created_at DESC
-            """,
-            [symbol],
-        ).fetchall()
 
     candidacies = tuple(
         SymbolCandidacyRow(
@@ -552,15 +508,4 @@ def get_symbol_timeline(database: Database, symbol: str) -> SymbolTimeline | Non
         )
         for row in candidacy_rows
     )
-    decisions = tuple(
-        SymbolDecisionRow(
-            run_id=row[0],
-            run_date=row[1],
-            strategy_key=row[2],
-            decision=row[3],
-            reason_memo=row[4],
-            realized_return_pct=row[5],
-        )
-        for row in decision_rows
-    )
-    return SymbolTimeline(symbol=symbol, candidacies=candidacies, decisions=decisions)
+    return SymbolTimeline(symbol=symbol, candidacies=candidacies)

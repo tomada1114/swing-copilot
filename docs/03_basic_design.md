@@ -66,7 +66,6 @@ flowchart TD
 
     subgraph Offline["オフライン支援機能"]
         BT["backtest/*<br/>FR-10"]
-        PAPER["paper/journal.py<br/>FR-11"]
     end
 
     subgraph Storage["データストア（2層）"]
@@ -115,11 +114,9 @@ flowchart TD
 
     DUCKDB -.-> BT
     BT -.-> DUCKDB
-    DUCKDB -.-> PAPER
-    PAPER -.-> DUCKDB
 ```
 
-日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。`reports/`（生成Markdown）は実行環境に残る成果物である。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
+日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。`reports/`（生成Markdown）は実行環境に残る成果物である。記録済みのrun・候補・落選を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。実売買記録機能（旧`copilot-decision`、旧`performance`サブコマンド）は2026-08に公開トラックレコード化に伴い撤去した。
 
 ---
 
@@ -132,7 +129,7 @@ flowchart TD
 | EDGARクライアント | `data/edgar.py` | SEC EDGAR公式APIから財務諸表・ファンダメンタルズを取得 | FR-03 |
 | Database | `storage/database.py` | 単一DuckDB接続・スキーマ初期化・トランザクション境界 | NFR-02, NFR-05 |
 | MarketStore | `storage/market_store.py` | 日足時系列（Parquet）・ファンダメンタルズ・分析クエリ（DuckDB）の読み書き | FR-02, FR-03 |
-| StateStore | `storage/state_store.py` | 実行、候補、リスク評価、収集テキスト、ポジション、判断を同じDuckDBへ保存 | FR-11, NFR-05 |
+| StateStore | `storage/state_store.py` | 実行、候補、リスク評価、収集テキスト、verdictと仮想ポジション追跡を同じDuckDBへ保存 | NFR-05 |
 | Filter/Signal基盤 | `screening/base.py` | フィルタ・シグナルのABCとプラガブルな登録レジストリ | FR-05, NFR-07 |
 | ファンダフィルタ | `screening/fundamental_filters.py` | 第1段: 黒字継続・FCF・自己資本比率によるユニバース絞り込み | FR-04 |
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価 | FR-05, P5-21 |
@@ -140,8 +137,7 @@ flowchart TD
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲート・Distribution Day・表示専用FTD状態機械を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
 | RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
 | 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示`--as-of`では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する | P4-18 |
-| サーキットブレーカー | `risk/circuit_breaker.py` | ペーパージャーナルの実現損益だけをETの日次・週次・月次境界で再集計する。損失上限または連敗後24時間に該当する間は新規候補を拒否するが、収集・レポート生成は継続する | P4-19 |
-| MAE/MFEトラッキング | `paper/excursions.py`, `storage/paper_records.py` | fail-softな`mae_mfe` stepで、保有期間中の日足高安から1株あたりの累積MAE/MFEを日次保存する。欠損日は品質フラグ付きで既存極値を維持し、クローズ済みだけをUSD換算してperformanceへ集計する | P4-20 |
+| サーキットブレーカー | `risk/circuit_breaker.py` | 実現損益をETの日次・週次・月次境界で再集計し、損失上限または連敗後24時間に該当する間は新規候補を拒否する。日次パイプラインでは実売買記録機能の撤去（2026-08-19）により入力が存在せず常に未評価（`None`）で、バックテストが自身の実現損益で評価するときだけ機能する（`backtest/policy.py`） | P4-19 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | 分析スキーマ | `analysis/schemas.py` | `analysis_input.json`/`analysis_result.json`双方のstrict pydanticスキーマ（`extra="forbid"`）。`SourcedFact.source_ids`は1件以上必須、`SourcedFact.evidence_quote`は自身が引用する`source_ids`の本文からの逐語引用が必須 | FR-08, CON-03 |
 | 分析文脈整形 | `analysis/context.py` | コード計算済みのスコア内訳・リスク制約・市場レジーム・実績サマリ・過去判断を、上書き不可の明示付きで不活性テキストへ整形する純関数群 | FR-08, P2-12, P3-15 |
@@ -155,8 +151,6 @@ flowchart TD
 | CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |
 | Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（デフォルト有効） | FR-09 |
 | バックテスト | `backtest/` | 日次ロジックを再利用する複数銘柄ポートフォリオシミュレータ、SPY買い持ちとの比較 | FR-10 |
-| ペーパートレード記帳 | `paper/journal.py` | 人間の判断（追随/見送り/修正）と仮想約定の記録 | FR-11, CON-04 |
-| 判断記録CLI | `paper/cli.py` | 候補検証、判断upsert、Markdown判断欄の再生成 | FR-11 |
 | 日次オーケストレータ | `pipeline/daily.py` | 全ステップの実行順制御・冪等性・フェイルソフト | FR-12, NFR-04 |
 | 設定ロード | `config.py` | `settings.yaml`/`strategies.yaml`/環境変数の統合ロード | NFR-06 |
 
@@ -275,7 +269,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 層 | 実体 | 役割 | 主な利用者 |
 |---|---|---|---|
 | ① Parquet | `data/bars/`（`year=YYYY`パーティション） | 日足時系列の生データを列指向で永続化。追記・大量読み出しに強い。 | DataProvider（書き込み）、DuckDB（読み出し元） |
-| ② DuckDB | `data/copilot.duckdb` | Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、落選理由、リスク評価、収集テキスト、判断/ポジションを保持する唯一の構造化ストア。 | screening/*, risk/*, paper/*, report/*, pipeline/*, backtest/* |
+| ② DuckDB | `data/copilot.duckdb` | Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、落選理由、リスク評価、収集テキスト、verdict/仮想ポジションを保持する唯一の構造化ストア。 | screening/*, risk/*, tracking/*, report/*, pipeline/*, backtest/* |
 | ③ JSONアーティファクト | `reports/<run_date>/` | 定性分析の入出力（`analysis_input.json`／`analysis_result.json`）と再描画用の`report_context.json`。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、同時にそのまま監査証跡になる（NFR-05）。落選明細の`rejections.json`（`report/rejections.py`）も同じディレクトリに並べる。こちらはDuckDBの`screening_rejections`の写しに加え、台帳の閉じたenumでは表現できない`candidate_limit`切り捨て分を持つ。 | analysis/*, report/*, Claude Codeスキル |
 
 使い分けの原則:
@@ -409,17 +403,17 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | FR-08 | 定性分析（スキル連携、事実/解釈分離） | `analysis/export.py`, `analysis/context.py`, `analysis/schemas.py`, `analysis/validate.py`, `analysis/safety.py`, `analysis/snapshot.py`, `analysis/cli.py`, `.claude/skills/swing-daily`（`analyze-news`/`analyze-filings`/`interpret-screening`） |
 | FR-09 | CLI・Markdown＋Discord通知 | `report/daily_brief.py`, `report/terminal_report.py`, `report/markdown_report.py`, `report/discord_notify.py` |
 | FR-10 | バックテスト（対S&P500） | `backtest/strategies.py`, `backtest/runner.py` |
-| FR-11 | ペーパートレード記録 | `paper/journal.py`, `paper/cli.py`, `storage/state_store.py`（DuckDB） |
+| FR-11 | ペーパートレード記録（**廃止 2026-08-19**: 公開トラックレコード化に伴い実売買記録機能を撤去） | — |
 | FR-12 | 日次バッチ（冪等・フェイルソフト） | `pipeline/daily.py` |
 | NFR-01 | コスト（LLM API従量課金なし） | 定性分析をClaude Codeスキルへ委譲する構成そのもの（`src/`はLLM APIクライアントを持たない）、$0構成のデータソース選定 |
 | NFR-02 | 1人保守 | 全体アーキテクチャ（シンプルな単一バッチ構成、`config.py`による設定一元化） |
 | NFR-03 | 35分以内 | `pipeline/daily.py`（`run_steps`による所要時間計測） |
 | NFR-04 | 欠損検知・リトライ | `data/*_provider.py`, `data/edgar.py`, `text/*`, `pipeline/daily.py`（フェイルソフト） |
-| NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `screening_rejections`, `risk_assessments`, `text_items`, `trades_journal`）、`analysis/export.py`・`analysis/snapshot.py`が残す`reports/<run_date>/*.json` |
+| NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `screening_rejections`, `risk_assessments`, `text_items`, `verdicts`）、`analysis/export.py`・`analysis/snapshot.py`が残す`reports/<run_date>/*.json` |
 | NFR-06 | キー管理 | `config.py`, `.env`（python-dotenv） |
 | NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier） |
 | NFR-08 | テスト品質（カバレッジ95%以上・E2Eスモーク） | テスト戦略全体（`docs/04_detailed_design.md` 8章）、`pyproject.toml`/justfileのカバレッジ設定 |
 | CON-01 | 発注自動化なし | アーキテクチャ全体（証券会社API未接続） |
 | CON-02 | yfinance試作限定 | `data/yfinance_provider.py`（P1〜P3）、`data/eodhd_provider.py`（P4） |
 | CON-03 | 断定的売買指示を出力しない | `analysis/schemas.py`（facts/interpretation分離）、`analysis/safety.py`＋`analysis/validate.py`（ingest時の一元検査・fail-closed）、スキル側の規約（`.claude/skills/swing-daily/references/analysis-conventions.md`） |
-| CON-04 | ペーパートレード検証ゲート | `paper/journal.py` |
+| CON-04 | ペーパートレード検証ゲート（**廃止 2026-08-19**: 公開トラックレコード化に伴い実売買記録機能を撤去） | — |

@@ -1,12 +1,13 @@
-"""Read-only judgment-history CLI: `copilot-history` (P1-05, D6 read side).
+"""Read-only run-history CLI: `copilot-history` (P1-05, D6 read side).
 
-`copilot-decision` (`paper/cli.py`) is write-only; this module is its
-read-only counterpart. It lives under `report/` rather than `paper/` because
-it never writes -- mirroring this repo's convention of keeping write CLIs in
-the domain that owns the write (`paper/cli.py` for `copilot-decision`) and
-read-only presentation elsewhere. Every subcommand here is backed exclusively
-by `storage/history_queries.py`'s `SELECT`-only functions (REQ-007), plus the
-read-only `reports/` scan behind `incomplete` (Issue #129).
+Every subcommand here is backed exclusively by `storage/history_queries.py`'s
+`SELECT`-only functions (REQ-007), plus the read-only `reports/` scan behind
+`incomplete` (Issue #129). It lives under `report/` because it is presentation
+over stored history and never writes.
+
+The real-trade decision journal this CLI also used to read -- and its
+`performance` subcommand -- went with the rest of the record feature in
+2026-08; what remains is the deterministic run history.
 """
 
 from __future__ import annotations
@@ -23,9 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from swing_copilot.cli_support import ExitPolicy, run_cli
-from swing_copilot.clock import SystemClock
 from swing_copilot.exceptions import SwingCopilotError
-from swing_copilot.paper.journal import PaperJournal
 from swing_copilot.report.incomplete_runs import (
     ANALYSIS_INCOMPLETE_EXIT_CODE,
     IncompleteRunKind,
@@ -39,11 +38,9 @@ from swing_copilot.storage.history_queries import (
     list_runs,
     run_exists,
 )
-from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.storage.state_store import StateStore
 
 if TYPE_CHECKING:
-    from swing_copilot.paper.journal import PerformanceBreakdownRow, PerformanceSummary
     from swing_copilot.report.incomplete_runs import IncompleteRun
     from swing_copilot.storage.history_queries import RunDetail, SymbolTimeline
 
@@ -132,14 +129,12 @@ def _run_runs(database: Database, console: Console, limit: int) -> None:
     table.add_column("run_date")
     table.add_column("候補数", justify="right")
     table.add_column("落選数", justify="right")
-    table.add_column("判断数", justify="right")
     for run in runs:
         table.add_row(
             str(run.run_id),
             run.run_date.isoformat(),
             str(run.candidate_count),
             str(run.rejection_count),
-            str(run.decision_count),
         )
     console.print(table)
 
@@ -183,25 +178,6 @@ def _render_run_detail(console: Console, detail: RunDetail) -> None:
     else:
         console.print(f"Risk: {_NO_RECORDS_MESSAGE}")
 
-    if detail.decisions:
-        table = Table(title="Decisions")
-        table.add_column("Symbol")
-        table.add_column("Strategy")
-        table.add_column("Decision")
-        table.add_column("Reason")
-        table.add_column("Fill", justify="right")
-        for decision in detail.decisions:
-            table.add_row(
-                decision.symbol,
-                decision.strategy_key,
-                decision.decision,
-                decision.reason_memo or "-",
-                _fmt_money(decision.virtual_fill_price),
-            )
-        console.print(table)
-    else:
-        console.print(f"Decisions: {_NO_RECORDS_MESSAGE}")
-
 
 def _run_run_detail(database: Database, console: Console, run_id_value: str) -> None:
     run_id = _parse_run_id(run_id_value)
@@ -228,25 +204,6 @@ def _render_symbol_timeline(console: Console, timeline: SymbolTimeline) -> None:
             _fmt_score(candidacy.score),
         )
     console.print(table)
-
-    if timeline.decisions:
-        table = Table(title=f"{timeline.symbol} decisions")
-        table.add_column("run_date")
-        table.add_column("Strategy")
-        table.add_column("Decision")
-        table.add_column("Reason")
-        table.add_column("実現損益率", justify="right")
-        for decision in timeline.decisions:
-            table.add_row(
-                decision.run_date.isoformat(),
-                decision.strategy_key,
-                decision.decision,
-                decision.reason_memo or "-",
-                _fmt_ratio_pct(decision.realized_return_pct),
-            )
-        console.print(table)
-    else:
-        console.print(f"Decisions: {_NO_RECORDS_MESSAGE}")
 
 
 def _run_symbol(database: Database, console: Console, symbol_value: str) -> None:
@@ -329,56 +286,6 @@ def _run_incomplete(
     raise SystemExit(ANALYSIS_INCOMPLETE_EXIT_CODE)
 
 
-def _render_breakdown(
-    console: Console, title: str, rows: tuple[PerformanceBreakdownRow, ...]
-) -> None:
-    if not rows:
-        return
-    table = Table(title=title)
-    table.add_column("Key")
-    table.add_column("Trades", justify="right")
-    table.add_column("Win rate", justify="right")
-    table.add_column("Avg P&L", justify="right")
-    for row in rows:
-        table.add_row(
-            row.key,
-            str(row.trade_count),
-            _fmt_ratio_pct(row.win_rate),
-            _fmt_money(row.avg_pnl_usd),
-        )
-    console.print(table)
-
-
-def _render_performance(console: Console, summary: PerformanceSummary) -> None:
-    console.print(f"Closed trades: {summary.closed_trade_count}")
-    console.print(f"Total P&L: {_fmt_money(summary.total_pnl_usd)}")
-    console.print(f"Win rate: {_fmt_ratio_pct(summary.win_rate)}")
-    console.print(f"Expectancy: {_fmt_money(summary.expectancy_usd)}")
-    console.print(f"Profit factor: {_fmt_score(summary.profit_factor)}")
-    console.print(f"Avg R-multiple: {_fmt_score(summary.avg_r_multiple)}")
-    console.print(f"Avg MAE: {_fmt_money(summary.avg_mae_usd)}")
-    console.print(f"Avg MFE: {_fmt_money(summary.avg_mfe_usd)}")
-    for note in summary.excursion_notes:
-        console.print(f"[yellow]{note}[/yellow]")
-    if summary.r_multiple_omitted_warning:
-        console.print(f"[yellow]{summary.r_multiple_omitted_warning}[/yellow]")
-    console.print(f"SPY buy-and-hold: {_fmt_percent_points(summary.spy_return_pct)}")
-    _render_breakdown(console, "By exit reason", summary.by_exit_reason)
-    _render_breakdown(console, "By strategy", summary.by_strategy)
-
-
-def _run_performance(
-    database: Database, state_store: StateStore, console: Console
-) -> None:
-    market_store = MarketStore(database)
-    journal = PaperJournal(state_store)
-    summary = journal.summarize_performance(market_store, SystemClock().today())
-    if summary.closed_trade_count == 0:
-        console.print(_NO_RECORDS_MESSAGE)
-        return
-    _render_performance(console, summary)
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="copilot-history")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -387,13 +294,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     runs_parser.add_argument("--limit", type=int, default=_DEFAULT_RUNS_LIMIT)
     runs_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
-    run_parser = subparsers.add_parser("run", help="1件のrunの候補・リスク・判断詳細")
+    run_parser = subparsers.add_parser("run", help="1件のrunの候補・リスク詳細")
     run_parser.add_argument("--run-id", required=True)
     run_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
-    symbol_parser = subparsers.add_parser(
-        "symbol", help="1銘柄の候補化・判断・結果の時系列"
-    )
+    symbol_parser = subparsers.add_parser("symbol", help="1銘柄の候補化の時系列")
     symbol_parser.add_argument("symbol")
     symbol_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
@@ -419,11 +324,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     incomplete_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
-    performance_parser = subparsers.add_parser(
-        "performance", help="クローズ済みペーパートレードのパフォーマンス集計"
-    )
-    performance_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
-
     return parser.parse_args(argv)
 
 
@@ -444,10 +344,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_symbol(database, console, args.symbol)
         elif args.command == "rejections":
             _run_rejections(database, console, args.run_id)
-        elif args.command == "incomplete":
-            _run_incomplete(database, console, args.reports_dir, args.since)
         else:
-            _run_performance(database, state_store, console)
+            _run_incomplete(database, console, args.reports_dir, args.since)
 
     run_cli(_dispatch, _EXIT_POLICY)
 

@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
-    from swing_copilot.storage.state_store import StateStore
     from swing_copilot.universe import UniverseMember
 
 MARKET_STRIP_SYMBOLS = ("SPY", "QQQ", "^VIX", "^TNX")
@@ -55,10 +54,6 @@ MISSING_ANALYSIS_MESSAGE = "定性分析なし"
 WITHHELD_ANALYSIS_MESSAGE = "検証不合格のため非表示"
 _NEUTRAL_ANALYSIS_MESSAGE = "定性分析からの追加情報は今回ありません"
 NO_TRADE_MESSAGE = "本日は取引なし（定性判断）"
-# REQ-008: "直近3件" -- mirrors `pipeline/daily.py`'s `_DECISION_HISTORY_LIMIT`
-# (same value, used for the exported decision-history block), kept as an
-# independent constant here since `report/` must not depend on `pipeline/`.
-_PAST_DECISIONS_LIMIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,16 +297,6 @@ class BriefFundamentals:
 
 
 @dataclass(frozen=True, slots=True)
-class BriefPastDecision:
-    """One prior recorded decision for a candidate's "過去判断" section (REQ-008)."""
-
-    run_date: date
-    decision: str
-    reason_memo: str | None
-    realized_return_pct: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class BriefCandidate:
     """All terminal/Markdown presentation data for one ranked candidate."""
 
@@ -334,10 +319,6 @@ class BriefCandidate:
     fundamentals: BriefFundamentals
     risk: BriefRisk
     analysis: BriefAnalysis
-    # REQ-008: newest-first, at most `_PAST_DECISIONS_LIMIT` entries -- see
-    # `_candidate_brief`. Defaults to `()` for markdown/terminal-only tests
-    # that don't exercise this section.
-    past_decisions: tuple[BriefPastDecision, ...] = ()
     execution_state: str = "UNKNOWN"
     execution_distance: float | None = None
 
@@ -410,8 +391,7 @@ class DailyBriefContext:
     # Verified skill output, or `None` for a plain `copilot-daily` run whose
     # qualitative sections are still pending analysis.
     analysis: ValidatedAnalysis | None
-    # REQ-008: the single strategy this run screened with, used to scope
-    # `state_store.get_decision_history()` per candidate -- today's `Candidate`
+    # The single strategy this run screened with -- today's `Candidate`
     # objects don't carry a per-candidate strategy_key (one run == one strategy).
     strategy_key: str
     rejections: list[RejectionRecord] = field(default_factory=list)
@@ -442,9 +422,7 @@ class _CandidateContext:
 
 
 def build_daily_brief(
-    context: DailyBriefContext,
-    market_store: MarketStore,
-    state_store: StateStore,
+    context: DailyBriefContext, market_store: MarketStore
 ) -> DailyBrief:
     """Build the shared terminal/Markdown view using point-in-time reads."""
     companies = {member.symbol: member for member in context.universe}
@@ -458,7 +436,6 @@ def build_daily_brief(
                 brief=context,
             ),
             market_store,
-            state_store,
         )
         for candidate in context.candidates
     )
@@ -577,10 +554,7 @@ def _market_items(
 
 
 def _candidate_brief(
-    candidate: Candidate,
-    context: _CandidateContext,
-    market_store: MarketStore,
-    state_store: StateStore,
+    candidate: Candidate, context: _CandidateContext, market_store: MarketStore
 ) -> BriefCandidate:
     close = candidate.metrics.get("close")
     previous = _previous_close(market_store, candidate.symbol, context.brief.run_date)
@@ -617,7 +591,6 @@ def _candidate_brief(
             context.brief.max_position_pct,
         ),
         analysis=build_analysis_brief(candidate.symbol, context.brief.analysis),
-        past_decisions=_past_decisions(candidate.symbol, context.brief, state_store),
         execution_state=candidate.execution_state,
         execution_distance=candidate.execution_distance,
     )
@@ -639,29 +612,6 @@ def _signal_label(name: str, metrics: Mapping[str, float]) -> str:
                 f"{label} ({int(count)}収縮 / dry-up {dry_up:.2f} / pivot {pivot:.2f})"
             )
     return label
-
-
-def _past_decisions(
-    symbol: str, brief: DailyBriefContext, state_store: StateStore
-) -> tuple[BriefPastDecision, ...]:
-    """REQ-008: at most `_PAST_DECISIONS_LIMIT` prior decisions, newest first.
-
-    Delegates entirely to `state_store.get_decision_history()` -- already
-    point-in-time-safe (`mode='live'` and `run_date < before_date`) and
-    already ordered newest-first, so this is a pure field mapping.
-    """
-    history = state_store.get_decision_history(
-        symbol, brief.strategy_key, brief.run_date, _PAST_DECISIONS_LIMIT
-    )
-    return tuple(
-        BriefPastDecision(
-            run_date=entry.run_date,
-            decision=entry.decision,
-            reason_memo=entry.reason_memo,
-            realized_return_pct=entry.realized_return_pct,
-        )
-        for entry in history
-    )
 
 
 def _previous_close(

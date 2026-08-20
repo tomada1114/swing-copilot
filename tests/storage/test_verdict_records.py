@@ -17,7 +17,6 @@ from uuid import UUID, uuid4
 import duckdb
 import pytest
 
-from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.verdict_records import (
     AnalysisSourceCoverageRecord,
     CollectedRunRecords,
@@ -1086,78 +1085,6 @@ class TestGetVerdictCitationsInWindow:
         )
 
         assert state_store.get_verdict_citations_in_window(AS_OF, AS_OF) == ()
-
-
-class TestGetVerdictDecisionAlignment:
-    """P8-31 (E31.5): human decision x verdict x realized classification."""
-
-    def _journal(self, state_store: StateStore, run_id: UUID, decision: str) -> None:
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=run_id,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=None,
-                decision=decision,
-                reason_memo=None,
-                virtual_fill_price=None,
-            )
-        )
-
-    def test_joins_the_journal_to_each_matured_horizon(
-        self, state_store: StateStore
-    ) -> None:
-        run_id = uuid4()
-        self._journal(state_store, run_id, "followed")
-        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
-        for horizon_days, forward_return_pct in ((5, 1.5), (20, -3.0)):
-            state_store.replace_verdict_outcomes(
-                run_id,
-                horizon_days,
-                [
-                    _outcome(
-                        run_id,
-                        "AAPL",
-                        horizon_days,
-                        forward_return_pct=forward_return_pct,
-                        classification="HIT" if horizon_days == 5 else "MISS_SEVERE",
-                    )
-                ],
-            )
-
-        rows = state_store.get_verdict_decision_alignment(AS_OF, AS_OF)
-
-        assert [
-            (
-                row.decision,
-                row.recommendation,
-                row.horizon_days,
-                row.forward_return_pct,
-                row.classification,
-            )
-            for row in rows
-        ] == [
-            ("followed", "proceed", 5, 1.5, "HIT"),
-            ("followed", "proceed", 20, -3.0, "MISS_SEVERE"),
-        ]
-
-    def test_omits_symbols_the_human_never_journaled(
-        self, state_store: StateStore
-    ) -> None:
-        run_id = uuid4()
-        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
-        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
-
-        assert state_store.get_verdict_decision_alignment(AS_OF, AS_OF) == ()
-
-    def test_omits_journal_rows_whose_verdict_has_not_matured(
-        self, state_store: StateStore
-    ) -> None:
-        run_id = uuid4()
-        self._journal(state_store, run_id, "ignored")
-        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
-
-        assert state_store.get_verdict_decision_alignment(AS_OF, AS_OF) == ()
 
 
 class TestGetPriorVerdicts:

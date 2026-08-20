@@ -116,7 +116,10 @@ schedule:
   timeout_minutes: 35 # >= 1
 
 notification:
-  enabled: false # Discord notification is opt-in; set DISCORD_WEBHOOK_URL to use it
+  # The scheduled run is unattended, so Discord is how the day announces itself.
+  # Enabling it makes DISCORD_WEBHOOK_URL a required secret: a run without it
+  # fails fast at composition rather than silently going unannounced.
+  enabled: true
 
 regime:
   # roadmap §5 P3-13（要検証）: code-owned market gate and DD thresholds.

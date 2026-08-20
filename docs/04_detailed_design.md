@@ -62,7 +62,7 @@ swing-copilot/
 │   │   ├── terminal_report.py # Richによるstdout表示
 │   │   ├── markdown_report.py # Markdown原子保存
 │   │   ├── rejections.py     # rejections.json（落選明細＋candidate_limit切り捨て）
-│   │   └── discord_notify.py # FR-09（オプション機能）
+│   │   └── discord_notify.py # FR-09
 │   ├── backtest/
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
 │   │   └── runner.py         # FR-10
@@ -143,7 +143,7 @@ class Secrets(BaseSettings):
 
     finnhub_api_key: str | None = None
     fred_api_key: str | None = None
-    discord_webhook_url: str | None = None  # 通知（オプション機能）を有効にする場合のみ設定
+    discord_webhook_url: str | None = None  # 通知が有効なら必須（欠けると設定エラー）
     edgar_identity: str | None = None
     eodhd_api_key: str | None = None  # P4まで未使用
 
@@ -156,7 +156,7 @@ class Settings(BaseModel):
     backtest: "BacktestConfig"
     analysis: "AnalysisConfig"   # 分析入力に載せる未信頼テキストの上限（旧llm/budgetセクションの後継）
     schedule: "ScheduleConfig"
-    notification: "NotificationConfig"  # Discord通知（オプション機能）の有効/無効
+    notification: "NotificationConfig"  # Discord通知の有効/無効
 
 def load_settings(path: str = "config/settings.yaml") -> Settings:
     """settings.yamlを読み込みSettingsを返す。ファイル不在・スキーマ不整合はpydantic ValidationErrorを送出する。"""
@@ -1305,7 +1305,7 @@ class Notifier(Protocol):
         ...
 
 class DiscordNotifier:
-    """Notifierプロトコルの実装。Discord Webhookへ通知を送信する（FR-09、オプション機能。settings.yamlのnotification.enabled=trueかつWebhook URL設定時のみ呼び出される）。"""
+    """Notifierプロトコルの実装。Discord Webhookへ通知を送信する（FR-09。settings.yamlのnotification.enabled=trueかつWebhook URL設定時のみ呼び出される）。"""
 
     def __init__(self, webhook_url: str):
         ...
@@ -2689,7 +2689,7 @@ regime:
   reduce_only_risk_multiplier: 0.5 # REDUCE_ONLYの取引リスク倍率（P3-14、要検証）
 
 notification:
-  enabled: false                   # Discord通知はオプション機能（デフォルト無効）。trueにする場合は環境変数DISCORD_WEBHOOK_URL（.env）を設定する
+  enabled: true                    # Discord通知はデフォルト有効。環境変数DISCORD_WEBHOOK_URL（.env）が必須で、欠けている実行は設定エラーで止まる
 
 ```
 

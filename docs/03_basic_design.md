@@ -153,7 +153,7 @@ flowchart TD
 | 定性分析スキル | `.claude/skills/swing-daily` ほか | `analysis_input.json`を読み、ニュース/開示/スクリーニングの専門家スキルへ並列委譲し、統合レビューとverdict決定を経て`analysis_result.json`を書く（本リポジトリのPythonパッケージ外、人間が起動） | FR-08 |
 | 日次ブリーフ構築 | `report/daily_brief.py` | 市場・候補・リスク・検証済み定性分析を表示非依存の値へ集約 | FR-09 |
 | CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |
-| Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（オプション機能、デフォルト無効） | FR-09 |
+| Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（デフォルト有効） | FR-09 |
 | バックテスト | `backtest/` | 日次ロジックを再利用する複数銘柄ポートフォリオシミュレータ、SPY買い持ちとの比較 | FR-10 |
 | ペーパートレード記帳 | `paper/journal.py` | 人間の判断（追随/見送り/修正）と仮想約定の記録 | FR-11, CON-04 |
 | 判断記録CLI | `paper/cli.py` | 候補検証、判断upsert、Markdown判断欄の再生成 | FR-11 |
@@ -297,7 +297,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 2 | SEC EDGAR API | 財務諸表・ファンダメンタルズ、8-K/10-Q監視 | 公式REST API（edgartools経由） | 不要（ただしUser-Agentヘッダー必須: 氏名/アプリ名＋連絡先メールアドレス） | 10リクエスト/秒上限 |
 | 3 | Finnhub API | ニュース収集（company-newsエンドポイント） | 公式REST API | APIキー（無料枠） | 60コール/分 |
 | 4 | FRED API | 経済カレンダー・指標 | 公式REST API | APIキー（無料） | 明示的なSLAなし（実装時に要確認、常識的な間隔を空ける） |
-| － | Discord Webhook | 日次レポート通知（オプション機能、デフォルト無効） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
+| － | Discord Webhook | 日次レポート通知（デフォルト有効。無人実行の結果を知る主経路であり、有効なままWebhook URLが無い実行は設定エラーで止まる） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
 
 現行の価格providerは`yfinance`であり、全runのdata tierは`prototype`である。`prototype`の最終CLIブリーフとMarkdownには「非公式データに基づく試作結果」を必ず表示する。本番tierはまだ実装していないため、起動モードの追加や曖昧な本番切替は行わない。
 
@@ -380,13 +380,13 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 ### 8.4 監視
 
 - 実行結果は`runs`/`run_steps`に記録し、レポート末尾へ`run_id`、評価対象日、データ鮮度、各ステップの状態と所要時間を表示する。
-- Discord通知を有効にしている場合、通知はレポート配信を兼ねた簡易な死活監視としても機能する（通知が来ない＝バッチ未完走のシグナルになる）。ただし通知はオプション機能であり、無効時（デフォルト）はこの用途には使えない。
+- 通知はレポート配信を兼ねた簡易な死活監視としても機能する（通知が来ない＝バッチ未完走のシグナルになる）。無人実行では結果を知る主経路がこれであるため、デフォルトで有効とする。
 
 ---
 
 ## 9. セキュリティ設計
 
-- **APIキー管理（NFR-06）**: `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY`, `DISCORD_WEBHOOK_URL` はすべて環境変数として扱い、ローカルの`.env`（`.gitignore`対象、python-dotenvで読み込み、`.env.example`に項目のみ記載）から読み込む。`DISCORD_WEBHOOK_URL`は通知（オプション機能）を有効にする場合のみ設定する。
+- **APIキー管理（NFR-06）**: `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY`, `DISCORD_WEBHOOK_URL` はすべて環境変数として扱い、ローカルの`.env`（`.gitignore`対象、python-dotenvで読み込み、`.env.example`に項目のみ記載）から読み込む。`DISCORD_WEBHOOK_URL`は通知が有効な限り必須であり、欠けている実行は縮退せず設定エラーで止まる。
 - **コードへの秘密情報のハードコード禁止**: `settings.yaml`・`strategies.yaml`等の設定ファイルにはAPIキー・Webhook URLを直接記載しない。`config.py`（pydantic-settings）が環境変数を優先的に読み込む。
 - **リポジトリの公開範囲**: GitHubリポジトリを利用する場合（コード管理用、利用自体は任意）はプライベートで運用する（`docs/00_human_preparation.md`項目5に対応）。
 - **SEC EDGAR User-Agent**: 規約上必須のUser-Agentヘッダーには氏名またはアプリ名＋連絡先メールアドレスを設定する（個人情報の取り扱いに留意）。
@@ -417,7 +417,7 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | NFR-04 | 欠損検知・リトライ | `data/*_provider.py`, `data/edgar.py`, `text/*`, `pipeline/daily.py`（フェイルソフト） |
 | NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `screening_rejections`, `risk_assessments`, `text_items`, `trades_journal`）、`analysis/export.py`・`analysis/snapshot.py`が残す`reports/<run_date>/*.json` |
 | NFR-06 | キー管理 | `config.py`, `.env`（python-dotenv） |
-| NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier、オプション機能） |
+| NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier） |
 | NFR-08 | テスト品質（カバレッジ95%以上・E2Eスモーク） | テスト戦略全体（`docs/04_detailed_design.md` 8章）、`pyproject.toml`/justfileのカバレッジ設定 |
 | CON-01 | 発注自動化なし | アーキテクチャ全体（証券会社API未接続） |
 | CON-02 | yfinance試作限定 | `data/yfinance_provider.py`（P1〜P3）、`data/eodhd_provider.py`（P4） |

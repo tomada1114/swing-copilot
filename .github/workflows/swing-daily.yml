@@ -1,8 +1,16 @@
 name: Swing Daily
 
-# 手動起動のみ。パブリックリポジトリなので issue_comment などの
-# 第三者が引ける経路は付けない。定時起動は別途 cron を足すまで行わない。
+# 起動経路は定時実行と手動起動の 2 つだけ。パブリックリポジトリなので
+# issue_comment などの第三者が引ける経路は付けない。失敗しても自動再実行は
+# せず、手動 dispatch で対応する。
 on:
+  # UTC 23:00 = JST 火〜土 8:00。米国クローズ (20:00/21:00 UTC) の 2〜3 時間後で、
+  # EOD が確定してから走る。GitHub の cron は保証起動ではないので、飛んだ日は
+  # 翌朝に手動 dispatch する (欠落は次 run のプリフライトが検知する)。
+  schedule:
+    - cron: "0 23 * * 1-5"
+  # schedule では inputs が空になるため、mode は既定値ではなく
+  # `inputs.mode || 'live'` で解決する (定時実行は常に live)。
   workflow_dispatch:
     inputs:
       mode:
@@ -24,7 +32,7 @@ concurrency:
 
 jobs:
   daily:
-    name: Daily analysis (${{ inputs.mode }})
+    name: Daily analysis (${{ inputs.mode || 'live' }})
     runs-on: ubuntu-latest
     # swing-daily スキル内部の全体上限が 45 分。データ取得・ingest・
     # R2 の pull/push を足した余裕として 90 分を取る。
@@ -76,7 +84,7 @@ jobs:
             従ってください。ユーザーに質問することはできません。判断が割れる分岐は
             常に保守側 (skip / withhold / 中断) を選んでください。
 
-            ${{ inputs.mode == 'dry-run' && 'swing-daily スキル (`/swing-daily`) を実行してください。ただし `copilot-daily` は `--dry-run` を付けて起動します (`uv run copilot-daily --dry-run`)。dry-run はライブの DuckDB を開かず、`data/copilot_dry_run.duckdb` と `reports/dry_run` にだけ書きます。' || 'swing-daily スキル (`/swing-daily`) を引数なしで実行してください (`uv run copilot-daily`)。これは本番の日次実行です。' }}
+            ${{ (inputs.mode || 'live') == 'dry-run' && 'swing-daily スキル (`/swing-daily`) を実行してください。ただし `copilot-daily` は `--dry-run` を付けて起動します (`uv run copilot-daily --dry-run`)。dry-run はライブの DuckDB を開かず、`data/copilot_dry_run.duckdb` と `reports/dry_run` にだけ書きます。' || 'swing-daily スキル (`/swing-daily`) を引数なしで実行してください (`uv run copilot-daily`)。これは本番の日次実行です。' }}
 
             最後に、どこまで進んだか、打ち切った組、縮退・欠落の理由、
             人間が翌朝確認すべき点を要約して報告してください。
@@ -84,19 +92,26 @@ jobs:
       # 失敗した日は push しない = リモート正本は前日のまま。
       # dry-run はライブ DB を触らないので push する対象が無い。
       - name: Push data to R2
-        if: ${{ success() && inputs.mode == 'live' }}
+        if: ${{ success() && (inputs.mode || 'live') == 'live' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: uv run --group ops python scripts/data_sync.py push
 
+      # 分析セッションはほとんど何も書かないまま "success" で終わることがある。
+      # データを先に push してから落とすので、その日の価格・ファンダメンタルズ・
+      # 台帳は残り、定性分析だけを後からローカルの /swing-daily で仕上げられる。
+      - name: Verify the analysis completed
+        if: ${{ success() && (inputs.mode || 'live') == 'live' }}
+        run: uv run python scripts/check_daily_complete.py
+
       # 失敗した日ほどレポートを見たいので always()。
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: swing-daily-reports-${{ inputs.mode }}
+          name: swing-daily-reports-${{ inputs.mode || 'live' }}
           path: reports/
           if-no-files-found: ignore
           retention-days: 14

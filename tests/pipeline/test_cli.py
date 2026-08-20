@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from swing_copilot.config import Secrets, load_settings, load_strategies
+from swing_copilot.config import Secrets, Settings, load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, PreflightAbort
 from swing_copilot.models import DailyRunOptions, DataTier, Position, RunMode, RunStatus
 from swing_copilot.pipeline import daily_composition as daily_module
@@ -32,6 +32,18 @@ from swing_copilot.pipeline.daily_composition import (
 )
 from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.universe import UniverseError, UniverseMember, UniverseResolution
+
+
+def _shipped_settings(*, notification_enabled: bool = False) -> Settings:
+    """Load the shipped settings with the Discord toggle pinned.
+
+    `config/settings.yaml` enables Discord, which makes `discord_webhook_url` a
+    required secret. Tests that are not about notifications pin it off so their
+    fixture secrets stay minimal, and the notification tests pin it on.
+    """
+    settings = load_settings("config/settings.yaml")
+    object.__setattr__(settings.notification, "enabled", notification_enabled)
+    return settings
 
 
 def _make_status_error(message: str) -> httpx.HTTPStatusError:
@@ -118,22 +130,21 @@ class TestParseArgs:
 
 class TestRequiredFeatures:
     def test_full_run_requires_edgar_finnhub_and_fred(self):
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
 
         features = _required_features(DailyRunOptions(), settings)
 
         assert features == {"edgar", "finnhub", "fred"}
 
     def test_skip_text_drops_finnhub_and_fred(self):
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
 
         features = _required_features(DailyRunOptions(skip_text=True), settings)
 
         assert features == {"edgar"}
 
     def test_notification_enabled_adds_discord(self):
-        settings = load_settings("config/settings.yaml")
-        object.__setattr__(settings.notification, "enabled", True)
+        settings = _shipped_settings(notification_enabled=True)
 
         features = _required_features(DailyRunOptions(), settings)
 
@@ -204,7 +215,7 @@ class TestComposeDependencies:
     def test_unknown_strategy_fails_before_secret_or_network_composition(
         self, monkeypatch
     ):
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         monkeypatch.setattr(
             daily_module,
@@ -219,7 +230,7 @@ class TestComposeDependencies:
 
     def test_missing_required_secret_raises_config_error(self, monkeypatch):
         monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="edgar_identity"):
@@ -233,7 +244,7 @@ class TestComposeDependencies:
             "load_secrets",
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         monkeypatch.chdir(tmp_path)
 
@@ -251,7 +262,7 @@ class TestComposeDependencies:
     def test_explicit_as_of_uses_the_point_in_time_universe_resolver(
         self, monkeypatch, tmp_path
     ):
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         expected_as_of = date(2026, 7, 20)
         captured = {}
@@ -307,7 +318,7 @@ class TestComposeDependencies:
                 fred_api_key="fred-key",
             ),
         )
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         monkeypatch.chdir(tmp_path)
 
@@ -328,8 +339,7 @@ class TestComposeDependencies:
             "load_secrets",
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
-        settings = load_settings("config/settings.yaml")
-        object.__setattr__(settings.notification, "enabled", True)
+        settings = _shipped_settings(notification_enabled=True)
         strategies = load_strategies("config/strategies.yaml")
 
         with pytest.raises(ConfigError, match="discord_webhook_url"):
@@ -343,7 +353,7 @@ class TestComposeDependencies:
             "load_secrets",
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         monkeypatch.chdir(tmp_path)
 
@@ -366,7 +376,7 @@ class TestComposeDependencies:
             "load_secrets",
             lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
         )
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
         monkeypatch.chdir(tmp_path)
 
@@ -539,7 +549,7 @@ class TestMain:
     def test_historical_missing_snapshot_exits_before_price_provider(
         self, monkeypatch, tmp_path
     ):
-        settings = load_settings("config/settings.yaml")
+        settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
 
         def _missing_snapshot(*_args, **_kwargs):

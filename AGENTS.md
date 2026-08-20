@@ -131,7 +131,8 @@ the divergence, and update the stale canonical source or request a decision.
   purpose: an mtime check catches writes, and a `duckdb.connect` interception
   catches the *open* — `init_schema()` against an already initialized file
   changes no mtime, yet still takes DuckDB's exclusive file lock and can fail
-  the operator's scheduled run.
+  whatever the operator is doing with that file (a `just data-pull` /
+  `data-push`, or a local `copilot-daily`).
 - Qualitative analysis runs in a Claude Code skill, never inside this process.
   The pipeline exports `analysis_input.json` and ingests `analysis_result.json`
   via `copilot-ingest-analysis`; both directions parse under strict

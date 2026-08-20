@@ -20,7 +20,7 @@
 
 ## 2. システム全体構成
 
-swing-copilotは、利用者がローカルマシンで手動実行するコマンドを起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェックを経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。定性分析（ニュース解釈・開示解釈・スクリーニング評価）はこのプロセスの外にあり、日次バッチが書き出した`analysis_input.json`をClaude Codeスキルが読み、その回答を`copilot-ingest-analysis`が検証してレポートへ反映する。Discord通知はオプションであり、自動発注は行わない。
+swing-copilotは、1日1回起動されるコマンド（平日は無人の定時実行、随時は手動実行）を起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェックを経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。定性分析（ニュース解釈・開示解釈・スクリーニング評価）はこのプロセスの外にあり、日次バッチが書き出した`analysis_input.json`をClaude Codeスキルが読み、その回答を`copilot-ingest-analysis`が検証してレポートへ反映する。Discord通知はオプションであり、自動発注は行わない。
 
 採用するアーキテクチャパターンは次の通り。
 
@@ -30,7 +30,7 @@ swing-copilotは、利用者がローカルマシンで手動実行するコマ�
 - **Repository + step Unit of Work**: `MarketStore`/`StateStore`は同じDuckDBを使う論理repositoryとし、日次バッチの各ステップをトランザクション境界にする。Parquetを跨ぐ処理は自然キーupsertと原子的renameで再実行可能にする。
 - **明示的composition root**: CLI起動時に設定から具体adapterを組み立てて注入する。import副作用による自動検出やentry-point plugin探索はP1〜P2では行わない。
 
-この構成は、1人保守・ローカル手動実行というNFR-02に対して、外部サービス差し替えとテスト容易性だけを確保し、分散システムの運用負荷を持ち込まないための選択である。
+この構成は、1人保守・常時稼働サーバーなしというNFR-02に対して、外部サービス差し替えとテスト容易性だけを確保し、分散システムの運用負荷を持ち込まないための選択である。
 
 ```mermaid
 flowchart TD
@@ -119,7 +119,7 @@ flowchart TD
     PAPER -.-> DUCKDB
 ```
 
-実行環境はローカルマシンのみであり、利用者が1日1回`uv run copilot-daily`を手動実行する。`data/`（Parquet/DuckDB）と`reports/`（生成Markdown）はローカルへ永続化する。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
+日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。`reports/`（生成Markdown）は実行環境に残る成果物である。判断は`uv run copilot-decision`で明示的に記録する。記録済みのrun・候補・落選・判断・実績を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。
 
 ---
 
@@ -153,7 +153,7 @@ flowchart TD
 | 定性分析スキル | `.claude/skills/swing-daily` ほか | `analysis_input.json`を読み、ニュース/開示/スクリーニングの専門家スキルへ並列委譲し、統合レビューとverdict決定を経て`analysis_result.json`を書く（本リポジトリのPythonパッケージ外、人間が起動） | FR-08 |
 | 日次ブリーフ構築 | `report/daily_brief.py` | 市場・候補・リスク・検証済み定性分析を表示非依存の値へ集約 | FR-09 |
 | CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |
-| Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（オプション機能、デフォルト無効） | FR-09 |
+| Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（デフォルト有効） | FR-09 |
 | バックテスト | `backtest/` | 日次ロジックを再利用する複数銘柄ポートフォリオシミュレータ、SPY買い持ちとの比較 | FR-10 |
 | ペーパートレード記帳 | `paper/journal.py` | 人間の判断（追随/見送り/修正）と仮想約定の記録 | FR-11, CON-04 |
 | 判断記録CLI | `paper/cli.py` | 候補検証、判断upsert、Markdown判断欄の再生成 | FR-11 |
@@ -176,7 +176,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant Local as ローカルマシン（手動実行）
+    participant Local as 実行環境（定時／手動）
     participant D as pipeline/daily.py
     participant DP as DataProvider
     participant EDG as data/edgar.py
@@ -297,7 +297,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 2 | SEC EDGAR API | 財務諸表・ファンダメンタルズ、8-K/10-Q監視 | 公式REST API（edgartools経由） | 不要（ただしUser-Agentヘッダー必須: 氏名/アプリ名＋連絡先メールアドレス） | 10リクエスト/秒上限 |
 | 3 | Finnhub API | ニュース収集（company-newsエンドポイント） | 公式REST API | APIキー（無料枠） | 60コール/分 |
 | 4 | FRED API | 経済カレンダー・指標 | 公式REST API | APIキー（無料） | 明示的なSLAなし（実装時に要確認、常識的な間隔を空ける） |
-| － | Discord Webhook | 日次レポート通知（オプション機能、デフォルト無効） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
+| － | Discord Webhook | 日次レポート通知（デフォルト有効。無人実行の結果を知る主経路であり、有効なままWebhook URLが無い実行は設定エラーで止まる） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
 
 現行の価格providerは`yfinance`であり、全runのdata tierは`prototype`である。`prototype`の最終CLIブリーフとMarkdownには「非公式データに基づく試作結果」を必ず表示する。本番tierはまだ実装していないため、起動モードの追加や曖昧な本番切替は行わない。
 
@@ -337,14 +337,19 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 | 環境 | 用途 | 実行方法 |
 |---|---|---|
-| ローカルマシン | 開発・デバッグ・日々の運用のすべてを同一方法で実行 | 利用者が任意のタイミングで1日1回`uv run copilot-daily`を手動実行する（`.env`から環境変数をロード） |
+| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `0 23 * * 1-5`（UTC、= JST 火〜土 8:00）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `/swing-daily`（`uv run copilot-daily`と定性分析スキル）→ 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
+| ローカルマシン | 開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード） |
+
+どちらの環境も同じコードを同じ手順で動かす。実行環境ごとの分岐はパイプラインに持たせない。
 
 ### 8.2 永続化
 
-すべてのデータはローカルファイルシステムのパスにそのまま永続化される。実行環境がステートレスに破棄されることはないため、永続化のためのコミット操作は不要である。
-- `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）
-- `reports/<run_date>/<run_id>.md`（run別生成Markdown）
-- `reports/latest.md`（最新runの便宜コピー）
+データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。
+
+- 同期対象（R2が正本）: `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない
+- 同期対象外（ローカル／ランナー限り）: `reports/<run_date>/<run_id>.md`（run別生成Markdown）、`reports/latest.md`（最新runの便宜コピー）。GitHub Actions上の実行はこれをworkflow artifactとして保存する
+- 並行書き込みガードは`manifest.json`の単調増加`generation`による楽観ロックだけである。`push`はリモートのgenerationが`pull`時点と一致するときにのみ成功するので、**書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない**
+- 実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する
 
 ### 8.3 実行時間
 
@@ -375,13 +380,13 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 ### 8.4 監視
 
 - 実行結果は`runs`/`run_steps`に記録し、レポート末尾へ`run_id`、評価対象日、データ鮮度、各ステップの状態と所要時間を表示する。
-- Discord通知を有効にしている場合、通知はレポート配信を兼ねた簡易な死活監視としても機能する（通知が来ない＝バッチ未完走のシグナルになる）。ただし通知はオプション機能であり、無効時（デフォルト）はこの用途には使えない。
+- 通知はレポート配信を兼ねた簡易な死活監視としても機能する（通知が来ない＝バッチ未完走のシグナルになる）。無人実行では結果を知る主経路がこれであるため、デフォルトで有効とする。
 
 ---
 
 ## 9. セキュリティ設計
 
-- **APIキー管理（NFR-06）**: `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY`, `DISCORD_WEBHOOK_URL` はすべて環境変数として扱い、ローカルの`.env`（`.gitignore`対象、python-dotenvで読み込み、`.env.example`に項目のみ記載）から読み込む。`DISCORD_WEBHOOK_URL`は通知（オプション機能）を有効にする場合のみ設定する。
+- **APIキー管理（NFR-06）**: `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY`, `DISCORD_WEBHOOK_URL` はすべて環境変数として扱い、ローカルの`.env`（`.gitignore`対象、python-dotenvで読み込み、`.env.example`に項目のみ記載）から読み込む。`DISCORD_WEBHOOK_URL`は通知が有効な限り必須であり、欠けている実行は縮退せず設定エラーで止まる。
 - **コードへの秘密情報のハードコード禁止**: `settings.yaml`・`strategies.yaml`等の設定ファイルにはAPIキー・Webhook URLを直接記載しない。`config.py`（pydantic-settings）が環境変数を優先的に読み込む。
 - **リポジトリの公開範囲**: GitHubリポジトリを利用する場合（コード管理用、利用自体は任意）はプライベートで運用する（`docs/00_human_preparation.md`項目5に対応）。
 - **SEC EDGAR User-Agent**: 規約上必須のUser-Agentヘッダーには氏名またはアプリ名＋連絡先メールアドレスを設定する（個人情報の取り扱いに留意）。
@@ -412,7 +417,7 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | NFR-04 | 欠損検知・リトライ | `data/*_provider.py`, `data/edgar.py`, `text/*`, `pipeline/daily.py`（フェイルソフト） |
 | NFR-05 | 監査性（全入出力記録） | `storage/database.py`, `storage/state_store.py`（`runs`, `run_steps`, `signals`, `candidates`, `screening_rejections`, `risk_assessments`, `text_items`, `trades_journal`）、`analysis/export.py`・`analysis/snapshot.py`が残す`reports/<run_date>/*.json` |
 | NFR-06 | キー管理 | `config.py`, `.env`（python-dotenv） |
-| NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier、オプション機能） |
+| NFR-07 | インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier） | `data/base.py`, `screening/base.py`, `screening/pipeline.py`（Strategy）, `report/discord_notify.py`（Notifier） |
 | NFR-08 | テスト品質（カバレッジ95%以上・E2Eスモーク） | テスト戦略全体（`docs/04_detailed_design.md` 8章）、`pyproject.toml`/justfileのカバレッジ設定 |
 | CON-01 | 発注自動化なし | アーキテクチャ全体（証券会社API未接続） |
 | CON-02 | yfinance試作限定 | `data/yfinance_provider.py`（P1〜P3）、`data/eodhd_provider.py`（P4） |

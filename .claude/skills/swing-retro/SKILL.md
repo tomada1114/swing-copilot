@@ -71,6 +71,11 @@ DataFrame（`swing_copilot.research`）で検証できる。ただし提案の�
 
 ## Step 1: Preflight（`prepare` の実行）
 
+まず `just data-pull` でローカルの `data/` を最新にする。正本は R2 にあり、
+日次実行は GitHub Actions が書いている。このスキルは DuckDB に**書く**
+（`collect` の verdict 取り込み、`ingest` の retro 結果）ので、取得 → 作業 →
+`just data-push`（Step 8）を 1 セットで行い、pull したまま放置しない。
+
 ```bash
 uv run copilot-retro prepare --as-of <YYYY-MM-DD>
 ```
@@ -277,7 +282,11 @@ L2（構成変更）・L3（設計見直し）は、適用前に `AskUserQuestio
 5. **却下・保留**: その場の回答で確定する。台帳を `rejected` / `deferred` に更新し、
    理由を提案全文へ追記する。`rejected` の記録が次回以降の再提案ガードの入力になる
 
-## Step 8: 報告
+## Step 8: 書き戻しと報告
+
+報告の前に `just data-push` で DuckDB を R2 へ書き戻す。generation 不一致で
+拒否されたら、その間に別の実行（日次実行など）が書いている。**ローカルの変更を
+捨てて上書きしない**で、拒否された事実をユーザーに報告して指示を仰ぐ。
 
 - 評価対象の窓（`window_start` 〜 `as_of`）と評価件数
 - 成績サマリ（verdict_mix・separation・重大外し率・skip 的中率、暫定表示の有無）

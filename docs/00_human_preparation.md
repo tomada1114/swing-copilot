@@ -32,13 +32,13 @@
   - 所要時間目安: 10分
   - 完了確認方法: 発行された `FRED_API_KEY` を手元に控えている。
 
-- [ ] **4. Discord Webhook URL発行（任意：通知が欲しい場合のみ）**
-  - 手順概要: Discord通知はオプション機能（`settings.yaml`の`notification.enabled`はデフォルト`false`）であり、本項目は通知を使いたい場合のみ実施すればよい。使う場合は、Discordサーバーを新規作成（または既存サーバーの通知用チャンネルを用意）→対象チャンネルの「連携サービス」設定からWebhookを作成→Webhook URLを発行する。
-  - 所要時間目安: 10分（使う場合のみ）
-  - 完了確認方法: （使う場合）発行された Webhook URL（`DISCORD_WEBHOOK_URL`）を手元に控えている。テスト送信でメッセージがチャンネルに届くことを確認できる。
+- [ ] **4. Discord Webhook URL発行**
+  - 手順概要: 日次実行は無人で走るため、Discord通知が結果を知る主経路である（`settings.yaml`の`notification.enabled`はデフォルト`true`で、Webhook URLが無い実行は縮退せず設定エラーで止まる）。Discordサーバーを新規作成（または既存サーバーの通知用チャンネルを用意）→対象チャンネルの「連携サービス」設定からWebhookを作成→Webhook URLを発行する。
+  - 所要時間目安: 10分
+  - 完了確認方法: 発行された Webhook URL（`DISCORD_WEBHOOK_URL`）を手元に控えている。テスト送信でメッセージがチャンネルに届くことを確認できる。
 
 - [ ] **5. uv本体・既存リポジトリの確認と `.env` 作成**
-  - 手順概要: `uv --version` でuv本体を確認する。プロジェクトは既に`/Users/masuyama/ghq/github.com/tomada1114/swing-copilot`へuv-templateから作成され、Git初期化と設計文書のコミットまで完了しているため、テンプレートの再コピーや`git init`は行わない。プロジェクト直下に `.env` を作成し `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY` を記載する（`DISCORD_WEBHOOK_URL` は項目4で通知を使う場合のみ）。`.env` が `.gitignore` 対象であることを確認する。
+  - 手順概要: `uv --version` でuv本体を確認する。プロジェクトは既に`/Users/masuyama/ghq/github.com/tomada1114/swing-copilot`へuv-templateから作成され、Git初期化と設計文書のコミットまで完了しているため、テンプレートの再コピーや`git init`は行わない。プロジェクト直下に `.env` を作成し `FINNHUB_API_KEY`, `FRED_API_KEY`, `EDGAR_IDENTITY`, `DISCORD_WEBHOOK_URL` を記載する。`.env` が `.gitignore` 対象であることを確認する。
   - 所要時間目安: 20分
   - 完了確認方法: `uv --version` と既存リポジトリ内の`just lint`/`just test`が実行できる。`.env` に必要な値が記載され、`git check-ignore .env`で追跡対象外と確認できる。値そのものはログへ出さない。
 

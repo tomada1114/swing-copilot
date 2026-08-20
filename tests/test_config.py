@@ -28,7 +28,7 @@ class TestLoadSettings:
         assert isinstance(settings, Settings)
         assert settings.universe.index == "sp500"
         assert settings.risk.max_position_pct == pytest.approx(0.10)
-        assert settings.notification.enabled is False
+        assert settings.notification.enabled is True
 
     def test_missing_file_raises_config_error(self, tmp_path):
         with pytest.raises(ConfigError, match="not found"):

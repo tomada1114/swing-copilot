@@ -9,16 +9,13 @@ import pytest
 
 from swing_copilot.analysis.context import (
     _SCORE_METRIC_KEYS,
-    format_decision_history,
     format_market_regime,
-    format_performance_summary,
     format_prior_verdicts,
     format_risk_constraints,
     format_score_breakdown,
 )
 from swing_copilot.analysis.safety import check_display_texts
 from swing_copilot.config import ScoreWeights
-from swing_copilot.paper.journal import PerformanceSummary
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
@@ -28,7 +25,6 @@ from swing_copilot.regime.exposure import ExposureDecision, ExposureVerdict
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import Candidate
-from swing_copilot.storage.paper_records import DecisionHistoryEntry
 from swing_copilot.storage.verdict_records import (
     PriorVerdictOutcome,
     PriorVerdictRecord,
@@ -59,22 +55,6 @@ def _full_score_metrics() -> dict[str, float]:
         "score_rs_percentile": 0.000,
         "score_criteria_met": 0.000,
     }
-
-
-def _performance(closed: int) -> PerformanceSummary:
-    return PerformanceSummary(
-        closed_trade_count=closed,
-        total_pnl_usd=100.0,
-        win_rate=0.5,
-        spy_return_pct=0.01,
-        expectancy_usd=50.0,
-        profit_factor=1.5,
-        avg_r_multiple=0.75,
-        r_multiple_omitted_count=0,
-        r_multiple_omitted_warning=None,
-        by_exit_reason=(),
-        by_strategy=(),
-    )
 
 
 class TestScoreBreakdown:
@@ -205,51 +185,6 @@ class TestMarketRegime:
         )
 
         assert "Warning: Market regime is UNKNOWN" in block
-
-
-class TestDecisionHistory:
-    @staticmethod
-    def _entry(reason: str | None, realized: float | None) -> DecisionHistoryEntry:
-        return DecisionHistoryEntry(
-            run_id=uuid4(),
-            run_date=date(2027, 2, 20),
-            symbol="AAPL",
-            strategy_key="default",
-            decision="buy",
-            reason_memo=reason,
-            virtual_fill_price=100.0,
-            realized_return_pct=realized,
-        )
-
-    def test_empty_history_renders_nothing(self):
-        assert format_decision_history(()) == ""
-
-    def test_entries_are_rendered_as_escaped_data(self):
-        block = format_decision_history((self._entry("<b>strong</b>", 0.0512),))
-
-        assert "<decision_history>" in block
-        assert "&lt;b&gt;strong&lt;/b&gt;" in block
-        assert "<b>strong</b>" not in block
-        assert "確定リターン: +5.12%" in block
-
-    def test_a_missing_memo_and_return_degrade_to_explicit_placeholders(self):
-        block = format_decision_history((self._entry(None, None),))
-
-        assert "理由: (理由なし)" in block
-        assert "確定リターン: 未確定/対象外" in block
-
-
-class TestPerformanceSummaryBlock:
-    def test_none_and_zero_closed_trades_both_render_nothing(self):
-        assert format_performance_summary(None) == ""
-        assert format_performance_summary(_performance(0)) == ""
-
-    def test_closed_trades_render_the_realized_summary(self):
-        block = format_performance_summary(_performance(3))
-
-        assert "クローズ済み取引数: 3" in block
-        assert "勝率: 50.0%" in block
-        assert "profit_factor: 1.500" in block
 
 
 def _raw_metrics() -> dict[str, float]:

@@ -31,7 +31,6 @@ from swing_copilot.pipeline.daily import (
     _record_regime_snapshot,
     _record_step,
     _RiskStepRequest,
-    _run_mae_mfe_soft_step,
     _run_metadata,
     _run_mode,
     _run_step_analysis_export,
@@ -64,7 +63,7 @@ from swing_copilot.storage.tracking_records import OPEN, PROCEED
 
 logger = logging.getLogger(__name__)
 _HISTORICAL_POSITION_NOTICE = (
-    "NO_POSITION_DATA: historical replay does not use current position state"
+    "NO_POSITION_DATA: historical replay does not use current ledger state"
 )
 #: Why an `ANALYSIS_GAP` line was written. A single value today; kept as a
 #: named constant so the stderr tag and the `metadata_json` record cannot drift.
@@ -92,18 +91,16 @@ _ANALYSIS_GAP_NOTICE_TEMPLATE = (
 __all__ = ["DailyDependencies", "run_daily"]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from datetime import date
 
     from swing_copilot.data.base import BarFetchResult
-    from swing_copilot.models import Position
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.incomplete_runs import IncompleteRun
     from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
-    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import (
         Candidate,
         RejectionRecord,
@@ -111,60 +108,53 @@ if TYPE_CHECKING:
     )
 
 
-def _held_symbols(
-    deps: DailyDependencies,
-    portfolio: Sequence[Position],
-    *,
-    is_historical: bool,
-) -> set[str]:
-    """Union the real open positions with the tracked open virtual ones.
+def _held_symbols(deps: DailyDependencies, *, is_historical: bool) -> set[str]:
+    """Return the open virtual positions the verdict ledger is carrying.
 
     This set only decides what gets *collected and analysed* -- the held-first
     text/filing targets of `docs/04_detailed_design.md` 3.14. It is deliberately
-    not the `portfolio` passed to the risk step: a virtual position must never
-    reach sizing, concentration, or correlation as if the account held it.
+    not a portfolio: a virtual position must never reach sizing, concentration,
+    or correlation as if the account held it, and since the 2026-08 removal of
+    the real-trade record feature there is no other kind of position at all.
 
-    Until real trading starts, `positions` is always empty, and the only record
-    of what is notionally held is `verdict_positions`, the virtual ledger of
-    past `proceed` verdicts. Without reading it, held-symbol news collection
-    never fires at all, and Finnhub company-news cannot be fetched
+    `verdict_positions`, the virtual ledger of past `proceed` verdicts, is the
+    only record of what is notionally held. Without reading it, held-symbol
+    news collection never fires, and Finnhub company-news cannot be fetched
     retroactively, so every missed day is permanent data loss.
 
     Only the `proceed` side of the ledger counts as held (Issue #190). The
-    ledger also shadow-tracks `skip` verdicts now, but nothing is notionally
+    ledger also shadow-tracks `skip` verdicts, but nothing is notionally
     held there -- those positions exist purely so the retrospective can state
     what the rejected candidates would have done. Treating them as held would
     quietly redirect the held-first text budget onto every symbol the
     qualitative layer turned down, which is the opposite of what 3.14's
     priority is for.
 
-    A historical replay (`--as-of`) deliberately skips the ledger and keeps the
-    held set to the (empty) real positions: the ledger records the *current*
-    position state with no point-in-time history, so reading it would leak
-    today's knowledge into a past as-of date.
+    A historical replay (`--as-of`) deliberately skips the ledger and holds
+    nothing: the ledger records the *current* position state with no
+    point-in-time history, so reading it would leak today's knowledge into a
+    past as-of date.
 
-    A ledger read failure is fail-soft: it is logged and the virtual side is
+    A ledger read failure is fail-soft: it is logged and the held set is
     treated as empty rather than failing the run over an analysis-scope input.
 
     Args:
         deps: Dependency bundle supplying the `state_store` to read.
-        portfolio: Real open positions (empty on a historical replay).
         is_historical: Whether this run replays an explicit `--as-of` date.
 
     Returns:
         Symbols to prioritise as held for collection and analysis.
     """
-    symbols = {position.symbol for position in portfolio}
     if is_historical:
-        return symbols
+        return set()
     try:
         tracked = deps.state_store.get_verdict_positions(OPEN, (PROCEED,))
     except Exception:
         logger.exception(
             "verdict tracking ledger unreadable: continuing without virtual positions"
         )
-        return symbols
-    return symbols | {position.symbol for position in tracked}
+        return set()
+    return {position.symbol for position in tracked}
 
 
 def _prior_analysis_gaps(
@@ -339,10 +329,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     mode = _run_mode(options)
     fetch_cutoff = options.as_of or deps.clock.today()
     is_historical = options.as_of is not None
-    portfolio = (
-        [] if is_historical else deps.state_store.get_open_positions(is_paper=True)
-    )
-    held_symbols = _held_symbols(deps, portfolio, is_historical=is_historical)
+    held_symbols = _held_symbols(deps, is_historical=is_historical)
     symbols = _select_symbols(deps.universe, held_symbols, options.limit)
     # The market strip is never screened but must be fetched for report context.
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
@@ -441,7 +428,6 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
     portfolio_heat: PortfolioHeatResult | None = None
-    circuit_breaker: CircuitBreakerResult | None = None
     earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
@@ -453,7 +439,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_risk() -> _StepOutcome:
-        nonlocal circuit_breaker, earnings_guard_notice, exposure_decision
+        nonlocal earnings_guard_notice, exposure_decision
         nonlocal ftd_snapshot, portfolio_heat
         nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
@@ -463,17 +449,11 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
             outcome,
             risk_assessments,
             portfolio_heat,
-            circuit_breaker,
             earnings_guard_notice,
         ) = _run_step_risk(
             deps,
             _RiskStepRequest(
-                candidates,
-                portfolio,
-                run_id,
-                run_date,
-                exposure_decision,
-                is_historical,
+                candidates, run_id, run_date, exposure_decision, is_historical
             ),
         )
         return outcome
@@ -525,7 +505,6 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         truncated=truncated,
         risk_assessments=risk_assessments,
         portfolio_heat=cast("PortfolioHeatResult", portfolio_heat),
-        circuit_breaker=cast("CircuitBreakerResult", circuit_breaker),
         earnings_guard_notice=earnings_guard_notice,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=cast("RegimeSnapshot", regime_snapshot),
@@ -545,14 +524,6 @@ def _run_soft_steps(
     """Run fail-soft local and optional steps after required steps finish."""
     degraded = deps.universe_warning is not None
     text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
-
-    excursion_outcome = _run_mae_mfe_soft_step(
-        deps,
-        ctx.run_id,
-        ctx.run_date,
-        is_historical=options.as_of is not None,
-    )
-    degraded = degraded or not excursion_outcome.success
 
     text_outcome, text_items = _run_text_soft_step(
         options, deps, ctx, deadline, text_symbols
@@ -595,7 +566,7 @@ def _run_soft_steps(
                 deps,
                 ctx,
                 text_items,
-                include_decision_history=(
+                include_prior_verdicts=(
                     not options.is_dry_run and options.as_of is None
                 ),
             )
@@ -652,7 +623,6 @@ def _run_soft_steps(
         + tuple(
             f"{label}: {outcome.detail}"
             for label, outcome in (
-                ("MAE/MFE", excursion_outcome),
                 ("text", text_outcome),
                 ("analysis export", export_outcome),
                 ("postmortem", postmortem_outcome),

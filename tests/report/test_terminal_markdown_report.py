@@ -20,7 +20,6 @@ from swing_copilot.report.daily_brief import (
     BriefFundamentals,
     BriefMarketItem,
     BriefNewsSupply,
-    BriefPastDecision,
     BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
@@ -728,39 +727,6 @@ def test_the_breakdown_rows_are_exactly_the_score_weights_fields() -> None:
     # row here is still summed into `score`, so the printed table would no
     # longer add up to the score printed beside it.
     assert tuple(ScoreWeights.model_fields) == _SCORE_BREAKDOWN_COMPONENTS
-
-
-def _brief_with_past_decisions() -> DailyBrief:
-    base = _brief()
-    candidate = replace(
-        base.candidates[0],
-        past_decisions=(
-            BriefPastDecision(date(2026, 7, 19), "followed", "出来高増加", 0.05),
-            BriefPastDecision(date(2026, 7, 12), "ignored", None, None),
-        ),
-    )
-    return replace(base, candidates=(candidate,))
-
-
-def test_markdown_shows_past_decisions_section_newest_first() -> None:
-    # P1-05 REQ-008: 過去判断 subsection, rendered in the given order (the
-    # caller -- `get_decision_history` -- is responsible for newest-first).
-    output = render_markdown(_brief_with_past_decisions(), RunStatus.SUCCESS)
-
-    assert "### 過去判断" in output
-    assert output.index("2026-07-19") < output.index("2026-07-12")
-    assert "followed" in output
-    assert "出来高増加" in output
-    assert "+5.00%" in output
-    assert "ignored" in output
-
-
-def test_markdown_omits_past_decisions_section_when_empty() -> None:
-    # P1-05 boundary: zero past decisions omits the whole subsection, no
-    # stray heading -- matching Facts/LLM risk flags/Sources' own style.
-    output = render_markdown(_brief(), RunStatus.SUCCESS)
-
-    assert "### 過去判断" not in output
 
 
 def _brief_without_candidates() -> DailyBrief:

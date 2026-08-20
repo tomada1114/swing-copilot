@@ -39,7 +39,6 @@ dependencies = [
 [project.scripts]
 copilot-daily = "swing_copilot.pipeline.daily:main"
 copilot-backfill = "swing_copilot.pipeline.backfill:main"
-copilot-decision = "swing_copilot.paper.cli:main"
 copilot-history = "swing_copilot.report.history_cli:main"
 copilot-backtest = "swing_copilot.backtest.cli:main"
 copilot-filter-matrix = "swing_copilot.screening.filter_matrix_cli:main"

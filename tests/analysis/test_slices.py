@@ -230,7 +230,6 @@ def test_screening_slice_carries_the_deterministic_blocks_and_run_wide_context()
         "symbol": "AAPL",
         "score_breakdown": source["score_breakdown"],
         "risk_constraints": source["risk_constraints"],
-        "decision_history": source["decision_history"],
         "prior_verdicts": source["prior_verdicts"],
     }
     assert screening_slice["context"] == payload["context"]
@@ -417,14 +416,8 @@ def test_build_slices_rejects_a_symbol_that_cannot_be_a_filename() -> None:
         pytest.param(
             "screening",
             {"symbol": "AAPL", "score_breakdown": "s"},
-            "must carry candidate fields decision_history, risk_constraints",
+            "must carry candidate fields risk_constraints",
             id="screening-missing-blocks",
-        ),
-        pytest.param(
-            "screening",
-            {"symbol": "AAPL", "score_breakdown": "s", "risk_constraints": "r"},
-            "must carry candidate fields decision_history",
-            id="screening-missing-the-human-journal",
         ),
         pytest.param(
             "screening",
@@ -432,7 +425,6 @@ def test_build_slices_rejects_a_symbol_that_cannot_be_a_filename() -> None:
                 "symbol": "AAPL",
                 "score_breakdown": "s",
                 "risk_constraints": "r",
-                "decision_history": None,
                 "news": [],
             },
             "must not carry candidate fields news",

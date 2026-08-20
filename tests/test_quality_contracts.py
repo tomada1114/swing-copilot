@@ -31,7 +31,6 @@ TEST_NODE_PATTERN = re.compile(r"`(tests/[\w/]+\.py(?:::[A-Za-z_]\w*)+)`")
 CLI_ERROR_CONVERSION_MODULES = {
     "copilot-daily": "src/swing_copilot/pipeline/daily_composition.py",
     "copilot-backfill": "src/swing_copilot/pipeline/backfill.py",
-    "copilot-decision": "src/swing_copilot/paper/cli.py",
     "copilot-history": "src/swing_copilot/report/history_cli.py",
     "copilot-backtest": "src/swing_copilot/backtest/cli.py",
     "copilot-filter-matrix": "src/swing_copilot/screening/filter_matrix_cli.py",

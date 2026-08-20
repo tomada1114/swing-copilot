@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from swing_copilot.models import Position, RunMode
+from swing_copilot.models import RunMode
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
     Candidate,
@@ -31,7 +31,6 @@ from swing_copilot.storage.history_queries import (
     list_runs,
     run_exists,
 )
-from swing_copilot.storage.paper_records import TradeDecisionRecord
 
 if TYPE_CHECKING:
     from typing import NoReturn
@@ -75,23 +74,11 @@ class TestListRuns:
     def test_derives_counts_via_left_join_so_zero_rows_still_show(
         self, state_store: StateStore
     ) -> None:
-        # Example 1: run_id with 10 candidates / 3 rejections / 2 decisions.
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
         state_store.record_candidates(
             [_candidate(f"SYM{i}", rank=i) for i in range(1, 3)], run_id, "default"
         )
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=run_id,
-                symbol="SYM1",
-                strategy_key="default",
-                position_id=None,
-                decision="followed",
-                reason_memo=None,
-                virtual_fill_price=100.0,
-            )
-        )
-        # A second run with zero candidates/rejections/decisions must still
+        # A second run with zero candidates and zero rejections must still
         # appear, showing 0 rather than disappearing (LEFT JOIN contract).
         empty_run_id = state_store.start_run(date(2026, 7, 21), RunMode.LIVE, "cfg")
 
@@ -100,10 +87,8 @@ class TestListRuns:
         by_run_id = {row.run_id: row for row in rows}
         assert by_run_id[run_id].candidate_count == 2
         assert by_run_id[run_id].rejection_count == 0
-        assert by_run_id[run_id].decision_count == 1
         assert by_run_id[empty_run_id].candidate_count == 0
         assert by_run_id[empty_run_id].rejection_count == 0
-        assert by_run_id[empty_run_id].decision_count == 0
 
     def test_orders_newest_first_and_respects_limit(
         self, state_store: StateStore
@@ -122,7 +107,7 @@ class TestGetRunDetail:
     def test_unknown_run_id_returns_none(self, state_store: StateStore) -> None:
         assert get_run_detail(state_store._database, uuid4()) is None  # noqa: SLF001
 
-    def test_returns_candidates_risk_and_decisions_for_the_run(
+    def test_returns_candidates_and_risk_for_the_run(
         self, state_store: StateStore
     ) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
@@ -155,18 +140,6 @@ class TestGetRunDetail:
             ],
             run_id,
         )
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=run_id,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=None,
-                decision="followed",
-                reason_memo="test",
-                virtual_fill_price=100.0,
-            )
-        )
-
         detail = get_run_detail(state_store._database, run_id)  # noqa: SLF001
 
         assert detail is not None
@@ -178,8 +151,6 @@ class TestGetRunDetail:
         assert detail.candidates[0].signal_names == ("trend_sma",)
         assert len(detail.risk_assessments) == 1
         assert detail.risk_assessments[0].binding_constraint == "trade_risk"
-        assert len(detail.decisions) == 1
-        assert detail.decisions[0].decision == "followed"
 
 
 class TestGetRejections:
@@ -261,37 +232,9 @@ class TestGetSymbolTimeline:
     def test_never_a_candidate_returns_none(self, state_store: StateStore) -> None:
         assert get_symbol_timeline(state_store._database, "ZZZZ") is None  # noqa: SLF001
 
-    def test_merges_candidacy_and_decisions_across_runs(
-        self, state_store: StateStore
-    ) -> None:
-        position_id = uuid4()
-        state_store.upsert_position(
-            Position(
-                position_id=position_id,
-                symbol="AAPL",
-                is_paper=True,
-                entry_date=date(2026, 7, 18),
-                entry_price=100.0,
-                shares=10,
-                status="closed",
-                close_date=date(2026, 7, 21),
-                close_price=110.0,
-                exit_reason="target",
-            )
-        )
+    def test_merges_candidacy_across_runs(self, state_store: StateStore) -> None:
         run_id = state_store.start_run(date(2026, 7, 18), RunMode.LIVE, "cfg")
         state_store.record_candidates([_candidate()], run_id, "default")
-        state_store.record_trade_decision(
-            TradeDecisionRecord(
-                run_id=run_id,
-                symbol="AAPL",
-                strategy_key="default",
-                position_id=position_id,
-                decision="followed",
-                reason_memo="test",
-                virtual_fill_price=100.0,
-            )
-        )
 
         timeline = get_symbol_timeline(state_store._database, "AAPL")  # noqa: SLF001
 
@@ -300,9 +243,6 @@ class TestGetSymbolTimeline:
         assert len(timeline.candidacies) == 1
         assert timeline.candidacies[0].run_id == run_id
         assert timeline.candidacies[0].score == 0.5
-        assert len(timeline.decisions) == 1
-        assert timeline.decisions[0].decision == "followed"
-        assert timeline.decisions[0].realized_return_pct == 0.1
 
 
 class TestRunExists:

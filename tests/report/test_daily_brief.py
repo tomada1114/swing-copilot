@@ -24,7 +24,6 @@ from swing_copilot.analysis.validate import (
     SymbolOutcome,
     ValidatedAnalysis,
 )
-from swing_copilot.models import RunMode
 from swing_copilot.report.daily_brief import (
     PENDING_ANALYSIS_MESSAGE,
     BriefRejectionCount,
@@ -43,15 +42,10 @@ from swing_copilot.screening.base import (
     RejectionStage,
 )
 from swing_copilot.storage.market_store import FundamentalsRecord
-from swing_copilot.storage.paper_records import (
-    DecisionHistoryEntry,
-    TradeDecisionRecord,
-)
 from swing_copilot.universe import UniverseMember
 
 if TYPE_CHECKING:
     from swing_copilot.storage.market_store import MarketStore
-    from swing_copilot.storage.state_store import StateStore
 
 AS_OF = date(2026, 7, 22)
 
@@ -105,16 +99,6 @@ class FakeMarketStore:
             source_url="https://example.com/filing",
             fetched_at=datetime(2026, 7, 21, tzinfo=UTC),
         )
-
-
-class FakeStateStore:
-    def __init__(self, *, decision_history=()):
-        self._decision_history = list(decision_history)
-        self.decision_history_calls: list[tuple[str, str, date, int]] = []
-
-    def get_decision_history(self, symbol, strategy_key, before_date, limit):
-        self.decision_history_calls.append((symbol, strategy_key, before_date, limit))
-        return self._decision_history
 
 
 def _validated_analysis(
@@ -244,7 +228,6 @@ class TestNewsSupplyReachesTheBrief:
         brief = build_daily_brief(
             context,
             cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
         )
 
         supply = brief.candidates[0].analysis.news_supply
@@ -270,7 +253,6 @@ class TestNewsSupplyReachesTheBrief:
         brief = build_daily_brief(
             context,
             cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
         )
 
         supply = brief.candidates[0].analysis.news_supply
@@ -285,7 +267,6 @@ class TestNewsSupplyReachesTheBrief:
         brief = build_daily_brief(
             _context(),
             cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
         )
 
         assert brief.candidates[0].analysis.news_supply is None
@@ -297,7 +278,6 @@ def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:
     brief = build_daily_brief(
         _context(),
         cast("MarketStore", market_store),
-        cast("StateStore", FakeStateStore()),
     )
 
     assert len(brief.market) == 4
@@ -334,7 +314,6 @@ def test_missing_score_fields_produce_none() -> None:
     brief = build_daily_brief(
         context,
         cast("MarketStore", FakeMarketStore()),
-        cast("StateStore", FakeStateStore()),
     )
 
     candidate = brief.candidates[0]
@@ -348,7 +327,6 @@ def test_missing_data_produces_explicit_fallbacks() -> None:
     brief = build_daily_brief(
         _context(with_analysis=False, with_risk=False),
         cast("MarketStore", FakeMarketStore(with_data=False)),
-        cast("StateStore", FakeStateStore()),
     )
 
     assert all(item.value is None for item in brief.market)
@@ -388,7 +366,6 @@ def test_rejection_counts_are_tallied_by_reason_code_alphabetically() -> None:
     brief = build_daily_brief(
         context,
         cast("MarketStore", FakeMarketStore()),
-        cast("StateStore", FakeStateStore()),
     )
 
     assert brief.rejection_counts == (
@@ -401,7 +378,6 @@ def test_zero_rejections_produces_empty_rejection_counts() -> None:
     brief = build_daily_brief(
         _context(),
         cast("MarketStore", FakeMarketStore()),
-        cast("StateStore", FakeStateStore()),
     )
 
     assert brief.rejection_counts == ()
@@ -435,7 +411,6 @@ def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
     brief = build_daily_brief(
         context,
         cast("MarketStore", FakeMarketStore()),
-        cast("StateStore", FakeStateStore()),
     )
 
     risk = brief.candidates[0].risk
@@ -545,95 +520,6 @@ class TestFormatSizing:
         assert format_sizing(risk) == "5株（制約: 相関）"
 
 
-class TestPastDecisions:
-    """REQ-008: `past_decisions` mapping tests.
-
-    A thin, correctly-scoped mapping over `state_store.get_decision_history()`.
-    """
-
-    def test_populates_from_get_decision_history_scoped_to_symbol_strategy_and_run_date(
-        self,
-    ) -> None:
-        history = [
-            DecisionHistoryEntry(
-                run_id=uuid4(),
-                run_date=date(2026, 7, 15),
-                symbol="AAPL",
-                strategy_key="default",
-                decision="followed",
-                reason_memo="出来高増加",
-                virtual_fill_price=100.0,
-                realized_return_pct=0.05,
-            )
-        ]
-        state_store = FakeStateStore(decision_history=history)
-
-        brief = build_daily_brief(
-            _context(with_analysis=False),
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", state_store),
-        )
-
-        # `strategy_key`/`run_date` come from `DailyBriefContext`, not
-        # hardcoded, and `limit=3` is REQ-008's "直近3件".
-        assert state_store.decision_history_calls == [("AAPL", "default", AS_OF, 3)]
-        past = brief.candidates[0].past_decisions
-        assert len(past) == 1
-        assert past[0].run_date == date(2026, 7, 15)
-        assert past[0].decision == "followed"
-        assert past[0].reason_memo == "出来高増加"
-        assert past[0].realized_return_pct == 0.05
-
-    def test_zero_past_decisions_produces_empty_tuple_without_error(self) -> None:
-        brief = build_daily_brief(
-            _context(with_analysis=False),
-            cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
-        )
-
-        assert brief.candidates[0].past_decisions == ()
-
-    def test_example_4_four_recorded_decisions_truncate_to_three_newest_first(
-        self, state_store: StateStore
-    ) -> None:
-        # Issue's worked Example 4: 4 prior decisions recorded for AAPL ->
-        # only the 3 most recent appear, newest-first; the oldest is absent.
-        run_dates = [
-            date(2026, 7, 10),
-            date(2026, 7, 13),
-            date(2026, 7, 16),
-            date(2026, 7, 19),
-        ]
-        for i, run_date in enumerate(run_dates):
-            run_id = state_store.start_run(run_date, RunMode.LIVE, "cfg")
-            state_store.record_trade_decision(
-                TradeDecisionRecord(
-                    run_id=run_id,
-                    symbol="AAPL",
-                    strategy_key="default",
-                    position_id=None,
-                    decision="followed",
-                    reason_memo=f"memo-{i}",
-                    virtual_fill_price=100.0,
-                )
-            )
-
-        brief = build_daily_brief(
-            _context(with_analysis=False),
-            cast("MarketStore", FakeMarketStore()),
-            state_store,
-        )
-
-        past = brief.candidates[0].past_decisions
-        assert len(past) == 3
-        assert [p.run_date for p in past] == [
-            date(2026, 7, 19),
-            date(2026, 7, 16),
-            date(2026, 7, 13),
-        ]
-        assert date(2026, 7, 10) not in {p.run_date for p in past}
-
-
 class TestMultipleFilingAnalysesPerCandidate:
     """P6-27: every filing analysis for a symbol reaches the report.
 
@@ -671,7 +557,6 @@ class TestMultipleFilingAnalysesPerCandidate:
         brief = build_daily_brief(
             context,
             cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
         )
 
         filings = brief.candidates[0].analysis.filings
@@ -690,7 +575,6 @@ class TestMultipleFilingAnalysesPerCandidate:
         brief = build_daily_brief(
             _context(with_analysis=False),
             cast("MarketStore", FakeMarketStore()),
-            cast("StateStore", FakeStateStore()),
         )
 
         assert brief.candidates[0].analysis.filings == ()

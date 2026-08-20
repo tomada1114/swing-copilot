@@ -7,10 +7,9 @@ than reimplemented, so the ledger the human reads every morning cannot drift
 away from what the simulator would have done.
 
 This layer is deliberately not `retro/verdict_outcomes` (a two-point 5/20
-session classification of whether the verdict was right) and deliberately not
-`paper/positions` (what a human actually decided to hold, the FR-11/CON-04
-gate). It answers a third question: if this verdict had been followed
-mechanically, where would the position stand today, and what would close it.
+session classification of whether the verdict was right). It answers a
+different question: if this verdict had been followed mechanically, where
+would the position stand today, and what would close it.
 
 Both verdict sides are replayed (Issue #190). A `skip` position is a shadow:
 nobody was ever told to buy it, and it exists only so the ledger can state
@@ -35,26 +34,22 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from swing_copilot.analysis.safety import ForbiddenLanguageError, check_display_texts
 from swing_copilot.backtest.exits import (
     atr_as_of,
     atr_by_date,
     evaluate_exit,
     next_trailing_stop,
 )
-from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.tracking_records import (
     CLOSED,
     OPEN,
     VerdictPosition,
     VerdictPositionMark,
-    VerdictPositionNote,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date
-    from uuid import UUID
 
     import pandas as pd
 
@@ -64,9 +59,6 @@ if TYPE_CHECKING:
     from swing_copilot.storage.tracking_records import TrackableVerdict
 
 logger = logging.getLogger(__name__)
-
-#: Exit reason reserved for a human overriding the mechanical rules.
-MANUAL = "manual"
 
 #: Calendar days of history read before a position's entry date. ATR(14) needs
 #: 14 sessions plus the one before them for the first true range; 90 calendar
@@ -81,10 +73,6 @@ _OHLC_KEYS = ("open", "low", "close")
 #: every ex-dividend date, and US large-cap quarterly dividends run under 2%,
 #: while even the smallest ordinary splits (3-for-2, 5-for-4) clear 10%.
 _REBASE_THRESHOLD = 0.10
-
-
-class TrackingError(SwingCopilotError):
-    """Raised when a manual tracking write names a position it cannot act on."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,171 +513,3 @@ def _close_on(bars: pd.DataFrame, symbol: str, session_date: date) -> float | No
         return None
     close = float(selected["close"].to_numpy()[-1])
     return close if math.isfinite(close) else None
-
-
-# PLR0913: two stores plus the position's identity and the closing session.
-# Bundling the identity into a value object would only add construction noise
-# at the one call site that matters, the CLI.
-def close_manually(  # noqa: PLR0913
-    state_store: StateStore,
-    market_store: MarketStore,
-    *,
-    run_id: UUID,
-    symbol: str,
-    as_of: date,
-    note: str | None = None,
-) -> VerdictPosition:
-    """Close one tracked position by human decision, overriding the exit rules.
-
-    Args:
-        state_store: Tracking-ledger source and target.
-        market_store: Stored bars used for the closing price.
-        run_id: The run whose verdict opened the position.
-        symbol: The position's ticker.
-        as_of: The closing session; also the note's date.
-        note: Optional reasoning, recorded alongside the close.
-
-    Returns:
-        The closed position as persisted.
-
-    Raises:
-        TrackingError: The position does not exist, is already closed, the
-            requested close predates its entry or its last replayed session,
-            or the accompanying memo is unusable. The memo is checked before
-            anything is written, so a rejected one never leaves the position
-            closed without the reasoning that was meant to explain it.
-    """
-    if note is not None:
-        _check_note(note)
-    position = _require_position(state_store, run_id, symbol)
-    if position.status != OPEN:
-        msg = f"{symbol} ({run_id}) は既に {position.exit_date} に手仕舞い済みである"
-        raise TrackingError(msg)
-    if as_of < position.entry_date:
-        msg = (
-            f"手仕舞い日 {as_of.isoformat()} は "
-            f"エントリー日 {position.entry_date.isoformat()} より前にできない"
-        )
-        raise TrackingError(msg)
-    # Back-dating past an already replayed session would leave the position
-    # closed on one date while its marks, `days_held`, and resume position all
-    # describe a later one -- a row that contradicts itself in `list`/`show`.
-    last_marked_date = position.last_marked_date or position.entry_date
-    if as_of < last_marked_date:
-        msg = (
-            f"手仕舞い日 {as_of.isoformat()} は "
-            f"最終マーク日 {last_marked_date.isoformat()} より前にできない"
-            "（前進済みの日次マークと矛盾するため）"
-        )
-        raise TrackingError(msg)
-
-    exit_price = _close_on(
-        market_store.read_bars([symbol], as_of, as_of, as_of), symbol, as_of
-    )
-    if exit_price is None:
-        marks = state_store.get_verdict_position_marks(run_id, symbol)
-        exit_price = marks[-1].close if marks else position.entry_price
-        logger.info(
-            "manual close of %s uses the last recorded mark: no bar on %s",
-            symbol,
-            as_of,
-        )
-
-    realized_return_pct = _return_pct(exit_price, position.entry_price)
-    closed = replace(
-        position,
-        status=CLOSED,
-        exit_date=as_of,
-        exit_price=exit_price,
-        exit_reason=MANUAL,
-        realized_return_pct=realized_return_pct,
-        last_marked_date=as_of,
-    )
-    state_store.upsert_verdict_position(
-        closed,
-        (
-            VerdictPositionMark(
-                run_id=run_id,
-                symbol=symbol,
-                as_of_date=as_of,
-                close=exit_price,
-                stop_price=position.stop_price,
-                unrealized_return_pct=realized_return_pct,
-            ),
-        ),
-    )
-    if note is not None:
-        record_note(
-            state_store, run_id=run_id, symbol=symbol, note_date=as_of, note=note
-        )
-    return closed
-
-
-def record_note(
-    state_store: StateStore,
-    *,
-    run_id: UUID,
-    symbol: str,
-    note_date: date,
-    note: str,
-) -> None:
-    """Record one dated judgement memo against a tracked position.
-
-    A note is skill-authored text that `copilot-track show` prints verbatim,
-    which makes this an output boundary like every other skill-to-user text
-    channel: it goes through the same central CON-03 guard
-    (`analysis/safety.check_display_texts`) rather than trusting the skill's
-    instructions, and a violating memo is rejected outright rather than
-    stored and rendered.
-
-    Args:
-        state_store: Tracking-ledger source and target.
-        run_id: The run whose verdict opened the position.
-        symbol: The position's ticker.
-        note_date: The note's date, also its correction key.
-        note: The memo text.
-
-    Raises:
-        TrackingError: The memo is blank, carries prohibited imperative
-            trading language (CON-03), or names a position that is not tracked.
-    """
-    _check_note(note)
-    _require_position(state_store, run_id, symbol)
-    state_store.upsert_verdict_position_note(
-        VerdictPositionNote(
-            run_id=run_id, symbol=symbol, note_date=note_date, note=note
-        )
-    )
-
-
-def _check_note(note: str) -> None:
-    """Reject a memo that must never be stored, before anything is written.
-
-    Shared by `record_note` and `close_manually` so the CON-03 boundary
-    documented on the former cannot be bypassed through `close --note`.
-
-    Args:
-        note: The memo text.
-
-    Raises:
-        TrackingError: The memo is blank or violates CON-03.
-    """
-    if not note.strip():
-        msg = "ノート本文が空である"
-        raise TrackingError(msg)
-    try:
-        check_display_texts([note])
-    except ForbiddenLanguageError as exc:
-        msg = f"ノート本文が出力ポリシー(CON-03)に違反している: {exc}"
-        raise TrackingError(msg) from exc
-
-
-def _require_position(
-    state_store: StateStore, run_id: UUID, symbol: str
-) -> VerdictPosition:
-    """Return the named tracked position, or explain that it is not tracked."""
-    position = state_store.get_verdict_position(run_id, symbol)
-    if position is None:
-        msg = f"{symbol} ({run_id}) の追跡ポジションが存在しない"
-        raise TrackingError(msg)
-    return position

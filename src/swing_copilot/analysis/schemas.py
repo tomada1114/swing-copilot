@@ -334,9 +334,9 @@ class NewsSupply(_StrictModel):
 class CandidateInput(_StrictModel):
     """One screened candidate's deterministic context plus its untrusted text.
 
-    `score_breakdown`/`risk_constraints`/`decision_history`/`prior_verdicts`
-    are pre-rendered text blocks produced by `analysis/context.py` from values
-    the code already computed. They exist so the skill's narrative can be
+    `score_breakdown`/`risk_constraints`/`prior_verdicts` are pre-rendered
+    text blocks produced by `analysis/context.py` from values the code already
+    computed. They exist so the skill's narrative can be
     checked against the code's own quantitative determination, never so the
     skill can restate or override it.
     """
@@ -344,10 +344,8 @@ class CandidateInput(_StrictModel):
     symbol: str
     score_breakdown: str
     risk_constraints: str
-    decision_history: str | None
     #: This symbol's own earlier verdicts and how they turned out (Issue
-    #: #191), distinct from `decision_history`, which is the *human*
-    #: journal. Optional so `analysis-input-v3` documents archived before it
+    #: #191). Optional so `analysis-input-v3` documents archived before it
     #: existed keep parsing; `None` means "no prior verdict was archived",
     #: which for a first-time candidate is the normal state.
     prior_verdicts: str | None = None
@@ -379,7 +377,6 @@ class AnalysisContextBlocks(_StrictModel):
     """Run-wide (not per-candidate) deterministic context blocks."""
 
     market_regime: str | None
-    performance_summary: str | None
     calendar_events: list[CalendarEventInput] = []
 
 

@@ -20,7 +20,6 @@ from swing_copilot.retro.aggregate import (
     PROCEED_SEVERE_MISS_WATCH_RATE,
     UNTAGGED_VERDICT_BASIS,
     compute_basis_contribution,
-    compute_human_alignment,
     compute_news_supply_mix,
     compute_proceed_severe_miss_rate,
     compute_separation,
@@ -39,7 +38,6 @@ from swing_copilot.storage.tracking_records import (
 from swing_copilot.storage.verdict_records import (
     NewsSupplyRecord,
     VerdictCitationRow,
-    VerdictDecisionRow,
     VerdictOutcomeRecord,
     VerdictReasonBasisRow,
     VerdictRow,
@@ -293,72 +291,6 @@ class TestSkipHitRate:
             (None, 0),
             (None, 0),
         ]
-
-
-class TestHumanAlignment:
-    def _decision(
-        self,
-        decision: str,
-        recommendation: str,
-        forward_return_pct: float,
-        *,
-        classification: str = "HIT",
-        horizon_days: int = 5,
-    ) -> VerdictDecisionRow:
-        return VerdictDecisionRow(
-            run_id=RUN_A,
-            symbol="AAA",
-            strategy_key="default",
-            decision=decision,
-            recommendation=recommendation,
-            horizon_days=horizon_days,
-            forward_return_pct=forward_return_pct,
-            classification=classification,
-        )
-
-    def test_cross_tabs_decision_by_recommendation_by_horizon(self) -> None:
-        rows = compute_human_alignment(
-            (
-                self._decision("followed", "proceed", 2.0),
-                self._decision("followed", "proceed", 4.0),
-                self._decision("ignored", "skip", -3.0),
-                self._decision("followed", "proceed", 1.0, horizon_days=20),
-            )
-        )
-
-        assert [
-            (
-                row.decision,
-                row.recommendation,
-                row.horizon_days,
-                row.count,
-                row.mean_forward_return_pct,
-            )
-            for row in rows
-        ] == [
-            ("followed", "proceed", 5, 2, 3.0),
-            ("followed", "proceed", 20, 1, 1.0),
-            ("ignored", "skip", 5, 1, -3.0),
-        ]
-
-    def test_counts_hits_and_severe_misses_inside_each_cell(self) -> None:
-        rows = compute_human_alignment(
-            (
-                self._decision("modified", "proceed", 2.0),
-                self._decision(
-                    "modified", "proceed", -3.0, classification="MISS_SEVERE"
-                ),
-                self._decision("modified", "proceed", -1.0, classification="MISS_MILD"),
-            )
-        )
-
-        assert [(row.count, row.hit_count, row.severe_miss_count) for row in rows] == [
-            (3, 1, 1)
-        ]
-        assert rows[0].cell_id == "metric:human_alignment:modified:proceed:5d"
-
-    def test_reports_an_empty_journal_as_no_cells(self) -> None:
-        assert compute_human_alignment(()) == ()
 
 
 class TestSourceContribution:

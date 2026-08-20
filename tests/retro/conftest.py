@@ -129,18 +129,6 @@ def retro_input_unsigned_payload() -> dict[str, Any]:
                 "is_preliminary": True,
             }
         ],
-        "human_alignment": [
-            {
-                "cell_id": "metric:human_alignment:followed:proceed:5d",
-                "decision": "followed",
-                "recommendation": "proceed",
-                "horizon_days": 5,
-                "count": 2,
-                "mean_forward_return_pct": 1.25,
-                "hit_count": 1,
-                "severe_miss_count": 1,
-            }
-        ],
         "source_contribution": [
             {
                 "contribution_id": "metric:source_contribution:news:finnhub",

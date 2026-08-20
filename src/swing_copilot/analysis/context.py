@@ -14,12 +14,10 @@ from html import escape
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from swing_copilot.paper.journal import PerformanceSummary
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate
-    from swing_copilot.storage.paper_records import DecisionHistoryEntry
     from swing_copilot.storage.verdict_records import PriorVerdictRecord
 
 # P1-01 score breakdown metric keys, as stored in `Candidate.metrics` by
@@ -76,30 +74,6 @@ def format_market_regime(snapshot: RegimeSnapshot, exposure: ExposureDecision) -
     )
 
 
-def format_decision_history(history: tuple[DecisionHistoryEntry, ...]) -> str:
-    """Format history as escaped data, never as instructions or current facts."""
-    if not history:
-        return ""
-    entries = []
-    for item in history:
-        reason = escape(item.reason_memo or "(理由なし)", quote=False)
-        realized = (
-            f"{item.realized_return_pct:+.2%}"
-            if item.realized_return_pct is not None
-            else "未確定/対象外"
-        )
-        entries.append(
-            f"日付: {item.run_date.isoformat()}\n"
-            f"判断: {escape(item.decision, quote=False)}\n"
-            f"理由: {reason}\n"
-            f"確定リターン: {realized}"
-        )
-    return (
-        "以下は同一銘柄・戦略に対する過去の人間の判断記録です。\n"
-        "<decision_history>\n" + "\n\n".join(entries) + "\n</decision_history>\n\n"
-    )
-
-
 def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str:
     """Feed this symbol's own past verdicts, and their outcomes, back in.
 
@@ -110,10 +84,9 @@ def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str:
     classification that followed makes the pattern visible at the one moment
     it can still change the answer.
 
-    Every text field is escaped and framed as data, exactly like
-    `format_decision_history`: a past reason is skill-authored prose, and it
-    must not be able to act as an instruction on re-entry just because the
-    code archived it. It carries no `source_ids` back either -- the earlier
+    Every text field is escaped and framed as data: a past reason is
+    skill-authored prose, and it must not be able to act as an instruction on
+    re-entry just because the code archived it. It carries no `source_ids` back either -- the earlier
     run's IDs are not this run's, and re-offering them would invite a
     provenance claim `validate.py` would then have to reject.
 
@@ -284,40 +257,6 @@ def format_risk_constraints(risk_assessment: RiskAssessment) -> str:
         f"最終株数(shares): {final_shares}\n"
         f"warnings: {warnings}\n"
         "</risk_constraints>\n"
-    )
-
-
-def format_performance_summary(summary: PerformanceSummary | None) -> str:
-    """REQ-003: render P1-06's recent realized-performance summary.
-
-    Degrades gracefully -- returns `""` -- when `summary` is `None` or there
-    are no closed trades yet (`closed_trade_count == 0`): a brand-new paper
-    journal with nothing closed is a normal, common state, not an error.
-
-    Args:
-        summary: The portfolio-wide `PaperJournal.summarize_performance()`
-            result, computed once per run, or `None` if unavailable.
-
-    Returns:
-        A `<performance_summary>` block, or `""` if there is no closed-trade
-        history to report.
-    """
-    if summary is None or summary.closed_trade_count == 0:
-        return ""
-    win_rate = _pct_or_unknown(summary.win_rate)
-    profit_factor = _ratio_or_unknown(summary.profit_factor)
-    expectancy = _ratio_or_unknown(summary.expectancy_usd)
-    avg_r_multiple = _ratio_or_unknown(summary.avg_r_multiple)
-    return (
-        "以下は直近の実現損益サマリです(P1-06)。過去の判断が実際に報われたかの"
-        "参考情報であり、個別の売買判断を意味するものではありません。\n"
-        "<performance_summary>\n"
-        f"クローズ済み取引数: {summary.closed_trade_count}\n"
-        f"勝率: {win_rate}\n"
-        f"profit_factor: {profit_factor}\n"
-        f"期待値(USD): {expectancy}\n"
-        f"平均R倍数: {avg_r_multiple}\n"
-        "</performance_summary>\n"
     )
 
 

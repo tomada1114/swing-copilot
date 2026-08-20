@@ -32,7 +32,6 @@ from swing_copilot.retro.surprises import FreshnessSources
 from swing_copilot.retro.validate import evidence_id_space
 from swing_copilot.storage.audit_records import SignalOutcomeRecord
 from swing_copilot.storage.config_records import ConfigVersionRecord
-from swing_copilot.storage.paper_records import TradeDecisionRecord
 from swing_copilot.storage.retro_records import (
     RetroNarrationRecord,
     RetroSessionRecord,
@@ -219,17 +218,6 @@ def populated_store(state_store: StateStore) -> StateStore:
             _outcome("AAPL", "proceed", -8.0, "MISS_SEVERE"),
             _outcome("MSFT", "skip", -1.0, "HIT"),
         ],
-    )
-    state_store.record_trade_decision(
-        TradeDecisionRecord(
-            run_id=RUN_ID,
-            symbol="AAPL",
-            strategy_key="default",
-            position_id=None,
-            decision="followed",
-            reason_memo=None,
-            virtual_fill_price=None,
-        )
     )
     return state_store
 
@@ -670,17 +658,13 @@ class TestBuildRetroInput:
             coverage.starved_filing_count,
         ) == counts
 
-    def test_cross_tabs_the_human_journal_and_the_cited_sources(
+    def test_tallies_the_cited_sources(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
     ) -> None:
         document = build_retro_input(
             _deps(populated_store, market_store), _request(tmp_path)
         )
 
-        assert [
-            (cell.decision, cell.recommendation, cell.count)
-            for cell in document.human_alignment
-        ] == [("followed", "proceed", 1)]
         assert [
             (row.source_type, row.provider, row.citation_count)
             for row in document.source_contribution
@@ -911,7 +895,6 @@ class TestBuildRetroInput:
         )
 
         assert document.surprises.items == []
-        assert document.human_alignment == []
         assert [row.value for row in document.aggregates.separation] == [
             None,
             None,

@@ -20,7 +20,7 @@
 | FR-08 | スキル結果の run identity 不一致はレポートを書き換えない | 別 run の `analysis_result.json` を取り込む | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report` |
 | FR-09 | 日次 run はローカル Markdown と 8 つの可視 step を残す | 通知成功後にレポートが作られない | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_eight_steps_complete_and_produce_a_markdown_brief` |
 | FR-10 | 売買コストをエントリー・決済の両方に適用する | 決済時のスリッページを損益から漏らす | `tests/backtest/test_engine.py::TestBenchmarkAndReproducibility::test_final_equity_includes_exit_slippage_and_commission` |
-| FR-11 | 同一判断の再記録は補正更新になり重複しない | 同じ run/symbol/strategy の判断が二重保存される | `tests/paper/test_journal.py::TestRecordDecisionIdempotency::test_recording_same_natural_key_twice_updates_not_duplicates` |
+| FR-11 | **廃止(2026-08-19)**: 公開トラックレコード化に伴い実売買記録機能を撤去した。不変条件も対応テストも無い | — | — |
 | FR-12 | required step の失敗は後続 step を実行せず failed で終える | 価格取得失敗後も分析入力を出力する | `tests/pipeline/test_daily_core.py::TestFatalStepFailure::test_price_fetch_failure_marks_run_failed_and_stops` |
 | NFR-01 | Python プロセスはモデル API を呼ばない | API キーや従量課金クライアントを production dependency に追加する | 手動確認: `pyproject.toml` と依存グラフにモデル SDK がなく、分析は Claude Code スキル境界だけで行うことをレビューする。 |
 | NFR-02 | 日次境界は小さく、構成・実行・step 実装を分離する | CLI が step 実装を直接抱え、テストで fake を差し込めない | `tests/test_quality_contracts.py::test_daily_entrypoint_remains_a_compatible_facade_over_split_boundaries` |
@@ -33,7 +33,7 @@
 | CON-01 | 発注 API を扱わず、人間だけが発注する | broker client または注文送信コードを追加する | 手動確認: `src/` と依存関係をレビューし、broker/order 実装が存在しないことを確認する。 |
 | CON-02 | yfinance は試作データ provider に限定する | 本番 tier が yfinance 固定になる | 手動確認: production provider の採用判断は運用 ADR で行い、`YFinanceProvider` は `DataTier.PROTOTYPE` の既定値だけであることをレビューする。 |
 | CON-03 | 表示文の断定的売買指示は ingest で fail-closed にする | 全角英字の「ＢＵＹ」を verdict 理由に入れる | `tests/analysis/test_safety.py::TestImperativeLanguage::test_normalized_commands_and_obligations_are_rejected` |
-| CON-04 | ペーパートレード実績なしに実資金へ進む判定を自動化しない | バックテスト成績だけで注文可能状態にする | 手動確認: 本アプリに実資金の状態遷移・注文機能がなく、人間の運用ゲートとして扱うことをレビューする。 |
+| CON-04 | **廃止(2026-08-19)**: ペーパートレード記録機能ごと撤去したため、このゲート自体が存在しない | — | 手動確認: 本アプリに実資金の状態遷移・注文機能が無いことは変わらない。 |
 
 ## レビュー修正の回帰対応
 

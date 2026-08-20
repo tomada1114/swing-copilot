@@ -16,12 +16,7 @@ import pytest
 
 from swing_copilot.storage.tracking_records import VerdictPosition, VerdictPositionMark
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
-from swing_copilot.tracking.update import (
-    TrackingError,
-    close_manually,
-    record_note,
-    update_tracking,
-)
+from swing_copilot.tracking.update import update_tracking
 from tests.tracking.conftest import (
     DAY_1,
     DAY_2,
@@ -659,178 +654,6 @@ class TestAsOfBoundary:
         ] == [ENTRY_DATE, DAY_1]
 
 
-class TestManualWrites:
-    @pytest.fixture
-    def opened(
-        self,
-        state_store: StateStore,
-        market_store: MarketStore,
-        backtest_config: BacktestConfig,
-    ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        write_bars(market_store, [_rise(DAY_1, 102.0)])
-        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
-
-    @pytest.mark.usefixtures("opened")
-    def test_manual_close_uses_the_session_close_and_records_the_note(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        closed = close_manually(
-            state_store,
-            market_store,
-            run_id=RUN_ID,
-            symbol=SYMBOL,
-            as_of=DAY_1,
-            note="決算前にリスクを落とす",
-        )
-
-        assert closed.exit_reason == "manual"
-        assert closed.exit_price == 102.0
-        assert closed.realized_return_pct == pytest.approx(2.0)
-        assert state_store.get_verdict_position(RUN_ID, SYMBOL) == closed
-        notes = state_store.get_verdict_position_notes(RUN_ID, SYMBOL)
-        assert [(note.note_date, note.note) for note in notes] == [
-            (DAY_1, "決算前にリスクを落とす")
-        ]
-
-    @pytest.mark.usefixtures("opened")
-    def test_manual_close_without_a_bar_falls_back_to_the_last_mark(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        closed = close_manually(
-            state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=DAY_2
-        )
-
-        assert closed.exit_date == DAY_2
-        assert closed.exit_price == 102.0
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
-
-    @pytest.mark.usefixtures("opened")
-    def test_closing_an_already_closed_position_is_rejected(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        close_manually(
-            state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=DAY_1
-        )
-
-        with pytest.raises(TrackingError, match="既に"):
-            close_manually(
-                state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=DAY_1
-            )
-
-    def test_closing_an_untracked_position_is_rejected(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        with pytest.raises(TrackingError, match="存在しない"):
-            close_manually(
-                state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=DAY_1
-            )
-
-    @pytest.mark.usefixtures("opened")
-    def test_closing_before_the_entry_date_is_rejected(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        with pytest.raises(TrackingError, match="より前にできない"):
-            close_manually(
-                state_store,
-                market_store,
-                run_id=RUN_ID,
-                symbol=SYMBOL,
-                as_of=ENTRY_DATE - timedelta(days=1),
-            )
-
-    @pytest.mark.usefixtures("opened")
-    def test_a_note_on_the_same_day_corrects_the_previous_one(
-        self, state_store: StateStore
-    ) -> None:
-        record_note(
-            state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="様子見"
-        )
-        record_note(
-            state_store,
-            run_id=RUN_ID,
-            symbol=SYMBOL,
-            note_date=DAY_1,
-            note="やはり利確を検討",
-        )
-
-        notes = state_store.get_verdict_position_notes(RUN_ID, SYMBOL)
-        assert [note.note for note in notes] == ["やはり利確を検討"]
-
-    @pytest.mark.usefixtures("opened")
-    def test_a_blank_note_is_rejected(self, state_store: StateStore) -> None:
-        with pytest.raises(TrackingError, match="空である"):
-            record_note(
-                state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="   "
-            )
-
-    def test_a_note_on_an_untracked_position_is_rejected(
-        self, state_store: StateStore
-    ) -> None:
-        with pytest.raises(TrackingError, match="存在しない"):
-            record_note(
-                state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="所感"
-            )
-
-    @pytest.mark.usefixtures("opened")
-    def test_closing_before_the_last_marked_session_is_rejected(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        # DAY_1 is already replayed and marked. Closing at ENTRY_DATE would
-        # leave exit_date behind last_marked_date, days_held, and a mark dated
-        # after the position's own exit.
-        with pytest.raises(TrackingError, match="最終マーク日"):
-            close_manually(
-                state_store,
-                market_store,
-                run_id=RUN_ID,
-                symbol=SYMBOL,
-                as_of=ENTRY_DATE,
-            )
-
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
-        assert position.status == "open"
-
-    @pytest.mark.usefixtures("opened")
-    def test_a_note_with_imperative_trading_language_is_rejected(
-        self, state_store: StateStore
-    ) -> None:
-        # A note is skill-authored text that `show` prints verbatim, so it
-        # goes through the same CON-03 guard as every other skill output.
-        with pytest.raises(TrackingError, match="CON-03"):
-            record_note(
-                state_store,
-                run_id=RUN_ID,
-                symbol=SYMBOL,
-                note_date=DAY_1,
-                note="AAA は今すぐ買うべきである",
-            )
-
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
-
-    @pytest.mark.usefixtures("opened")
-    def test_a_manual_close_with_a_forbidden_note_writes_nothing(
-        self, state_store: StateStore, market_store: MarketStore
-    ) -> None:
-        with pytest.raises(TrackingError, match="CON-03"):
-            close_manually(
-                state_store,
-                market_store,
-                run_id=RUN_ID,
-                symbol=SYMBOL,
-                as_of=DAY_1,
-                note="ここは売るべき",
-            )
-
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
-        assert position.status == "open"
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
-
-
 class TestVerdictReconciliation:
     def test_a_verdict_deleted_outright_removes_what_it_opened(
         self,
@@ -843,9 +666,6 @@ class TestVerdictReconciliation:
         write_bars(market_store, flat_prelude())
         write_bars(market_store, [_rise(DAY_1, 102.0)])
         update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
-        record_note(
-            state_store, run_id=RUN_ID, symbol=SYMBOL, note_date=DAY_1, note="様子見"
-        )
 
         # Re-ingesting a corrected analysis_result.json replaces the run's
         # verdicts wholesale; AAA is no longer analyzed at all, so nothing
@@ -857,7 +677,6 @@ class TestVerdictReconciliation:
 
         assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
         assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
-        assert state_store.get_verdict_position_notes(RUN_ID, SYMBOL) == ()
         assert any("verdict 行が消えた" in note for note in result.notes)
         assert result.opened_count == 0
 
@@ -1223,18 +1042,32 @@ class TestSplitRebase:
         seed_risk(state_store)
         write_bars(market_store, flat_prelude())
         update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-        close_manually(
-            state_store, market_store, run_id=RUN_ID, symbol=SYMBOL, as_of=ENTRY_DATE
+        # Close it the only way the ledger closes anything: a session that
+        # trades through the trailing stop.
+        write_bars(
+            market_store,
+            [
+                bar(
+                    DAY_1,
+                    open_price=RISK_STOP - 1.0,
+                    high=RISK_STOP - 0.5,
+                    low=RISK_STOP - 2.0,
+                    close=RISK_STOP - 1.0,
+                )
+            ],
         )
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
         closed_before = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert closed_before is not None
+        assert closed_before.status == "closed"
 
         write_bars(market_store, _scaled(flat_prelude(), 0.5))
         write_bars(
             market_store,
-            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+            [bar(DAY_2, open_price=50.0, high=50.5, low=49.5, close=50.0)],
         )
 
-        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_2)
 
         closed_after = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert closed_after == closed_before

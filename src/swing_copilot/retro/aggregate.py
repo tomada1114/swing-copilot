@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.verdict_records import (
         VerdictCitationRow,
-        VerdictDecisionRow,
         VerdictOutcomeRecord,
         VerdictReasonBasisRow,
         VerdictRow,
@@ -239,20 +238,6 @@ class NewsSupplySummary:
     recorded_verdict_count: int
     unrecorded_verdict_count: int
     cells: tuple[NewsSupplyCell, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AlignmentCell:
-    """One `(decision, recommendation, horizon)` cell of the human cross-tab."""
-
-    cell_id: str
-    decision: str
-    recommendation: str
-    horizon_days: int
-    count: int
-    mean_forward_return_pct: float
-    hit_count: int
-    severe_miss_count: int
 
 
 #: Notional every shadow position is normalized to before its P&L is measured
@@ -1070,46 +1055,6 @@ def _flag_severe(value: float | None, baseline: float | None) -> bool:
 
 def _flag_below_baseline(value: float | None, baseline: float | None) -> bool:
     return value is not None and baseline is not None and value < baseline
-
-
-def compute_human_alignment(
-    rows: Sequence[VerdictDecisionRow],
-) -> tuple[AlignmentCell, ...]:
-    """Cross-tab the journal's decision against the verdict and what happened.
-
-    Args:
-        rows: `trades_journal` x `verdicts` x `verdict_outcomes` rows (E31.5).
-
-    Returns:
-        One cell per `(decision, recommendation, horizon)` seen, ordered
-        deterministically. Empty when nothing was journaled -- a user who
-        never records decisions simply has nothing to cross-tabulate, which
-        is not an error.
-    """
-    grouped: dict[tuple[str, str, int], list[VerdictDecisionRow]] = defaultdict(list)
-    for row in rows:
-        grouped[(row.decision, row.recommendation, row.horizon_days)].append(row)
-
-    return tuple(
-        AlignmentCell(
-            cell_id=(
-                f"{_METRIC_PREFIX}:human_alignment:"
-                f"{decision}:{recommendation}:{horizon_days}d"
-            ),
-            decision=decision,
-            recommendation=recommendation,
-            horizon_days=horizon_days,
-            count=len(cell),
-            mean_forward_return_pct=(
-                sum(row.forward_return_pct for row in cell) / len(cell)
-            ),
-            hit_count=sum(1 for row in cell if row.classification == HIT),
-            severe_miss_count=sum(
-                1 for row in cell if row.classification == MISS_SEVERE
-            ),
-        )
-        for (decision, recommendation, horizon_days), cell in sorted(grouped.items())
-    )
 
 
 def compute_basis_contribution(

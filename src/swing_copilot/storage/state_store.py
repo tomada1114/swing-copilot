@@ -11,10 +11,9 @@ creation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from swing_copilot.models import Position, RunStatus, StepStatus
 from swing_copilot.storage import (
     audit_records,
     config_records,
@@ -22,7 +21,6 @@ from swing_copilot.storage import (
     exposure_records,
     ftd_records,
     history_queries,
-    paper_records,
     regime_records,
     retro_records,
     text_records,
@@ -33,6 +31,7 @@ from swing_copilot.storage.json_guard import dumps_safe
 from swing_copilot.storage.schema import (
     ALTER_SCHEMA_STATEMENTS,
     ANALYSIS_VIEW_STATEMENTS,
+    DROP_SCHEMA_STATEMENTS,
     INIT_SCHEMA_STATEMENTS,
 )
 from swing_copilot.universe import UniverseMember
@@ -44,7 +43,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.data.earnings import EarningsEvent
-    from swing_copilot.models import RunMode
+    from swing_copilot.models import RunMode, RunStatus, StepStatus
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
@@ -61,7 +60,6 @@ if TYPE_CHECKING:
     )
     from swing_copilot.storage.config_records import ConfigVersionRecord
     from swing_copilot.storage.database import Database
-    from swing_copilot.storage.paper_records import TradeDecisionRecord
     from swing_copilot.storage.retro_records import (
         FailureClassHistory,
         RetroNarrationRecord,
@@ -71,14 +69,12 @@ if TYPE_CHECKING:
         TrackableVerdict,
         VerdictPosition,
         VerdictPositionMark,
-        VerdictPositionNote,
     )
     from swing_copilot.storage.verdict_records import (
         AnalysisSourceCoverageRecord,
         CollectedRunRecords,
         PriorVerdictRecord,
         VerdictCitationRow,
-        VerdictDecisionRow,
         VerdictOutcomeRecord,
         VerdictReasonBasisRow,
         VerdictRecord,
@@ -115,13 +111,17 @@ class StateStore:
         return self._database
 
     def init_schema(self) -> None:
-        """Create every table this store owns (idempotent, additive only).
+        """Create every table this store owns (idempotent).
 
-        Also applies `ALTER_SCHEMA_STATEMENTS` so an existing database from
-        before an additive column change (e.g. P1-03's `risk_assessments`
-        columns) picks them up, then `ANALYSIS_VIEW_STATEMENTS` (CREATE OR
-        REPLACE, so edited view definitions self-migrate); every statement
-        set is safe to re-run.
+        `DROP_SCHEMA_STATEMENTS` runs first, so a table this project no longer
+        owns is gone before anything reads or writes -- that is the migration
+        path for the 2026-08 real-trade record removal, and it is deliberately
+        the first thing an existing database sees on open.
+
+        Then `ALTER_SCHEMA_STATEMENTS` so an existing database from before an
+        additive column change (e.g. P1-03's `risk_assessments` columns) picks
+        them up, then `ANALYSIS_VIEW_STATEMENTS` (CREATE OR REPLACE, so edited
+        view definitions self-migrate); every statement set is safe to re-run.
 
         Issue #192's `verdict_reasons` backfill runs last, after the tables
         it reads and writes both exist. It is the one migration step that
@@ -130,6 +130,8 @@ class StateStore:
         and like every statement above it is idempotent.
         """
         with self._database.connect() as conn:
+            for statement in DROP_SCHEMA_STATEMENTS:
+                conn.execute(statement)
             for statement in INIT_SCHEMA_STATEMENTS:
                 conn.execute(statement)
             for statement in ALTER_SCHEMA_STATEMENTS:
@@ -305,88 +307,6 @@ class StateStore:
                 [str(run_id), step, status.value, detail, duration_s],
             )
 
-    def upsert_position(self, position: Position) -> None:
-        """Insert or update a position, keyed by `position_id`.
-
-        Args:
-            position: The position to persist.
-        """
-        with self._database.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO positions (
-                    position_id, symbol, is_paper, entry_date, entry_price,
-                    shares, stop_price, status, close_date, close_price,
-                    exit_reason, close_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
-                ON CONFLICT (position_id) DO UPDATE SET
-                    symbol = EXCLUDED.symbol,
-                    is_paper = EXCLUDED.is_paper,
-                    entry_date = EXCLUDED.entry_date,
-                    entry_price = EXCLUDED.entry_price,
-                    shares = EXCLUDED.shares,
-                    stop_price = EXCLUDED.stop_price,
-                    status = EXCLUDED.status,
-                    close_date = EXCLUDED.close_date,
-                    close_price = EXCLUDED.close_price,
-                    exit_reason = EXCLUDED.exit_reason,
-                    close_at = EXCLUDED.close_at
-                """,
-                [
-                    str(position.position_id),
-                    position.symbol,
-                    position.is_paper,
-                    position.entry_date,
-                    position.entry_price,
-                    position.shares,
-                    position.stop_price,
-                    position.status,
-                    position.close_date,
-                    position.close_price,
-                    position.exit_reason,
-                    position.close_at,
-                ],
-            )
-
-    _POSITION_COLUMNS = (
-        "position_id, symbol, is_paper, entry_date, entry_price, "
-        "shares, stop_price, status, close_date, close_price, exit_reason, close_at"
-    )
-
-    @staticmethod
-    def _position_from_row(row: tuple[Any, ...]) -> Position:  # Any: untyped DuckDB row
-        return Position(
-            position_id=row[0],
-            symbol=row[1],
-            is_paper=row[2],
-            entry_date=row[3],
-            entry_price=row[4],
-            shares=row[5],
-            stop_price=row[6],
-            status=row[7],
-            close_date=row[8],
-            close_price=row[9],
-            exit_reason=row[10],
-            close_at=row[11],
-        )
-
-    def get_open_positions(self, is_paper: bool = True) -> list[Position]:
-        """Return open positions matching `is_paper`.
-
-        Args:
-            is_paper: Whether to return paper or live positions.
-
-        Returns:
-            Open positions, unordered.
-        """
-        with self._database.connect() as conn:
-            rows = conn.execute(
-                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
-                "FROM positions WHERE status = 'open' AND is_paper = ?",
-                [is_paper],
-            ).fetchall()
-        return [self._position_from_row(row) for row in rows]
-
     def upsert_earnings_calendar(self, events: Sequence[EarningsEvent]) -> None:
         """Correction-upsert earnings events as one transaction."""
         earnings_records.upsert_earnings_calendar(self._database, events)
@@ -394,149 +314,6 @@ class StateStore:
     def get_earnings_event(self, symbol: str) -> EarningsEvent | None:
         """Return the latest corrected earnings event for one symbol."""
         return earnings_records.get_earnings_event(self._database, symbol)
-
-    def get_position(self, position_id: UUID) -> Position | None:
-        """Return one position by ID, regardless of status.
-
-        Args:
-            position_id: The position to look up.
-
-        Returns:
-            The matching position, or `None` if it doesn't exist.
-        """
-        with self._database.connect() as conn:
-            row = conn.execute(
-                f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
-                "FROM positions WHERE position_id = ?",
-                [str(position_id)],
-            ).fetchone()
-        return None if row is None else self._position_from_row(row)
-
-    def get_closed_positions(
-        self, is_paper: bool = True, as_of: date | None = None
-    ) -> list[Position]:
-        """Return closed positions matching `is_paper`.
-
-        Args:
-            is_paper: Whether to return paper or live positions.
-            as_of: Optional point-in-time cutoff; when given, only positions
-                with `close_date <= as_of` are returned (inclusive), so a
-                position closed after `as_of` never leaks into a summary
-                computed for that date. `None` returns every closed position
-                regardless of `close_date`.
-
-        Returns:
-            Closed positions, unordered.
-        """
-        query = (
-            f"SELECT {self._POSITION_COLUMNS} "  # noqa: S608 - constant column list
-            "FROM positions WHERE status = 'closed' AND is_paper = ?"
-        )
-        params: list[Any] = [is_paper]
-        if as_of is not None:
-            query += " AND close_date <= ?"
-            params.append(as_of)
-        with self._database.connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [self._position_from_row(row) for row in rows]
-
-    def get_closed_positions_with_strategy(
-        self, is_paper: bool = True, as_of: date | None = None
-    ) -> list[tuple[Position, str | None]]:
-        """Return closed positions paired with their originating strategy_key.
-
-        A closed `Position` doesn't carry `strategy_key` directly — it lives
-        on `trades_journal`, linked via `position_id` (P1-06, REQ-007's
-        by-strategy breakdown).
-
-        Args:
-            is_paper: Whether to return paper or live positions.
-            as_of: Optional point-in-time cutoff; same `close_date <= as_of`
-                (inclusive) semantics as `get_closed_positions`.
-
-        Returns:
-            `(position, strategy_key)` pairs, unordered. `strategy_key` is
-            `None` when the position was never linked to a `trades_journal`
-            row (e.g. closed without ever recording a decision). Because
-            `trades_journal.position_id` is not itself uniquely constrained
-            (`UNIQUE (run_id, symbol, strategy_key)` is the real key), more
-            than one row could in principle reference the same
-            `position_id`; this picks the earliest-recorded row (by
-            `created_at`, tie-broken by `strategy_key`) deterministically —
-            a tie-break, not a new business rule.
-        """
-        qualified_columns = ", ".join(
-            f"p.{column.strip()}" for column in self._POSITION_COLUMNS.split(",")
-        )
-        query = f"""
-            SELECT {qualified_columns}, tj.strategy_key
-            FROM positions p
-            LEFT JOIN (
-                SELECT position_id, strategy_key,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY position_id
-                           ORDER BY created_at ASC, strategy_key ASC
-                       ) AS rn
-                FROM trades_journal
-                WHERE position_id IS NOT NULL
-            ) tj ON tj.position_id = p.position_id AND tj.rn = 1
-            WHERE p.status = 'closed' AND p.is_paper = ?
-        """  # noqa: S608 - constant column list, no user input interpolated
-        params: list[Any] = [is_paper]
-        if as_of is not None:
-            query += " AND p.close_date <= ?"
-            params.append(as_of)
-        with self._database.connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [(self._position_from_row(row[:-1]), row[-1]) for row in rows]
-
-    def record_trade_decision(self, record: TradeDecisionRecord) -> None:
-        """Upsert a paper-trading decision, keyed by `(run_id, symbol, strategy_key)`.
-
-        Args:
-            record: The decision to persist.
-        """
-        paper_records.record_trade_decision(self._database, record)
-
-    def upsert_position_excursions(
-        self, records: list[paper_records.PositionExcursionRecord]
-    ) -> None:
-        """Atomically correction-upsert daily position excursion snapshots."""
-        paper_records.upsert_position_excursions(self._database, records)
-
-    def get_position_excursions(
-        self, position_ids: list[UUID], as_of: date
-    ) -> dict[UUID, paper_records.PositionExcursionRecord]:
-        """Return latest point-in-time excursion snapshots for positions."""
-        return paper_records.get_position_excursions(
-            self._database, position_ids, as_of
-        )
-
-    def get_decision_history(
-        self, symbol: str, strategy_key: str, before_date: date, limit: int
-    ) -> list[paper_records.DecisionHistoryEntry]:
-        """Return bounded prior live decisions for point-in-time analysis use."""
-        return paper_records.get_decision_history(
-            self._database, symbol, strategy_key, before_date, limit
-        )
-
-    def get_candidate_strategy_keys(self, run_id: UUID, symbol: str) -> tuple[str, ...]:
-        """Return strategies that produced a candidate in one run."""
-        return paper_records.get_candidate_strategy_keys(self._database, run_id, symbol)
-
-    def get_trade_decisions(
-        self, run_id: UUID
-    ) -> list[paper_records.TradeDecisionRecord]:
-        """Return all human decisions recorded for one run."""
-        return paper_records.get_trade_decisions(self._database, run_id)
-
-    def get_run_report_path(self, run_id: UUID) -> Path | None:
-        """Return the generated artifact path associated with a run."""
-        return paper_records.get_run_report_path(self._database, run_id)
-
-    def get_latest_run_report_path(self) -> Path | None:
-        """Return the newest completed generated artifact path."""
-        return paper_records.get_latest_run_report_path(self._database)
 
     def get_run_started_at(self, run_id: UUID) -> datetime | None:
         """Return one run's `started_at`, or `None` if it has no `runs` row."""
@@ -878,19 +655,6 @@ class StateStore:
             self._database, window_start, as_of
         )
 
-    def get_verdict_decision_alignment(
-        self, window_start: date, as_of: date
-    ) -> tuple[VerdictDecisionRow, ...]:
-        """Return matured verdicts joined to the human's journal (P8-31, E31.5).
-
-        Args:
-            window_start: Inclusive earliest maturity date.
-            as_of: Inclusive latest maturity date.
-        """
-        return verdict_records.get_verdict_decision_alignment(
-            self._database, window_start, as_of
-        )
-
     def get_untracked_verdicts(
         self,
         as_of: date,
@@ -986,18 +750,6 @@ class StateStore:
     ) -> dict[tuple[UUID, str], VerdictPositionMark]:
         """Return each tracked position's first (entry-session) mark."""
         return tracking_records.get_earliest_verdict_position_marks(self._database)
-
-    def upsert_verdict_position_note(self, note: VerdictPositionNote) -> None:
-        """Correction-upsert one dated note on a tracked position."""
-        tracking_records.upsert_verdict_position_note(self._database, note)
-
-    def get_verdict_position_notes(
-        self, run_id: UUID, symbol: str
-    ) -> tuple[VerdictPositionNote, ...]:
-        """Return one tracked position's notes in date order."""
-        return tracking_records.get_verdict_position_notes(
-            self._database, run_id, symbol
-        )
 
     def get_verdict_reasons_json(self, run_id: UUID, symbol: str) -> str | None:
         """Return the raw `verdicts.reasons_json` behind a tracked position."""

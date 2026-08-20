@@ -263,19 +263,6 @@ class SignalPerformanceEntry(_StrictModel):
     is_preliminary: bool
 
 
-class AlignmentEntry(_StrictModel):
-    """One `(decision, recommendation, horizon)` cell of the human cross-tab."""
-
-    cell_id: NonBlankText
-    decision: NonBlankText
-    recommendation: NonBlankText
-    horizon_days: int
-    count: int = Field(ge=0)
-    mean_forward_return_pct: float
-    hit_count: int = Field(ge=0)
-    severe_miss_count: int = Field(ge=0)
-
-
 class BasisContributionEntry(_StrictModel):
     """One evidence kind's verdict tally and hit share (Issue #191).
 
@@ -521,7 +508,6 @@ class RetroInput(_StrictModel):
     evaluation: EvaluationSettings
     aggregates: AggregateMetrics
     signal_performance: list[SignalPerformanceEntry]
-    human_alignment: list[AlignmentEntry]
     source_contribution: list[SourceContributionEntry]
     #: Hit rate per evidence kind (Issue #191). Defaults to empty so
     #: `retro_input.json` documents archived before it existed keep parsing;

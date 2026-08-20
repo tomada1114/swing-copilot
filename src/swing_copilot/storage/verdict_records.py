@@ -259,27 +259,6 @@ class VerdictCitationRow:
     source_url: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class VerdictDecisionRow:
-    """One human decision paired with the verdict it accepted or overrode.
-
-    `trades_journal` x `verdicts` x `verdict_outcomes` (E31.5). The realized
-    figure is the horizon's `forward_return_pct`, deliberately not an
-    execution-aware P&L: the retrospective adds no new realized-return
-    calculation, and `skip` symbols were never actually traded anyway
-    (design §12).
-    """
-
-    run_id: UUID
-    symbol: str
-    strategy_key: str
-    decision: str
-    recommendation: str
-    horizon_days: int
-    forward_return_pct: float
-    classification: str
-
-
 def _news_supply_columns(
     supply: NewsSupplyRecord | None,
 ) -> tuple[int | None, int | None, int | None, str | None]:
@@ -883,15 +862,14 @@ def get_prior_verdicts(
 ) -> tuple[PriorVerdictRecord, ...]:
     """Return a symbol's most recent earlier verdicts, newest first (Issue #191).
 
-    Deliberately a separate read from `paper_records.get_decision_history()`
-    even though both answer "what happened last time". That one reports the
-    *human* journal, which only has a row when the operator recorded one; this
-    one reports the analysis layer's own past judgement, which exists for every
-    symbol a past run analyzed. Joining the two would have made the feedback
-    visible only for journaled symbols -- the case the issue is least about.
+    This reports the analysis layer's own past judgement, which exists for
+    every symbol a past run analyzed. Since 2026-08 it is the only "what
+    happened last time" feedback the export carries: the human decision
+    journal it used to sit beside was removed with the rest of the real-trade
+    record feature.
 
-    Point-in-time: `as_of < before_date` strictly, matching the decision-history
-    cutoff, so today's own verdict can never be fed back into today's input.
+    Point-in-time: `as_of < before_date` strictly, so today's own verdict can
+    never be fed back into today's input.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -1058,55 +1036,6 @@ def get_verdict_citations_in_window(
             source_id=row[2],
             source_type=row[3],
             source_url=row[4],
-        )
-        for row in rows
-    )
-
-
-def get_verdict_decision_alignment(
-    database: Database, window_start: date, as_of: date
-) -> tuple[VerdictDecisionRow, ...]:
-    """Return matured verdicts paired with the human decision recorded for them.
-
-    Joined on `(run_id, symbol)` rather than also on `strategy_key`: a verdict
-    is one judgement per symbol per run, so every strategy row the human
-    journaled for that symbol is measured against the same verdict.
-
-    Args:
-        database: Shared DuckDB connection owner.
-        window_start: Inclusive earliest maturity date.
-        as_of: Inclusive latest maturity date.
-
-    Returns:
-        Rows ordered by `(run_id, symbol, strategy_key, horizon_days)`. Empty
-        when the journal is empty -- the cross-tab is observation-only and a
-        user who never journals simply has nothing to cross.
-    """
-    with database.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT tj.run_id, tj.symbol, tj.strategy_key, tj.decision,
-                   v.recommendation, vo.horizon_days, vo.forward_return_pct,
-                   vo.classification
-            FROM trades_journal tj
-            JOIN verdicts v ON v.run_id = tj.run_id AND v.symbol = tj.symbol
-            JOIN verdict_outcomes vo
-              ON vo.run_id = tj.run_id AND vo.symbol = tj.symbol
-            WHERE vo.as_of >= ? AND vo.as_of <= ?
-            ORDER BY tj.run_id, tj.symbol, tj.strategy_key, vo.horizon_days
-            """,
-            [window_start, as_of],
-        ).fetchall()
-    return tuple(
-        VerdictDecisionRow(
-            run_id=UUID(str(row[0])),
-            symbol=row[1],
-            strategy_key=row[2],
-            decision=row[3],
-            recommendation=row[4],
-            horizon_days=row[5],
-            forward_return_pct=row[6],
-            classification=row[7],
         )
         for row in rows
     )

@@ -39,9 +39,31 @@ ALTER path.
 Python (`verdict_records.backfill_verdict_reasons`), because normalizing
 `reasons_json` reuses that module's own parsing rather than duplicating it as
 nested JSON SQL.
+
+Removal is the mirror image: `DROP_SCHEMA_STATEMENTS` runs *before* the
+create/alter tuples in `StateStore.init_schema()`, so a table this project no
+longer owns disappears — with its rows — from every copy of the database the
+next time one is opened. `init_schema()` is on the daily run's path and on
+every test's path, which is what makes it reach the operator's file, the copy
+restored from R2, and a CI runner's alike, rather than only wherever a
+one-shot migration script happened to be run.
 """
 
 from __future__ import annotations
+
+# 2026-08: the real-trade record feature (FR-11/CON-04's paper-trading gate and
+# its decision journal) and the virtual ledger's human notes were removed so
+# the daily analysis can be published as a track record without exposing what
+# the operator personally bought or chose to skip. Dropping them here, rather
+# than in a one-shot script, is what makes the removal reach every database
+# copy; see the module docstring. `verdict_positions`/`verdict_position_marks`
+# — the mechanical virtual tracking — are deliberately untouched.
+DROP_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    "DROP TABLE IF EXISTS trades_journal",
+    "DROP TABLE IF EXISTS position_excursions",
+    "DROP TABLE IF EXISTS positions",
+    "DROP TABLE IF EXISTS verdict_position_notes",
+)
 
 INIT_SCHEMA_STATEMENTS = (
     """
@@ -245,56 +267,11 @@ INIT_SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS positions (
-        position_id   UUID PRIMARY KEY,
-        symbol        VARCHAR NOT NULL,
-        is_paper      BOOLEAN NOT NULL DEFAULT 1,
-        entry_date    DATE NOT NULL,
-        entry_price   DOUBLE NOT NULL,
-        shares        BIGINT NOT NULL,
-        stop_price    DOUBLE,
-        status        VARCHAR NOT NULL CHECK(status IN ('open','closed')),
-        close_date    DATE,
-        close_at      TIMESTAMPTZ,
-        close_price   DOUBLE,
-        exit_reason   VARCHAR CHECK (exit_reason IS NULL OR exit_reason IN (
-            'stop_loss','target','time_stop','manual','other','unknown'
-        )),
-        created_at    TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS position_excursions (
-        position_id    UUID NOT NULL,
-        as_of_date     DATE NOT NULL,
-        mae_per_share  DOUBLE,
-        mfe_per_share  DOUBLE,
-        data_quality   VARCHAR NOT NULL
-            CHECK(data_quality IN ('OK','MISSING_BAR')),
-        created_at     TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (position_id, as_of_date)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS earnings_calendar (
         symbol          VARCHAR PRIMARY KEY,
         earnings_date   DATE NOT NULL,
         session         VARCHAR NOT NULL,
         fetched_at      TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS trades_journal (
-        journal_id          UUID PRIMARY KEY,
-        run_id              UUID NOT NULL,
-        symbol              VARCHAR NOT NULL,
-        strategy_key        VARCHAR NOT NULL,
-        position_id         UUID,
-        decision            VARCHAR NOT NULL CHECK(decision IN ('followed','ignored','modified')),
-        reason_memo         VARCHAR,
-        virtual_fill_price  DOUBLE,
-        created_at          TIMESTAMPTZ NOT NULL,
-        UNIQUE (run_id, symbol, strategy_key)
     )
     """,
     """
@@ -459,12 +436,10 @@ INIT_SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, symbol, horizon_days)
     )
     """,
-    # Verdict tracking: the virtual position a verdict implies, the daily marks
-    # that follow it, and the human's notes about it. Deliberately separate
-    # from `positions` (the FR-11/CON-04 paper-trading gate, which records what
-    # a *human* decided to hold) and from `verdict_outcomes` (a two-point 5/20
-    # session classification): this layer replays the backtest's own exit rules
-    # forward, one trading day at a time.
+    # Verdict tracking: the virtual position a verdict implies and the daily
+    # marks that follow it. Deliberately separate from `verdict_outcomes` (a
+    # two-point 5/20 session classification): this layer replays the
+    # backtest's own exit rules forward, one trading day at a time.
     #
     # Issue #190: `skip` verdicts are shadow-tracked under the *same* exit
     # rules, which is what makes "proceed only vs every screened candidate" a
@@ -501,15 +476,6 @@ INIT_SCHEMA_STATEMENTS = (
         stop_price            DOUBLE,
         unrealized_return_pct DOUBLE NOT NULL,
         PRIMARY KEY (run_id, symbol, as_of_date)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS verdict_position_notes (
-        run_id     UUID NOT NULL,
-        symbol     VARCHAR NOT NULL,
-        note_date  DATE NOT NULL,
-        note       VARCHAR NOT NULL,
-        PRIMARY KEY (run_id, symbol, note_date)
     )
     """,
     # Issue #192: the shorter distribution windows and the gate's own inputs
@@ -636,20 +602,6 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS binding_constraint VARCHAR",
     "ALTER TABLE risk_assessments "
     "ADD COLUMN IF NOT EXISTS sizing_warnings_json JSON DEFAULT '[]'",
-    # P1-06: additive column for a database created before this change.
-    # Unconstrained at the DB level for the same reason as above (DuckDB
-    # rejects ADD COLUMN with an inline CHECK); `close_position()` and the
-    # backfill below are the sole enforcement points for rows added via
-    # this path. Deliberately no column-level DEFAULT: a plain DEFAULT would
-    # also stamp 'unknown' onto still-open positions (wrong — they have no
-    # exit reason at all and must stay NULL), so the backfill below is
-    # scoped to already-closed rows only. Both statements are idempotent —
-    # safe to re-run on every startup against a fresh or already-upgraded
-    # database.
-    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_reason VARCHAR",
-    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_at TIMESTAMPTZ",
-    "UPDATE positions SET exit_reason = 'unknown' "
-    "WHERE status = 'closed' AND exit_reason IS NULL",
     # I57: old databases gain the run-reconstruction metadata lazily. DuckDB
     # cannot add a NOT NULL JSON column, so legacy rows retain NULL while new
     # runs always write a canonical JSON object through `StateStore.start_run`.
@@ -663,8 +615,8 @@ ALTER_SCHEMA_STATEMENTS = (
     # added to a pre-existing `verdict_positions` table via this path. Every
     # row already in such a table was necessarily opened while `no_trade`
     # verdicts were still excluded, so backfilling `FALSE` is not a guess --
-    # it restates a fact those rows already had, the same way P1-06 backfills
-    # `positions.exit_reason`. Both statements are idempotent.
+    # it restates a fact those rows already had. Both statements are
+    # idempotent.
     "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS no_trade BOOLEAN",
     "UPDATE verdict_positions SET no_trade = FALSE WHERE no_trade IS NULL",
     # P8-123: Finnhub's `related`/`category` are now persisted for ticker-
@@ -715,9 +667,9 @@ ALTER_SCHEMA_STATEMENTS = (
     # Issue #192: the ranking key and its components as real columns. The
     # score side IS backfilled, unlike most entries above: `metrics_json`
     # already holds `score`/`score_*` for every row ever written, so the
-    # UPDATE restates a fact those rows carry rather than inventing one --
-    # the same reasoning as `positions.exit_reason`, applied to a value that
-    # was merely in the wrong shape. `execution_state`/`execution_distance`
+    # UPDATE restates a fact those rows carry rather than inventing one, a
+    # value that was merely in the wrong shape. `execution_state`/
+    # `execution_distance`
     # are NOT backfilled and cannot be: they were never persisted anywhere,
     # and recomputing them would mean replaying that day's execution config
     # against that day's bars. NULL there is a documented one-way cut,

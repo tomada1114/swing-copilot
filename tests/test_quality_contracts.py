@@ -415,9 +415,10 @@ def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
     """#323: exit 127 must have a documented, bounded recovery.
 
     The allowlisted form is relative, so a shell left outside the repository root
-    kills the parent's only blocking wait before the first wave even starts — the
-    2026-08-19 dry-runs both failed exactly this way and fell through to the
-    completion-based fallback. One absolute-path retry recovers it without
+    kills the parent's only blocking wait before the first wave even starts — a
+    2026-08-19 dry-run recorded exactly this exit 127 in its `headless_note.md`
+    and fell through to the completion-based fallback. One absolute-path retry
+    recovers it without
     widening the allowlist; the widened `Bash()` prefix is deliberately *not*
     added, so this pins that the recovery is documented instead.
     """

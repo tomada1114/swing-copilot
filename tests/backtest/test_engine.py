@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 
 INITIAL_CASH = 100_000.0
+LEGACY_SIM_POSITION_CAP_PCT = 0.10
+LEGACY_SIM_TRADE_RISK_PCT = 0.01
 
 
 def _candidate(
@@ -155,8 +157,8 @@ class TestEntryFill:
             INITIAL_CASH,
             expected_entry_price,
             expected_stop,
-            settings.risk.max_position_pct,
-            settings.risk.max_trade_risk_pct,
+            LEGACY_SIM_POSITION_CAP_PCT,
+            LEGACY_SIM_TRADE_RISK_PCT,
         ).shares
 
         # Verify the open position on its fill day, before the mandatory
@@ -271,8 +273,8 @@ class TestDuplicateBars:
             INITIAL_CASH,
             expected_entry_price,
             expected_stop,
-            settings.risk.max_position_pct,
-            settings.risk.max_trade_risk_pct,
+            LEGACY_SIM_POSITION_CAP_PCT,
+            LEGACY_SIM_TRADE_RISK_PCT,
         ).shares
         cost = (
             expected_shares
@@ -479,7 +481,7 @@ class TestCashAndRankConstraints:
         }
         assert len(held_symbols) <= 1
 
-    def test_concurrent_positions_capped_by_max_position_pct(self, settings, engine):
+    def test_concurrent_positions_use_legacy_simulator_cap(self, engine):
         days = TRADING_DAYS[:3]
         symbols = [f"SYM{i}" for i in range(20)]
         rows = list(_spy_bars(days))
@@ -497,7 +499,7 @@ class TestCashAndRankConstraints:
             days, bars, lambda d: candidates_by_day.get(d, []), initial_cash=1_000_000.0
         )
 
-        max_concurrent = max(1, int(1 / settings.risk.max_position_pct))
+        max_concurrent = max(1, int(1 / LEGACY_SIM_POSITION_CAP_PCT))
         filled_symbols = {trade.symbol for trade in result.trades}
         assert len(filled_symbols) <= max_concurrent
 
@@ -582,8 +584,8 @@ class TestBenchmarkAndReproducibility:
             INITIAL_CASH,
             entry,
             stop,
-            settings.risk.max_position_pct,
-            settings.risk.max_trade_risk_pct,
+            LEGACY_SIM_POSITION_CAP_PCT,
+            LEGACY_SIM_TRADE_RISK_PCT,
         ).shares
         entry_cost = shares * entry * (1 + settings.backtest.commission_pct)
         exit_price = 100.0 * (1 - settings.backtest.slippage_pct)
@@ -895,8 +897,8 @@ def _sized(
         equity,
         entry_price,
         stop_price,
-        settings.risk.max_position_pct,
-        settings.risk.max_trade_risk_pct,
+        LEGACY_SIM_POSITION_CAP_PCT,
+        LEGACY_SIM_TRADE_RISK_PCT,
     ).shares
 
 
@@ -1020,7 +1022,7 @@ class TestEntryPolicyInjection:
     def test_reduced_risk_budget_from_the_policy_shrinks_the_position(self, settings):
         days = TRADING_DAYS[:4]
         rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
-        halved = settings.risk.max_trade_risk_pct / 2
+        halved = LEGACY_SIM_TRADE_RISK_PCT / 2
         policy = _RecordingPolicy(max_trade_risk_pct=halved)
         # A wide ATR makes the *risk* cap the binding one, so halving the
         # budget is actually observable in the share count.
@@ -1036,7 +1038,7 @@ class TestEntryPolicyInjection:
             INITIAL_CASH,
             entry_price,
             stop_price,
-            settings.risk.max_position_pct,
+            LEGACY_SIM_POSITION_CAP_PCT,
             halved,
         ).shares
         assert result.trades[0].shares == expected
@@ -1118,7 +1120,7 @@ class TestEntryInstrumentation:
         assert dict(result.entry_block_counts)[ENTRY_BLOCK_ALREADY_HELD] == 1
 
     def test_candidate_beyond_the_concurrency_cap_counts_as_max_concurrent(
-        self, settings, engine
+        self, engine
     ):
         days = TRADING_DAYS[:3]
         symbols = [f"SYM{index}" for index in range(20)]
@@ -1139,7 +1141,7 @@ class TestEntryInstrumentation:
             initial_cash=1_000_000.0,
         )
 
-        max_concurrent = max(1, int(1 / settings.risk.max_position_pct))
+        max_concurrent = max(1, int(1 / LEGACY_SIM_POSITION_CAP_PCT))
         counts = dict(result.entry_block_counts)
         assert counts[ENTRY_BLOCK_MAX_CONCURRENT] == len(symbols) - max_concurrent
         assert result.max_concurrent_reached == max_concurrent

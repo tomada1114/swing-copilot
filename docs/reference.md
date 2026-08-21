@@ -99,31 +99,20 @@ run成果物になる。`candidate_limit`は`config/strategies.yaml`で戦略ご
 `RunStatus.DEGRADED`（終了コード0）に留まる。定性分析の3ファイルとは異なり
 digestで束縛せず、読み戻す経路も持たない診断用の成果物である。
 
-## 口座レベルリスク
+## 銘柄レベルの売買計画とリスク
 
-`risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションの
-`entry_price`と`stop_price`の差によるリスクを口座資産に対する百分率で計算する。
-`RiskChecker.check()`が承認候補を積み上げるときは、計画指値`limit_price`と`stop_price`の差を使う。実売買記録機能一式の撤去
-（2026-08、FR-11/CON-04）に伴い、日次パイプラインは保有中ポジションを常に
-空リストとして渡す——バーチャルなverdict追跡台帳（`verdict_positions`）は
-実際に持っていない建玉なのでここへ代入しない。`RiskChecker.check()`は
-候補をランキング順に評価しながらこの空の基準値へ承認済み候補ぶんの
-stopリスクを順に積み上げ、`risk.max_portfolio_heat_pct`を厳密に超える候補を
-`PORTFOLIO_HEAT_EXCEEDED`で拒否する。
+`risk/checks.py::RiskChecker`は読者の口座や保有を受け取らない。候補ごとにrun日終値、
+計画指値、終値アンカーの逆指値、ATR14、1R
+（`(limit_price - stop_price) / limit_price`）、status、blocking reasons、warningsを返す。
+価格/ATR欠損や無効なストップ幅は`not_calculable`、広いストップは`WIDE_STOP`警告になる。
 
 決算近接ガードは`EarningsCalendarClient` Protocolから取得した次回予定日を使い、
 2営業日以内を`EARNINGS_PROXIMITY_BLOCK`、5営業日以内を
 `EARNINGS_PROXIMITY_WARN`とする。予定不明は`EARNINGS_DATE_UNKNOWN`を明示し、
 Finnhubキー未設定時はガード全体を`NO_EARNINGS_DATA`として無効化する。
 
-`risk/circuit_breaker.py`の`evaluate_circuit_breaker()`は、クローズ済み取引の
-実現損益から米東部時間の日次・週次（月曜開始）・月次境界で状態を再計算する
-純関数（損失率2%/5%/8%到達で`HALTED`、2連敗で24時間`COOLDOWN`）だが、
-実現損益の唯一の入力源だった`positions`が撤去されたため、日次パイプラインは
-`RiskRunContext.circuit_breaker`へ常に`None`を渡す——空の実現損益履歴から
-従来出ていた`TRADING_ALLOWED`と挙動的に同じ値である。このモジュール自体は
-バックテストの`backtest/policy.py`が自前のシミュレーション上の実現損益で
-引き続き使用しており、廃止はされていない。
+`risk/circuit_breaker.py`はバックテスト互換の純関数として残るが、日次の本番/公開経路には
+配線しない。バックテストだけが自身のシミュレーション実現損益を渡す。
 
 ## 定性分析の境界（`analysis/`、FR-08・CON-03）
 
@@ -220,10 +209,10 @@ quote側の数値から10のべき乗（千/百万/billion/million/億/万）で
 
 `analysis/cli.py`（`copilot-ingest-analysis`）はネットワークにも接続せず、
 スクリーニング・リスク・ランキングを再計算しない。日次runが
-`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v3`、
+`analysis/snapshot.py`で保存した`report_context.json`（schema `report-context-v4`、
 表示非依存の`DailyBrief`のスナップショット）を読み直し、候補ごとの定性欄と
 run単位の`no_trade`/`no_trade_reason`だけを差し替えて同じMarkdownを再生成する。
-スコア・サイジング・実行状態・落選・レジームは無変更で持ち越す。
+スコア・売買計画・実行状態・落選・レジームは無変更で持ち越す。
 
 `report/daily_brief.py::build_analysis_brief()`は不合格経路をすべて
 `degraded=True`＋説明文へ畳む: 分析未実施は「分析待ち」、当該銘柄が分析対象外なら
@@ -553,8 +542,8 @@ R倍数はエントリー日のマークに残る**当時の**stopから計算�
 一式の撤去（2026-08）により実オープンポジション（`positions`）は存在しなくなった
 ため、日次runは台帳だけを読んで保有銘柄を決める。台帳を読まなければ保有銘柄の
 ニュース収集が一度も発火せず、遡及取得できない`company-news`が恒久的に欠ける。
-ただしこれは収集・分析の対象集合にだけ効き、リスク計算（サイジング・集中度・
-相関）へ渡すポートフォリオは常に空で、仮想建玉は混ざらない。`skip`のシャドウ
+ただしこれは収集・分析の対象集合にだけ効き、口座や保有を受け取らない銘柄単位の
+リスク判定へ仮想建玉は渡さない。`skip`のシャドウ
 建玉は保有銘柄に**含めない**——そこにはnotionalにも何も保有されておらず、含めると
 開示・ニュースの「保有優先」予算が定性レイヤが落とした銘柄すべてへ向いてしまう。
 `--as-of`指定の再現runは台帳を読まない（現在状態であり時点再現性が無いため）。
@@ -846,8 +835,8 @@ entry slippageを適用し、始値が上でも安値`<= limit`なら指値ち�
 持ち越さない。日中足がないため、安値に触れたことを約定とみなす日足近似であり、
 実板での約定保証ではない。
 
-`risk/checks.py`も同じ価格関数を使い、計画指値を上限として株数・候補ヒート・
-セクターエクスポージャーを計算する。感応度を測る場合は
+`risk/checks.py`も同じ価格関数を使い、計画指値と逆指値から銘柄単位の1Rを計算する。
+感応度を測る場合は
 `backtest.sensitivity.entry_limit_grid_values()`の絶対ATR倍率
 `0.0/0.5/1.0/1.5/2.0`を`BacktestCostOverrides(entry_limit_atr_multiple=...)`へ
 順に渡す。`k=0.0`で既存の数値を再現する必要があるため、このIssueではバックテスト
@@ -933,9 +922,8 @@ markdownレポートの冒頭に必ず出る（`run`・`--pessimistic`比較・`
 
 ## 本番ゲートのA/B（`--policy`）
 
-`--policy`は「候補→建玉」の間に本番の6ゲート（レジーム
-`CASH_PRIORITY`/`REDUCE_ONLY`、portfolio heat、決算ブロック、サーキット
-ブレーカー、セクター上限）をどこまで通すかを選ぶ。カンマ区切りで複数指定すると、
+`--policy`は「候補→建玉」の間に市場状態、決算ブロック、バックテスト自身の
+シミュレーション損失ゲートをどこまで通すかを選ぶ。カンマ区切りで複数指定すると、
 **同一の候補ストリーム**に対してアームごとにエンジンだけを走らせ、指標と
 ゲート発動回数を列比較する。
 
@@ -946,8 +934,8 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 
 - `none`: ゲート無し（従来の挙動）
 - `regime`: レジームのExposure Ceilingのみ
-- `regime+risk`: レジーム＋portfolio heat＋セクター上限＋サーキットブレーカー
-  （run自身の決済損益から評価する）
+- `regime+risk`: レジーム＋決算ブロック＋シミュレーション損失ゲート
+  （最後のゲートはrun自身の決済損益から評価する）
 
 レポートの`Entry blocks`は「入らなかった理由」を*候補件数（発動セッション数）*
 の形で出す。`regime`が`120 (37d)`なら、37営業日でレジームが閉じ、その日の候補
@@ -963,7 +951,7 @@ UNKNOWNのまま全期間を塞ぐ結果を黙って出す代わりに、実行�
 `--policy`はサイジング基底の変更（Issue #184）とセットである。1建玉のサイズは
 残現金ではなく`equity = cash + 建玉時価`から決まる。旧来の現金基準は保有が
 増えるたびにサイズを`0.9^n`で縮め、10銘柄満玉でも投下資本が約65%にしかならず、
-固定`account_equity_usd`基準で建てる本番とは別の系を測っていた。`run`の指標に
+本番/公開分析とは独立した名目資金系である。`run`の指標に
 出る`avg_invested_pct`（各日の建玉時価/equityの平均）と
 `max_concurrent_reached`が、この投下度合いをそのまま数字にする。
 

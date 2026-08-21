@@ -21,7 +21,6 @@ from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
     _TIME_BUDGET_STEP_OUTCOME,
-    ACCOUNT_EQUITY_UNSET_NOTICE,
     DailyDependencies,
     _config_hash,
     _OutputCompletion,
@@ -100,7 +99,7 @@ if TYPE_CHECKING:
     from swing_copilot.regime.gate import RegimeSnapshot
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.incomplete_runs import IncompleteRun
-    from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
+    from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import (
         Candidate,
         RejectionRecord,
@@ -427,7 +426,6 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
     ftd_snapshot: FtdSnapshot | None = None
-    portfolio_heat: PortfolioHeatResult | None = None
     earnings_guard_notice: str | None = None
 
     def _step_screening() -> _StepOutcome:
@@ -440,7 +438,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 
     def _step_risk() -> _StepOutcome:
         nonlocal earnings_guard_notice, exposure_decision
-        nonlocal ftd_snapshot, portfolio_heat
+        nonlocal ftd_snapshot
         nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
         ftd_snapshot = _record_ftd_snapshot(deps, run_id, regime_snapshot)
@@ -448,7 +446,6 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         (
             outcome,
             risk_assessments,
-            portfolio_heat,
             earnings_guard_notice,
         ) = _run_step_risk(
             deps,
@@ -504,7 +501,6 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         rejections=rejections,
         truncated=truncated,
         risk_assessments=risk_assessments,
-        portfolio_heat=cast("PortfolioHeatResult", portfolio_heat),
         earnings_guard_notice=earnings_guard_notice,
         held_symbols=frozenset(held_symbols),
         regime_snapshot=cast("RegimeSnapshot", regime_snapshot),
@@ -613,11 +609,6 @@ def _run_soft_steps(
     notices = (
         ((deps.universe_warning,) if deps.universe_warning is not None else ())
         + ((_HISTORICAL_POSITION_NOTICE,) if options.as_of is not None else ())
-        + (
-            (ACCOUNT_EQUITY_UNSET_NOTICE,)
-            if deps.settings.risk.account_equity_usd is None
-            else ()
-        )
         + ((ctx.earnings_guard_notice,) if ctx.earnings_guard_notice else ())
         + _analysis_gap_notices(ctx.analysis_gaps)
         + tuple(

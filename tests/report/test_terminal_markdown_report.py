@@ -14,13 +14,11 @@ from swing_copilot.models import DataTier, RunStatus
 from swing_copilot.report.daily_brief import (
     BriefAnalysis,
     BriefCandidate,
-    BriefCircuitBreaker,
     BriefExposure,
     BriefFilingAnalysis,
     BriefFundamentals,
     BriefMarketItem,
     BriefNewsSupply,
-    BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
     BriefRisk,
@@ -72,11 +70,13 @@ def _brief() -> DailyBrief:
                 ),
                 risk=BriefRisk(
                     status="approved",
-                    max_shares=12,
+                    entry_price=171.20,
+                    limit_price=172.00,
                     stop_price=164.80,
+                    atr14=4.1,
+                    stop_distance_pct=(172.00 - 164.80) / 172.00,
                     reasons=(),
                     warnings=("AMDとの相関 0.82",),
-                    limit_price=172.00,
                 ),
                 analysis=BriefAnalysis(
                     degraded=False,
@@ -180,7 +180,7 @@ def test_markdown_candidates_table_is_self_contained_per_bucket() -> None:
 
     header = (
         "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | "
-        "Signals | Risk | Shares | Stop | Limit |"
+        "Signals | Risk | 1R | Stop | Limit |"
     )
     separator = "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|"
     header_indices = [index for index, line in enumerate(lines) if line == header]
@@ -237,78 +237,16 @@ def test_terminal_and_markdown_show_exposure_before_candidates() -> None:
     assert "Verdict: `CASH_PRIORITY`" in markdown
 
 
-def test_circuit_breaker_banner_is_alongside_exposure_before_candidates() -> None:
-    brief = replace(
-        _brief(),
-        exposure=BriefExposure(
-            verdict="NEW_ENTRY_ALLOWED",
-            gate="BULL",
-            dd_level="NORMAL",
-            data_quality="OK",
-            is_conservatively_downgraded=False,
-        ),
-        circuit_breaker=BriefCircuitBreaker(
-            state="HALTED",
-            data_quality="OK",
-            triggered_rules=("DAILY_LOSS",),
-        ),
-    )
-
-    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(brief, RunStatus.SUCCESS)
-
-    assert terminal.index("Exposure Ceiling") < terminal.index("Circuit Breaker")
-    assert terminal.index("Circuit Breaker") < terminal.index("銘柄")
-    assert markdown.index("## Exposure Ceiling") < markdown.index("## Circuit Breaker")
-    assert markdown.index("## Circuit Breaker") < markdown.index("## Candidates")
-    assert "HALTED" in terminal
-    assert "Triggered rules: `DAILY_LOSS`" in markdown
-
-
-def test_terminal_and_markdown_always_show_portfolio_heat_before_candidates() -> None:
-    brief = replace(
-        _brief(),
-        portfolio_heat=BriefPortfolioHeat(
-            status="calculated",
-            heat_pct=4.4,
-            max_heat_pct=6.0,
-        ),
-    )
-
-    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(brief, RunStatus.SUCCESS)
-
-    assert terminal.index("Portfolio heat: 4.40% / 6.00%") < terminal.index("銘柄")
-    assert markdown.index("## Portfolio risk") < markdown.index("## Candidates")
-    assert "Portfolio heat: `4.40% / 6.00%`" in markdown
-
-
-def test_terminal_and_markdown_explain_missing_stop_heat_failure() -> None:
-    brief = replace(
-        _brief(),
-        portfolio_heat=BriefPortfolioHeat(
-            status="not_calculable",
-            heat_pct=None,
-            max_heat_pct=6.0,
-            missing_stop_symbols=("ABC",),
-        ),
-    )
-
-    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
-    markdown = render_markdown(brief, RunStatus.SUCCESS)
-
-    assert "Portfolio heat: not_calculable (missing stop: ABC)" in terminal
-    assert "Portfolio heat: `not_calculable` (missing stop: ABC)" in markdown
-
-
 def test_terminal_and_markdown_show_earnings_warning_for_candidate() -> None:
     risk = BriefRisk(
         status="approved",
-        max_shares=10,
+        entry_price=100.0,
+        limit_price=100.0,
         stop_price=95.0,
+        atr14=2.0,
+        stop_distance_pct=0.05,
         reasons=(),
-        warnings=(),
-        sizing_warnings=("EARNINGS_PROXIMITY_WARN: 5 business days until 2026-07-28",),
+        warnings=("EARNINGS_PROXIMITY_WARN: 5 business days until 2026-07-28",),
     )
 
     terminal = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
@@ -318,92 +256,67 @@ def test_terminal_and_markdown_show_earnings_warning_for_candidate() -> None:
     assert "EARNINGS_PROXIMITY_WARN" in markdown
 
 
-def test_terminal_shows_the_binding_constraint_sizing_string() -> None:
-    # REQ-006 worked example: trade_risk binds.
-    risk = BriefRisk(
-        status="approved",
-        max_shares=200,
-        stop_price=45.0,
-        reasons=(),
-        warnings=(),
-        shares_by_risk=200,
-        shares_by_position_cap=500,
-        binding_constraint="trade_risk",
-        max_trade_risk_pct=0.01,
-        max_position_pct=0.25,
+def test_terminal_and_markdown_show_one_r_without_account_sections() -> None:
+    terminal = render_terminal(_brief(), RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(_brief(), RunStatus.SUCCESS)
+
+    for output in (terminal, markdown):
+        assert "4.19%" in output
+        assert "Shares" not in output
+        assert "株" not in output
+        assert "Portfolio heat" not in output
+        assert "Portfolio risk" not in output
+        assert "Circuit Breaker" not in output
+        assert "SMALL_ACCOUNT_FRICTION" not in output
+        assert "REGIME_REDUCE_ONLY_RISK_HALVED" not in output
+
+
+def test_reduce_only_keeps_candidates_and_explains_warning() -> None:
+    brief = replace(
+        _brief(),
+        exposure=BriefExposure(
+            verdict="REDUCE_ONLY",
+            gate="CAUTION",
+            dd_level="NORMAL",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
     )
-    # A wide console avoids Rich wrapping the cell across two lines, which
-    # would otherwise split this literal substring apart.
-    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
-    assert "200株（制約: リスク1.0%）" in output
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    for output in (terminal, markdown):
+        assert "相場は警戒状態\uff1a新規は控えめに" in output
+        assert "NVDA" in output
 
 
-def test_markdown_shows_the_binding_constraint_sizing_string() -> None:
-    # REQ-006 worked example: position_cap binds.
-    risk = BriefRisk(
-        status="approved",
-        max_shares=40,
-        stop_price=45.0,
-        reasons=(),
-        warnings=(),
-        shares_by_risk=200,
-        shares_by_position_cap=40,
-        binding_constraint="position_cap",
-        max_trade_risk_pct=0.01,
-        max_position_pct=0.02,
-    )
-    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
-    assert "40株（制約: ポジション上限2.0%）" in output
-
-
-def test_terminal_shows_zero_shares_without_exception() -> None:
-    # REQ-020 boundary: a floored-to-zero trade renders Example 4's wording,
-    # not an exception or a bare "0".
-    risk = BriefRisk(
-        status="approved",
-        max_shares=0,
-        stop_price=45.0,
-        reasons=(),
-        warnings=(),
-        shares_by_risk=1,
-        shares_by_position_cap=0,
-        binding_constraint="position_cap",
-        sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
-        max_trade_risk_pct=0.01,
-        max_position_pct=0.001,
-    )
-    output = render_terminal(_brief_with_sizing(risk), RunStatus.SUCCESS, width=200)
-    assert "0株（摩擦: 資金規模過小）" in output
-
-
-def test_markdown_shows_regime_wording_not_friction_for_regime_zero_shares() -> None:
-    # P6-28: a regime-driven zero-share candidate (e.g. Exposure Ceiling
-    # CASH_PRIORITY) must not be shown with the small-account-friction
-    # wording, since the account was never the binding constraint.
-    risk = BriefRisk(
+def test_cash_priority_keeps_candidates_as_market_skips() -> None:
+    base = _brief()
+    cash_risk = replace(
+        base.candidates[0].risk,
         status="rejected",
-        max_shares=0,
-        stop_price=None,
         reasons=("REGIME_CASH_PRIORITY",),
-        warnings=(),
         binding_constraint="regime",
-        max_trade_risk_pct=0.0,
     )
-    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
-    assert "0株（レジーム: 新規建て停止）" in output
-    assert "資金規模過小" not in output
-
-
-def test_markdown_still_shows_dash_for_not_calculable_max_shares() -> None:
-    risk = BriefRisk(
-        status="not_calculable",
-        max_shares=None,
-        stop_price=None,
-        reasons=("missing candidate price/ATR data",),
-        warnings=(),
+    brief = replace(
+        base,
+        candidates=(replace(base.candidates[0], risk=cash_risk),),
+        exposure=BriefExposure(
+            verdict="CASH_PRIORITY",
+            gate="BEAR",
+            dd_level="SEVERE",
+            data_quality="OK",
+            is_conservatively_downgraded=False,
+        ),
     )
-    output = render_markdown(_brief_with_sizing(risk), RunStatus.SUCCESS)
-    assert "| not_calculable | - |" in output
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    for output in (terminal, markdown):
+        assert "NVDA" in output
+        assert "見送り（地合い）" in output
 
 
 def test_terminal_output_is_a_compact_decision_brief() -> None:
@@ -426,7 +339,8 @@ def test_terminal_output_is_a_compact_decision_brief() -> None:
     assert "終値" in output
     assert "前日比" in output
     assert "スコア" in output
-    assert "株数" in output
+    assert "1R" in output
+    assert "株数" not in output
     assert "ストップ" in output
     assert "指値" in output
     assert "approved" not in output

@@ -27,7 +27,6 @@ from swing_copilot.exceptions import ConfigError, PreflightAbort
 from swing_copilot.models import DailyRunOptions
 from swing_copilot.pipeline.daily import (
     _LOG_LEVELS,
-    ACCOUNT_EQUITY_UNSET_NOTICE,
     DailyDependencies,
     _paths_for_mode,
     _run_mode,
@@ -79,9 +78,8 @@ def _preflight_abort_message(exc: Exception) -> str:
 #: The universe cannot be resolved: the argparse convention (message as the
 #: exit status, stderr, exit 1).
 _UNIVERSE_EXIT = ExitPolicy(errors=(UniverseError,))
-#: `_preflight` catches the account-equity trap; `run_daily` itself raises the
-#: same exception for the same-day rerun guard (P8-118), since `run_date` only
-#: resolves after prefetch, deep inside the run.
+#: `run_daily` raises this for the same-day rerun guard (P8-118), since
+#: `run_date` only resolves after prefetch, deep inside the run.
 _PREFLIGHT_EXIT = ExitPolicy(
     errors=(PreflightAbort,), code=2, format_message=_preflight_abort_message
 )
@@ -236,26 +234,6 @@ def _compose_dependencies(
     )
 
 
-def _preflight(deps: DailyDependencies) -> None:
-    """Warn before any run state is written when equity is unconfigured.
-
-    `account_equity_usd is None` makes `RiskChecker` return `not_calculable`
-    for every candidate (by design, unchanged here), so the run still produces
-    a usable screening report and is allowed to continue.
-
-    This used to abort the run outright once a closed position existed, because
-    the realized-P&L circuit breaker then returned `HALTED` and rejected every
-    candidate on top. That abort went with the real-trade record feature in
-    2026-08: with `positions` removed there is no realized P&L in a daily run,
-    the breaker no longer runs here, and no such state can arise.
-
-    Args:
-        deps: Composed dependencies; only `settings` is read.
-    """
-    if deps.settings.risk.account_equity_usd is None:
-        logger.warning(ACCOUNT_EQUITY_UNSET_NOTICE)
-
-
 class _SecretRedactionFilter(logging.Filter):
     """Replace configured secret values before a log record reaches stderr."""
 
@@ -315,7 +293,6 @@ def main(argv: list[str] | None = None) -> None:
     deps = run_cli(
         lambda: _compose_dependencies(options, settings, strategies), _UNIVERSE_EXIT
     )
-    run_cli(lambda: _preflight(deps), _PREFLIGHT_EXIT)
     result = run_cli(lambda: run_daily(options, deps), _PREFLIGHT_EXIT)
     paths = TerminalPaths(
         report=result.report_path,

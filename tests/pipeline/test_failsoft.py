@@ -30,7 +30,7 @@ from swing_copilot.analysis.export import (
     HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.data.base import BarFetchResult
-from swing_copilot.models import DailyRunOptions, Position, RunStatus
+from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline import daily_runner
 from swing_copilot.pipeline.daily import (
@@ -44,7 +44,6 @@ from swing_copilot.report.markdown_report import (
 from swing_copilot.report.rejections import REJECTIONS_FILENAME
 from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.retro.evaluate import EvaluateSummary, evaluate_verdicts
-from swing_copilot.risk.checks import calculate_portfolio_heat
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - registers built-ins
 )
@@ -946,29 +945,6 @@ class TestVirtualLedgerPositionsCountAsHeld:
         # The sampled symbol, not the alphabetical head the old `[:limit]`
         # would have returned (Issue #205).
         assert _candidate_symbols(state_store, result.run_id) == {"MSFT"}
-
-    def test_a_virtual_position_never_reaches_the_risk_step_portfolio(
-        self, base_deps, state_store, monkeypatch
-    ):
-        _seed_virtual_position(state_store, "NVDA")
-        seen: list[list[Position]] = []
-
-        def _spy(portfolio, account_equity):
-            seen.append(list(portfolio))
-            return calculate_portfolio_heat(portfolio, account_equity)
-
-        # String target: `daily.py` imports the helper by name, so the binding
-        # to rebind lives in that module's namespace, not `risk.checks`'.
-        monkeypatch.setattr(
-            "swing_copilot.pipeline.daily.calculate_portfolio_heat", _spy
-        )
-
-        result = run_daily(DailyRunOptions(is_dry_run=True), base_deps)
-
-        assert result.status == RunStatus.SUCCESS
-        # Sizing, concentration, correlation and portfolio heat all see an
-        # empty book: the ledger is a collection input, never a holding.
-        assert seen == [[]]
 
     def test_a_historical_replay_leaves_the_held_set_empty(
         self, base_deps, state_store

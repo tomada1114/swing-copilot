@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 REPORT_CONTEXT_FILENAME = "report_context.json"
-CONTEXT_SCHEMA_VERSION = "report-context-v3"
+CONTEXT_SCHEMA_VERSION = "report-context-v4"
 
 # Pydantic evaluates a dataclass's annotation strings against its *defining*
 # module's globals, so `report/daily_brief.py` imports `date`/`datetime`/`UUID`
@@ -51,7 +51,7 @@ class _ReportContextDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["report-context-v3"]
+    schema_version: Literal["report-context-v4"]
     run_id: UUID
     as_of: date
     strategy_key: NonBlankText

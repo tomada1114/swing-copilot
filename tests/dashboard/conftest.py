@@ -188,7 +188,7 @@ class Builder:
         symbol: str,
         *,
         status: str = "approved",
-        binding_constraint: str | None = "trade_risk",
+        binding_constraint: str | None = "earnings",
     ) -> None:
         self._execute(
             "INSERT INTO risk_assessments (run_id, symbol, status, reasons_json, "

@@ -15,7 +15,7 @@
 | FR-03 | 提出日時が `as_of` より後の財務値を使わない | 将来提出の 10-Q がスクリーニングに混入する | `tests/storage/test_market_store.py::TestUpsertFundamentals::test_read_fundamentals_excludes_filings_after_as_of` |
 | FR-04 | 全フィルタを通過した銘柄だけを残す | 流動性不足銘柄が候補に残る | `tests/screening/test_pipeline.py::TestAndSemantics::test_symbol_must_pass_all_filters_and_all_signals` |
 | FR-05 | シグナル合致を一候補に集約し、順位を決定的にする | 同一銘柄が重複候補になる | `tests/screening/test_pipeline.py::TestCandidateAggregationAndRanking::test_multiple_signal_hits_aggregate_into_one_candidate` |
-| FR-06 | 相関は取引日で整合し、重複日は data-quality 扱いにする | 行位置で結合して高相関と誤判定する | `tests/risk/test_checks.py::TestCorrelationWarnings::test_duplicate_dates_produce_data_quality_warning_without_correlation` |
+| FR-06 | 公開リスク判定は銘柄単位の指値・逆指値・ATR14・1Rだけを計算し、読者の口座や保有を参照しない | 口座評価額から株数を推測して分析入力へ出す | `tests/risk/test_checks.py::TestTradePlan::test_approved_plan_exposes_close_limit_stop_atr_and_one_r`、`tests/analysis/test_context.py::TestRiskConstraints::test_it_renders_the_symbol_level_trade_plan` |
 | FR-07 | 一時的な Finnhub 障害は全試行でレート制限を守って再試行する | 429 後の再試行が待機を飛ばす | `tests/text/test_news_finnhub.py::TestRetries::test_retries_rate_limited_request_and_throttles_every_attempt` |
 | FR-08 | スキル結果の run identity 不一致はレポートを書き換えない | 別 run の `analysis_result.json` を取り込む | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report` |
 | FR-09 | 日次 run はローカル Markdown と 8 つの可視 step を残す | 通知成功後にレポートが作られない | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_eight_steps_complete_and_produce_a_markdown_brief` |
@@ -43,7 +43,8 @@
 | #55 | ユニバース更新失敗時は保存済みスナップショットを明示警告付きで再利用する | 取得障害で空ユニバースを永続化する | `tests/test_universe.py::TestResolveDailyUniverse::test_refresh_failure_reuses_persisted_snapshot_with_warning` |
 | #56 | Parquet 置換は失敗しても旧ファイルを残し一時ファイルを掃除する | 置換失敗で価格パーティションを失う | `tests/storage/test_market_store.py::TestWriteAndReadBars::test_replace_failure_preserves_partition_and_cleans_unique_temp` |
 | #57 | テキスト収集失敗は status/exit/report の fail-soft 契約を保つ | export 前に text 例外で process が終了する | `tests/pipeline/test_failsoft.py::TestTextCollectionFailureDegrades::test_text_failure_degrades_but_still_completes_the_run` |
-| #58 | 重複取引日は相関係数を算出せず data-quality 警告にする | duplicate date を行番号で結合する | `tests/risk/test_checks.py::TestCorrelationWarnings::test_duplicate_dates_produce_data_quality_warning_without_correlation` |
+| #58 | 旧相関チェックを本番経路から撤去し、公開リスク判定を銘柄単位に限定する | 重複日付の系列結合や相関制約が公開経路へ戻る | `tests/risk/test_checks.py::TestTradePlan::test_public_plan_has_no_account_or_correlation_constraints` |
+| #348 | 本番経路は口座依存ルールを持たず、旧監査列は新規行でNULLにする | 旧履歴を読めなくする、または新規行へ株数を残す | `tests/storage/test_state_store.py::TestRecordRiskAssessments::test_new_rows_leave_legacy_sizing_columns_null`、`tests/report/test_terminal_markdown_report.py::test_terminal_and_markdown_show_one_r_without_account_sections` |
 | #59 | result symbol/source ID/no-trade 契約を strict に検証する | 同一 source ID または空白 no-trade 理由を受理する | `tests/analysis/test_schemas.py::TestUniqueAnalysisEntities::test_duplicate_source_ids_within_a_candidate_are_rejected` |
 
 ## 履歴バックフィルと低ボラバイアス是正
@@ -174,14 +175,11 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 | `config.py` | UTF-8 として読めない `settings.yaml` / `strategies.yaml` も `ConfigError` として届く | 別エンコーディングで保存された設定が生の `UnicodeDecodeError` になり、`ConfigError` を fatal として扱う CLI 境界を素通りする | `tests/test_config.py::TestLoadSettings::test_non_utf8_file_raises_config_error`、`::TestLoadStrategies::test_non_utf8_file_raises_config_error` |
 | `retro/ledger.py` | 存在するのに読めない提案台帳は `RetroIngestError` として届き、「空の台帳」に化けない | 台帳が読めないまま `closed_proposal_keys()` が空になり、却下済みの提案が新しい RP-ID で再び通る | `tests/retro/test_ledger.py::TestReadLedger::test_an_unreadable_ledger_fails_instead_of_reading_as_empty`、`tests/retro/test_cli.py::TestExportCommand::test_exits_when_the_proposal_ledger_cannot_be_read` |
 
-## バックテストへの本番リスクゲート注入（Issue #184）
+## バックテストへの市場状態ゲート注入（Issue #184）
 
-本番は候補と建玉の間に6つのゲートを置き、サイジングは固定 `account_equity_usd`
-基準で行う。バックテストはIssue #184で本番RiskCheckerを注入したが、旧
-`reduce_only_risk_multiplier` は互換列として保持するだけで判定には使わない。
-`max_portfolio_heat_pct` / `earnings_block_business_days` / `circuit_*` は
-各policy armの設定に応じて有効化される。ここで固定するのは「同じ系を測っている」
-ことと、ゲート入力にも as-of 規律が効いていることである。
+本番RiskCheckerは市場状態・決算と銘柄単位の価格計画だけを扱う。バックテストは
+Issue #184でこれを注入し、名目資金の株数計算とシミュレーション損失ゲートは
+バックテスト内部に限定する。ここで固定するのはゲート入力のas-of規律である。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
@@ -189,8 +187,8 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 | `backtest/engine.py` | サイジングの時価評価はシグナル日の終値までで、約定日当日の終値を見ない | 約定日に急騰した保有銘柄の時価で当日の新規建玉を大きくする | `tests/backtest/test_engine.py::TestEquityBasedSizing::test_equity_basis_uses_the_signal_days_close_not_the_fill_days` |
 | `backtest/policy.py` | レジーム判定はシグナル日のバーだけを見る（直前・同日・直後の3点） | 翌日の VIX 急騰が前日の判断を後ろ向きに書き換える | `tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_immediately_before_the_cutoff_leaves_entries_allowed`、`tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_exactly_at_the_cutoff_is_included_and_blocks`、`tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_after_the_cutoff_cannot_reach_back_and_block_an_earlier_day` |
 | `backtest/policy.py` | `CASH_PRIORITY` は全候補を `regime` 理由でブロックする | レジームが閉じた日にバックテストだけが建玉を作る | `tests/backtest/test_policy.py::TestRegimeGate::test_cash_priority_blocks_every_candidate_with_the_regime_reason` |
-| `backtest/policy.py` | `REDUCE_ONLY` は警戒ラベルだけで、実効 `max_trade_risk_pct` を変更しない | レジームの警戒表示が口座固有のリスク半減や候補削減へ変換される | `tests/backtest/test_policy.py::TestRegimeGate::test_reduce_only_keeps_the_configured_trade_risk_budget`、`tests/risk/test_checks.py::TestCheckSizing::test_reduce_only_is_a_label_and_preserves_trade_risk` |
-| `backtest/policy.py` | サイジング不能な候補は fail-closed で建てない | `close`/`atr14` を欠く候補を既定値で建てる | `tests/backtest/test_policy.py::TestRegimeGate::test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed` |
+| `backtest/policy.py` | `REDUCE_ONLY` は警戒ラベルだけで、シミュレータの名目サイジングを上書きしない | レジームの警戒表示が口座固有のリスク半減や候補削減へ変換される | `tests/backtest/test_policy.py::TestRegimeGate::test_reduce_only_is_a_label_and_does_not_override_simulator_sizing`、`tests/risk/test_checks.py::TestMarketState::test_reduce_only_is_a_label_without_filtering_or_risk_warning` |
+| `backtest/policy.py` | 価格計画を算出不能な候補は fail-closed で建てない | `close`/`atr14` を欠く候補を既定値で建てる | `tests/backtest/test_policy.py::TestRegimeGate::test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed` |
 | `backtest/policy.py` | SPY/QQQ/^VIX のバーが無い状態の `--policy` は実行前に落ちる | レジーム UNKNOWN の fail-closed で全期間ゼロ取引のレポートを黙って出す | `tests/backtest/test_policy.py::TestArmSelection::test_missing_regime_bars_fail_fast_instead_of_blocking_silently` |
 | `backtest/earnings_history.py` | 決算日の推定は `filed_at <= as_of` の提出だけを見る（直前・同日・直後の3点） | 未提出の決算を先取りして、当時知り得なかった日付でエントリーを止める | `tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_from_the_day_after_as_of_is_not_visible`、`tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_dated_exactly_as_of_is_visible`、`tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_from_the_day_before_as_of_is_visible`、`tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_the_projection_itself_never_reads_past_the_cutoff` |
 | `backtest/earnings_history.py` | 推定できない銘柄は「不明」と報告し、日付を捏造しない | 提出履歴が1件しか無い銘柄に既定の四半期日程を当てはめる | `tests/backtest/test_earnings_history.py::TestProjection::test_a_single_visible_filing_cannot_establish_a_cadence`、`tests/backtest/test_earnings_history.py::TestProjection::test_symbol_with_no_collected_filings_reports_unknown`、`tests/backtest/test_earnings_history.py::TestProjection::test_projection_the_calendar_has_outrun_is_reported_as_unknown` |

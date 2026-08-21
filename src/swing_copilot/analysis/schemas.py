@@ -507,7 +507,8 @@ class ScreeningAssessment(_StrictModel):
 #: (Issue #191). Kept flat and small on purpose: every additional value
 #: splits the same fixed number of matured verdicts into thinner buckets, so
 #: a hit rate per basis stops being readable. `market_regime` and
-#: `risk_sizing` cover the two code-owned context blocks; the remaining four
+#: `risk_sizing` is a compatibility name for symbol-level risk-plan context;
+#: it does not imply reader-account sizing. The remaining four
 #: cover the evidence a skill actually reads.
 VerdictBasis = Literal[
     "technical_score",

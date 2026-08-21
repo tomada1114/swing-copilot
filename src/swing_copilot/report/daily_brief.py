@@ -26,8 +26,7 @@ if TYPE_CHECKING:
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.ftd import FtdSnapshot
     from swing_copilot.regime.gate import RegimeSnapshot
-    from swing_copilot.risk.checks import PortfolioHeatResult, RiskAssessment
-    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
+    from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import Candidate, RejectionRecord
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
@@ -94,29 +93,6 @@ class BriefExposure:
     dd_level: str
     data_quality: str
     is_conservatively_downgraded: bool
-
-
-@dataclass(frozen=True, slots=True)
-class BriefCircuitBreaker:
-    """Realized-loss circuit state displayed beside the exposure ceiling."""
-
-    state: str
-    data_quality: str
-    triggered_rules: tuple[str, ...] = ()
-    daily_loss_pct: float | None = None
-    weekly_loss_pct: float | None = None
-    monthly_loss_pct: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BriefPortfolioHeat:
-    """Account-level stop risk displayed before individual candidates."""
-
-    status: str
-    heat_pct: float | None
-    max_heat_pct: float
-    missing_stop_symbols: tuple[str, ...] = ()
-    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,75 +170,19 @@ class BriefAnalysis:
     news_supply: BriefNewsSupply | None = None
 
 
-_CONSTRAINT_LABELS = {
-    "sector": "セクター集中",
-    "correlation": "相関",
-}
-
-# P6-28: zero-share wording keyed by the actual `binding_constraint` that
-# produced it. `trade_risk`/`position_cap` (and anything unlisted here) fall
-# through to the small-account-friction wording below, since only those two
-# constraints mean the position-sizing floor itself rounded down to zero.
-# Every other constraint means sizing *could* place shares but something
-# else vetoed the trade -- attributing that to "資金規模過小" would misstate
-# the reason (e.g. a regime-driven CASH_PRIORITY halt).
-_ZERO_SHARE_TEXTS = {
-    "regime": "0株（レジーム: 新規建て停止）",
-    "portfolio_heat": "0株（制約: ポートフォリオヒート上限）",
-    "earnings": "0株（制約: 決算近接）",
-    "sector": "0株（制約: セクター集中）",
-    "correlation": "0株（制約: 相関集中）",
-    "not_calculable": "0株（算出不可）",
-}
-_SMALL_ACCOUNT_FRICTION_TEXT = "0株（摩擦: 資金規模過小）"
-
-
 @dataclass(frozen=True, slots=True)
 class BriefRisk:
-    """Position-sizing and portfolio-risk result for one candidate."""
+    """Account-independent trade-plan result for one candidate."""
 
     status: str
-    max_shares: int | None
+    entry_price: float | None
+    limit_price: float | None
     stop_price: float | None
+    atr14: float | None
+    stop_distance_pct: float | None
     reasons: tuple[str, ...]
     warnings: tuple[str, ...]
-    limit_price: float | None = None
-    # P1-03 sizing breakdown (REQ-005/REQ-006).
-    shares_by_risk: int | None = None
-    shares_by_position_cap: int | None = None
-    binding_constraint: str = "not_calculable"
-    sizing_warnings: tuple[str, ...] = ()
-    max_trade_risk_pct: float | None = None
-    max_position_pct: float | None = None
-
-
-def format_sizing(risk: BriefRisk) -> str:
-    """REQ-006: a compact `"128株（制約: リスク1.0%）"`-style sizing summary.
-
-    Returns `"-"` when `max_shares` is `None` (not calculable, the pre-P1-03
-    fallback existing snapshots assert on). A final share count of `0`
-    renders Example 4's friction wording only when `trade_risk`/`position_cap`
-    was binding (P6-28: a genuine sizing-floor-to-zero); any other binding
-    constraint (e.g. a regime halt) renders that constraint's own wording so
-    the display doesn't misattribute the reason.
-    """
-    if risk.max_shares is None:
-        return "-"
-    if risk.max_shares == 0:
-        return _ZERO_SHARE_TEXTS.get(
-            risk.binding_constraint, _SMALL_ACCOUNT_FRICTION_TEXT
-        )
-    if risk.binding_constraint == "trade_risk" and risk.max_trade_risk_pct is not None:
-        return (
-            f"{risk.max_shares}株（制約: リスク{risk.max_trade_risk_pct * 100:.1f}%）"
-        )
-    if risk.binding_constraint == "position_cap" and risk.max_position_pct is not None:
-        pct = risk.max_position_pct * 100
-        return f"{risk.max_shares}株（制約: ポジション上限{pct:.1f}%）"
-    label = _CONSTRAINT_LABELS.get(risk.binding_constraint)
-    if label is not None:
-        return f"{risk.max_shares}株（制約: {label}）"
-    return f"{risk.max_shares}株"
+    binding_constraint: str | None = None
 
 
 def format_verdict(analysis: BriefAnalysis) -> str | None:
@@ -367,8 +287,6 @@ class DailyBrief:
     candidates: tuple[BriefCandidate, ...]
     regime: BriefRegime | None = None
     exposure: BriefExposure | None = None
-    circuit_breaker: BriefCircuitBreaker | None = None
-    portfolio_heat: BriefPortfolioHeat | None = None
     rejection_counts: tuple[BriefRejectionCount, ...] = ()
     notices: tuple[str, ...] = ()
     # P2-11: trailing-window per-signal hit-rate stats for the "シグナル成績" section.
@@ -403,17 +321,9 @@ class DailyBriefContext:
     # P2-11: computed by `pipeline/postmortem.py`'s `run_postmortem_step()`,
     # threaded straight through to `DailyBrief` (mirrors `notices` above).
     signal_performance: tuple[SignalPerformanceRow, ...] = ()
-    # REQ-006: baked into each candidate's `BriefRisk` for `format_sizing()`,
-    # since `RiskAssessment` itself only carries computed outputs, not the
-    # config percentages that produced them.
-    max_trade_risk_pct: float = 0.01
-    max_position_pct: float = 0.10
     regime_snapshot: RegimeSnapshot | None = None
     exposure_decision: ExposureDecision | None = None
-    circuit_breaker: CircuitBreakerResult | None = None
     ftd_snapshot: FtdSnapshot | None = None
-    portfolio_heat: PortfolioHeatResult | None = None
-    max_portfolio_heat_pct: float = 6.0
     provider_name: str = "yfinance"
     data_tier: str = "prototype"
 
@@ -451,10 +361,6 @@ def build_daily_brief(
         candidates=candidates,
         regime=_regime_brief(context.regime_snapshot, context.ftd_snapshot),
         exposure=_exposure_brief(context.exposure_decision),
-        circuit_breaker=_circuit_breaker_brief(context.circuit_breaker),
-        portfolio_heat=_portfolio_heat_brief(
-            context.portfolio_heat, context.max_portfolio_heat_pct
-        ),
         rejection_counts=_rejection_counts(context.rejections),
         notices=context.notices,
         signal_performance=context.signal_performance,
@@ -508,35 +414,6 @@ def _exposure_brief(decision: ExposureDecision | None) -> BriefExposure | None:
         dd_level=decision.dd_level.value,
         data_quality=decision.data_quality.value,
         is_conservatively_downgraded=decision.is_conservatively_downgraded,
-    )
-
-
-def _circuit_breaker_brief(
-    result: CircuitBreakerResult | None,
-) -> BriefCircuitBreaker | None:
-    if result is None:
-        return None
-    return BriefCircuitBreaker(
-        state=result.state.value,
-        data_quality=result.data_quality,
-        triggered_rules=result.triggered_rules,
-        daily_loss_pct=result.daily_loss_pct,
-        weekly_loss_pct=result.weekly_loss_pct,
-        monthly_loss_pct=result.monthly_loss_pct,
-    )
-
-
-def _portfolio_heat_brief(
-    result: PortfolioHeatResult | None, max_heat_pct: float
-) -> BriefPortfolioHeat | None:
-    if result is None:
-        return None
-    return BriefPortfolioHeat(
-        status=result.status,
-        heat_pct=result.heat_pct,
-        max_heat_pct=max_heat_pct,
-        missing_stop_symbols=result.missing_stop_symbols,
-        reason=result.reason,
     )
 
 
@@ -601,11 +478,7 @@ def _candidate_brief(
         fundamentals=_fundamentals(
             market_store, candidate.symbol, context.brief.run_date, close
         ),
-        risk=_risk_brief(
-            context.assessment,
-            context.brief.max_trade_risk_pct,
-            context.brief.max_position_pct,
-        ),
+        risk=_risk_brief(context.assessment),
         analysis=build_analysis_brief(candidate.symbol, context.brief.analysis),
         execution_state=candidate.execution_state,
         execution_distance=candidate.execution_distance,
@@ -665,34 +538,19 @@ def _fundamentals(
     return BriefFundamentals(per, fcf, equity_ratio, eps)
 
 
-def _risk_brief(
-    assessment: RiskAssessment | None,
-    max_trade_risk_pct: float,
-    max_position_pct: float,
-) -> BriefRisk:
+def _risk_brief(assessment: RiskAssessment | None) -> BriefRisk:
     if assessment is None:
-        return BriefRisk("not_calculable", None, None, (), ())
-    warnings = tuple(
-        (
-            f"{warning.correlated_symbol}との相関 {warning.correlation:.2f}"
-            if warning.warning_type == "high_correlation"
-            else f"{warning.correlated_symbol}: {warning.warning_type}"
-        )
-        for warning in assessment.warnings
-    )
+        return BriefRisk("not_calculable", None, None, None, None, None, (), ())
     return BriefRisk(
-        assessment.status,
-        assessment.max_shares,
-        assessment.stop_price,
-        assessment.reasons,
-        warnings,
+        status=assessment.status,
+        entry_price=assessment.entry_price,
         limit_price=assessment.limit_price,
-        shares_by_risk=assessment.shares_by_risk,
-        shares_by_position_cap=assessment.shares_by_position_cap,
+        stop_price=assessment.stop_price,
+        atr14=assessment.atr14,
+        stop_distance_pct=assessment.stop_distance_pct,
+        reasons=assessment.reasons,
+        warnings=assessment.warnings,
         binding_constraint=assessment.binding_constraint,
-        sizing_warnings=assessment.sizing_warnings,
-        max_trade_risk_pct=max_trade_risk_pct,
-        max_position_pct=max_position_pct,
     )
 
 

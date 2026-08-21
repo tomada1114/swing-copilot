@@ -1,4 +1,4 @@
-"""Tests for the backtest's production-gate port (Issue #184).
+"""Tests for the backtest's production market-state gate port (Issue #184).
 
 The contract under test is "the simulator applies the *production* gates, on
 *point-in-time* inputs" — so every case here pins either a gate that must fire
@@ -16,9 +16,7 @@ from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_CIRCUIT_BREAKER,
     ENTRY_BLOCK_EARNINGS,
     ENTRY_BLOCK_NOT_CALCULABLE,
-    ENTRY_BLOCK_PORTFOLIO_HEAT,
     ENTRY_BLOCK_REGIME,
-    ENTRY_BLOCK_SECTOR,
 )
 from swing_copilot.backtest.policy import (
     EntryPolicy,
@@ -207,17 +205,17 @@ class TestRegimeGate:
         assert decision.is_allowed is False
         assert decision.reject_reason == ENTRY_BLOCK_REGIME
 
-    def test_reduce_only_keeps_the_configured_trade_risk_budget(self, settings):
+    def test_reduce_only_is_a_label_and_does_not_override_simulator_sizing(
+        self, settings
+    ):
         policy = _policy(settings, EntryPolicyArm.REGIME, _market_bars(vix=15.0))
 
         decision = policy.decide(_request())["AAA"]
 
         assert decision.is_allowed is True
-        assert decision.max_trade_risk_pct == pytest.approx(
-            settings.risk.max_trade_risk_pct
-        )
+        assert decision.max_trade_risk_pct is None
 
-    def test_new_entry_allowed_keeps_the_configured_trade_risk_budget(self, settings):
+    def test_new_entry_allowed_does_not_override_simulator_sizing(self, settings):
         policy = _policy(
             settings,
             EntryPolicyArm.REGIME,
@@ -227,9 +225,7 @@ class TestRegimeGate:
         decision = policy.decide(_request())["AAA"]
 
         assert decision.is_allowed is True
-        assert decision.max_trade_risk_pct == pytest.approx(
-            settings.risk.max_trade_risk_pct
-        )
+        assert decision.max_trade_risk_pct is None
 
     def test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed(
         self, settings
@@ -292,14 +288,14 @@ class TestAsOfDiscipline:
         assert decision.is_allowed is True
 
 
-class TestPortfolioHeat:
+class TestPortfolioHeatRemoval:
     @staticmethod
     def _hot_portfolio():
         # (200 - 100) * 70 = $7,000 of open stop risk = 7% of equity, above
         # the configured 6% ceiling.
         return (as_position("BBB", _DAYS[0], 200.0, 70, 100.0),)
 
-    def test_regime_risk_arm_blocks_on_portfolio_heat(self, settings):
+    def test_regime_risk_arm_no_longer_applies_account_heat(self, settings):
         policy = _policy(
             settings,
             EntryPolicyArm.REGIME_RISK,
@@ -308,7 +304,7 @@ class TestPortfolioHeat:
 
         decision = policy.decide(_request(open_positions=self._hot_portfolio()))["AAA"]
 
-        assert decision.reject_reason == ENTRY_BLOCK_PORTFOLIO_HEAT
+        assert decision.is_allowed is True
 
     def test_regime_arm_leaves_the_heat_ceiling_out_of_the_way(self, settings):
         policy = _policy(
@@ -322,8 +318,8 @@ class TestPortfolioHeat:
         assert decision.is_allowed is True
 
 
-class TestSectorCap:
-    def test_same_sector_concentration_is_reported_as_the_sector_reason(self, settings):
+class TestSectorCapRemoval:
+    def test_regime_risk_arm_no_longer_applies_account_sector_cap(self, settings):
         policy = _policy(
             settings,
             EntryPolicyArm.REGIME_RISK,
@@ -335,7 +331,7 @@ class TestSectorCap:
 
         decision = policy.decide(_request(open_positions=portfolio))["AAA"]
 
-        assert decision.reject_reason == ENTRY_BLOCK_SECTOR
+        assert decision.is_allowed is True
 
     def test_regime_arm_leaves_the_sector_ceiling_out_of_the_way(self, settings):
         policy = _policy(

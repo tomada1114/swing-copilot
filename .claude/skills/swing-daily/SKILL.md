@@ -669,7 +669,7 @@ reasonsが1件のみでそれが(a)か(b)なら、1/1は過半として対象に
   買収の連結効果を含む可能性があり区別して読む必要がある」は、買収完了日が入力から
   読み取れるため (a) ではない）
 - (b) `source_ids` が空で、決定論的制約だけを述べる定型 reason: `not_calculable` /
-  `shares` 不明 / `Exposure Ceiling: REDUCE_ONLY`
+  `stop_distance_pct` 不明 / `Exposure Ceiling: REDUCE_ONLY`
 
 **実行上限による打ち切りで withhold した銘柄は対象外**（「サブエージェントの実行上限と
 打ち切り」）。不足しているのは入力ではなく分析であり、対称エージェントへ供給できる
@@ -748,6 +748,8 @@ Step 3.6 の反証エージェントと**同一の入力契約**を使う: 当�
   スコア等の決定論的入力のみに基づく理由は `source_ids: []` でよい
 - `reasons[].basis` に根拠タイプ（`technical_score` / `news_catalyst` /
   `filing_fundamental` / `risk_sizing` / `market_regime` / `peer_relative`）を付ける。
+  `risk_sizing` は互換名であり、現在は `risk_constraints` の指値・逆指値・1R・warnings
+  に基づく銘柄単位の理由を表す。読者の口座や株数を意味しない。
   複数種類にまたがる理由は分割して 1 種類ずつ書く。判断が付かなければ省略してよい
   （`untagged` として集計される）。**ingest はこのタグの正しさを検証できない**ため、
   それらしい値で埋めず、自信が無ければ省略する（AC10b）

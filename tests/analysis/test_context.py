@@ -102,49 +102,48 @@ class TestScoreBreakdown:
 
 
 class TestRiskConstraints:
-    def test_it_renders_the_binding_constraint_and_share_counts(self):
+    def test_it_renders_the_symbol_level_trade_plan(self):
         assessment = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=128,
             entry_price=100.0,
-            stop_price=95.0,
-            reasons=(),
             limit_price=102.0,
-            shares_by_risk=128,
-            shares_by_position_cap=200,
-            binding_constraint="trade_risk",
-            sizing_warnings=("WIDE_STOP",),
+            stop_price=95.0,
+            atr14=2.0,
+            stop_distance_pct=(102.0 - 95.0) / 102.0,
+            reasons=(),
+            warnings=("WIDE_STOP",),
         )
 
         block = format_risk_constraints(assessment)
 
-        assert "binding_constraint: trade_risk" in block
+        assert "binding_constraint: なし" in block
         assert "指値(limit_price): 102.00" in block
         assert "逆指値(stop_price): 95.00" in block
-        assert "リスク基準の株数(shares_by_risk): 128" in block
-        assert "ポジション上限基準の株数(shares_by_position_cap): 200" in block
-        assert "最終株数(shares): 128" in block
+        assert "1R(stop_distance_pct): 6.9%" in block
+        assert "shares" not in block
         assert "warnings: WIDE_STOP" in block
 
     def test_a_not_calculable_assessment_still_renders_a_block(self):
         assessment = RiskAssessment(
             symbol="AAPL",
             status="not_calculable",
-            max_shares=None,
             entry_price=None,
+            limit_price=None,
             stop_price=None,
-            reasons=("account equity unset",),
+            atr14=None,
+            stop_distance_pct=None,
+            reasons=("missing candidate price/ATR data",),
+            binding_constraint="not_calculable",
         )
 
         block = format_risk_constraints(assessment)
 
-        # The "code already declined to size this" signal must reach the
-        # analysis, so this never degrades to an empty string.
         assert "binding_constraint: not_calculable" in block
         assert "指値(limit_price): 不明" in block
         assert "逆指値(stop_price): 不明" in block
-        assert "最終株数(shares): 不明" in block
+        assert "1R(stop_distance_pct): 不明" in block
+        assert "shares" not in block
         assert "warnings: なし" in block
 
 

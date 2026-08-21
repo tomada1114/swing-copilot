@@ -186,11 +186,11 @@ def _risk(entry: common.ScorecardEntry | None) -> tuple[Stat, ...]:
     if entry is None:
         return (
             Stat("リスク判定", fmt.missing("not_ingested")),
-            Stat("バインド制約", fmt.missing("not_ingested")),
+            Stat("ブロック理由", fmt.missing("not_ingested")),
         )
     return (
         Stat("リスク判定", fmt.text(entry.value("risk_status"), key="not_ingested")),
-        Stat("バインド制約", fmt.text(entry.value("binding_constraint"), key="absent")),
+        Stat("ブロック理由", fmt.text(entry.value("binding_constraint"), key="absent")),
     )
 
 

@@ -102,10 +102,11 @@ class TestIngestRewritesTheReport:
             encoding="utf-8"
         )
 
-        # Score, sizing, and execution state come from the archived brief.
+        # Score, trade plan, and execution state come from the archived brief.
         assert "| Total: 0.812" not in markdown
         assert "0.812" in markdown
-        assert "128株（制約: リスク1.0%）" in markdown
+        assert "5.76%" in markdown
+        assert "株" not in markdown
         assert "FAIR (d=1.20)" in markdown
 
     def test_a_skip_verdict_is_shown_with_its_leading_reason(

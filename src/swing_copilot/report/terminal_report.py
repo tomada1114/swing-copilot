@@ -12,7 +12,6 @@ from rich.table import Table
 
 from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
-    format_sizing,
     format_verdict,
 )
 
@@ -21,11 +20,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.models import DataTier, RunStatus
-    from swing_copilot.report.daily_brief import (
-        BriefCandidate,
-        BriefPortfolioHeat,
-        DailyBrief,
-    )
+    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,22 +99,24 @@ def render_terminal(
             f"(Gate: {brief.exposure.gate}, DD: {brief.exposure.dd_level}, "
             f"Data quality: {brief.exposure.data_quality})"
         )
-    if brief.circuit_breaker is not None:
-        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
-        console.print(
-            "[bold]Circuit Breaker[/bold] "
-            f"{brief.circuit_breaker.state} "
-            f"(Data quality: {brief.circuit_breaker.data_quality}; "
-            f"Triggered rules: {rules})"
-        )
-    if brief.portfolio_heat is not None:
-        console.print(
-            f"[bold]Portfolio heat[/bold]: {_portfolio_heat_text(brief.portfolio_heat)}"
-        )
+        if brief.exposure.verdict == "REDUCE_ONLY":
+            console.print(
+                "[bold]相場は警戒状態\uff1a新規は控えめに[/bold] "
+                f"(Gate: {brief.exposure.gate}, DD: {brief.exposure.dd_level})"
+            )
+    cash_priority = any(
+        _execution_bucket(candidate) == "見送り（地合い）"
+        for candidate in brief.candidates
+    )
     console.print(
         "[bold]即検討可[/bold]: " + _bucket_symbols(brief.candidates, "即検討可")
     )
     console.print("[bold]様子見[/bold]: " + _bucket_symbols(brief.candidates, "様子見"))
+    if cash_priority:
+        console.print(
+            "[bold]見送り（地合い）[/bold]: "
+            + _bucket_symbols(brief.candidates, "見送り（地合い）")
+        )
     console.print("[bold]見送り[/bold]: " + _bucket_symbols(brief.candidates, "見送り"))
 
     table = Table(
@@ -133,7 +130,7 @@ def render_terminal(
     table.add_column("終値", justify="right")
     table.add_column("前日比", justify="right")
     table.add_column("スコア", justify="right")
-    table.add_column("株数", justify="right")
+    table.add_column("1R", justify="right")
     table.add_column("ストップ", justify="right")
     table.add_column("指値", justify="right")
     for candidate in brief.candidates:
@@ -143,7 +140,7 @@ def render_terminal(
             _money(candidate.close),
             _percent(candidate.pct_change),
             _number(candidate.score, digits=3),
-            format_sizing(candidate.risk),
+            _one_r(candidate.risk.stop_distance_pct),
             _money(candidate.risk.stop_price),
             _money(candidate.risk.limit_price),
         )
@@ -209,7 +206,7 @@ def _render_candidate_details(console: Console, candidate: BriefCandidate) -> No
         console.print(f"  {verdict_line}")
     for concern in candidate.analysis.concerns:
         console.print(f"  懸念: {concern}")
-    for warning in (*candidate.risk.warnings, *candidate.risk.sizing_warnings):
+    for warning in candidate.risk.warnings:
         console.print(f"  Risk: {warning}")
     if candidate.analysis.sources:
         console.print(
@@ -234,6 +231,8 @@ def _bucket_symbols(candidates: tuple[BriefCandidate, ...], bucket: str) -> str:
 
 
 def _execution_bucket(candidate: BriefCandidate) -> str:
+    if "REGIME_CASH_PRIORITY" in candidate.risk.reasons:
+        return "見送り（地合い）"
     if candidate.execution_state in {"PULLBACK_ZONE", "FAIR"}:
         return "即検討可"
     if candidate.execution_state == "EXTENDED":
@@ -260,22 +259,16 @@ def _render_regime(console: Console, brief: DailyBrief) -> None:
         )
 
 
-def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
-    """Render the portfolio-heat value without adding report-level branches."""
-    if heat.heat_pct is not None:
-        return f"{heat.heat_pct:.2f}% / {heat.max_heat_pct:.2f}%"
-    if heat.missing_stop_symbols:
-        symbols = ", ".join(heat.missing_stop_symbols)
-        return f"not_calculable (missing stop: {symbols})"
-    return f"not_calculable ({heat.reason or 'unknown reason'})"
-
-
 def _number(value: float | None, *, digits: int = 2) -> str:
     return "N/A" if value is None else f"{value:,.{digits}f}"
 
 
 def _money(value: float | None) -> str:
     return "N/A" if value is None else f"${value:,.2f}"
+
+
+def _one_r(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2%}"
 
 
 def _percent(value: float | None) -> str:

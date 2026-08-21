@@ -203,11 +203,13 @@ def _request(
         risk_assessment=RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=10,
             entry_price=100.0,
+            limit_price=101.0,
             stop_price=95.0,
+            atr14=2.0,
+            stop_distance_pct=(101.0 - 95.0) / 101.0,
             reasons=(),
-            binding_constraint="trade_risk",
+            warnings=("WIDE_STOP",),
         ),
         text_items=text_items,
         prior_verdicts=prior_verdicts,
@@ -245,6 +247,9 @@ class TestBuildAnalysisInput:
         assert candidate.filings == []
         assert "<score_breakdown>" in candidate.score_breakdown
         assert "<risk_constraints>" in candidate.risk_constraints
+        assert "stop_distance_pct" in candidate.risk_constraints
+        assert "warnings: WIDE_STOP" in candidate.risk_constraints
+        assert "shares" not in candidate.risk_constraints
 
     def test_news_is_newest_first_and_capped_by_count(self):
         payload = build_analysis_input(

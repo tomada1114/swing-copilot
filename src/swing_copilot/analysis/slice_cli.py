@@ -7,10 +7,10 @@ release. This command is therefore read-mostly and cheap to re-run: it opens no
 network connection, touches no database, re-runs no screening, and writes
 nothing but the slices in the directory it was given.
 
-`--out-dir` is required rather than defaulted beside the input, because
-SKILL.md ("一時ファイルと後始末") puts slices in the session scratchpad and
-nowhere near `<WORKDIR>`: a slice written into the run directory would sit
-next to the fragments and could be merged as one.
+`--out-dir` is required rather than defaulted beside the input, because the
+CI-only `swing-daily` workflow puts slices in the repository's ignored
+`.swing-daily-scratch/` sibling, never in `<WORKDIR>`: a slice written into the
+run directory would sit next to the fragments and could be merged as one.
 """
 
 from __future__ import annotations
@@ -105,21 +105,21 @@ def _verify_out_dir(input_path: Path, out_dir: Path) -> None:
     if destination == run_dir or run_dir in destination.parents:
         msg = (
             f"--out-dir {out_dir} is inside the run directory {run_dir}; "
-            "slices are session scratch and must not be written to the "
+            "slices are CI scratch and must not be written to the "
             "operator's report output"
         )
         raise SliceExportError(msg)
     if destination in run_dir.parents:
         msg = (
             f"--out-dir {out_dir} contains the run directory {run_dir}; "
-            "write slices to the session scratchpad instead"
+            "write slices to the repository's CI scratch directory instead"
         )
         raise SliceExportError(msg)
     if (destination / ANALYSIS_INPUT_FILENAME).is_file():
         msg = (
             f"--out-dir {out_dir} is a run directory of its own (it holds "
             f"{ANALYSIS_INPUT_FILENAME}); write slices to the session "
-            "scratchpad instead"
+            "CI scratch directory instead"
         )
         raise SliceExportError(msg)
 
@@ -159,10 +159,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         required=True,
         help=(
-            "Directory to write the slices into, created when absent. Use the "
-            "session scratchpad: slices are working files and must not sit in "
-            "the run directory or the repository. A destination inside, above, "
-            "or equal to a run directory is refused."
+            "Directory to write the slices into, created when absent. The "
+            "swing-daily workflow uses the ignored repository sibling "
+            ".swing-daily-scratch/slices; a destination inside, above, or equal "
+            "to a run directory is refused."
         ),
     )
     return parser.parse_args(argv)

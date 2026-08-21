@@ -406,7 +406,7 @@ def test_a_failed_write_leaves_no_slice_and_no_temporary_behind(
     """The set is one logical write: seven files must not survive the eighth.
 
     A command that exits non-zero tells the orchestrator nothing was produced,
-    and this workflow never deletes anything from the scratchpad, so a partial
+    and this workflow never deletes anything from the CI scratch directory, so a partial
     set would sit there unnoticed. The fake fills the file before failing, as
     ENOSPC does, so the temporary of the *failing* write counts too.
     """

@@ -4,24 +4,23 @@
 [![codecov](https://codecov.io/gh/tomada1114/swing-copilot/branch/main/graph/badge.svg)](https://codecov.io/gh/tomada1114/swing-copilot)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A decision-support batch pipeline for US equity swing/position trading. It
-screens the S&P 500 universe, checks risk parameters, collects news and filing
-text, prints a readable terminal brief, and archives Markdown — all run
-locally. It never places orders; the human always makes the final buy/sell
-decision (see `docs/01_requirements.md`).
+A decision-support batch pipeline for US equity swing/position trading. Its
+deterministic batch can run locally: it screens the S&P 500 universe, checks
+risk parameters, collects news and filing text, prints a readable terminal
+brief, and archives Markdown. It never places orders; the human always makes
+the final buy/sell decision (see `docs/01_requirements.md`).
 
 Qualitative analysis of that news and filing text is done by Claude Code
-skills, not by this process: `copilot-daily` exports `analysis_input.json`
-beside the day's report, the `swing-daily` skill analyzes it, and
-`copilot-ingest-analysis` machine-verifies the answer (schema, source
-provenance, CON-03) before re-rendering the report. `copilot-verify-analysis`
-runs those same checks read-only, so the skill can check one working fragment —
-or dry-run the merged answer — without writing anything, and
-`copilot-export-slices` cuts the per-expert, per-symbol input slices the skill
-hands to its subagents, deterministically and verbatim:
+skills, not by this process. The GitHub Actions `swing-daily.yml` job invokes
+the `swing-daily` skill after `copilot-daily` exports `analysis_input.json`,
+then runs `copilot-ingest-analysis` to machine-verify the answer (schema,
+source provenance, CON-03) before re-rendering the report. The qualitative
+skill is CI-only; it is not a local interactive workflow. The slice command
+uses the ignored CI scratch directory:
 
 ```bash
-uv run copilot-export-slices reports/2026-07-29/<run-id> --out-dir /tmp/slices
+uv run copilot-export-slices reports/2026-07-29/<run-id> \
+  --out-dir .swing-daily-scratch/slices
 ```
 
 ## Quickstart

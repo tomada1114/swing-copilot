@@ -5,15 +5,26 @@ description: >
   for the deterministic pipeline, fans out news/filings/screening interpretation
   to parallel expert subagents, reconciles their findings, decides a per-symbol
   proceed/skip verdict, writes analysis_result.json, and re-renders the final
-  report via `copilot-ingest-analysis`. Use PROACTIVELY when: 日次分析、
-  デイリー実行、今日の分析、銘柄分析、定性分析、レポート生成、swing daily,
-  daily run, run the pipeline.
+  report via `copilot-ingest-analysis`. This skill is invoked only by the
+  GitHub Actions `swing-daily.yml` workflow; the qualitative daily phase is not
+  a local or interactive execution path.
 ---
 
 # 日次分析ワークフロー（統括）
 
 機械処理は Python、定性判断はこのスキル、最終判断は人間。
 決定論的な出力（スコア・ランキング・リスク制約）は**絶対に書き換えない**。
+
+## 実行前提（GitHub Actions のみ）
+
+このスキルの起動経路は `.github/workflows/swing-daily.yml` の GitHub Actions
+job だけである。ローカルの対話セッションから `swing-daily` を実行する運用は
+採らない。`copilot-daily` はローカルで決定論的なレポート入力を作れるが、
+ニュース・開示・スクリーニングの定性分析と ingest は CI の job が担当する。
+
+入力スライスなどの作業用ファイルは、checkout 直下の
+`<REPO_ROOT>/.swing-daily-scratch/`（以下 `<SCRATCHDIR>`）にだけ置く。
+このディレクトリは `.gitignore` 対象で、`reports/` の `<WORKDIR>` とは別の場所である。
 
 作業前に必ず読む:
 
@@ -46,21 +57,20 @@ description: >
 
 ## 一時ファイルと後始末（統括・全サブエージェント共通）
 
-このワークフローは平日定時に**無人起動**される。`rm` は許可リストに無いため、
-1 回でも実行しようとすると承認待ちで実行全体が停止する（実測で 44 分停止した例がある）。
-したがって次を全員が守る。
+このワークフローは平日定時に GitHub Actions 上で**無人起動**される。`rm` は許可
+リストに無いため、1 回でも実行しようとすると承認待ちで実行全体が停止する
+（実測で 44 分停止した例がある）。したがって次を全員が守る。
 
 - 作業用の一時ファイル（入力スライス、抽出テキスト等）は
-  **セッションの scratchpad ディレクトリ配下にだけ**作る。`<WORKDIR>` 直下や
-  リポジトリ配下に作らない（`analysis_work/` に置かないのは従来どおり）
+  **`<SCRATCHDIR>` 配下にだけ**作る。`<WORKDIR>` 直下や `analysis_work/` には置かない
 - **契約検証のスクリプトは統括もサブエージェントも書かない。** 断片と
   `analysis_result.json` の検証は `uv run copilot-verify-analysis` が担う
   （Step 3 / Step 5）。同じ検査を各自が実装し直すと、実装のばらつきがそのまま
   検査水準のばらつきになる（Issue #132）
-- **一時ファイルを削除しない。`rm` を実行しない。** scratchpad はセッション終了時に
-  破棄されるため掃除は不要で、掃除の実行コストの方が高い
-- 掃除が必要になるのは、リポジトリ配下に一時ファイルを作ってしまった場合だけである。
-  そもそも作らないことで、この分岐自体を無くす
+- **一時ファイルを削除しない。`rm` を実行しない。** GitHub-hosted runner は job
+  終了時に checkout 全体を破棄するため、`<SCRATCHDIR>` の掃除は runner に任せる
+- job の途中で `<SCRATCHDIR>` を掃除する手順は設けない。job の再実行は新しい
+  checkout から始まるため、前回のスライスを流用する必要もない
 
 ## サブエージェントの実行上限と打ち切り（統括・全サブエージェント共通）
 
@@ -137,12 +147,10 @@ Step 2 の専門家・Step 3 と Step 3.5 の再分析／追加分析・Step 3.6
    同じ手順で当てる。全体ウォッチャは 6 の最終防波堤そのものなので、これを取りこぼすと
    45 分の上限が黙って消える。
 
-   絶対パスは allowlist の前方一致から外れるため、対話セッションでは承認を 1 回求める
-   （人が居るので止まらない）。無人実行は `--permission-mode bypassPermissions` で
-   起動されるので承認自体が発生しない。どちらの形でも起動できなかった場合の終了
-   コードとメッセージは、4 の代替規則へ切り替えた根拠として `headless_note.md` と
-   Step 7 にそのまま残す（GitHub Actions のログには残らないため、ここが唯一の記録に
-   なる）
+   絶対パスは allowlist の前方一致から外れる。GitHub Actions の無人実行では承認待ちに
+   できないため、起動できなかった場合の終了コードとメッセージを、4 の代替規則へ
+   切り替えた根拠として `headless_note.md` と Step 7 にそのまま残す（GitHub Actions
+   のログには残らないため、ここが唯一の記録になる）
 2. 締切より前に全エージェントが完了したら、そのまま次のステップへ進む
 3. 締切の通知が届いた時点で未完了のエージェントが残っていれば、**待ちを延長せず**
    `TaskStop`（`task_id` に当該エージェントの ID または名前）で 1 体ずつ止める。
@@ -289,11 +297,9 @@ uv run copilot-daily <ユーザー指定の引数>
 
 引数（対象日、dry-run/live 等）はユーザーの指示に従う。指定が無ければ引数なしで実行。
 
-**`data/` の同期は実行形態で担当が変わる。** 正本は R2 にある。
-対話セッション（ローカル）では、このコマンドの前に `just data-pull`、Step 6 の
-ingest まで終えたあとに `just data-push` を実行する。無人実行（GitHub Actions）
-ではワークフローが前後で pull/push を行うので、**スキルからは実行しない**
-（分析セッションには R2 の資格情報を渡していない）。
+**`data/` の同期はワークフローが担当する。** 正本は R2 にあり、GitHub Actions の
+job がこのスキルの前に pull し、成功時に push する。分析セッションには R2 の資格情報を
+渡していないため、**スキルから `data-pull` / `data-push` は実行しない**。
 
 **終了コード 2（preflight abort）は stderr の機械可読プレフィックスで判定する。**
 stderr の先頭行は `PREFLIGHT_ABORT[<reason>]: <メッセージ>` の形式。
@@ -369,17 +375,9 @@ Step 0 で流用が決まった組を除いた、残りの「銘柄 × 専門家
 - 起動は **同一メッセージ内で並列に**行う。並列枠に収まらない場合は波に分け、
   波をまたいでも各エージェントへの指示内容は変えない
 
-**Workflow ツールは対話セッション限定の任意手段。**
-Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分岐・レジューム・
-進捗可視化・トークン予算連動が効くため、組の数が多いときは上位互換になりうる。
-ただしこれは標準経路ではなく、次の**両方**を満たすときにだけ選べる任意の代替手段である。
-
-1. 対話セッションであり、かつ Workflow の利用が**明示的に許可**されている
-2. N > 9（これ以下の規模なら Agent 並列で十分で、切り替える利点が無い）
-
-どちらか一方でも欠けるなら、可否を検討せずそのまま Agent 並列で進める。Workflow を
-使う場合も **各エージェントへ渡す指示内容と銘柄割り当て方針は Agent 経路と同一**
-（上記および下記）。手段の違いが分析内容の違いになってはならない。
+**Workflow ツールは使わない。** GitHub Actions の無人実行では利用を明示的に許可
+していないため、組の数にかかわらず Agent 経路で fan-out する。手段の違いが分析内容の
+違いにならないよう、各エージェントへ渡す指示内容と銘柄割り当て方針は常に同じにする。
 
 ### サブエージェントへ渡す入力範囲
 
@@ -389,13 +387,13 @@ Workflow ツール（Dynamic Workflow）での fan-out は、決定論的な分�
 手切りは 2026-08-13 の実走で 21 件・5.2 分かかり、欠落・重複ミスの温床でもあった）。
 
 ```bash
-uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad>/slices
+uv run copilot-export-slices <WORKDIR>/analysis_input.json \
+  --out-dir <REPO_ROOT>/.swing-daily-scratch/slices
 ```
 
-- `<scratchpad>` は**セッションの scratchpad ディレクトリ**。`<WORKDIR>` やリポジトリ
-  配下を `--out-dir` に指定しない（「一時ファイルと後始末」参照）。`<WORKDIR>` と
-  同じパス・その配下・その上位を渡した場合はコマンドが拒否して終了する（exit 1）ので、
-  その場合は scratchpad のパスを渡し直す
+- `<REPO_ROOT>/.swing-daily-scratch/slices` が CI 専用の固定出力先である。`<WORKDIR>`
+  と同じパス・その配下・その上位を `--out-dir` に渡した場合はコマンドが拒否して終了
+  する（exit 1）。別のパスへ切り替えず、この固定出力先を使う
 - 生成物は `slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` /
   `screening`）で、1 スライス = 1 専門家 × 1 銘柄。`news` が空の銘柄には news
   スライスを、`filings` が空の銘柄には filings スライスを作らず、`screening` は
@@ -450,7 +448,7 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
    （何も書かなかった開示の分も残す。自分でハッシュを計算させない。Issue #261）
 4. 親に返すのは **銘柄ごと 1〜2 行の要約 + 特記事項 + AC 自己点検結果**だけ。
    JSON 全文・生の入力テキストをメッセージに載せないこと
-5. 作業用の一時ファイルは scratchpad ディレクトリ配下にだけ作り、**削除しないこと
+5. 作業用の一時ファイルは `<SCRATCHDIR>` 配下にだけ作り、**削除しないこと
    （`rm` を実行しないこと）**。無人実行では `rm` の承認待ちでワークフロー全体が
    停止する（「一時ファイルと後始末」参照）
 6. 書き出した断片を `uv run copilot-verify-analysis <断片の絶対パス>` で検証し、
@@ -609,7 +607,7 @@ Step 3.5 を終えた時点で **暫定的に `proceed` に傾いている銘柄
   単独で構成されていれば作り直さず再利用する
 - 「**供給されたデータのみ**から結論を出すこと。新規のデータ取得・Web 検索・
   事前知識による補完をしないこと」（AC8）
-- 「作業用の一時ファイルは scratchpad ディレクトリ配下にだけ作り、**削除しないこと
+- 「作業用の一時ファイルは `<SCRATCHDIR>` 配下にだけ作り、**削除しないこと
   （`rm` を実行しないこと）**」（「一時ファイルと後始末」参照）
 - 「壁時計 **15 分**・ツール呼び出し **40 回**を上限とし、渡されたスライスは通し 1 回で読み
   （読み終えた範囲を読み直さない）、元の `analysis_input.json` 全件を読まないこと」
@@ -688,7 +686,7 @@ Step 3.6 の反証エージェントと**同一の入力契約**を使う: 当�
 `screening-<SYMBOL>.json` の絶対パス（存在するものだけ）、`analysis_input.json` の
 当該銘柄スライスの絶対パス（逐語コピー・他銘柄の混入禁止）、「供給されたデータのみ
 から結論を出すこと。新規のデータ取得・Web検索・事前知識による補完をしないこと」
-（AC8）、一時ファイルは scratchpad 配下にのみ作り `rm` しないこと、壁時計 15 分・
+（AC8）、一時ファイルは `<SCRATCHDIR>` 配下にのみ作り `rm` しないこと、壁時計 15 分・
 ツール呼び出し 40 回の上限と、スライスを通し 1 回で読み読み終えた範囲を読み直さない規律
 （「サブエージェントの実行上限と打ち切り」）。
 
@@ -853,10 +851,10 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 
 ## 無人実行（headless）時の方針
 
-平日の定時に GitHub Actions から **無人起動**される運用がある
+このスキルは平日の定時に GitHub Actions から **無人起動**される運用だけを持つ
 （ワークフローの構成は `CLAUDE.md` の "Scheduled Daily Run" を参照。スケジュール
-自体はこのスキルの外で管理される）。対話セッションでは従来どおり
-ユーザーに確認しながら進めてよいが、headless では以下に従う。
+自体はこのスキルの外で管理される）。ローカルの対話セッションでこのスキルを
+起動する経路は設けず、以下をすべての実行に適用する。
 
 - **ユーザーに質問できない前提で動く。** `AskUserQuestion` は使えない。判断が割れる
   分岐（既存 `analysis_result.json` の上書き可否、断片の流用可否、proceed か skip か）は
@@ -870,8 +868,7 @@ result ファイルと同じディレクトリから解決する）。hard fail 
   終わった日がある）、打ち切って withhold で先へ進むことがここでの保守側の選択に
   あたる（「サブエージェントの実行上限と打ち切り」）
 - **起動中のサブエージェントが残っている間は、ツール呼び出しを含まないターンを
-  返さない。** 対話セッションなら背景タスクの完了通知でセッションが再開するが、
-  SDK 起動（GitHub Actions）では**最終応答がそのままセッションの終わり**になる。
+  返さない。** SDK 起動（GitHub Actions）では**最終応答がそのままセッションの終わり**になる。
   テキストだけのターンを返した時点で、まだ走っているサブエージェントごと実行が
   終了する。2026-08-19 の live run がこれに該当し、30 断片中 2 断片・
   `analysis_result.json` 未生成・`headless_note.md` 未生成のまま job は success で
@@ -913,8 +910,8 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 - ユーザーが再実行を求めていないのに既存の `analysis_result.json` を上書きすること
 - 一時ファイルの掃除目的で `rm` を実行すること（統括・サブエージェントとも。
   「一時ファイルと後始末」参照）
-- `<WORKDIR>` やリポジトリ配下に作業用の一時ファイル（スライス、抽出テキスト等）を
-  作ること
+- `<WORKDIR>` や `<SCRATCHDIR>` 以外のリポジトリ配下に作業用の一時ファイル
+  （スライス、抽出テキスト等）を作ること
 - 断片や `analysis_result.json` の契約検証を自前のスクリプトで実装すること
   （`copilot-verify-analysis` を使う。Issue #132）
 - 実行上限に達したサブエージェントを待ち続けること、および「あと少しで終わりそう」を

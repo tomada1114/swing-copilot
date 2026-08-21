@@ -127,8 +127,8 @@ Finnhubキー未設定時はガード全体を`NO_EARNINGS_DATA`として無効�
 ## 定性分析の境界（`analysis/`、FR-08・CON-03）
 
 定性分析はこのプロセスの中では行わない。`swing_copilot.analysis`は、日次バッチと
-Claude Codeスキル（`.claude/skills/swing-daily`系）の間の**ファイルを介した境界**
-であり、モデルAPIを一切呼ばない。
+GitHub Actions からのみ起動する Claude Code スキル（`.claude/skills/swing-daily`系）
+の間の**ファイルを介した境界**であり、モデルAPIを一切呼ばない。
 
 `analysis/export.py`は`copilot-daily`のステップ6で、候補ごとの決定論的文脈
 （`analysis/context.py`が整形したP1-01スコア内訳・P1-03リスク制約・市場レジーム・
@@ -294,8 +294,10 @@ provenance・`evidence_quote`の逐語一致・CON-03を改めて通り、本文
 決定論的なコードへ置き換えたものである（Issue #260）。
 
 ```bash
-copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad>/slices
-copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクトリでもよい
+copilot-export-slices <WORKDIR>/analysis_input.json \
+  --out-dir <REPO_ROOT>/.swing-daily-scratch/slices
+copilot-export-slices <WORKDIR> \
+  --out-dir <REPO_ROOT>/.swing-daily-scratch/slices  # ディレクトリでもよい
 ```
 
 - 出力は`slice-<kind>-<SYMBOL>.json`（`<kind>`は`news` / `filings` / `screening`）。
@@ -312,15 +314,15 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   （Issue #130）をレポートへ届かせるのは決定論コード側の役目で、
   `analysis/validate.py`・`report/daily_brief.py`・`report/markdown_report.py`が
   担う（前段の`news_supply`の項を参照、Issue #281）
-- `--out-dir`は**必須**である。既定値を入力の隣に置くと、スキル規約が
-  scratchpad配下と定めているスライスがrunディレクトリに書かれうるため、
+- `--out-dir`は**必須**である。CI 専用スキルは checkout 直下の
+  `.swing-daily-scratch/`配下へ書く。既定値を入力の隣に置くと、スライスが
+  runディレクトリに書かれうるため、
   呼び出し側に必ず宣言させる。さらに値そのものを検査し、**runディレクトリと同一・
   その配下・その上位**、および`analysis_input.json`を既に持つディレクトリを拒否する。
   必須にするだけでは「入力として渡したのと同じパスを`--out-dir`にも渡す」誤りを
-  防げず、このワークフローは`rm`を実行しないので`reports/<date>/<run-id>/`へ落ちた
-  `slice-*.json`はrunごとに溜まる。「gitチェックアウト配下か」は判定しない——
-  wheelでインストールされたパッケージから運用者のリポジトリは同定できず、
-  誤判定は無人runを丸ごと落とすためである
+  防げず、`reports/<date>/<run-id>/`へ落ちた`slice-*.json`はrunごとに溜まるためである。
+  `.swing-daily-scratch/`は`.gitignore`対象で、job終了時にGitHub-hosted runnerが
+  checkout全体を破棄する。スキルは途中で`rm`を実行しない
 - 標準出力は「絶対パス / kind / 銘柄 / `source_chars`」のタブ区切り＋総数行。
   `source_chars`はそのスライスが載せている本文の文字数で、統括はこれを
   1エージェントあたりの文字数上限（開示は240,000文字）に突き合わせる
@@ -330,8 +332,8 @@ copilot-export-slices <WORKDIR> --out-dir <scratchpad>/slices  # ディレクト
   全件をまず宛先ディレクトリ内の一時ファイルへ書き、そのあとで`os.replace`する。
   容量不足や書き込み不可で途中失敗した場合、宛先は1つも変更されず一時ファイルも
   残らない——「コマンドは失敗したのに7件だけ残っている」状態を作らないためである。
-  統括は非ゼロ終了を「何も生成されなかった」と読み、このワークフローは scratchpad を
-  掃除しない
+  統括は非ゼロ終了を「何も生成されなかった」と読み、CI の `<REPO_ROOT>/.swing-daily-scratch/`
+  は job 終了時に runner が破棄するため、ワークフローは途中で掃除しない
 
 **決定論性が本コマンドの要件**である（同一入力→バイト同一出力。Issue #261 が
 本文ハッシュでの流用判定の前提にする。この性質はプロセスを跨いで成り立つ必要が

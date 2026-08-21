@@ -42,7 +42,7 @@ flowchart TD
         DISCORD["Discord Webhook"]
     end
 
-    subgraph Skills["Claude Code スキル（別プロセス・人間が起動）"]
+    subgraph Skills["Claude Code スキル（別プロセス・GitHub Actionsが起動）"]
         SKILL["swing-daily<br/>analyze-news / analyze-filings /<br/>interpret-screening"]
     end
 
@@ -146,7 +146,7 @@ flowchart TD
 | 分析結果検証 | `analysis/validate.py` | スキル出力を信頼せず、strictスキーマ・provenance（`source_ids` ⊆ 当該銘柄の供給ID）・CON-03を検証し、違反銘柄を銘柄単位でfail-closedに縮退させる | FR-08, CON-03 |
 | CON-03検査 | `analysis/safety.py` | 断定的売買指示・根拠なき心理/行動診断を全ユーザー表示テキストから検出する純関数（旧`llm/safety.py`） | CON-03 |
 | 分析取り込みCLI | `analysis/cli.py` | `copilot-ingest-analysis`。3つのJSONだけを読み、検証を通った定性欄でレポートを再描画する。ネットワーク・スクリーニング再計算なし | FR-08, FR-09 |
-| 定性分析スキル | `.claude/skills/swing-daily` ほか | `analysis_input.json`を読み、ニュース/開示/スクリーニングの専門家スキルへ並列委譲し、統合レビューとverdict決定を経て`analysis_result.json`を書く（本リポジトリのPythonパッケージ外、人間が起動） | FR-08 |
+| 定性分析スキル | `.claude/skills/swing-daily` ほか | `analysis_input.json`を読み、ニュース/開示/スクリーニングの専門家スキルへ並列委譲し、統合レビューとverdict決定を経て`analysis_result.json`を書く（本リポジトリのPythonパッケージ外、GitHub Actionsから起動） | FR-08 |
 | 日次ブリーフ構築 | `report/daily_brief.py` | 市場・候補・リスク・検証済み定性分析を表示非依存の値へ集約 | FR-09 |
 | CLI/Markdown出力 | `report/terminal_report.py`, `report/markdown_report.py` | stdout表示とrun ID単位の原子的Markdown保存 | FR-09, NFR-05 |
 | Discord通知 | `report/discord_notify.py` | Discord Webhookへの通知送信（デフォルト有効） | FR-09 |
@@ -233,18 +233,20 @@ sequenceDiagram
     D->>ST: run_steps(step=8, status)
 ```
 
-日次バッチ完了後、利用者がClaude Codeで`swing-daily`スキルを起動すると以下が続く。この経路はDuckDBへ書き込まず、ネットワークにも接続しない。
+日次バッチ完了後、GitHub Actions の `swing-daily.yml` job が `swing-daily` スキルを
+起動すると以下が続く。この経路はDuckDBへ書き込まず、データ同期以外のネットワークにも
+接続しない。定性分析スキルは CI でのみ実行する。
 
 ```mermaid
 sequenceDiagram
-    participant Human as 利用者（Claude Code）
+    participant CI as GitHub Actions（Claude Code）
     participant SK as swing-daily スキル
     participant EX as 専門家スキル（news/filings/screening）
     participant FS as 当日のレポートディレクトリ
     participant IN as copilot-ingest-analysis
     participant OUT as report renderers
 
-    Human->>SK: スキル起動
+    CI->>SK: スキル起動
     SK->>FS: analysis_input.json 読み取り
     SK->>EX: 銘柄 × 専門家を並列委譲（独立コンテキスト）
     EX-->>FS: analysis_work/ 配下へ断片JSONを書き出し
@@ -257,7 +259,7 @@ sequenceDiagram
         IN-->>IN: その銘柄の定性欄を非表示にして継続（fail-closed、リトライなし）
     end
     IN->>OUT: 定性欄だけを差し替えて再描画
-    OUT-->>Human: Markdown再保存 + ターミナル表示
+    OUT-->>CI: Markdown再保存 + 実行ログ
 ```
 
 ---
@@ -302,8 +304,8 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 項目 | 内容 |
 |---|---|
 | 用途 | ニュース解釈、開示（8-K/10-Q）解釈、スクリーニング結果の定性評価、銘柄ごとのverdict決定（FR-08） |
-| 実行主体 | 利用者のClaude Codeセッション。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェントへ並列委譲する。**標準経路はAgentツールの並列起動**であり、平日定時の無人実行（`CLAUDE.md`の"Scheduled Daily Run"）でもこれを使う——headless実行ではWorkflowツールの利用が明示的に許可されないため。Workflowツールは対話セッションであること・利用が明示的に許可されていること・組の数が閾値を超えることをすべて満たすときだけ選べる**任意の代替手段**であり、どちらを使っても各エージェントへ渡す指示内容と銘柄割り当ては同一とする（条件と閾値は`.claude/skills/swing-daily/SKILL.md`が定める） |
-| 認証 | なし（APIキーを持たない）。利用者のClaude Code環境が実行権限を担う |
+| 実行主体 | GitHub Actions の `swing-daily.yml` job。統括スキル`.claude/skills/swing-daily`が、`analyze-news`／`analyze-filings`／`interpret-screening`を独立コンテキストのサブエージェントへ並列委譲する。定性分析スキルの起動経路は CI のみで、Workflowツールは使わず Agent ツールの並列起動を標準とする（条件は`.claude/skills/swing-daily/SKILL.md`が定める） |
+| 認証 | なし（APIキーを持たない）。GitHub Actions の Claude Code OAuth secret が実行権限を担う |
 | 渡すもの | `reports/<run_date>/<run_id>/analysis_input.json`（schema `analysis-input-v3`）。決定論的な文脈ブロックと未信頼テキストをフィールドレベルで分離し、開示にはコード所有のcoverageを含む |
 | 受け取るもの | `reports/<run_date>/<run_id>/analysis_result.json`（schema `analysis-result-v3`。旧`analysis-result-v2`はP8アーカイブ読み込みだけ後方互換で受理し、新規runは`copilot-ingest-analysis`がhard failさせる）。スキルが書く唯一の成果物 |
 | 信頼境界 | スキル出力は未信頼入力として扱う。`copilot-ingest-analysis`が3文書のstrict schema・run identity・provenance・CON-03を検証するまで、いかなる文字列もレポートへ出さない |
@@ -331,10 +333,11 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 | 環境 | 用途 | 実行方法 |
 |---|---|---|
-| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `17 1 * * 2-6`（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `/swing-daily`（`uv run copilot-daily`と定性分析スキル）→ 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
-| ローカルマシン | 開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード） |
+| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `17 1 * * 2-6`（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `copilot-daily` → CI専用の`swing-daily`定性分析 → 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
+| ローカルマシン | 決定論的パイプラインの開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード）。`swing-daily`定性分析はローカルでは実行しない |
 
-どちらの環境も同じコードを同じ手順で動かす。実行環境ごとの分岐はパイプラインに持たせない。
+決定論的なパイプラインは両環境で同じコードを動かす。定性分析だけは GitHub Actions
+に限定し、ローカル実行の分岐をスキルへ持たせない。
 
 ### 8.2 永続化
 

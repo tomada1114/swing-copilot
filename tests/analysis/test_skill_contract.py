@@ -188,6 +188,20 @@ def test_the_orchestrator_is_pointed_at_the_deterministic_slice_command() -> Non
     assert "区切り文字なし" in filings_skill
 
 
+def test_daily_skill_is_ci_only_and_uses_the_ignored_scratch_directory() -> None:
+    """Issue #334: CI must use a readable, non-report scratch sibling."""
+    skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    schema = _read_output_schema()
+
+    assert "GitHub Actions" in skill
+    assert "ローカルの対話セッションから `swing-daily` を実行する運用は" in skill
+    assert "<REPO_ROOT>/.swing-daily-scratch/slices" in skill
+    assert "<REPO_ROOT>/.swing-daily-scratch/slices" in schema
+    assert "GitHub-hosted runner" in skill
+    assert "scratchpad" not in skill
+    assert "scratchpad" not in schema
+
+
 def test_the_schema_reference_binds_the_checker_to_the_ingest_function() -> None:
     """Name the shared function, so a rename cannot quietly weaken the claim."""
     schema = (_SKILL_ROOT / "references" / "output-schema.md").read_text(

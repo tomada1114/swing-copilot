@@ -188,3 +188,155 @@ the divergence, and update the stale canonical source or request a decision.
   design genuinely needs a new module/artifact.
 - Add dependencies only to the appropriate `pyproject.toml` group and commit
   `uv.lock` with dependency changes.
+
+## Scheduled Daily Run
+
+The daily analysis loop runs unattended on weekdays in CI: it fires the day
+*after* the US session it analyzes, so the weekday mask must include Saturday
+to cover Friday's session — a Monday-through-Friday mask would miss it. That
+is the only scheduled trigger, plus a manual dispatch for an out-of-band run.
+Nothing is retried automatically: a failed or skipped day is re-dispatched by
+hand, and the pipeline's preflight check makes the gap visible in the next
+run.
+
+The canonical `data/` lives in a private object-storage bucket, not in any
+working copy. The scheduled run pulls it before analysis and pushes it back
+only on success, so a failed day leaves the remote on the previous generation.
+
+### Working with the data locally
+
+- Read-only work (ad-hoc research, a read-only dashboard): pull the remote
+  copy first, then read the local copy; a status check confirms whether it
+  still matches the remote.
+- Anything that writes (a retrospective run, a live daily run): pull → work →
+  push, in one sitting. The optimistic lock is a monotonic `generation` field
+  in the data manifest — the only concurrent-write guard — so do not leave a
+  pulled copy unpushed, and do not start a local write while the scheduled run
+  holds the generation.
+- Never open the shared DuckDB file as a read-write connection for
+  exploration, and never hold any connection across think-time. The file lock
+  is exclusive between a read-write process and everything else, so a held
+  handle fails the next pull/push. Sync always moves the file as bytes, never
+  through DuckDB.
+- A fresh worktree has no `data/`, `.env`, or virtualenv of its own. Install
+  dependencies there, copy `.env` in by hand (it holds credentials and is
+  untracked), and pull the data history fresh — never by copying or
+  symlinking another checkout's `data/`.
+
+The daily pipeline's entry point exits `2` on a preflight abort, and stderr's
+first line carries a machine-readable tag that the caller branches on — never
+assume exit 2 means "already ran":
+
+- `PREFLIGHT_ABORT[same_day_rerun]:` — a successful run already exists for the
+  resolved run date (the schedule fires once per weekday, but a manual
+  dispatch or a re-run of a completed day would otherwise write a second
+  verdict set). It exits before creating a run record or report directory. An
+  explicit override flag bypasses the guard for an intentional re-run.
+
+## Reading the Accumulated Data
+
+Ad-hoc analysis of the DuckDB history (verdict outcomes, score breakdowns,
+tracking ledger, regimes, rejections) goes through the read-only research
+accessor module — one connection per query, joined views included. Never open
+a raw read-write DuckDB connection against the shared file for exploration,
+and never hold any connection across think-time: the file's lock is exclusive
+between a read-write process and everything else, so a held connection fails
+the next pull/push and strands the local copy on a stale generation.
+Improvement work discovered while analyzing follows the architecture review's
+principles: no config changes on point estimates alone; route proposals
+through issues or the retrospective loop.
+
+## Conventions: src/**/*.py, scripts/**/*.py
+
+### Design
+
+- Treat 300-line modules and 40-line functions as review triggers, not absolute
+  correctness rules. Split only when doing so improves a real responsibility boundary
+- Prefer 3 or fewer parameters; group related parameters with a dataclass or TypedDict
+- Google-style docstrings (Args/Returns/Raises) on all public functions; document *why*, not what the type signature already says; don't document obvious code
+
+### Error Handling
+
+- Define a package-level base exception; derive all specific errors from it
+- Catch the most specific exception possible
+- Use `logging.exception()` in catch blocks (auto-includes traceback), never `logger.error(str(e))`
+- Never swallow exceptions silently; if catching, handle meaningfully or re-raise
+- Never use exceptions for control flow
+- Return `None` or a sentinel only when the caller expects it; prefer raising for true errors
+
+### Type System
+
+- Prefer `@dataclass(frozen=True, slots=True)` for internal value objects
+- Use Pydantic (`BaseModel`) only at serialization/deserialization boundaries
+- Use `TypedDict` for structured dict shapes (API responses, config dicts)
+- Use `Protocol` for structural subtyping instead of ABC when possible
+- Avoid `Any`; when unavoidable, add a comment explaining why (e.g., `# Any: third-party lib has no stubs`)
+
+### Performance
+
+- Use generator expressions and `itertools` for large sequences; avoid materializing unnecessary lists
+- Use `__slots__` on frequently instantiated classes (dataclass `slots=True`)
+- Use `functools.lru_cache` or `functools.cache` for expensive pure functions
+- Prefer `str.join()` over `+=` concatenation in loops
+- Use `collections.defaultdict`, `Counter`, `deque` instead of hand-rolled equivalents
+- Avoid repeated attribute lookups in tight loops; bind to local variable
+- Use `dict`/`set` for O(1) membership tests instead of lists
+- Lazy-import heavy optional dependencies inside functions to reduce import time
+
+### Pythonic Patterns
+
+- EAFP (try/except) over LBYL (if-check) when dealing with duck typing or I/O
+- Use context managers (`with`) for all resource management (files, connections, locks)
+- Prefer comprehensions over `map()`/`filter()` for readability
+- Use `enum.Enum` for fixed sets of values instead of string constants
+- Use `walrus operator` (:=) for assign-and-test when it improves clarity
+- Use structural pattern matching (`match/case`) for complex dispatch
+- Use `*args` unpacking and `**kwargs` deliberately; avoid passing them blindly through call chains
+
+### Security
+
+- Sanitize file paths to prevent directory traversal (`pathlib.Path.resolve()` then check prefix)
+- Ruff's bandit rules (`S`) cover eval/exec/pickle/random misuse — do not suppress them with `noqa` without a written justification
+
+### Constants and Naming
+
+- Use `UPPER_SNAKE_CASE` named constants instead of magic numbers/strings
+- Boolean variables/params: prefix with `is_`, `has_`, `can_`, `should_`
+- Private helpers: prefix with `_`; reserve `__` (name mangling) only for avoiding conflicts in subclass hierarchies
+
+## Conventions: pyproject.toml
+
+- Runtime dependencies go under `[project] dependencies`
+- Dev dependencies go under `[dependency-groups] dev`; docs under `[dependency-groups] docs`
+- Before adding a dependency: verify active maintenance, compatible license (MIT/BSD/Apache), and minimal transitive dependencies
+- Use version ranges (`>=X.Y`) for runtime dependencies -- never pin exact versions in a library
+- NEVER remove existing ruff rules without explicit user approval
+- NEVER lower the line+branch coverage threshold (currently 95%)
+- After modifying dependencies, run `uv sync --all-groups`
+- The `uv.lock` file MUST be committed alongside dependency changes
+
+### `[tool.uv] exclude-newer`
+
+`exclude-newer` is a supply-chain cooldown: `uv lock` and `uv sync` ignore any
+package version published after the given timestamp, so a dependency cannot be
+resolved until it has survived in the wild for a while. This complements the
+Dependabot `cooldown.default-days` setting in `.github/dependabot.yml`, which
+delays *update PRs* by the same idea — together they keep both fresh installs
+and automated upgrades off packages published in the last few days.
+
+Bump cadence: whenever dependencies are updated, move the `exclude-newer`
+timestamp forward to roughly "today minus 14 days"; do this at least monthly
+even if no dependency changed, so the cutoff doesn't drift too far behind.
+
+Procedure:
+
+1. Edit the `exclude-newer` date in `pyproject.toml`.
+2. Run `uv lock` to regenerate `uv.lock` against the new cutoff.
+3. Commit `pyproject.toml` and `uv.lock` together in the same commit.
+
+## Conventions: docs/**/*.md, README.md, CONTRIBUTING.md, CHANGELOG.md
+
+- Document non-obvious behavior, architecture decisions, and trade-offs
+- Do NOT document what is obvious from the code or already expressed by the type system
+- Code examples in docs must be valid Python that works with the current API
+- Use admonitions (note, warning, tip) for important callouts in MkDocs pages

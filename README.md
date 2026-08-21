@@ -133,6 +133,7 @@ confirm the distribution imports from the wheel, not from `src/`.
 
 ## Documentation
 
+- [Investment Philosophy](https://tomada1114.github.io/swing-copilot/10_investment_philosophy/)
 - [Getting Started](https://tomada1114.github.io/swing-copilot/getting-started/)
 - [API Reference](https://tomada1114.github.io/swing-copilot/reference/)
 - Design docs: `docs/01_requirements.md`, `docs/03_basic_design.md`,

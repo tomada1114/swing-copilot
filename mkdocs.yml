@@ -61,6 +61,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Investment Philosophy: 10_investment_philosophy.md
   - Product Design:
       - Human Preparation: 00_human_preparation.md
       - Requirements: 01_requirements.md

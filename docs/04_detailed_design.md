@@ -2644,7 +2644,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | シグナル | 条件 | 設定キー |
 |---|---|---|
 | トレンド | 終値 > SMA200 かつ SMA50 > SMA200 | `technical_signals.trend.sma_short=50`, `sma_long=200` |
-| 押し目 | RSI(14) < 45 かつ 終値がSMA50の±3%以内 | `technical_signals.pullback.rsi_period=14`, `rsi_threshold=45`, `sma_band_pct=0.03` |
+| 押し目 | RSI(14) < 45 かつ 終値とSMA50の距離が2×ATR14以内 | `technical_signals.pullback.rsi_period=14`, `rsi_threshold=45`, `band_atr_multiple=2.0` |
 | 出来高フィルタ（第1段） | 20日平均出来高 > 100万株 | `technical_signals.volume.avg_volume_days=20`, `min_avg_volume=1000000` |
 
 ### 7.3 バックテスト初期設定

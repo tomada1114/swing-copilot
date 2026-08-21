@@ -861,6 +861,8 @@ L2/L3 の設計承認）に集約する。Python 側には config / コードを
 
 ## 6. 知見の出典と信頼性
 
+- 分析ルールの一次資料と系譜の正本は `docs/10_investment_philosophy.md` とする。
+  本節の `(要検証)` の扱いは同書の制定後も変わらない。
 - 出典リポジトリ: `/Users/masuyama/Downloads/claude-trading-skills-main`（ローカルコピー）。
   スキル名は各 Issue の「出典」注記を参照。
 - 調査で `(要検証)` と付いた値の例: FTD 成功率 25%（伝聞）、Druckenmiller の数値表

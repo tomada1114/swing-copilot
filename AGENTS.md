@@ -63,6 +63,7 @@ src/swing_copilot/
 | Concern | Canonical source |
 |---|---|
 | Product requirements and constraints | `docs/01_requirements.md` |
+| Public investment philosophy and analysis-rule genealogy | `docs/10_investment_philosophy.md` |
 | Architecture and behavioral invariants | `docs/03_basic_design.md`, then the contract sections of `docs/04_detailed_design.md` |
 | Current data/API shape | `src/swing_copilot/models.py`, `storage/schema.py`, public signatures |
 | Tooling and quality commands | `justfile`, `pyproject.toml`, CI workflows |

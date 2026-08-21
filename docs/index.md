@@ -14,6 +14,7 @@ uv run copilot-daily --dry-run
 
 ## Next Steps
 
+- [Investment Philosophy](10_investment_philosophy.md) — public analysis rules and source genealogy
 - [Getting Started](getting-started.md) — setup and first steps
 - [API Reference](reference.md) — full API documentation
 - [Contributing](contributing.md) — how to contribute

@@ -168,7 +168,7 @@ jobs:
               tool_name = denial.get("tool_name", "unknown")
               if tool_name != "Bash":
                   return str(tool_name)
-              input_value = denial.get("input", {})
+              input_value = denial.get("tool_input", denial.get("input", {}))
               command = input_value.get("command", "") if isinstance(input_value, dict) else ""
               if re.search(r"\buv run copilot-daily\b", command):
                   return "Bash:uv-run-copilot-daily-with-prefix"

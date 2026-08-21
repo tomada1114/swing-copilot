@@ -418,9 +418,9 @@ def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
     kills the parent's only blocking wait before the first wave even starts — a
     2026-08-19 dry-run recorded exactly this exit 127 in its `headless_note.md`
     and fell through to the completion-based fallback. One absolute-path retry
-    recovers it without
-    widening the allowlist; the widened `Bash()` prefix is deliberately *not*
-    added, so this pins that the recovery is documented instead.
+    recovers it without widening the allowlist; the widened `Bash()` prefix is
+    deliberately *not* added, so this pins that the recovery is documented
+    instead.
     """
     skill_text = DAILY_SKILL.read_text(encoding="utf-8")
     allow = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))["permissions"][

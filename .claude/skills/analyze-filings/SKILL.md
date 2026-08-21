@@ -25,6 +25,10 @@ description: >
   に従い、これを分析に使う。`run_id` / `as_of` / `input_digest` が元 input と一致することを
   確認し、担当外の元入力本文は読み込まない。スライスの `filing_body_digests` は
   出力断片の同名キーへ**全件逐語コピー**する（Issue #261。下記「出力ファイル」）
+- filings スライスの `candidate.filings[].text_chunks` は、Read の1物理行上限を避ける
+  ための輸送形式である。各配列を順番どおり区切り文字なしで連結して元の `text` を
+  再構成し、チャンク境界に改行・空白・区切り文字を追加しない。`text_chunks` と
+  `filing_body_digests` は同じ再構成本文に対応する
 - [../swing-daily/references/analysis-conventions.md](../swing-daily/references/analysis-conventions.md) — AC1〜AC16 の共通規約（**必読**）
 - [../swing-daily/references/output-schema.md](../swing-daily/references/output-schema.md) — JSON の形と `analysis_work/` 断片の形式
 - `src/swing_copilot/analysis/schemas.py` — **スキーマの最終正本**。JSON を組み立てる前に読む
@@ -70,15 +74,16 @@ description: >
 
 ## 手順
 
-1. 入力 JSON を読み、担当銘柄の `filings` 配列を取り出す。`source_id`,
-   `form_type`, `filed_at`, `text`, `coverage` を控える。`coverage` はコード所有の
+1. 入力 JSON を読み、担当銘柄の `filings` 配列を取り出す。スライスでは
+   `text_chunks` を連結して本文を再構成したうえで、`source_id`, `form_type`,
+   `filed_at`, `text`, `coverage` を控える。`coverage` はコード所有の
    完全性情報であり、`selection_mode`、`is_truncated`、`exhibit_truncated`、
    章ごとの `status` を先に確認する。
    章が `partial` なら `original_chars` / `exported_chars` / `omission_shape` も控える
    （欠落量 = `original_chars - exported_chars`、欠落位置 = `omission_shape`）。
 2. `filings` が空なら、その銘柄は `filing_analyses: []` とする（内容を作らない・AC14）。
    その場合も断片ファイルは書く（「分析済みで空」と「未分析」を区別するため）。
-3. **開示 1 件につき 1 つの分析オブジェクト**を作る。`text` が長い場合は
+3. **開示 1 件につき 1 つの分析オブジェクト**を作る。再構成した `text` が長い場合は
    同じ担当コンテキスト内で分割して読み、部分ごとの読み取りを最後に統合する。
    別エージェント/API呼び出しへ分割して結果をマージしない。
 4. 抽出の重点（この順で優先度が高い）。

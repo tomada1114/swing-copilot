@@ -11,6 +11,7 @@ import pytest
 from swing_copilot.analysis.fragment import AnalysisFragment
 from swing_copilot.analysis.schemas import filing_body_digest
 from swing_copilot.analysis.slices import (
+    MAX_FILING_SLICE_TEXT_LINE_CHARS,
     InputSlice,
     SliceExportError,
     build_slices,
@@ -153,12 +154,54 @@ def test_filings_slice_carries_only_the_filing_bodies() -> None:
     filings_slice = slice_by(build_slices(payload), "filings", "AAPL")
 
     source = payload["candidates"][0]
+    source_filing = source["filings"][0]
     assert filings_slice["candidate"] == {
         "symbol": "AAPL",
-        "filings": source["filings"],
+        "filings": [
+            {
+                **{key: value for key, value in source_filing.items() if key != "text"},
+                "text_chunks": [source_filing["text"]],
+            }
+        ],
     }
     assert filings_slice["candidate"]["filings"][0]["source_id"] == f"{FILING_ID}:AAPL"
     assert filings_slice["context"] == {}
+
+
+def test_a_large_filing_is_chunked_without_changing_its_body_or_digest(
+    tmp_path: Path,
+) -> None:
+    """Keep every Read-visible line short while preserving provenance input."""
+    candidate = candidate_payload("AAPL")
+    original = ('Quoted "text" \\ path\n本文の行。' * 5_000) + "終端"
+    filing = candidate["filings"][0]
+    filing["text"] = original
+    filing["coverage"] = {
+        **filing["coverage"],
+        "original_chars": len(original),
+        "exported_chars": len(original),
+    }
+    payload = input_payload(candidates=[candidate])
+
+    document = slice_by(build_slices(payload), "filings", "AAPL")
+    chunked = document["candidate"]["filings"][0]["text_chunks"]
+
+    assert len(chunked) > 1
+    assert "".join(chunked) == original
+    assert document["filing_body_digests"][filing["source_id"]] == filing_body_digest(
+        original
+    )
+
+    written = write_slices(build_slices(payload), tmp_path / "slices")
+    filings_path = next(
+        path for path in written if path.name == "slice-filings-AAPL.json"
+    )
+    raw_text = filings_path.read_text(encoding="utf-8")
+    raw_lines = raw_text.splitlines()
+    assert max(map(len, raw_lines)) <= MAX_FILING_SLICE_TEXT_LINE_CHARS
+    parsed = InputSlice.model_validate(json.loads(raw_text))
+    assert parsed.candidate.filings is not None
+    assert "".join(parsed.candidate.filings[0].text_chunks) == original
 
 
 def test_only_the_filings_slice_carries_the_reuse_digests() -> None:

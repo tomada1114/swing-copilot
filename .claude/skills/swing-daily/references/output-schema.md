@@ -196,11 +196,17 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
 - 元入力の `run_id` / `as_of` / `input_digest` は必ず含め、専門家は断片出力の同名 3 値へ
   逐語コピーする。統括は元の `analysis_input.json` と一致を確認する
 - `filing_body_digests` は filings スライスにだけ付く。このスライスが載せている
-  `filings[].text` の digest で、**スライス内で唯一の計算値**である（他は逐語コピー）。
+  `filings[].text_chunks` を順番どおり連結した本文の digest で、**スライス内で唯一の計算値**である（他は逐語コピー）。
   開示担当はこれを断片へ逐語コピーする。翌営業日の流用可否がこの値で決まるため、
   1 件でも落とすと再分析になる（Issue #261）
 - `source_id` と、その専門家が分析する `summary` / `text` は元入力から逐語コピーされる。
-  担当対象の source object を要約・再採番・省略しない
+  担当対象の source object を要約・再採番・省略しない。filings スライスでは `text` を
+  `text_chunks` に置き換えるが、配列を区切り文字なしで連結した値が元入力の本文と
+  一致する
+- filings スライスの `candidate.filings[].text_chunks` は、Read の1物理行上限を
+  避けるための輸送形式である。配列順を保ったまま `"".join(text_chunks)` として
+  本文を再構成し、チャンク境界に改行・空白・区切り文字を追加しない。各 JSON 文字列
+  行は最大 8,000 文字に収まる
 - ニュース／開示スライスには担当銘柄の該当 source object だけが、スクリーニング
   スライスにはその銘柄の決定論的入力（`score_breakdown` / `risk_constraints` /
   `prior_verdicts`）と run-wide context（`market_regime` / `calendar_events`）

@@ -172,6 +172,9 @@ def test_the_orchestrator_is_pointed_at_the_deterministic_slice_command() -> Non
     """
     skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     schema = _read_output_schema()
+    filings_skill = (_SKILLS / "analyze-filings" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "copilot-export-slices" in skill
     assert "手で切り出さない" in skill
@@ -179,6 +182,10 @@ def test_the_orchestrator_is_pointed_at_the_deterministic_slice_command() -> Non
     assert "copilot-export-slices" in schema
     for document in (skill, schema):
         assert f"{SLICE_FILENAME_PREFIX}-<kind>-<SYMBOL>.json" in document
+    assert "text_chunks" in skill
+    assert "text_chunks" in schema
+    assert "text_chunks" in filings_skill
+    assert "区切り文字なし" in filings_skill
 
 
 def test_the_schema_reference_binds_the_checker_to_the_ingest_function() -> None:

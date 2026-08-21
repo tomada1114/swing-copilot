@@ -1,7 +1,4 @@
----
-paths:
-  - "tests/**/*.py"
----
+Applies to: `*.py` under this directory.
 
 ## Structure and Organization
 

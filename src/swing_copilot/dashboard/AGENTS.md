@@ -1,11 +1,7 @@
----
-paths:
-  - "src/swing_copilot/dashboard/**"
-  - "tests/dashboard/**"
----
+対象: このディレクトリ配下と `tests/dashboard/**`。
 
-`copilot-dashboard` は蓄積済みデータの閲覧専用ビューア。`.claude/rules/python.md`
-と `testing.md` に加えて、この境界だけの規約を守る。
+`copilot-dashboard` は蓄積済みデータの閲覧専用ビューア。ルート `AGENTS.md` の
+Python 規約と `tests/AGENTS.md` に加えて、この境界だけの規約を守る。
 
 ## 読み取り専用
 
@@ -13,7 +9,7 @@ paths:
   の read-write 生成、DDL のいずれも禁止
 - DuckDB へは `swing_copilot.research` 経由でのみ触る。`duckdb.connect()` を
   自分で呼ばない。接続をアプリ・モジュール・キャッシュに保持しない
-  （`research` の「開く→1クエリ→閉じる」を通す限り保持は起きない）
+  (`research` の「開く→1クエリ→閉じる」を通す限り保持は起きない)
 - `research.ensure_views()` をダッシュボードから呼ばない。read-write 接続を
   開くため。ビュー不在は `ResearchError` としてエラーページに出し、
   別シェルで `ensure_views()` を実行するよう案内する
@@ -39,20 +35,20 @@ view-model 層が引き受けるもの: `v_verdict_scorecard` の
 - 列ごとに NULL の意味が違う。ゼロ・`UNKNOWN`・`none` と混同しない
 - view-model 層で `formatting.Cell` の表示トークンへ解決し、テンプレートには
   生の NULL を渡さない。テンプレートは欠損有無で分岐しない
-- 表示トークンと色意味論（tone）の定数は `formatting.py` に 1 箇所だけ置き、
+- 表示トークンと色意味論(tone)の定数は `formatting.py` に 1 箇所だけ置き、
   チャート・バッジ・CSS が同じ語彙を共有する
 - tone テーブルは対象 enum の全メンバを網羅する。未登録の値は中立 tone へ
   フォールバックするため、`SEVERE` の登録漏れは「最悪のレジームを最も穏当な色で
   描く」ことになる。網羅はテストで固定する
 - 新しい欠損理由が要るときは `NULL_TOKENS` に追加し、対象ページの
-  `LEGEND_KEYS` にも載せる（各ページは自分が使うトークンだけを脚注で定義する）
+  `LEGEND_KEYS` にも載せる(各ページは自分が使うトークンだけを脚注で定義する)
 
 ## 読み方ヒント
 
 - 各セクションの「読み方」キャプションは `guidance.py` に集約し、テンプレートへ
   直書きしない。同じ定義を 2 箇所に書かないため、複数ページで同じ `Hint` を共有する
-- 文言は値を作っているコード（`retro/evaluate.py`・`regime/gate.py`・
-  `regime/distribution.py`）を読んで書く。閾値は設定キー名で示し、数値を
+- 文言は値を作っているコード(`retro/evaluate.py`・`regime/gate.py`・
+  `regime/distribution.py`)を読んで書く。閾値は設定キー名で示し、数値を
   焼き込まない——ダッシュボードは `settings.yaml` を読まないので、数値は黙って古くなる
 - 当否の向きなど、外れると誤読を生む主張はテストでコードに突き合わせる
 
@@ -66,16 +62,16 @@ view-model 層が引き受けるもの: `v_verdict_scorecard` の
 ## チャートと静的資産
 
 - チャートはサーバサイド生成のインライン SVG。JS チャートライブラリ、CDN、
-  外部フォント、外部画像を読み込まない（完全オフラインで動くこと）
-- 色は `static/app.css` の CSS カスタムプロパティ（`var(--tone-*)`）を参照し、
+  外部フォント、外部画像を読み込まない(完全オフラインで動くこと)
+- 色は `static/app.css` の CSS カスタムプロパティ(`var(--tone-*)`)を参照し、
   Python 側に色リテラルを置かない
-- ホバー情報は SVG の `<title>` で出す（スクリプト不要）
+- ホバー情報は SVG の `<title>` で出す(スクリプト不要)
 
 ## テスト
 
-- 2 段構え: view-model 層のユニットテスト（HTTP を介さず、NULL 意味論・集約・
-  層別を直接検証）と、`TestClient` によるページテスト（ルーティング・404・
-  エラーページ・描画内容の要点）
+- 2 段構え: view-model 層のユニットテスト(HTTP を介さず、NULL 意味論・集約・
+  層別を直接検証)と、`TestClient` によるページテスト(ルーティング・404・
+  エラーページ・描画内容の要点)
 - DB は `tmp_path` に作り、`tests/dashboard/conftest.py` の `Builder` で行を入れる。
   実 `data/`・実 `reports/` は絶対に触らない
 - `Builder` は 1 文ごとに接続を開閉する。read-write 接続を保持すると

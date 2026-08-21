@@ -23,9 +23,8 @@ technical_signals:
   pullback:
     rsi_period: 14 # >= 1
     rsi_threshold: 45 # closed interval [0, 100]
-    sma_band_pct: 0.03 # fraction in [0, 1]; band_atr_multiple 設定中は無視（ロールバック用に保持）
-    # null: 従来どおり sma_band_pct（絶対%）で帯を判定する。
-    # 数値を入れると SMA50 からの距離を ATR14 単位で測り sma_band_pct は無視する（> 0.0）。
+    # 数値を入れると SMA50 からの距離を ATR14 単位で測る（> 0.0）。
+    # null（または省略）では、既存設定との互換のため固定3%帯を使う。
     # 2026-08-04 に 2.0 を採用: reports/backtests/2026-07-30-strategy-comparison.md の
     # R2（期待値・PF・Sharpe 改善、DD 同等）に基づく採用判断。
     band_atr_multiple: 2.0
@@ -111,6 +110,15 @@ notification:
   # Enabling it makes DISCORD_WEBHOOK_URL a required secret: a run without it
   # fails fast at composition rather than silently going unannounced.
   enabled: true
+
+postmortem:
+  # roadmap §5 P2-11: signal/verdict forward-return evaluation boundaries.
+  horizon_5d_weight: 0.6
+  horizon_20d_weight: 0.4
+  neutral_threshold_pct: 0.5
+  severe_threshold_pct: 2.0
+  preliminary_sample_threshold: 20
+  lookback_window_days: 90
 
 regime:
   # SPY SMA200 trend gate. The 3% buffer prevents one-day whipsaws; VIX is

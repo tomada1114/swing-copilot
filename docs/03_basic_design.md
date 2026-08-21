@@ -50,7 +50,7 @@ flowchart TD
         UNIV["universe.py<br/>FR-01"]
         DP["data/*_provider.py<br/>DataProvider (FR-02)"]
         EDG["data/edgar.py<br/>FR-03"]
-        SCR["screening/pipeline.py<br/>Filter+Signal (FR-04, FR-05)"]
+        SCR["screening/pipeline.py + execution.py<br/>Filter+Signal+bucket (FR-04, FR-05)"]
         REG["regime/*<br/>市場ゲート・DD（P3-13）"]
         RISK["risk/checks.py<br/>FR-06"]
         TXT["text/*<br/>FR-07"]
@@ -133,6 +133,7 @@ flowchart TD
 | Filter/Signal基盤 | `screening/base.py` | フィルタ・シグナルのABCとプラガブルな登録レジストリ | FR-05, NFR-07 |
 | ファンダフィルタ | `screening/fundamental_filters.py` | 第1段: 黒字継続・FCF・自己資本比率によるユニバース絞り込み | FR-04 |
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価 | FR-05, P5-21 |
+| 実行状態バケット | `screening/execution.py` | 実行状態から表示・ランキング用バケットへの写像を一元化。CASH_PRIORITYの表示上書きもここで扱う | P5-23, FR-09 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVからSMA200主軸の市場ゲート・Distribution Day・FTD再参入状態を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
 | RiskChecker | `risk/` | 読者の口座・保有を参照せず、run日終値、計画指値、終値アンカーの逆指値、ATR14、1R、決算/wide-stop警告、市場状態による判定を銘柄単位で返す。CASH_PRIORITYは候補を保持して地合い理由で見送り、REDUCE_ONLYは候補を保持した警戒ラベルだけとする | FR-06, P3-14 |

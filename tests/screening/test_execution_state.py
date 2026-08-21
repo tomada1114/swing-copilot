@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from swing_copilot.screening.pipeline import (
-    _execution_bucket,
-    _execution_state,
-    _state_sort_key,
-)
+from swing_copilot.screening.execution import execution_bucket
+from swing_copilot.screening.pipeline import _execution_state, _state_sort_key
 
 
 def test_execution_state_boundaries_are_inclusive_on_the_upper_bucket():
@@ -19,7 +16,13 @@ def test_execution_state_boundaries_are_inclusive_on_the_upper_bucket():
 
 def test_unknown_is_safe_side_pass_bucket():
     assert _execution_state(None) == "UNKNOWN"
-    assert _execution_bucket("UNKNOWN") == "見送り"
+    assert execution_bucket("UNKNOWN") == "見送り"
+
+
+def test_cash_priority_overrides_execution_state_for_display_bucket():
+    assert execution_bucket("FAIR", risk_reasons=("REGIME_CASH_PRIORITY",)) == (
+        "見送り（地合い）"
+    )
 
 
 def test_state_cap_places_high_scoring_pass_candidate_after_other_buckets():

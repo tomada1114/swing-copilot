@@ -442,7 +442,6 @@ def _pullback_band_rejection(
     }
     if config.band_atr_multiple is None:
         detail["band_pct"] = distance / last_sma50
-        detail["sma_band_pct"] = config.sma_band_pct
     else:
         atr14 = window.atr(_PULLBACK_BAND_ATR_PERIOD)
         # Mirrors the signal's fail-closed branch: an undefined ATR leaves the

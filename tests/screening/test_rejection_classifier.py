@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 import pytest
@@ -445,7 +445,10 @@ class TestSignalReasons:
         assert rejection.reason_code is not RejectionReasonCode.SIGNAL_RSI_NOT_MET
         assert rejection.detail["signal"] == "pullback_rsi"
         assert rejection.detail["reason"] == "sma_band"
-        assert "sma_band_pct" in rejection.detail
+        distance = cast("float", rejection.detail["distance"])
+        sma50 = cast("float", rejection.detail["sma50"])
+        band_pct = cast("float", rejection.detail["band_pct"])
+        assert band_pct == pytest.approx(distance / sma50)
 
     def test_the_atr_band_mode_reports_the_atr_it_measured(self, settings, monkeypatch):
         # In `band_atr_multiple` mode the ledger must name the ATR-normalized
@@ -470,7 +473,7 @@ class TestSignalReasons:
 
         assert rejection.detail["reason"] == "sma_band"
         assert rejection.detail["band_atr_multiple"] == 0.01
-        assert "sma_band_pct" not in rejection.detail
+        assert "band_pct" not in rejection.detail
 
     def test_insufficient_bars_for_trend_signal_is_data_quality(self, settings):
         rows = _healthy_fundamentals("XYZ")

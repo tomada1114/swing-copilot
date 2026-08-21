@@ -85,7 +85,6 @@ def pinned_settings_path(tmp_path: Path) -> Path:
     raw["technical_signals"]["pullback"] |= {
         "rsi_period": 14,
         "rsi_threshold": 45,
-        "sma_band_pct": 0.03,
         "band_atr_multiple": None,
     }
     raw["technical_signals"]["volume"] |= {

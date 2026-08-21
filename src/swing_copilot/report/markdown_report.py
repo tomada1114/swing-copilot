@@ -9,6 +9,11 @@ from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
     format_verdict,
 )
+from swing_copilot.screening.execution import (
+    EXECUTION_BUCKETS,
+    EXECUTION_CASH_PRIORITY_BUCKET,
+    execution_bucket,
+)
 
 if TYPE_CHECKING:
     from swing_copilot.models import RunStatus
@@ -165,19 +170,23 @@ def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
     """
     lines = ["", "## Candidates"]
     cash_priority = any(
-        _execution_bucket(candidate) == "見送り（地合い）" for candidate in candidates
+        execution_bucket(candidate.execution_state, risk_reasons=candidate.risk.reasons)
+        == EXECUTION_CASH_PRIORITY_BUCKET
+        for candidate in candidates
     )
     buckets = (
-        "即検討可",
-        "様子見",
-        *(("見送り（地合い）",) if cash_priority else ()),
-        "見送り",
+        *EXECUTION_BUCKETS[:2],
+        *((EXECUTION_CASH_PRIORITY_BUCKET,) if cash_priority else ()),
+        EXECUTION_BUCKETS[2],
     )
     for bucket in buckets:
         bucket_candidates = [
             candidate
             for candidate in candidates
-            if _execution_bucket(candidate) == bucket
+            if execution_bucket(
+                candidate.execution_state, risk_reasons=candidate.risk.reasons
+            )
+            == bucket
         ]
         lines.extend(["", f"### {bucket}", ""])
         if not bucket_candidates:
@@ -390,21 +399,14 @@ def _number(value: float | None, *, digits: int = 2) -> str:
 
 def _execution_state_text(candidate: BriefCandidate) -> str:
     """Render the code-owned P5-23 state and ATR-normalized distance."""
-    if "REGIME_CASH_PRIORITY" in candidate.risk.reasons:
-        return "見送り（地合い）"
+    if (
+        execution_bucket(candidate.execution_state, risk_reasons=candidate.risk.reasons)
+        == EXECUTION_CASH_PRIORITY_BUCKET
+    ):
+        return EXECUTION_CASH_PRIORITY_BUCKET
     if candidate.execution_distance is None:
         return f"{candidate.execution_state} (d=N/A)"
     return f"{candidate.execution_state} (d={candidate.execution_distance:.2f})"
-
-
-def _execution_bucket(candidate: BriefCandidate) -> str:
-    if "REGIME_CASH_PRIORITY" in candidate.risk.reasons:
-        return "見送り（地合い）"
-    if candidate.execution_state in {"PULLBACK_ZONE", "FAIR"}:
-        return "即検討可"
-    if candidate.execution_state == "EXTENDED":
-        return "様子見"
-    return "見送り"
 
 
 def _money(value: float | None) -> str:

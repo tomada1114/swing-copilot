@@ -252,6 +252,8 @@ def format_risk_constraints(risk_assessment: RiskAssessment) -> str:
         "分析側が上書きすることはできません。\n"
         "<risk_constraints>\n"
         f"binding_constraint: {risk_assessment.binding_constraint}\n"
+        f"指値(limit_price): {_price_or_unknown(risk_assessment.limit_price)}\n"
+        f"逆指値(stop_price): {_price_or_unknown(risk_assessment.stop_price)}\n"
         f"リスク基準の株数(shares_by_risk): {shares_by_risk}\n"
         f"ポジション上限基準の株数(shares_by_position_cap): {shares_by_position_cap}\n"
         f"最終株数(shares): {final_shares}\n"
@@ -262,6 +264,10 @@ def format_risk_constraints(risk_assessment: RiskAssessment) -> str:
 
 def _int_or_unknown(value: int | None) -> str:
     return str(value) if value is not None else "不明"
+
+
+def _price_or_unknown(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "不明"
 
 
 def _pct_or_unknown(value: float | None) -> str:

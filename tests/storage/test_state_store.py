@@ -283,11 +283,31 @@ class TestInitSchema:
                 ],
             )
             row = conn.execute(
-                "SELECT binding_constraint, shares_by_risk, shares_by_position_cap "
+                "SELECT limit_price, binding_constraint, shares_by_risk, shares_by_position_cap "
                 "FROM risk_assessments WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()
-        assert row == ("trade_risk", 200, 500)
+        assert row == (None, "trade_risk", 200, 500)
+
+    def test_init_schema_adds_limit_price_to_a_pre_existing_risk_table(self, tmp_path):
+        database = Database(tmp_path / "pre_limit_price.duckdb")
+        with database.connect() as conn:
+            conn.execute(_PRE_P1_03_RISK_ASSESSMENTS_TABLE)
+
+        StateStore(database).init_schema()
+
+        with database.connect() as conn:
+            columns = {
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'risk_assessments'
+                    """
+                ).fetchall()
+            }
+        assert "limit_price" in columns
 
     def test_init_schema_adds_no_trade_to_a_pre_existing_verdict_positions_table(
         self, tmp_path
@@ -2107,6 +2127,7 @@ class TestRecordRiskAssessments:
             stop_price=45.0,
             reasons=(),
             warnings=(),
+            limit_price=51.0,
             shares_by_risk=200,
             shares_by_position_cap=500,
             binding_constraint="trade_risk",
@@ -2118,16 +2139,19 @@ class TestRecordRiskAssessments:
         with state_store._database.connect() as conn:  # noqa: SLF001
             row = conn.execute(
                 """
-                SELECT shares_by_risk, shares_by_position_cap,
-                       binding_constraint, sizing_warnings_json
+                SELECT entry_price, limit_price, shares_by_risk,
+                       shares_by_position_cap, binding_constraint,
+                       sizing_warnings_json
                 FROM risk_assessments WHERE run_id = ?
                 """,
                 [str(run_id)],
             ).fetchone()
-        assert row[0] == 200
-        assert row[1] == 500
-        assert row[2] == "trade_risk"
-        assert "WIDE_STOP" in row[3]
+        assert row[0] == 50.0
+        assert row[1] == 51.0
+        assert row[2] == 200
+        assert row[3] == 500
+        assert row[4] == "trade_risk"
+        assert "WIDE_STOP" in row[5]
 
     def test_rerun_correction_upserts_sizing_breakdown(self, state_store):
         # Natural-key rerun (same run_id, symbol) must overwrite the sizing
@@ -2141,6 +2165,7 @@ class TestRecordRiskAssessments:
             stop_price=45.0,
             reasons=(),
             warnings=(),
+            limit_price=50.0,
             shares_by_risk=200,
             shares_by_position_cap=500,
             binding_constraint="trade_risk",
@@ -2153,6 +2178,7 @@ class TestRecordRiskAssessments:
             stop_price=45.0,
             reasons=(),
             warnings=(),
+            limit_price=52.0,
             shares_by_risk=200,
             shares_by_position_cap=40,
             binding_constraint="position_cap",
@@ -2163,11 +2189,11 @@ class TestRecordRiskAssessments:
 
         with state_store._database.connect() as conn:  # noqa: SLF001
             row = conn.execute(
-                "SELECT max_shares, shares_by_position_cap, binding_constraint "
+                "SELECT max_shares, shares_by_position_cap, binding_constraint, limit_price "
                 "FROM risk_assessments WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()
-        assert row == (40, 40, "position_cap")
+        assert row == (40, 40, "position_cap", 52.0)
 
 
 class TestRecordSignalOutcomes:

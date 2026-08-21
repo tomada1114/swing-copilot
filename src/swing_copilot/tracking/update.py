@@ -314,10 +314,11 @@ def _seed_position(
 ) -> _Work | None:
     """Build the entry state for a `proceed` verdict not yet tracked.
 
-    The entry price is the risk assessment's (the run day's close). When that
-    is missing -- a `CASH_PRIORITY` regime or a `not_calculable` assessment
-    leaves it unset -- the run day's stored close stands in. With neither, the
-    verdict simply stays untracked and the next update tries again.
+    The entry price is the risk assessment's reference close (the run day's
+    close), not its planned `limit_price`. When that is missing -- a
+    `CASH_PRIORITY` regime or a `not_calculable` assessment leaves it unset --
+    the run day's stored close stands in. With neither, the verdict simply
+    stays untracked and the next update tries again.
     """
     bars = _position_bars(all_bars, candidate.symbol, candidate.as_of)
     entry_price = candidate.entry_price

@@ -199,8 +199,8 @@ def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
             continue
         lines.extend(
             [
-                "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop |",
-                "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|",
+                "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop | Limit |",
+                "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|",
             ]
         )
         lines.extend(_candidate_row(candidate) for candidate in bucket_candidates)
@@ -223,6 +223,7 @@ def _candidate_row(candidate: BriefCandidate) -> str:
                 candidate.risk.status,
                 format_sizing(candidate.risk),
                 _money(candidate.risk.stop_price),
+                _money(candidate.risk.limit_price),
             )
         )
         + " |"

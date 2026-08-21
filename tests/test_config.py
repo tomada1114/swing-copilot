@@ -573,6 +573,16 @@ def test_portfolio_heat_limit_defaults_to_six_percent():
     assert settings.risk.max_portfolio_heat_pct == 6.0
 
 
+def test_entry_limit_atr_multiple_defaults_to_zero():
+    settings = load_settings("config/settings.yaml")
+    assert settings.backtest.entry_limit_atr_multiple == 0.0
+
+
+def test_entry_limit_atr_multiple_rejects_negative_values():
+    with pytest.raises(ValidationError, match="entry_limit_atr_multiple"):
+        Settings.model_validate({"backtest": {"entry_limit_atr_multiple": -0.1}})
+
+
 def test_earnings_guard_thresholds_default_to_two_and_five_business_days():
     settings = load_settings("config/settings.yaml")
     assert settings.risk.earnings_block_business_days == 2

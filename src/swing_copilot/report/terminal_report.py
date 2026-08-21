@@ -135,6 +135,7 @@ def render_terminal(
     table.add_column("スコア", justify="right")
     table.add_column("株数", justify="right")
     table.add_column("ストップ", justify="right")
+    table.add_column("指値", justify="right")
     for candidate in brief.candidates:
         table.add_row(
             str(candidate.rank),
@@ -144,6 +145,7 @@ def render_terminal(
             _number(candidate.score, digits=3),
             format_sizing(candidate.risk),
             _money(candidate.risk.stop_price),
+            _money(candidate.risk.limit_price),
         )
     console.print(table)
 

@@ -269,6 +269,9 @@ class BacktestConfig(_StrictModel):
 
     initial_cash_usd: float = Field(default=100_000, gt=0.0)
     entry: str = "next_open"
+    # Planned limit-order entry above the run-day close. Kept at zero until
+    # the backtest gate supplies evidence for a non-zero value (#325/#326).
+    entry_limit_atr_multiple: float = Field(default=0.0, ge=0.0)
     exit_atr_multiple: float = Field(default=2.5, gt=0.0)
     # Wilder period of the ATR the *exit* side uses: the backtest's trailing
     # stop and the tracking ledger's replay of it (Issue #194). The entry-side

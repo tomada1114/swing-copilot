@@ -1,6 +1,6 @@
 """Position sizing, sector concentration, and correlation checks (FR-06).
 
-The stop-distance multiple (`entry_price - exit_atr_multiple * ATR14`) reuses
+The stop-distance multiple (`limit_price - exit_atr_multiple * ATR14`) reuses
 `settings.backtest.exit_atr_multiple` rather than a second, redundant
 risk-specific multiplier — `settings.yaml`'s `risk.*` section has no such
 key, and reusing the strategy's own stop rule keeps the risk preview
@@ -145,10 +145,15 @@ class RiskAssessment:
     symbol: str
     status: str  # "approved" | "rejected" | "not_calculable"
     max_shares: int | None
+    # Reference close from the run day. Tracking deliberately uses this value
+    # as its virtual-ledger entry until the entry basis is revisited in #327.
     entry_price: float | None
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[CorrelationWarning, ...] = ()
+    # Maximum planned fill price. It is separate from `entry_price` because a
+    # planned limit order is not proof that the order actually filled.
+    limit_price: float | None = None
     # P1-03 sizing breakdown.
     shares_by_risk: int | None = None
     shares_by_position_cap: int | None = None
@@ -217,6 +222,7 @@ class RiskChecker:
         """
         self._risk_config = settings.risk
         self._stop_atr_multiple = settings.backtest.exit_atr_multiple
+        self._entry_limit_atr_multiple = settings.backtest.entry_limit_atr_multiple
         self._sector_by_symbol = {
             member.symbol: member.gics_sector for member in universe
         }
@@ -407,13 +413,13 @@ class RiskChecker:
         if (
             account_equity is None
             or account_equity <= 0
-            or assessment.entry_price is None
+            or assessment.limit_price is None
             or assessment.stop_price is None
             or assessment.max_shares is None
         ):
             return None
         return (
-            max(0.0, assessment.entry_price - assessment.stop_price)
+            max(0.0, assessment.limit_price - assessment.stop_price)
             * assessment.max_shares
             / account_equity
             * 100
@@ -428,6 +434,9 @@ class RiskChecker:
     ) -> RiskAssessment:
         entry_price = candidate.metrics.get("close")
         atr14 = candidate.metrics.get("atr14")
+        limit_price: float | None = None
+        if entry_price is not None and atr14 is not None:
+            limit_price = entry_price + self._entry_limit_atr_multiple * atr14
         warnings = tuple(
             self.check_correlation(
                 candidate.symbol, portfolio, self._market_store, candidate.as_of
@@ -443,6 +452,7 @@ class RiskChecker:
                 stop_price=None,
                 reasons=(REGIME_CASH_PRIORITY_REASON,),
                 warnings=warnings,
+                limit_price=limit_price,
                 binding_constraint="regime",
                 max_trade_risk_pct=0.0,
             )
@@ -456,6 +466,7 @@ class RiskChecker:
                 stop_price=None,
                 reasons=(_MISSING_DATA_REASON,),
                 warnings=warnings,
+                limit_price=limit_price,
                 binding_constraint="not_calculable",
             )
         if account_equity is None:
@@ -467,8 +478,13 @@ class RiskChecker:
                 stop_price=None,
                 reasons=(_MISSING_EQUITY_REASON,),
                 warnings=warnings,
+                limit_price=limit_price,
                 binding_constraint="not_calculable",
             )
+
+        # The missing-data branch above narrows both operands, so the normal
+        # path keeps a non-optional planned price for sizing and heat checks.
+        limit_price = entry_price + self._entry_limit_atr_multiple * atr14
 
         effective_risk_pct = self._risk_config.max_trade_risk_pct
         is_reduce_only = (
@@ -482,7 +498,7 @@ class RiskChecker:
         try:
             sizing = calc_position_size(
                 account_equity,
-                entry_price,
+                limit_price,
                 stop_price,
                 self._risk_config.max_position_pct,
                 effective_risk_pct,
@@ -496,11 +512,12 @@ class RiskChecker:
                 stop_price=stop_price,
                 reasons=(_INVALID_STOP_REASON,),
                 warnings=warnings,
+                limit_price=limit_price,
                 binding_constraint="not_calculable",
             )
 
         sizing_warnings = self._sizing_warnings(
-            entry_price, stop_price, account_equity, sizing, effective_risk_pct
+            limit_price, stop_price, account_equity, sizing, effective_risk_pct
         )
         if is_reduce_only:
             sizing_warnings += (SIZING_WARNING_REGIME_REDUCE_ONLY,)
@@ -520,7 +537,7 @@ class RiskChecker:
                 for position in portfolio
                 if self._sector_by_symbol.get(position.symbol) == sector
             )
-            new_exposure = sizing.shares * entry_price
+            new_exposure = sizing.shares * limit_price
             if (
                 existing_exposure + new_exposure
             ) / account_equity > self._risk_config.max_sector_pct:
@@ -540,6 +557,7 @@ class RiskChecker:
             stop_price=stop_price,
             reasons=tuple(reasons),
             warnings=warnings,
+            limit_price=limit_price,
             shares_by_risk=sizing.shares_by_risk,
             shares_by_position_cap=sizing.shares_by_position_cap,
             binding_constraint=binding_constraint,
@@ -549,7 +567,7 @@ class RiskChecker:
 
     def _sizing_warnings(
         self,
-        entry_price: float,
+        limit_price: float,
         stop_price: float,
         account_equity: float,
         sizing: PositionSizeResult,
@@ -557,7 +575,7 @@ class RiskChecker:
     ) -> tuple[str, ...]:
         """REQ-030/REQ-020: friction warnings that never block approval."""
         warnings: list[str] = []
-        stop_distance_pct = (entry_price - stop_price) / entry_price * 100
+        stop_distance_pct = (limit_price - stop_price) / limit_price * 100
         if stop_distance_pct > self._risk_config.wide_stop_threshold_pct:
             warnings.append(SIZING_WARNING_WIDE_STOP)
 

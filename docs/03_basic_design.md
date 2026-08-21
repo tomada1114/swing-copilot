@@ -135,7 +135,7 @@ flowchart TD
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価 | FR-05, P5-21 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVから市場ゲート・Distribution Day・表示専用FTD状態機械を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
-| RiskChecker | `risk/` | ポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
+| RiskChecker | `risk/` | 終値アンカーの逆指値と、`backtest.entry_limit_atr_multiple` で算出する計画指値の上限を使ったポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。`entry_price` は仮想台帳用のrun日終値、`limit_price` は発注計画用に分離する。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら取引リスク枠を縮小する。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
 | 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示`--as-of`では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する | P4-18 |
 | サーキットブレーカー | `risk/circuit_breaker.py` | 実現損益をETの日次・週次・月次境界で再集計し、損失上限または連敗後24時間に該当する間は新規候補を拒否する。日次パイプラインでは実売買記録機能の撤去（2026-08-19）により入力が存在せず常に未評価（`None`）で、バックテストが自身の実現損益で評価するときだけ機能する（`backtest/policy.py`） | P4-19 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |

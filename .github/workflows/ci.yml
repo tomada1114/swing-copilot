@@ -40,8 +40,12 @@ jobs:
         run: uv run mypy src scripts tests
 
   test:
-    name: Test
+    name: Test (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # 典型実行時間は約5分。遅いランナーでは DuckDB/Parquet 系スイートが
     # 2〜3倍化するため、ハング検出という目的を保ちつつ実測の3〜4倍を確保する
     # (10分では空振りキャンセルが発生していた: #234)。
@@ -61,8 +65,58 @@ jobs:
 
       # `just test` は経由せず pytest を直接呼ぶため、`-n auto` は justfile とは
       # 別にここへも指定する (#256)。`-n auto` はランナーの実コア数に追従する。
+      # coverage の閾値判定は全 shard のデータを合流した後にだけ行う。
       - name: Run tests
-        run: uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95 --cov-report=xml
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.shard }}
+        run: >-
+          uv run pytest
+          --splits 4
+          --group ${{ matrix.shard }}
+          --durations-path .test_durations
+          -n auto
+          --cov=swing_copilot
+          --cov-branch
+          --cov-report=
+
+      - name: Upload shard coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    name: Coverage
+    if: ${{ needs.test.result == 'success' }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --group dev --locked
+
+      - name: Download shard coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Combine and validate coverage
+        run: |
+          uv run coverage combine
+          uv run coverage xml
+          uv run coverage report --fail-under=95
 
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0

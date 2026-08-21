@@ -56,7 +56,7 @@
         <tr>
           <th>銘柄</th><th>判断</th><th class="num">rank</th><th class="num">score</th>
           {% for c in view.rows[0].score_components %}<th class="num">{{ c.label }}</th>{% endfor %}
-          <th>リスク</th><th>バインド制約</th><th>当否</th>
+          <th>リスク</th><th>ブロック理由</th><th>当否</th>
         </tr>
       </thead>
       <tbody>

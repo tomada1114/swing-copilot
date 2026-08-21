@@ -20,12 +20,9 @@ Per-day order of operations (never looks past the current day's own bars):
 4. Generate today's candidates and queue them for tomorrow's fill.
 5. Record today's closing equity.
 
-Issue #184 changed two things about step 1. Sizing is based on *equity* (cash
-plus marked positions) rather than on remaining cash, matching
-`pipeline/daily.py`'s fixed `risk.account_equity_usd` basis — cash-based
-sizing shrank every position by 0.9^n and deployed only ~65% of the account at
-ten holdings, so the simulator was measuring a system nobody trades. And the
-production entry gates are consulted through the injected `EntryPolicy` port
+Issue #184 changed two things about step 1. Simulator sizing is based on
+*equity* (cash plus marked positions) rather than on remaining cash, and the
+point-in-time entry gates are consulted through the injected `EntryPolicy` port
 (`backtest/policy.py`), which wraps `risk/checks.py` rather than reimplementing
 it here. Both the equity basis and the gate inputs are resolved as of the
 *signal* day, never the fill day: at tomorrow's open the newest observable
@@ -74,6 +71,10 @@ SURVIVORSHIP_BIAS_NOTE = (
     "Removed or delisted symbols may be absent, overstating historical "
     "performance (survivorship bias)."
 )
+
+_LEGACY_SIM_TRADE_RISK_PCT = 0.01
+_LEGACY_SIM_POSITION_CAP_PCT = 0.10
+_LEGACY_SIM_MAX_CONCURRENT_POSITIONS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,9 +291,12 @@ class BacktestEngine:
         """
         self._entry_policy = entry_policy
         self._backtest_config = settings.backtest
-        self._max_concurrent_positions = max(1, int(1 / settings.risk.max_position_pct))
-        self._max_position_pct = settings.risk.max_position_pct
-        self._max_trade_risk_pct = settings.risk.max_trade_risk_pct
+        # Production no longer carries account settings. These preserve the
+        # simulator's existing nominal-money convention until Issue #349 moves
+        # them into explicit `backtest.sim_*` configuration.
+        self._max_concurrent_positions = _LEGACY_SIM_MAX_CONCURRENT_POSITIONS
+        self._max_position_pct = _LEGACY_SIM_POSITION_CAP_PCT
+        self._max_trade_risk_pct = _LEGACY_SIM_TRADE_RISK_PCT
         # Issue #194: the trailing stop's ATR period is configuration, not a
         # constant. It governs the *exit* side only; the entry stop keeps using
         # the screening metric `atr14` so the simulator sizes a position with

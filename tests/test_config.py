@@ -27,7 +27,12 @@ class TestLoadSettings:
         settings = load_settings("config/settings.yaml")
         assert isinstance(settings, Settings)
         assert settings.universe.index == "sp500"
-        assert settings.risk.max_position_pct == pytest.approx(0.10)
+        assert set(type(settings.risk).model_fields) == {
+            "earnings_lookahead_days",
+            "earnings_block_business_days",
+            "earnings_warn_business_days",
+            "wide_stop_threshold_pct",
+        }
         assert settings.notification.enabled is True
 
     def test_missing_file_raises_config_error(self, tmp_path):
@@ -562,15 +567,37 @@ def test_settings_requires_short_sma_to_precede_long_sma(short_window, long_wind
 def test_settings_rejects_coercible_values_and_unknown_nested_keys():
     with pytest.raises(ValidationError, match=r"technical_signals\.trend\.sma_short"):
         Settings.model_validate({"technical_signals": {"trend": {"sma_short": 50.0}}})
-    with pytest.raises(ValidationError, match=r"risk\.max_position_pct"):
-        Settings.model_validate({"risk": {"max_position_pct": "0.1"}})
+    with pytest.raises(ValidationError, match=r"risk\.wide_stop_threshold_pct"):
+        Settings.model_validate({"risk": {"wide_stop_threshold_pct": "10.0"}})
     with pytest.raises(ValidationError, match=r"risk\.not_a_setting"):
         Settings.model_validate({"risk": {"not_a_setting": 1}})
 
 
-def test_portfolio_heat_limit_defaults_to_six_percent():
-    settings = load_settings("config/settings.yaml")
-    assert settings.risk.max_portfolio_heat_pct == 6.0
+@pytest.mark.parametrize(
+    "removed_key",
+    [
+        "account_equity_usd",
+        "max_position_pct",
+        "max_trade_risk_pct",
+        "max_sector_pct",
+        "max_correlation",
+        "correlation_lookback_days",
+        "max_portfolio_heat_pct",
+        "circuit_daily_loss_pct",
+        "circuit_weekly_loss_pct",
+        "circuit_monthly_loss_pct",
+        "circuit_consecutive_losses",
+        "circuit_cooldown_hours",
+    ],
+)
+def test_removed_account_dependent_risk_keys_are_rejected(removed_key):
+    with pytest.raises(ValidationError, match=removed_key):
+        Settings.model_validate({"risk": {removed_key: 1}})
+
+
+def test_removed_reduce_only_multiplier_is_rejected():
+    with pytest.raises(ValidationError, match="reduce_only_risk_multiplier"):
+        Settings.model_validate({"regime": {"reduce_only_risk_multiplier": 0.5}})
 
 
 def test_entry_limit_atr_multiple_defaults_to_zero():
@@ -602,15 +629,6 @@ def test_earnings_lookahead_days_defaults_to_forty_five_calendar_days():
 def test_earnings_lookahead_days_rejects_zero_or_negative():
     with pytest.raises(ValidationError, match="earnings_lookahead_days"):
         Settings.model_validate({"risk": {"earnings_lookahead_days": 0}})
-
-
-def test_circuit_breaker_thresholds_have_documented_defaults():
-    settings = load_settings("config/settings.yaml")
-    assert settings.risk.circuit_daily_loss_pct == 2.0
-    assert settings.risk.circuit_weekly_loss_pct == 5.0
-    assert settings.risk.circuit_monthly_loss_pct == 8.0
-    assert settings.risk.circuit_consecutive_losses == 2
-    assert settings.risk.circuit_cooldown_hours == 24
 
 
 def test_dd_level_thresholds_default_to_previous_hardcoded_constants():
@@ -647,7 +665,6 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
 @pytest.mark.parametrize(
     "overrides",
     [
-        pytest.param({"risk": {"max_position_pct": 1.1}}, id="position-fraction"),
         pytest.param({"backtest": {"commission_pct": -0.01}}, id="commission"),
         pytest.param(
             {

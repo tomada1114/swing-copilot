@@ -15,6 +15,12 @@
 > 正とすること。以降の本文で「LLM」と書かれている箇所は、現行では
 > 「Claude Code スキルによる定性分析」と読み替える。
 
+> **現況注記（Issue #348）**: 本書のP1-03/P1-04/P3-14および旧口座レベルリスクの
+> 記述は実装履歴としてのみ残す。本番/公開経路は読者の口座・保有を知らず、銘柄単位の
+> 指値・逆指値・ATR14・1R・warnings・市場状態だけを公開する。株数、集中度、相関、
+> ポートフォリオ損失上限、REDUCE_ONLY倍率は現行の本番契約ではない。正本は
+> `docs/01_requirements.md`のFR-06と`docs/04_detailed_design.md` 3.13節である。
+
 ## 1. 背景と診断
 
 swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fail-soft・原子的書き込み）
@@ -140,25 +146,14 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **Not in scope**: 落選履歴の閲覧 CLI、ユニバース選定段階の記録
 - **依存**: なし
 
-### P1-03 【並列可/worktree:p1-risk】risk - binding constraint 明示とサイジング内訳
+### P1-03 【Issue #348で公開契約を更新】risk - 銘柄単位の1Rと警告
 
-- **目的**: 「なぜこの株数か」を即答可能にする。
-- **スコープ**: `risk/position_sizing.py`, `risk/checks.py`, `models.py`,
-  `storage/audit_records.py`, `report/*`
-- **主要仕様**:
-  - サイジング結果に中間値を保持: `shares_by_risk`（リスク%基準）、
-    `shares_by_position_cap`（ポジション%基準）、最終 `shares`、
-    `binding_constraint` ∈ {trade_risk, position_cap, sector, correlation, not_calculable}。
-  - 損切り幅がエントリー価格の 10%（config、既定 10.0 (要検証)）を超える場合
-    `WIDE_STOP` warning を追加。
-  - 1株未満に切り捨てられた場合・計算リスク額が極小の場合は
-    `SMALL_ACCOUNT_FRICTION` warning。
-  - レポート表示例: `128株（制約: リスク1.0%）`。DuckDB へ内訳を永続化。
-- **動作確認**: dry-run 実行で候補ごとに制約名が表示されること。
-  設定の `max_position_pct` を極端に絞って再実行し、binding constraint が
-  `position_cap` に切り替わることを確認。
-- **Not in scope**: ポートフォリオヒート、レジーム連動の上限（P3-14）
-- **依存**: なし
+- **現況**: 読者口座に基づくサイジング内訳・株数・集中制約は本番/公開経路から撤去済み。
+  DuckDBの旧列は履歴互換のため残し、新規行はNULLとする。
+- **現行仕様**: 指値・逆指値・ATR14・1R・blocking reasons・warningsを銘柄単位で返す。
+  損切り幅が指値の10%（要検証）を超える場合は`WIDE_STOP` warningを追加する。
+- **動作確認**: daily Markdown/terminalと`analysis_input.json`が1Rを持ち、口座依存値を
+  持たないこと。旧履歴が引き続き読めること。
 
 ### P1-04 【並列可/worktree:p1-risk】risk/storage - 数値堅牢性（Fraction 床計算・NaN/Inf 書き込みガード）
 
@@ -369,14 +364,14 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
     `NEW_ENTRY_ALLOWED`とする。HIGH/CAUTIONは表示専用。
   - 欠損時保守則: 入力のいずれかが UNKNOWN なら判定を 1 段階厳しい側へ倒す。
     緩める方向への自動変更は行わない（出典: exposure-coach の安全第一原則）。
-  - リスク統合: CASH_PRIORITY では新規候補のサイジングを 0 株 +
-    理由 `REGIME_CASH_PRIORITY` で返す。REDUCE_ONLYは警戒ラベルと説明文だけで、
-    max_trade_risk_pctや候補掲載数を変更しない。旧倍率列はIssue #342の削除まで互換保持する。
+  - リスク統合: CASH_PRIORITYでも候補と価格計画を保持し、理由
+    `REGIME_CASH_PRIORITY`で「見送り（地合い）」とする。REDUCE_ONLYは警戒ラベルと
+    説明文だけで、候補掲載数や口座固有値を変更しない。
   - レポート: terminal / markdown / discord の**先頭**（候補一覧より前）に
     Exposure Ceiling ブロック（判定・根拠・データ品質）を表示。
 - **動作確認**: フィクスチャで3判定それぞれを再現する dry-run を行い、
-  レポート先頭に判定が出ること、CASH_PRIORITY で候補の株数が 0 になり理由が
-  表示されることを確認。
+  レポート先頭に判定が出ること、CASH_PRIORITYで候補が「見送り（地合い）」として
+  残ること、REDUCE_ONLYで候補が残ることを確認。
 - **Not in scope**: 加重平均型の複合エクスポージャー式（複数指標が揃う将来に拡張）
 - **依存**: P3-13、P1-03（理由コード表示の枠組み）
 
@@ -660,9 +655,8 @@ provenance 検証、予算ゲート機構そのもの、補正 upsert、原子�
     （### 即検討可 等）が挿入され、データ行が見出しの後ろに孤立して
     テーブルとして描画されない。バケットごとに完結したテーブルを出力する形に
     修正する（P5-23 のバケット節導入時のリグレッション）。
-  - 株数 0 の理由表示: `max_shares == 0` で固定文言「資金規模過小」を返す
-    単純化をやめ、`binding_constraint` 由来の文言にする（レジーム起因なら
-    その旨を表示。DB・LLM プロンプトへは正しい値が渡っており表示層のみの問題）。
+  - Issue #348後は株数表示自体を廃止し、候補表は1Rを表示する。CASH_PRIORITYは
+    `binding_constraint=regime`を「見送り（地合い）」として表示する。
 - **動作確認**: バケットに候補が分散するフィクスチャで markdown が有効な
   テーブルとしてレンダリングされること。`binding_constraint = regime` の
   候補で表示文言が一致すること。

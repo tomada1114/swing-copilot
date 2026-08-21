@@ -27,14 +27,12 @@ from swing_copilot.analysis.validate import (
 from swing_copilot.report.daily_brief import (
     PENDING_ANALYSIS_MESSAGE,
     BriefRejectionCount,
-    BriefRisk,
     BriefSource,
     DailyBriefContext,
     _sources_for_ids,
     build_daily_brief,
-    format_sizing,
 )
-from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
+from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
     Candidate,
     RejectionReasonCode,
@@ -178,12 +176,13 @@ def _context(
             RiskAssessment(
                 symbol="AAPL",
                 status="approved",
-                max_shares=10,
                 entry_price=110.0,
-                stop_price=102.5,
-                reasons=(),
-                warnings=(CorrelationWarning("MSFT", 0.81),),
                 limit_price=113.0,
+                stop_price=102.5,
+                atr14=3.0,
+                stop_distance_pct=(113.0 - 102.5) / 113.0,
+                reasons=(),
+                warnings=("WIDE_STOP",),
             )
         ]
         if with_risk
@@ -287,7 +286,7 @@ def test_builds_full_brief_and_uses_inclusive_as_of_reads() -> None:
     assert candidate.pct_change == 0.1
     assert candidate.signals == ("SMA200上抜け", "custom")
     assert candidate.fundamentals.per == "55.0x"
-    assert candidate.risk.warnings == ("MSFTとの相関 0.81",)
+    assert candidate.risk.warnings == ("WIDE_STOP",)
     assert candidate.analysis.conclusion == "Growth may continue"
     assert candidate.analysis.facts == ("Revenue grew", "FCF was positive")
     assert {source.source_id for source in candidate.analysis.sources} == {
@@ -384,9 +383,7 @@ def test_zero_rejections_produces_empty_rejection_counts() -> None:
     assert brief.rejection_counts == ()
 
 
-def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
-    # REQ-005/REQ-006: RiskAssessment's sizing breakdown and the run's
-    # configured percentages both reach the rendered BriefRisk.
+def test_risk_brief_propagates_public_trade_plan_from_the_pipeline() -> None:
     context = _context()
     context = replace(
         context,
@@ -394,20 +391,15 @@ def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
             RiskAssessment(
                 symbol="AAPL",
                 status="approved",
-                max_shares=200,
                 entry_price=50.0,
-                stop_price=45.0,
-                reasons=(),
-                warnings=(),
                 limit_price=50.6,
-                shares_by_risk=200,
-                shares_by_position_cap=500,
-                binding_constraint="trade_risk",
-                sizing_warnings=("WIDE_STOP",),
+                stop_price=45.0,
+                atr14=2.0,
+                stop_distance_pct=(50.6 - 45.0) / 50.6,
+                reasons=(),
+                warnings=("WIDE_STOP",),
             )
         ],
-        max_trade_risk_pct=0.01,
-        max_position_pct=0.25,
     )
 
     brief = build_daily_brief(
@@ -416,111 +408,12 @@ def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
     )
 
     risk = brief.candidates[0].risk
+    assert risk.entry_price == pytest.approx(50.0)
     assert risk.limit_price == pytest.approx(50.6)
-    assert risk.shares_by_risk == 200
-    assert risk.shares_by_position_cap == 500
-    assert risk.binding_constraint == "trade_risk"
-    assert risk.sizing_warnings == ("WIDE_STOP",)
-    assert risk.max_trade_risk_pct == 0.01
-    assert risk.max_position_pct == 0.25
-
-
-class TestFormatSizing:
-    """P1-03 (REQ-006): the compact "128株（制約: リスク1.0%）"-style string."""
-
-    def test_not_calculable_renders_dash(self) -> None:
-        risk = BriefRisk("not_calculable", None, None, (), ())
-        assert format_sizing(risk) == "-"
-
-    def test_zero_shares_uses_example_4_friction_wording(self) -> None:
-        # True small-account friction: trade_risk/position_cap bound and
-        # the sizing floor itself rounded down to zero.
-        risk = BriefRisk(
-            "approved",
-            0,
-            45.0,
-            (),
-            (),
-            binding_constraint="position_cap",
-            sizing_warnings=("SMALL_ACCOUNT_FRICTION",),
-            max_trade_risk_pct=0.01,
-            max_position_pct=0.001,
-        )
-        assert format_sizing(risk) == "0株（摩擦: 資金規模過小）"
-
-    def test_zero_shares_regime_binding_uses_regime_wording_not_friction(
-        self,
-    ) -> None:
-        # P6-28: an Exposure Ceiling CASH_PRIORITY (or circuit-breaker) halt
-        # sizes zero shares via `binding_constraint="regime"`, which is not
-        # small-account friction and must not be mislabeled as such.
-        risk = BriefRisk(
-            "rejected",
-            0,
-            None,
-            ("REGIME_CASH_PRIORITY",),
-            (),
-            binding_constraint="regime",
-            max_trade_risk_pct=0.0,
-        )
-        rendered = format_sizing(risk)
-        assert rendered == "0株（レジーム: 新規建て停止）"
-        assert "資金規模過小" not in rendered
-
-    def test_zero_shares_correlation_binding_uses_correlation_wording_not_friction(
-        self,
-    ) -> None:
-        # Same category of bug as the regime case above: a correlation veto
-        # (like sector concentration) is not a sizing-floor friction, and
-        # must not be mislabeled as small-account friction either.
-        risk = BriefRisk(
-            "rejected",
-            0,
-            None,
-            (),
-            (),
-            binding_constraint="correlation",
-        )
-        rendered = format_sizing(risk)
-        assert rendered == "0株（制約: 相関集中）"
-        assert "資金規模過小" not in rendered
-
-    def test_issue_example_1_trade_risk_string(self) -> None:
-        risk = BriefRisk(
-            "approved",
-            128,
-            None,
-            (),
-            (),
-            binding_constraint="trade_risk",
-            max_trade_risk_pct=0.01,
-            max_position_pct=0.25,
-        )
-        assert format_sizing(risk) == "128株（制約: リスク1.0%）"
-
-    def test_issue_example_2_position_cap_string(self) -> None:
-        risk = BriefRisk(
-            "approved",
-            40,
-            None,
-            (),
-            (),
-            binding_constraint="position_cap",
-            max_trade_risk_pct=0.01,
-            max_position_pct=0.02,
-        )
-        assert format_sizing(risk) == "40株（制約: ポジション上限2.0%）"
-
-    def test_sector_binding_uses_a_dedicated_label(self) -> None:
-        risk = BriefRisk("rejected", 12, None, (), (), binding_constraint="sector")
-        assert format_sizing(risk) == "12株（制約: セクター集中）"
-
-    def test_correlation_binding_uses_a_dedicated_label(self) -> None:
-        # Currently unreachable in production (correlation never blocks),
-        # but format_sizing must still render it correctly for
-        # completeness/future-proofing.
-        risk = BriefRisk("approved", 5, None, (), (), binding_constraint="correlation")
-        assert format_sizing(risk) == "5株（制約: 相関）"
+    assert risk.stop_price == pytest.approx(45.0)
+    assert risk.atr14 == pytest.approx(2.0)
+    assert risk.stop_distance_pct == pytest.approx((50.6 - 45.0) / 50.6)
+    assert risk.warnings == ("WIDE_STOP",)
 
 
 class TestMultipleFilingAnalysesPerCandidate:

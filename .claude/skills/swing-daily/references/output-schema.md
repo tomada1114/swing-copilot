@@ -393,8 +393,8 @@ checkout 全体を破棄するため、これがこの作業ファイルの掃�
     （RSI14 / SMA50 / SMA200 / ATR14 比率 / 終値 / 平均出来高）に基づく理由
   - `news_catalyst` — ニュース記事が報じた材料に基づく理由
   - `filing_fundamental` — 開示（10-Q / 10-K / 8-K）の内容に基づく理由
-  - `risk_sizing` — `risk_constraints` の binding_constraint・株数・warnings に
-    基づく理由
+  - `risk_sizing` — 互換名。`risk_constraints` の binding_constraint・指値・逆指値・
+    1R (`stop_distance_pct`)・warnings に基づく銘柄単位の理由。読者の口座や株数は含まない
   - `market_regime` — `context.market_regime` のゲート・分配日・エクスポージャ
     上限に基づく理由
   - `peer_relative` — 同業他社・セクター全体との相対比較に基づく理由

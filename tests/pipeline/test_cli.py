@@ -26,7 +26,6 @@ from swing_copilot.pipeline.daily_composition import (
     _configure_logging,
     _finnhub_clients,
     _parse_args,
-    _preflight,
     _required_features,
     main,
 )
@@ -403,58 +402,6 @@ class TestPathsForMode:
         assert db_path != DEFAULT_DB_PATH
 
 
-def _equity_settings(settings, account_equity_usd):
-    return settings.model_copy(
-        update={
-            "risk": settings.risk.model_copy(
-                update={"account_equity_usd": account_equity_usd}
-            )
-        }
-    )
-
-
-def _preflight_deps(state_store, settings):
-    """A minimal stand-in for `DailyDependencies`: `_preflight` reads only these two."""
-    return SimpleNamespace(state_store=state_store, settings=settings)
-
-
-class TestPreflight:
-    """P8-117: warn before any state is written when equity is unconfigured.
-
-    The abort this preflight once raised (`account_equity_unset`) went with
-    the real-trade record feature in 2026-08: no daily run has realized P&L
-    to halt over any more, so an unset equity is a warning and nothing else.
-    """
-
-    def test_equity_set_does_not_warn(self, settings, state_store, caplog):
-        deps = _preflight_deps(state_store, _equity_settings(settings, 100_000.0))
-
-        with caplog.at_level(logging.WARNING):
-            _preflight(deps)
-
-        assert caplog.records == []
-
-    def test_equity_unset_warns_and_continues(self, settings, state_store, caplog):
-        deps = _preflight_deps(state_store, _equity_settings(settings, None))
-
-        with caplog.at_level(logging.WARNING):
-            _preflight(deps)
-
-        assert any("account_equity_usd" in record.message for record in caplog.records)
-
-    def test_it_never_reads_storage(self, settings, state_store, monkeypatch):
-        # `state_store` is still on `DailyDependencies`, but preflight must not
-        # open the database: the one query it used to run is gone with the
-        # positions table it read.
-        def _fail(*_args, **_kwargs):
-            msg = "preflight must not open the database"
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(state_store._database, "connect", _fail)  # noqa: SLF001
-
-        _preflight(_preflight_deps(state_store, _equity_settings(settings, None)))
-
-
 class TestMain:
     def test_historical_missing_snapshot_exits_before_price_provider(
         self, monkeypatch, tmp_path
@@ -513,7 +460,6 @@ class TestMain:
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(daily_module, "_compose_dependencies", fake_compose)
-        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(daily_module, "run_daily", fake_run_daily)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -535,7 +481,6 @@ class TestMain:
         monkeypatch.setattr(
             daily_module, "_compose_dependencies", lambda *_args: "fake-deps"
         )
-        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
             daily_module,
             "run_daily",
@@ -674,10 +619,7 @@ class TestPreflightAbortStderrContract:
     """The tag `swing-daily` branches on must survive refactors (Issue #193).
 
     An abort exits `2`, so the reason has to be readable from stderr's first
-    line without parsing prose, whichever step raises it. `run_daily` raises
-    for the same-day rerun guard; `_preflight` no longer raises at all since
-    the account-equity abort was removed, but it is still on the path that
-    renders the tag, so both call sites stay covered.
+    line without parsing prose. `run_daily` raises for the same-day rerun guard.
     """
 
     @staticmethod
@@ -688,13 +630,11 @@ class TestPreflightAbortStderrContract:
         monkeypatch.setattr(
             daily_module, "_compose_dependencies", lambda *_args: "fake-deps"
         )
-        monkeypatch.setattr(daily_module, "_preflight", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(daily_module, "run_daily", lambda *_args, **_kwargs: None)
 
-    @pytest.mark.parametrize("aborting_step", ["_preflight", "run_daily"])
     @pytest.mark.parametrize("reason", ["same_day_rerun"])
     def test_the_first_stderr_line_carries_the_tagged_reason(
-        self, monkeypatch, capsys, aborting_step, reason
+        self, monkeypatch, capsys, reason
     ):
         self._stub_composition(monkeypatch)
 
@@ -703,7 +643,7 @@ class TestPreflightAbortStderrContract:
         def _abort(*_args, **_kwargs):
             raise PreflightAbort(message, reason=reason)
 
-        monkeypatch.setattr(daily_module, aborting_step, _abort)
+        monkeypatch.setattr(daily_module, "run_daily", _abort)
 
         with pytest.raises(SystemExit) as exc_info:
             main([])

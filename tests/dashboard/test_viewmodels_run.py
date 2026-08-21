@@ -54,13 +54,16 @@ class TestVerdictAvailability:
         builder.run()
         builder.candidate("AAPL")
         builder.verdict("AAPL", recommendation="proceed")
-        builder.risk("AAPL", status="approved", binding_constraint="position_cap")
+        builder.risk("AAPL", status="rejected", binding_constraint="earnings")
 
         row = row_for(build(dashboard_db), "AAPL")
 
         assert (row.verdict.text, row.verdict.tone) == ("proceed", "good")
-        assert (row.risk_status.text, row.risk_status.tone) == ("approved", "good")
-        assert row.binding_constraint.text == "position_cap"
+        assert (row.risk_status.text, row.risk_status.tone) == (
+            "rejected",
+            "critical",
+        )
+        assert row.binding_constraint.text == "earnings"
 
     def test_a_verdict_without_a_candidate_row_still_appears(
         self, builder: Builder, dashboard_db: Fixture

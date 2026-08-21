@@ -43,7 +43,7 @@ MarketStore / StateStore / Pipeline values
 - SPY、QQQ、VIX、US10Yの値と前日比
 - 候補順位、銘柄、終値、前日比、RSI、ATR、シグナル
 - ファンダメンタル表示値
-- リスク判定、最大株数、指値、逆指値、理由、相関警告
+- リスク判定、指値、逆指値、1R、理由、warnings
 - 定性分析の結論、facts、risk flags、source IDとURL
 - 銘柄ごとのverdict（`proceed`／`skip`）とその要約
 - run全体の`no_trade`フラグと理由
@@ -57,13 +57,13 @@ MarketStore / StateStore / Pipeline values
 
 1. 日付、run status、候補数、run ID
 2. 市場概況
-3. 市場レジーム、exposure ceiling、circuit breaker、portfolio heat、実行バケット
+3. 市場レジーム、exposure ceiling、実行バケット。REDUCE_ONLYは警戒見出しと理由を表示し、CASH_PRIORITYは全候補を「見送り（地合い）」に置く
 4. 候補比較テーブル
 5. 候補ごとの定性分析結論、verdict行、リスク警告、source ID
 6. run全体の警告
 7. 詳細レポートパス
 
-候補表は最大10件を前提とし、順位、銘柄、終値、前日比、スコア、株数、ストップ、指値の8列を日本語ヘッダと罫線付きで表示する。指値は翌営業日に事前発注する上限であり、株数はこの価格での最悪ケースを使って計算する。実行状態は実行バケット行で、リスク警告は候補別詳細で表示する。落選サマリはターミナルには表示せず、監査用のMarkdownレポートだけに保持する。出力末尾には詳細レポートのパスと、`analysis_input.json`を書き出した場合はそのパスを表示する。詳細なfactsとURLはMarkdownへ保存し、ターミナルでは結論ファーストにする。
+候補表は最大10件を前提とし、順位、銘柄、終値、前日比、スコア、1R、ストップ、指値の8列を日本語ヘッダと罫線付きで表示する。指値は翌営業日の計画上限、1Rは指値から逆指値までの距離率である。読者の口座や保有を前提にした株数、Portfolio risk、Circuit Breakerは表示しない。実行状態は実行バケット行で、リスク警告は候補別詳細で表示する。落選サマリはターミナルには表示せず、監査用のMarkdownレポートだけに保持する。出力末尾には詳細レポートのパスと、`analysis_input.json`を書き出した場合はそのパスを表示する。詳細なfactsとURLはMarkdownへ保存し、ターミナルでは結論ファーストにする。
 
 `no_trade`が真のときは、ヘッダ直後に「本日は取引なし（定性判断）」と理由を1行で強調表示する。候補別詳細では「定性」の結論行の直下に、`skip`なら`⚠ 定性: 見送り推奨（理由）`、`proceed`なら`✓ 定性: 懸念なし`のverdict行を出す。分析が未実施・対象外・検証不合格の候補ではverdict行そのものを出さない——沈黙が「懸念なし」と読まれてはならないためである。結論行は状態に応じて「分析待ち（swing-daily スキルで分析を実行してください）」「定性分析なし」「検証不合格のため非表示」を出し分ける。
 
@@ -85,7 +85,7 @@ reports/
 
 Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、免責文を含める。
 
-各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v3`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
+各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v4`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
 
 同じディレクトリには`rejections.json`（schema `rejections-v1`、`report/rejections.py`）も置く。Markdownの「落選サマリ」がreason_code別の件数しか出さないのに対し、こちらは落選銘柄の明細（`symbol`・`stage`・`reason_code`・`detail`）と、全ステージを通過したのに`candidate_limit`で切り捨てられた銘柄の明細（`truncated_by_candidate_limit`: `symbol`・`rank`・`score`・スコア内訳・実行状態）を残す。後者はDuckDBの`screening_rejections`にも載らない——落選理由コードは閉じたenumであり、順位落ちは落選ではないためで、run成果物としてはこのファイルだけが記録する。定性分析の3ファイルとは異なりdigestで束縛せず、読み戻す経路も持たない診断用の成果物である。
 
@@ -101,7 +101,7 @@ Markdown冒頭にはDuckDBが正本であることをコメントで明記する
 
 - stdoutとstderrの役割が分離される
 - ターミナルとMarkdownが同じ`DailyBrief`を使う
-- 0候補、欠損値、分析未実施、一部銘柄のみ検証通過、相関警告を明示できる
+- 0候補、欠損値、分析未実施、一部銘柄のみ検証通過、決算・wide-stop警告を明示できる
 - 分析未実施・対象外・検証不合格でverdict行が出ず、「懸念なし」と誤読されない
 - `no_trade`が真のときヘッダ直後に取引なしと理由を表示する
 - `as_of`直前・同時・直後で未来データが表示されない

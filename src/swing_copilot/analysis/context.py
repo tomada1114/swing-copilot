@@ -249,10 +249,10 @@ def _format_raw_metrics(candidate: Candidate) -> str:
 
 
 def format_risk_constraints(risk_assessment: RiskAssessment) -> str:
-    """REQ-002: render P1-03's binding-constraint sizing breakdown.
+    """Render the account-independent trade plan and blocking result.
 
     Always renders (never `""`): even a `not_calculable`/rejected assessment
-    with no share counts is itself meaningful quantitative context the analysis
+    with unavailable prices is itself meaningful quantitative context the analysis
     must defer to (REQ-004/005's conservative-conflict rule needs exactly this
     "code already said REJECT" signal present).
 
@@ -262,32 +262,25 @@ def format_risk_constraints(risk_assessment: RiskAssessment) -> str:
     Returns:
         A `<risk_constraints>` block.
     """
-    shares_by_risk = _int_or_unknown(risk_assessment.shares_by_risk)
-    shares_by_position_cap = _int_or_unknown(risk_assessment.shares_by_position_cap)
-    final_shares = _int_or_unknown(risk_assessment.max_shares)
     warnings = (
-        "、".join(risk_assessment.sizing_warnings)
-        if risk_assessment.sizing_warnings
-        else "なし"
+        "、".join(risk_assessment.warnings) if risk_assessment.warnings else "なし"
     )
+    reasons = "、".join(risk_assessment.reasons) if risk_assessment.reasons else "なし"
+    binding_constraint = risk_assessment.binding_constraint or "なし"
     return (
-        "以下はコード側で決定論的に計算済みのリスク制約内訳です(P1-03)。"
-        "この判定（binding_constraintやshares）はコードの計算結果であり、"
+        "以下はコード側で決定論的に計算済みの売買計画とリスク判定です。"
+        "この判定（status、価格、1R、blocking reasons）はコードの計算結果であり、"
         "分析側が上書きすることはできません。\n"
         "<risk_constraints>\n"
-        f"binding_constraint: {risk_assessment.binding_constraint}\n"
+        f"status: {risk_assessment.status}\n"
+        f"binding_constraint: {binding_constraint}\n"
         f"指値(limit_price): {_price_or_unknown(risk_assessment.limit_price)}\n"
         f"逆指値(stop_price): {_price_or_unknown(risk_assessment.stop_price)}\n"
-        f"リスク基準の株数(shares_by_risk): {shares_by_risk}\n"
-        f"ポジション上限基準の株数(shares_by_position_cap): {shares_by_position_cap}\n"
-        f"最終株数(shares): {final_shares}\n"
+        f"1R(stop_distance_pct): {_pct_or_unknown(risk_assessment.stop_distance_pct)}\n"
+        f"blocking_reasons: {reasons}\n"
         f"warnings: {warnings}\n"
         "</risk_constraints>\n"
     )
-
-
-def _int_or_unknown(value: int | None) -> str:
-    return str(value) if value is not None else "不明"
 
 
 def _price_or_unknown(value: float | None) -> str:

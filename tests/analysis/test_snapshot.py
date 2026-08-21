@@ -22,12 +22,10 @@ from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import (
     BriefAnalysis,
     BriefCandidate,
-    BriefCircuitBreaker,
     BriefExposure,
     BriefFilingAnalysis,
     BriefFundamentals,
     BriefMarketItem,
-    BriefPortfolioHeat,
     BriefRegime,
     BriefRejectionCount,
     BriefRisk,
@@ -79,16 +77,13 @@ def _populated_brief() -> DailyBrief:
                 fundamentals=BriefFundamentals("21.0x", "$1,000", "60%", "$9.00"),
                 risk=BriefRisk(
                     status="approved",
-                    max_shares=128,
+                    entry_price=190.0,
+                    limit_price=191.0,
                     stop_price=180.0,
+                    atr14=3.1,
+                    stop_distance_pct=(191.0 - 180.0) / 191.0,
                     reasons=("ok",),
-                    warnings=("MSFTとの相関 0.80",),
-                    shares_by_risk=128,
-                    shares_by_position_cap=200,
-                    binding_constraint="trade_risk",
-                    sizing_warnings=("WIDE_STOP",),
-                    max_trade_risk_pct=0.01,
-                    max_position_pct=0.10,
+                    warnings=("WIDE_STOP",),
                 ),
                 analysis=BriefAnalysis(
                     degraded=False,
@@ -132,10 +127,6 @@ def _populated_brief() -> DailyBrief:
             qqq_ftd_quality_score=None,
         ),
         exposure=BriefExposure("NEW_ENTRY_ALLOWED", "BULL", "NORMAL", "OK", False),
-        circuit_breaker=BriefCircuitBreaker(
-            "NORMAL", "OK", ("daily",), -1.0, None, None
-        ),
-        portfolio_heat=BriefPortfolioHeat("calculated", 2.5, 6.0, ("MSFT",), None),
         rejection_counts=(BriefRejectionCount("FILTER_LOW_LIQUIDITY", 12),),
         notices=("text: partial failure",),
         signal_performance=(SignalPerformanceRow("trend_sma", 3, 1, 2, 0.75, 6, True),),
@@ -307,7 +298,7 @@ class TestSchemaVersionMismatch:
 
         message = str(exc_info.value)
         assert "report-context-v2" in message
-        assert "report-context-v3" in message
+        assert "report-context-v4" in message
         assert "copilot-daily" in message
         assert "Field required" not in message
         assert "score_pivot_proximity" not in message
@@ -319,4 +310,4 @@ class TestSchemaVersionMismatch:
         reloaded = read_report_context(path)
 
         assert reloaded.brief == context.brief
-        assert CONTEXT_SCHEMA_VERSION == "report-context-v3"
+        assert CONTEXT_SCHEMA_VERSION == "report-context-v4"

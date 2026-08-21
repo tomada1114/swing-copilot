@@ -91,16 +91,6 @@ class UniverseConfig(_StrictModel):
 class RiskConfig(_StrictModel):
     """`risk.*` in `settings.yaml`."""
 
-    account_equity_usd: float | None = Field(default=None, gt=0.0)
-    max_position_pct: float = Field(default=0.10, gt=0.0, le=1.0)
-    max_trade_risk_pct: float = Field(default=0.01, gt=0.0, le=1.0)
-    max_sector_pct: float = Field(default=0.30, gt=0.0, le=1.0)
-    max_correlation: float = Field(default=0.7, ge=-1.0, le=1.0)
-    correlation_lookback_days: int = Field(default=60, ge=2)
-    # Account-level open stop-risk ceiling in percentage points
-    # (roadmap §5 P4-17; breakout-trade-planner / Minervini 6-8%帯の
-    # 保守側、要検証).
-    max_portfolio_heat_pct: float = Field(default=6.0, gt=0.0)
     # Earnings-calendar lookahead window in calendar days (P8-115). 45 covers
     # max_hold_days=25 business days (~35 calendar days) plus a
     # weekend/holiday margin, so an event due late in the hold period is not
@@ -110,13 +100,6 @@ class RiskConfig(_StrictModel):
     # parabolic-short-trade-planner, 要検証).
     earnings_block_business_days: int = Field(default=2, ge=0)
     earnings_warn_business_days: int = Field(default=5, ge=0)
-    # Realized-P&L circuit breaker thresholds in percentage points
-    # (roadmap §5 P4-19; all initial values are 要検証).
-    circuit_daily_loss_pct: float = Field(default=2.0, gt=0.0)
-    circuit_weekly_loss_pct: float = Field(default=5.0, gt=0.0)
-    circuit_monthly_loss_pct: float = Field(default=8.0, gt=0.0)
-    circuit_consecutive_losses: int = Field(default=2, ge=1)
-    circuit_cooldown_hours: int = Field(default=24, ge=1)
     # Stop distance as a % of entry price above which a WIDE_STOP sizing
     # warning is raised (roadmap §5 P1-03, 要検証).
     wide_stop_threshold_pct: float = Field(default=10.0, gt=0.0)
@@ -468,9 +451,6 @@ class RegimeConfig(_StrictModel):
     dd_high_d15: int = Field(default=3, ge=1)
     dd_high_d5: int = Field(default=2, ge=1)
     dd_caution_d25: int = Field(default=3, ge=1)
-    # Transitional schema compatibility for Issue #342. REDUCE_ONLY is a
-    # public label only; this value is no longer consumed by sizing.
-    reduce_only_risk_multiplier: float = Field(default=1.0, gt=0.0, le=1.0)
     # roadmap §5 P3-16（要検証）: Follow-Through Day thresholds. The state is
     # now also consumed by the exposure gate as a narrow re-entry exception.
     ftd_correction_decline_pct: float = Field(default=0.03, gt=0.0)

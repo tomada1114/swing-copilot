@@ -135,14 +135,14 @@ flowchart TD
 | テクニカルシグナル | `screening/technical_signals.py` | 第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価 | FR-05, P5-21 |
 | ScreeningPipeline | `screening/pipeline.py` | `strategies.yaml`に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力 | FR-04, FR-05, NFR-07 |
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVからSMA200主軸の市場ゲート・Distribution Day・FTD再参入状態を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
-| RiskChecker | `risk/` | 終値アンカーの逆指値と、`backtest.entry_limit_atr_multiple` で算出する計画指値の上限を使ったポジションサイズ・セクター集中度・銘柄間相関・ポートフォリオヒートのリスクチェック。`entry_price` は仮想台帳用のrun日終値、`limit_price` は発注計画用に分離する。Exposure CeilingがCASH_PRIORITYなら新規株数を0、REDUCE_ONLYなら警戒ラベルだけを付けて通常のリスク枠を使う。ヒートは保有と承認候補をランキング順に累積し、上限超過候補を拒否する | FR-06, P3-14, P4-17 |
+| RiskChecker | `risk/` | 読者の口座・保有を参照せず、run日終値、計画指値、終値アンカーの逆指値、ATR14、1R、決算/wide-stop警告、市場状態による判定を銘柄単位で返す。CASH_PRIORITYは候補を保持して地合い理由で見送り、REDUCE_ONLYは候補を保持した警戒ラベルだけとする | FR-06, P3-14 |
 | 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示`--as-of`では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する | P4-18 |
-| サーキットブレーカー | `risk/circuit_breaker.py` | 実現損益をETの日次・週次・月次境界で再集計し、損失上限または連敗後24時間に該当する間は新規候補を拒否する。日次パイプラインでは実売買記録機能の撤去（2026-08-19）により入力が存在せず常に未評価（`None`）で、バックテストが自身の実現損益で評価するときだけ機能する（`backtest/policy.py`） | P4-19 |
+| バックテスト損失ゲート | `risk/circuit_breaker.py`, `backtest/policy.py` | シミュレーション自身の実現損益を用いるバックテスト専用の互換ゲート。本番/公開の日次経路からは呼び出さず、設定・レポートにも公開しない | FR-10 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | 分析スキーマ | `analysis/schemas.py` | `analysis_input.json`/`analysis_result.json`双方のstrict pydanticスキーマ（`extra="forbid"`）。`SourcedFact.source_ids`は1件以上必須、`SourcedFact.evidence_quote`は自身が引用する`source_ids`の本文からの逐語引用が必須 | FR-08, CON-03 |
 | 分析文脈整形 | `analysis/context.py` | コード計算済みのスコア内訳・リスク制約・市場レジーム・実績サマリ・過去判断を、上書き不可の明示付きで不活性テキストへ整形する純関数群 | FR-08, P2-12, P3-15 |
 | 分析入力エクスポート | `analysis/export.py` | 上記文脈と収集済み未信頼テキストを`analysis_input.json`として日付付きレポートディレクトリへ原子的に書き出す。モデルを呼ばない | FR-08 |
-| ブリーフスナップショット | `analysis/snapshot.py` | 再描画のため`DailyBrief`・run status・出力先と入力束縛を`report_context.json`（schema `report-context-v3`）へ保存/復元する。読み取り時に`schema_version`を検証し、世代不一致は復旧手段付きで`AnalysisIngestError`にする | FR-08, NFR-05 |
+| ブリーフスナップショット | `analysis/snapshot.py` | 再描画のため`DailyBrief`・run status・出力先と入力束縛を`report_context.json`（schema `report-context-v4`）へ保存/復元する。読み取り時に`schema_version`を検証し、世代不一致は復旧手段付きで`AnalysisIngestError`にする | FR-08, NFR-05 |
 | 分析結果検証 | `analysis/validate.py` | スキル出力を信頼せず、strictスキーマ・provenance（`source_ids` ⊆ 当該銘柄の供給ID）・CON-03を検証し、違反銘柄を銘柄単位でfail-closedに縮退させる | FR-08, CON-03 |
 | CON-03検査 | `analysis/safety.py` | 断定的売買指示・根拠なき心理/行動診断を全ユーザー表示テキストから検出する純関数（旧`llm/safety.py`） | CON-03 |
 | 分析取り込みCLI | `analysis/cli.py` | `copilot-ingest-analysis`。3つのJSONだけを読み、検証を通った定性欄でレポートを再描画する。ネットワーク・スクリーニング再計算なし | FR-08, FR-09 |

@@ -1,30 +1,23 @@
-"""Production entry gates, wrapped as an injectable backtest port (Issue #184).
+"""Market-state entry gates, wrapped as an injectable backtest port (Issue #184).
 
-Between a ranked candidate and an actual position, `pipeline/daily.py` puts
-six gates: the regime Exposure Ceiling (`CASH_PRIORITY` blocks outright,
-`REDUCE_ONLY` is a report label), portfolio heat, the earnings
-proximity block, the realized-P&L circuit breaker, and the sector cap. The
-simulator used to apply none of them, so `risk.reduce_only_risk_multiplier`,
-`risk.max_portfolio_heat_pct`, `risk.earnings_block_business_days` and
-`risk.circuit_*` could not move a backtest number by construction — and "did
-the regime gate improve the results?" had no answer anywhere in the repository.
+The public daily path supplies symbol-level trade plans plus regime and earnings
+gates. It does not know a reader's account or holdings. The simulator reuses
+those point-in-time gates and may additionally apply a circuit breaker based on
+its own realized P&L; nominal-money sizing remains inside the engine.
 
 This module closes that hole **by wrapping `risk/checks.py::RiskChecker`, not
 by reimplementing it**. A second copy of the gates inside the engine would
 measure a second system and reintroduce exactly the divergence being fixed, so
 `RiskCheckerEntryPolicy` builds the production checker once per simulated
 decision day and translates its `RiskAssessment`s into engine-level verdicts.
-Arms that exercise fewer gates (`EntryPolicyArm.REGIME`) configure the other
-ceilings out of the way rather than branching around the checker.
+Arms that exercise fewer gates (`EntryPolicyArm.REGIME`) leave earnings and the
+simulator-only circuit breaker disabled.
 
 Two things the policy deliberately does *not* decide:
 
-- **The share count.** `RiskChecker` sizes from the signal day's close, while
-  the engine fills at the next open plus adverse slippage. The policy returns
-  the *effective* configured `max_trade_risk_pct` (unchanged under `REDUCE_ONLY`)
-  and the engine performs the single sizing call at the real fill price, so
-  the two never disagree about what was bought. `REDUCE_ONLY` is intentionally
-  not converted into an account-specific risk multiplier.
+- **The share count.** The engine alone performs nominal-money sizing at the
+  fill price. `REDUCE_ONLY` is intentionally not converted into an
+  account-specific risk multiplier.
 - **The as-of date.** `EntryPolicyRequest.as_of` is the *signal* day, never
   the fill day: at tomorrow's open, today's close is the newest observable
   fact, so evaluating the regime on the fill day's own bar would be exactly
@@ -35,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 import pandas as pd
@@ -44,9 +37,7 @@ from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_CIRCUIT_BREAKER,
     ENTRY_BLOCK_EARNINGS,
     ENTRY_BLOCK_NOT_CALCULABLE,
-    ENTRY_BLOCK_PORTFOLIO_HEAT,
     ENTRY_BLOCK_REGIME,
-    ENTRY_BLOCK_SECTOR,
 )
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.models import Position
@@ -61,8 +52,6 @@ from swing_copilot.regime.gate import (
 from swing_copilot.risk.checks import (
     CIRCUIT_BREAKER_REASON_PREFIX,
     EARNINGS_PROXIMITY_BLOCK_REASON,
-    PORTFOLIO_HEAT_EXCEEDED_REASON,
-    PORTFOLIO_HEAT_NOT_CALCULABLE_REASON,
     REGIME_CASH_PRIORITY_REASON,
     EarningsGuardInput,
     RiskChecker,
@@ -83,7 +72,6 @@ if TYPE_CHECKING:
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate
-    from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
 
 #: Index/volatility symbols `calculate_regime_snapshot` needs. Narrower than
@@ -96,17 +84,9 @@ REGIME_SYMBOLS = ("SPY", "QQQ", "^VIX")
 #: in a field nothing reads; `uuid5` keeps reproducibility exact.
 _POSITION_NAMESPACE = uuid5(NAMESPACE_URL, "swing_copilot/backtest/policy")
 
-#: Heat ceiling used by the regime-only arm. `max_portfolio_heat_pct` has no
-#: "disabled" value, so the arm sets one no realistic portfolio can reach
-#: instead of branching around the production checker.
-_UNBOUNDED_HEAT_PCT = 1e12
-
-#: Sector ceiling used by the regime-only arm. Deliberately above the config
-#: field's own `le=1.0` bound, which `model_copy(update=...)` does not
-#: re-validate: the sector check compares *cost basis* against *current*
-#: equity, so a plain 1.0 would start blocking inside a drawdown and quietly
-#: put a second gate into the regime-only arm.
-_UNBOUNDED_SECTOR_PCT = 1e12
+# Temporary simulator-only compatibility values. Issue #349 removes the
+# account gates and replaces implicit nominal-money settings with `backtest.*`.
+_LEGACY_CIRCUIT_THRESHOLDS = CircuitThresholds(2.0, 5.0, 8.0, 2, 24)
 
 
 class EntryPolicyError(SwingCopilotError):
@@ -114,18 +94,15 @@ class EntryPolicyError(SwingCopilotError):
 
 
 class EntryPolicyArm(StrEnum):
-    """Which production gates one backtest arm applies."""
+    """Which point-in-time gates one backtest arm applies."""
 
     #: Deterministic screening/sizing only — the pre-Issue-#184 simulator.
     NONE = "none"
     #: Regime Exposure Ceiling only (`CASH_PRIORITY` block, `REDUCE_ONLY`
-    #: label; it does not halve risk). Heat and sector ceilings are configured
-    #: out of the way;
-    #: the earnings guard and circuit breaker stay off.
+    #: label; it does not halve risk). Earnings and circuit breaker stay off.
     REGIME = "regime"
-    #: Every gate the simulator can supply inputs for: regime, portfolio heat,
-    #: sector cap, and the realized-P&L circuit breaker fed from the run's own
-    #: closed trades.
+    #: Regime, earnings, and the realized-P&L circuit breaker fed from the
+    #: run's own closed trades.
     REGIME_RISK = "regime+risk"
 
 
@@ -179,7 +156,7 @@ def build_entry_policy(
     Args:
         arm: Which gates this arm applies.
         settings: Loaded application settings (`risk.*`, `regime.*`).
-        universe: Current universe, supplying the symbol -> GICS sector map.
+        universe: Current universe retained by the compatibility port.
         bars: The backtest's whole tidy OHLCV frame. It must carry
             `REGIME_SYMBOLS`; the policy trims every read at its own `as_of`.
         earnings_guard_fn: Point-in-time earnings lookups for `as_of` and the
@@ -201,7 +178,7 @@ def build_entry_policy(
     _require_regime_bars(bars)
     is_full = arm is EntryPolicyArm.REGIME_RISK
     return RiskCheckerEntryPolicy(
-        settings if is_full else _regime_only_settings(settings),
+        settings,
         universe,
         bars,
         is_circuit_breaker_enabled=is_full,
@@ -218,25 +195,6 @@ def _require_regime_bars(bars: pd.DataFrame) -> None:
             "SPY/QQQ/^VIX を価格履歴へ取り込んでから --policy を指定してください。"
         )
         raise EntryPolicyError(msg)
-
-
-def _regime_only_settings(settings: Settings) -> Settings:
-    """Configure the non-regime ceilings out of the way, without branching.
-
-    The alternative — skipping parts of `RiskChecker` — would put a second
-    implementation of "which gates apply" inside the backtest, which is the
-    duplication this module exists to prevent.
-    """
-    return settings.model_copy(
-        update={
-            "risk": settings.risk.model_copy(
-                update={
-                    "max_portfolio_heat_pct": _UNBOUNDED_HEAT_PCT,
-                    "max_sector_pct": _UNBOUNDED_SECTOR_PCT,
-                }
-            )
-        }
-    )
 
 
 def _regime_thresholds(config: RegimeConfig) -> RegimeThresholds:
@@ -295,14 +253,7 @@ def as_position(
 
 
 class _FrameBarReader:
-    """`MarketStore.read_bars`-shaped reader over the simulator's own frame.
-
-    `RiskChecker` reads bars for exactly one thing: the correlation *warning*,
-    which never blocks a candidate. Serving it from the frame the engine
-    already holds keeps the policy offline and free of a second storage
-    handle, and lets the as-of cutoff be tested directly. Rows are pre-grouped
-    by symbol so the per-candidate lookback never scans the whole frame.
-    """
+    """Compatibility reader over the simulator's own point-in-time frame."""
 
     def __init__(self, bars: pd.DataFrame) -> None:
         self._columns = list(bars.columns)
@@ -356,10 +307,8 @@ class RiskCheckerEntryPolicy:
         """Create the policy.
 
         Args:
-            settings: Settings the wrapped checker runs under; an arm that
-                exercises fewer gates supplies a copy with the other ceilings
-                configured out of the way.
-            universe: Current universe, for the sector map.
+            settings: Settings the wrapped checker runs under.
+            universe: Current universe retained by the compatibility port.
             bars: The backtest's tidy OHLCV frame, covering `REGIME_SYMBOLS`.
             is_circuit_breaker_enabled: Whether the run's own realized P&L
                 feeds `evaluate_circuit_breaker`.
@@ -397,23 +346,12 @@ class RiskCheckerEntryPolicy:
         exposure = determine_exposure(snapshot)
         checker = RiskChecker(
             self._settings,
-            self._universe,
-            # `RiskChecker` touches the store only through `read_bars`, for
-            # the correlation warning. Widening its annotation belongs to the
-            # checks-registry refactor (Issue #193), not here, so the seam is
-            # spelled out as one documented cast instead.
-            cast("MarketStore", self._bar_reader),
             RiskRunContext(
                 earnings_guard=self._earnings_guard(request),
                 circuit_breaker=self._circuit_breaker(request),
             ),
         )
-        assessments = checker.check(
-            list(request.candidates),
-            list(request.open_positions),
-            request.equity,
-            exposure,
-        )
+        assessments = checker.check(list(request.candidates), exposure)
         return {
             assessment.symbol: _to_decision(assessment) for assessment in assessments
         }
@@ -429,7 +367,6 @@ class RiskCheckerEntryPolicy:
     ) -> CircuitBreakerResult | None:
         if not self._is_circuit_breaker_enabled:
             return None
-        config = self._settings.risk
         return evaluate_circuit_breaker(
             [
                 RealizedTrade(evaluation_time_for_as_of(exit_date), pnl)
@@ -438,32 +375,22 @@ class RiskCheckerEntryPolicy:
             request.equity,
             request.as_of,
             evaluation_time_for_as_of(request.as_of),
-            CircuitThresholds(
-                config.circuit_daily_loss_pct,
-                config.circuit_weekly_loss_pct,
-                config.circuit_monthly_loss_pct,
-                config.circuit_consecutive_losses,
-                config.circuit_cooldown_hours,
-            ),
+            _LEGACY_CIRCUIT_THRESHOLDS,
         )
 
 
 def _to_decision(assessment: RiskAssessment) -> EntryDecision:
     if assessment.status == "approved":
-        return EntryDecision(
-            is_allowed=True, max_trade_risk_pct=assessment.max_trade_risk_pct
-        )
+        return EntryDecision(is_allowed=True)
     return EntryDecision(is_allowed=False, reject_reason=_block_reason(assessment))
 
 
 def _block_reason(assessment: RiskAssessment) -> str:
     """Pick the one gate reported as "why this entry was not taken".
 
-    Several gates can fire on the same candidate (a `CASH_PRIORITY` day also
-    trips the not-calculable heat path, for instance), so the order below is
-    the contract: the earliest match wins, running from the most decisive
-    market-wide block down to the per-candidate ones. `binding_constraint` is
-    consulted only for the sector cap, whose reason string is free text.
+    Several gates can fire on the same candidate, so the order below is the
+    contract: market state, simulator loss gate, earnings, then an invalid
+    symbol-level trade plan.
     """
     reasons = assessment.reasons
     if REGIME_CASH_PRIORITY_REASON in reasons:
@@ -472,13 +399,6 @@ def _block_reason(assessment: RiskAssessment) -> str:
         return ENTRY_BLOCK_CIRCUIT_BREAKER
     if EARNINGS_PROXIMITY_BLOCK_REASON in reasons:
         return ENTRY_BLOCK_EARNINGS
-    if (
-        PORTFOLIO_HEAT_EXCEEDED_REASON in reasons
-        or PORTFOLIO_HEAT_NOT_CALCULABLE_REASON in reasons
-    ):
-        return ENTRY_BLOCK_PORTFOLIO_HEAT
-    if assessment.binding_constraint == "sector":
-        return ENTRY_BLOCK_SECTOR
     return ENTRY_BLOCK_NOT_CALCULABLE
 
 

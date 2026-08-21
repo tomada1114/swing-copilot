@@ -8,7 +8,6 @@ is a one-line delegate) while its own module stays under the project's
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -614,36 +613,15 @@ def _insert_risk_assessments(
                 str(run_id),
                 assessment.symbol,
                 assessment.status,
-                assessment.max_shares,
+                None,
                 assessment.entry_price,
                 assessment.limit_price,
                 assessment.stop_price,
                 dumps_safe(list(assessment.reasons)),
-                dumps_safe(
-                    [
-                        {
-                            "warning_type": warning.warning_type,
-                            "correlated_symbol": warning.correlated_symbol,
-                            # P1-04: risk/checks.py intentionally uses NaN
-                            # as `CorrelationWarning.correlation`'s
-                            # sentinel for "data_quality" (insufficient
-                            # history to compute a correlation). JSON has
-                            # no NaN literal, so persist that sentinel as
-                            # `null` -- the spec-compliant representation
-                            # of "not computable" -- rather than letting
-                            # dumps_safe reject the whole row.
-                            "correlation": (
-                                warning.correlation
-                                if math.isfinite(warning.correlation)
-                                else None
-                            ),
-                        }
-                        for warning in assessment.warnings
-                    ]
-                ),
-                assessment.shares_by_risk,
-                assessment.shares_by_position_cap,
+                dumps_safe(list(assessment.warnings)),
+                None,
+                None,
                 assessment.binding_constraint,
-                dumps_safe(list(assessment.sizing_warnings)),
+                dumps_safe([]),
             ],
         )

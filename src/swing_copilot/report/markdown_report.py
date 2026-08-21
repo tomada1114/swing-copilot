@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
-    format_sizing,
     format_verdict,
 )
 
@@ -16,7 +15,6 @@ if TYPE_CHECKING:
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
         BriefNewsSupply,
-        BriefPortfolioHeat,
         DailyBrief,
         SignalPerformanceRow,
     )
@@ -96,27 +94,15 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 f"- Data quality: `{brief.exposure.data_quality}`",
             ]
         )
-    if brief.circuit_breaker is not None:
-        rules = ", ".join(brief.circuit_breaker.triggered_rules) or "none"
-        lines.extend(
-            [
-                "",
-                "## Circuit Breaker",
-                "",
-                f"- State: `{brief.circuit_breaker.state}`",
-                f"- Data quality: `{brief.circuit_breaker.data_quality}`",
-                f"- Triggered rules: `{rules}`",
-            ]
-        )
-    if brief.portfolio_heat is not None:
-        lines.extend(
-            [
-                "",
-                "## Portfolio risk",
-                "",
-                f"- Portfolio heat: {_portfolio_heat_text(brief.portfolio_heat)}",
-            ]
-        )
+        if brief.exposure.verdict == "REDUCE_ONLY":
+            lines.extend(
+                [
+                    "",
+                    "## 相場は警戒状態\uff1a新規は控えめに",
+                    "",
+                    f"- 理由: Gate `{brief.exposure.gate}` / DD `{brief.exposure.dd_level}`",
+                ]
+            )
     lines.extend(_candidates_section(brief.candidates))
     for candidate in brief.candidates:
         lines.extend(_candidate_section(candidate))
@@ -169,16 +155,6 @@ def _data_tier_disclosure(data_tier: str) -> str:
     return f"- Data tier: `{data_tier}`"
 
 
-def _portfolio_heat_text(heat: BriefPortfolioHeat) -> str:
-    """Render the portfolio-heat value without adding report-level branches."""
-    if heat.heat_pct is not None:
-        return f"`{heat.heat_pct:.2f}% / {heat.max_heat_pct:.2f}%`"
-    if heat.missing_stop_symbols:
-        symbols = ", ".join(heat.missing_stop_symbols)
-        return f"`not_calculable` (missing stop: {symbols})"
-    return f"`not_calculable` ({heat.reason or 'unknown reason'})"
-
-
 def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
     """P6-28: one self-contained table per P5-23 execution bucket.
 
@@ -188,7 +164,16 @@ def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
     heading between the header/separator and the data rows ends the table.
     """
     lines = ["", "## Candidates"]
-    for bucket in ("即検討可", "様子見", "見送り"):
+    cash_priority = any(
+        _execution_bucket(candidate) == "見送り（地合い）" for candidate in candidates
+    )
+    buckets = (
+        "即検討可",
+        "様子見",
+        *(("見送り（地合い）",) if cash_priority else ()),
+        "見送り",
+    )
+    for bucket in buckets:
         bucket_candidates = [
             candidate
             for candidate in candidates
@@ -200,7 +185,7 @@ def _candidates_section(candidates: tuple[BriefCandidate, ...]) -> list[str]:
             continue
         lines.extend(
             [
-                "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | Shares | Stop | Limit |",
+                "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | Signals | Risk | 1R | Stop | Limit |",
                 "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|",
             ]
         )
@@ -222,7 +207,7 @@ def _candidate_row(candidate: BriefCandidate) -> str:
                 _execution_state_text(candidate),
                 ", ".join(candidate.signals) or "-",
                 candidate.risk.status,
-                format_sizing(candidate.risk),
+                _one_r(candidate.risk.stop_distance_pct),
                 _money(candidate.risk.stop_price),
                 _money(candidate.risk.limit_price),
             )
@@ -249,7 +234,6 @@ def _candidate_section(candidate: BriefCandidate) -> list[str]:
     lines.extend(_news_supply_lines(candidate))
     lines.extend(f"- Risk: {reason}" for reason in candidate.risk.reasons)
     lines.extend(f"- Warning: {warning}" for warning in candidate.risk.warnings)
-    lines.extend(f"- Warning: {warning}" for warning in candidate.risk.sizing_warnings)
     lines.extend(_score_breakdown_section(candidate))
     lines.extend(_screening_assessment_section(candidate))
     if analysis.facts:
@@ -406,12 +390,16 @@ def _number(value: float | None, *, digits: int = 2) -> str:
 
 def _execution_state_text(candidate: BriefCandidate) -> str:
     """Render the code-owned P5-23 state and ATR-normalized distance."""
+    if "REGIME_CASH_PRIORITY" in candidate.risk.reasons:
+        return "見送り（地合い）"
     if candidate.execution_distance is None:
         return f"{candidate.execution_state} (d=N/A)"
     return f"{candidate.execution_state} (d={candidate.execution_distance:.2f})"
 
 
 def _execution_bucket(candidate: BriefCandidate) -> str:
+    if "REGIME_CASH_PRIORITY" in candidate.risk.reasons:
+        return "見送り（地合い）"
     if candidate.execution_state in {"PULLBACK_ZONE", "FAIR"}:
         return "即検討可"
     if candidate.execution_state == "EXTENDED":
@@ -421,6 +409,10 @@ def _execution_bucket(candidate: BriefCandidate) -> str:
 
 def _money(value: float | None) -> str:
     return "N/A" if value is None else f"${value:,.2f}"
+
+
+def _one_r(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2%}"
 
 
 def _percent(value: float | None) -> str:

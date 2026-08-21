@@ -14,7 +14,7 @@ from duckdb import ConstraintException
 
 from swing_copilot.config import ScoreWeights
 from swing_copilot.models import RunMode, RunStatus, StepStatus
-from swing_copilot.risk.checks import CorrelationWarning, RiskAssessment
+from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
     Candidate,
     RejectionReasonCode,
@@ -2037,17 +2037,21 @@ class TestRecordRiskAssessments:
         valid = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=10,
             entry_price=100.0,
+            limit_price=101.0,
             stop_price=95.0,
+            atr14=2.0,
+            stop_distance_pct=(101.0 - 95.0) / 101.0,
             reasons=(),
         )
         invalid = RiskAssessment(
             symbol="MSFT",
             status="bogus_status",
-            max_shares=10,
             entry_price=100.0,
+            limit_price=101.0,
             stop_price=95.0,
+            atr14=2.0,
+            stop_distance_pct=(101.0 - 95.0) / 101.0,
             reasons=(),
         )
 
@@ -2063,11 +2067,13 @@ class TestRecordRiskAssessments:
         assessment = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=10,
             entry_price=100.0,
+            limit_price=101.0,
             stop_price=95.0,
+            atr14=2.0,
+            stop_distance_pct=(101.0 - 95.0) / 101.0,
             reasons=(),
-            warnings=(CorrelationWarning("MSFT", 0.8, "high_correlation"),),
+            warnings=("WIDE_STOP",),
         )
 
         state_store.record_risk_assessments([assessment], run_id)
@@ -2078,60 +2084,20 @@ class TestRecordRiskAssessments:
                 [str(run_id)],
             ).fetchall()
         assert rows[0][0] == "approved"
-        assert "MSFT" in rows[0][1]
+        assert json.loads(rows[0][1]) == ["WIDE_STOP"]
 
-    def test_data_quality_correlation_warnings_nan_sentinel_persists_as_json_null(
-        self, state_store
-    ):
-        # P1-04 (Issue #13): risk/checks.py::check_correlation intentionally
-        # uses NaN as CorrelationWarning.correlation's "not computable"
-        # sentinel for warning_type="data_quality". dumps_safe must not
-        # reject the whole row for this legitimate value -- it is persisted
-        # as JSON null (the spec-compliant representation) instead.
+    def test_new_rows_leave_legacy_sizing_columns_null(self, state_store):
         run_id = uuid4()
         assessment = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=10,
-            entry_price=100.0,
-            stop_price=95.0,
-            reasons=(),
-            warnings=(CorrelationWarning("MSFT", float("nan"), "data_quality"),),
-        )
-
-        state_store.record_risk_assessments([assessment], run_id)
-
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            row = conn.execute(
-                "SELECT warnings_json FROM risk_assessments WHERE run_id = ?",
-                [str(run_id)],
-            ).fetchone()
-        parsed = json.loads(row[0])
-        assert parsed == [
-            {
-                "warning_type": "data_quality",
-                "correlated_symbol": "MSFT",
-                "correlation": None,
-            }
-        ]
-
-    def test_records_sizing_breakdown(self, state_store):
-        # REQ-005: shares_by_risk/shares_by_position_cap/binding_constraint/
-        # sizing_warnings all persist alongside the existing columns.
-        run_id = uuid4()
-        assessment = RiskAssessment(
-            symbol="AAPL",
-            status="approved",
-            max_shares=200,
             entry_price=50.0,
-            stop_price=45.0,
-            reasons=(),
-            warnings=(),
             limit_price=51.0,
-            shares_by_risk=200,
-            shares_by_position_cap=500,
-            binding_constraint="trade_risk",
-            sizing_warnings=("WIDE_STOP",),
+            stop_price=45.0,
+            atr14=2.0,
+            stop_distance_pct=(51.0 - 45.0) / 51.0,
+            reasons=(),
+            warnings=("WIDE_STOP",),
         )
 
         state_store.record_risk_assessments([assessment], run_id)
@@ -2139,7 +2105,7 @@ class TestRecordRiskAssessments:
         with state_store._database.connect() as conn:  # noqa: SLF001
             row = conn.execute(
                 """
-                SELECT entry_price, limit_price, shares_by_risk,
+                SELECT entry_price, limit_price, max_shares, shares_by_risk,
                        shares_by_position_cap, binding_constraint,
                        sizing_warnings_json
                 FROM risk_assessments WHERE run_id = ?
@@ -2148,40 +2114,32 @@ class TestRecordRiskAssessments:
             ).fetchone()
         assert row[0] == 50.0
         assert row[1] == 51.0
-        assert row[2] == 200
-        assert row[3] == 500
-        assert row[4] == "trade_risk"
-        assert "WIDE_STOP" in row[5]
+        assert row[2:6] == (None, None, None, None)
+        assert json.loads(row[6]) == []
 
-    def test_rerun_correction_upserts_sizing_breakdown(self, state_store):
-        # Natural-key rerun (same run_id, symbol) must overwrite the sizing
-        # breakdown, not silently keep the stale first-write values.
+    def test_rerun_correction_updates_trade_plan_and_keeps_legacy_columns_null(
+        self, state_store
+    ):
         run_id = uuid4()
         first = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=200,
             entry_price=50.0,
-            stop_price=45.0,
-            reasons=(),
-            warnings=(),
             limit_price=50.0,
-            shares_by_risk=200,
-            shares_by_position_cap=500,
-            binding_constraint="trade_risk",
+            stop_price=45.0,
+            atr14=2.0,
+            stop_distance_pct=0.1,
+            reasons=(),
         )
         second = RiskAssessment(
             symbol="AAPL",
             status="approved",
-            max_shares=40,
             entry_price=50.0,
-            stop_price=45.0,
-            reasons=(),
-            warnings=(),
             limit_price=52.0,
-            shares_by_risk=200,
-            shares_by_position_cap=40,
-            binding_constraint="position_cap",
+            stop_price=45.0,
+            atr14=2.0,
+            stop_distance_pct=(52.0 - 45.0) / 52.0,
+            reasons=(),
         )
 
         state_store.record_risk_assessments([first], run_id)
@@ -2189,11 +2147,12 @@ class TestRecordRiskAssessments:
 
         with state_store._database.connect() as conn:  # noqa: SLF001
             row = conn.execute(
-                "SELECT max_shares, shares_by_position_cap, binding_constraint, limit_price "
+                "SELECT max_shares, shares_by_risk, shares_by_position_cap, "
+                "binding_constraint, limit_price "
                 "FROM risk_assessments WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()
-        assert row == (40, 40, "position_cap", 52.0)
+        assert row == (None, None, None, None, 52.0)
 
 
 class TestRecordSignalOutcomes:

@@ -22,7 +22,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -73,10 +73,8 @@ from swing_copilot.retro.collect import collect_verdicts
 from swing_copilot.retro.evaluate import EvaluationRequest, evaluate_verdicts
 from swing_copilot.risk.checks import (
     EarningsGuardInput,
-    PortfolioHeatResult,
     RiskChecker,
     RiskRunContext,
-    calculate_portfolio_heat,
 )
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.pipeline import (
@@ -114,7 +112,7 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
-    from swing_copilot.models import DailyRunResult, Position
+    from swing_copilot.models import DailyRunResult
     from swing_copilot.report.daily_brief import SignalPerformanceRow
     from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
@@ -173,12 +171,6 @@ _FUNDAMENTALS_DETAIL_SYMBOL_LIMIT = 10
 _PRIOR_VERDICT_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
 _RETRO_NOTE_DETAIL_LIMIT = 3
-#: P8-117: shared between `daily_composition.py`'s preflight warning log and
-#: `daily_runner.py`'s report `## Warnings` line, so both say the same thing.
-ACCOUNT_EQUITY_UNSET_NOTICE = (
-    "account_equity_usd が未設定です。株数と portfolio heat は not_calculable に"
-    "なります。決済済みポジションを記録するとサーキットブレーカーが全候補を停止します。"
-)
 _VISIBLE_PIPELINE_STEPS = (
     "1_prices",
     "2_fundamentals",
@@ -294,7 +286,6 @@ class _RunContext:
     # is the only place a run ever reports them.
     truncated: list[TruncatedCandidate]
     risk_assessments: list[RiskAssessment]
-    portfolio_heat: PortfolioHeatResult
     earnings_guard_notice: str | None
     held_symbols: frozenset[str]
     regime_snapshot: RegimeSnapshot
@@ -1146,29 +1137,10 @@ def _run_step_screening(
 def _run_step_risk(
     deps: DailyDependencies,
     request: _RiskStepRequest,
-) -> tuple[_StepOutcome, list[RiskAssessment], PortfolioHeatResult, str | None]:
-    # The account holds nothing this process knows about: the real-trade record
-    # feature (FR-11/CON-04's `positions`) was removed in 2026-08, so sizing,
-    # concentration, correlation and portfolio heat are all computed against an
-    # empty book. The virtual verdict ledger is deliberately *not* substituted
-    # here -- a position nobody actually took must never reach risk as if the
-    # account held it (`daily_runner._held_symbols` says the same thing from
-    # the collection side).
-    portfolio: list[Position] = []
-    # The realized-P&L circuit breaker had exactly one input source, closed
-    # rows in `positions`, and it went with them. `None` is the checker's
-    # existing "not evaluated" value, behaviourally identical to
-    # `TRADING_ALLOWED` in `RiskChecker._apply_circuit_breaker`, which is what
-    # an empty journal produced before. The breaker itself survives in
-    # `backtest/policy.py`, fed by the simulator's own realized trades.
+) -> tuple[_StepOutcome, list[RiskAssessment], str | None]:
     earnings = collect_earnings_calendar(
         deps.earnings_client,
-        sorted(
-            {
-                *(position.symbol for position in portfolio),
-                *(candidate.symbol for candidate in request.candidates),
-            }
-        ),
+        sorted(candidate.symbol for candidate in request.candidates),
         request.as_of,
         deps.state_store,
         lookahead_days=deps.settings.risk.earnings_lookahead_days,
@@ -1176,32 +1148,15 @@ def _run_step_risk(
     )
     checker = RiskChecker(
         deps.settings,
-        deps.universe,
-        deps.market_store,
         RiskRunContext(
             earnings_guard=EarningsGuardInput(
                 earnings.is_enabled, earnings.lookups_by_symbol
             ),
-            circuit_breaker=None,
         ),
     )
-    assessments = checker.check(
-        request.candidates,
-        portfolio,
-        deps.settings.risk.account_equity_usd,
-        request.exposure,
-    )
+    assessments = checker.check(request.candidates, request.exposure)
     deps.state_store.record_risk_assessments(assessments, request.run_id)
-    base_heat = calculate_portfolio_heat(
-        portfolio,
-        deps.settings.risk.account_equity_usd,
-    )
-    final_heat = (
-        replace(base_heat, heat_pct=assessments[-1].portfolio_heat_pct)
-        if base_heat.status == "calculated" and assessments
-        else base_heat
-    )
-    return _StepOutcome(True), assessments, final_heat, earnings.notice
+    return _StepOutcome(True), assessments, earnings.notice
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -1752,13 +1707,9 @@ def _run_step_output(
         rejections=output.run.rejections,
         notices=output.notices,
         signal_performance=output.signal_performance,
-        max_trade_risk_pct=deps.settings.risk.max_trade_risk_pct,
-        max_position_pct=deps.settings.risk.max_position_pct,
         regime_snapshot=output.run.regime_snapshot,
         exposure_decision=output.run.exposure_decision,
         ftd_snapshot=output.run.ftd_snapshot,
-        portfolio_heat=output.run.portfolio_heat,
-        max_portfolio_heat_pct=deps.settings.risk.max_portfolio_heat_pct,
         provider_name=deps.provider_name,
         data_tier=deps.data_tier.value,
     )

@@ -1,4 +1,4 @@
-"""Account-level realized-loss circuit breaker contracts (P4-19)."""
+"""Backtest-compatible realized-loss circuit breaker contracts."""
 
 from __future__ import annotations
 

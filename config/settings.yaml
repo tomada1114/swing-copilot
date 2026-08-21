@@ -6,25 +6,9 @@ universe:
   manual_exclude: [] # ticker symbols to force-exclude
 
 risk:
-  # null にすると position sizing が全候補で not_calculable を返し、株数・
-  # portfolio heat・サーキットブレーカーがいずれも評価されない。2026-08-13 に
-  # 運用資金 5,000 USD を設定（10% = 500 USD/銘柄、1% = 50 USD/トレード）。
-  # 実際の口座残高と乖離させると建玉サイズが過大になるため、入金・出金の都度更新する。
-  account_equity_usd: 5000.0
-  max_position_pct: 0.10 # 1 symbol <= 10% of equity
-  max_trade_risk_pct: 0.01 # 1 trade risk <= 1% of equity (stop-distance based)
-  max_sector_pct: 0.30 # same-sector exposure cap
-  max_correlation: 0.7 # warn (do not block) above this Pearson correlation
-  correlation_lookback_days: 60
-  max_portfolio_heat_pct: 6.0 # %; roadmap §5 P4-17（要検証）
   earnings_lookahead_days: 45 # calendar days; covers max_hold_days=25 business days + margin (P8-115)
   earnings_block_business_days: 2 # weekdays; roadmap §5 P4-18（要検証）
   earnings_warn_business_days: 5 # weekdays; roadmap §5 P4-18（要検証）
-  circuit_daily_loss_pct: 2.0 # realized loss %; roadmap §5 P4-19（要検証）
-  circuit_weekly_loss_pct: 5.0 # realized loss %; roadmap §5 P4-19（要検証）
-  circuit_monthly_loss_pct: 8.0 # realized loss %; roadmap §5 P4-19（要検証）
-  circuit_consecutive_losses: 2 # roadmap §5 P4-19（要検証）
-  circuit_cooldown_hours: 24 # hours since latest losing close; roadmap §5 P4-19（要検証）
   wide_stop_threshold_pct: 10.0 # % of entry price; WIDE_STOP warning above this (要検証)
 
 fundamental_filters:

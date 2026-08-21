@@ -110,11 +110,12 @@ def _populate(state_store: StateStore) -> UUID:
             RiskAssessment(
                 symbol="AAPL",
                 status="approved",
-                max_shares=10,
                 entry_price=100.0,
+                limit_price=101.0,
                 stop_price=95.0,
+                atr14=2.0,
+                stop_distance_pct=(101.0 - 95.0) / 101.0,
                 reasons=(),
-                binding_constraint="trade_risk",
             )
         ],
         run_id,
@@ -175,7 +176,8 @@ class TestRunDetail:
 
         output = capsys.readouterr().out
         assert "AAPL" in output
-        assert "trade_risk" in output
+        assert "approved" in output
+        assert "trade_risk" not in output
 
     def test_unknown_run_id_exits_nonzero_without_traceback(
         self, state_store: StateStore, capsys: pytest.CaptureFixture[str]

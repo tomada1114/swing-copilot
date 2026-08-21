@@ -131,11 +131,12 @@ class TestGetRunDetail:
                 RiskAssessment(
                     symbol="AAPL",
                     status="approved",
-                    max_shares=100,
                     entry_price=100.0,
+                    limit_price=101.0,
                     stop_price=95.0,
+                    atr14=2.0,
+                    stop_distance_pct=(101.0 - 95.0) / 101.0,
                     reasons=(),
-                    binding_constraint="trade_risk",
                 )
             ],
             run_id,
@@ -150,7 +151,8 @@ class TestGetRunDetail:
         assert detail.candidates[0].score == 0.5
         assert detail.candidates[0].signal_names == ("trend_sma",)
         assert len(detail.risk_assessments) == 1
-        assert detail.risk_assessments[0].binding_constraint == "trade_risk"
+        assert detail.risk_assessments[0].binding_constraint is None
+        assert detail.risk_assessments[0].max_shares is None
 
 
 class TestGetRejections:

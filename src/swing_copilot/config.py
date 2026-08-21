@@ -511,13 +511,14 @@ class Settings(_StrictModel):
 #: everything would make the snapshot hash churn for unrelated edits.
 #:
 #: Lives here rather than in `retro/export.py` (Issue #189) because two callers
-#: now need the same eight sections: the dossier's `config_snapshot`, and
+#: now need the same nine sections: the dossier's `config_snapshot`, and
 #: `pipeline/daily_runner.py`'s `config_versions` ledger row. Two lists would
 #: drift, and a drifted snapshot silently splits a comparison window.
 CONFIG_SNAPSHOT_SECTIONS: Final = (
     "risk",
     "fundamental_filters",
     "technical_signals",
+    "trade_plan",
     "backtest",
     "analysis",
     "postmortem",

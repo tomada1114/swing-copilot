@@ -843,6 +843,12 @@ class TestBuildRetroInput:
 
         sections = document.config_snapshot.sections
         assert sections["retro"] == {"max_surprises": 5}
+        assert sections["trade_plan"] == {
+            "entry_limit_atr_multiple": 0.0,
+            "exit_atr_multiple": 2.5,
+            "exit_atr_period": 14,
+            "max_hold_days": 25,
+        }
         assert "postmortem" in sections
         # Delivery plumbing is not an analysis parameter, so it stays out.
         assert "notification" not in sections
@@ -865,6 +871,31 @@ class TestBuildRetroInput:
         assert (
             baseline.config_snapshot.config_hash != changed.config_snapshot.config_hash
         )
+
+    def test_changes_the_config_hash_when_trade_plan_changes(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        baseline = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+        changed = build_retro_input(
+            _deps(
+                populated_store,
+                market_store,
+                settings=Settings.model_validate({"trade_plan": {"max_hold_days": 26}}),
+            ),
+            _request(tmp_path),
+        )
+
+        assert (
+            baseline.config_snapshot.config_hash != changed.config_snapshot.config_hash
+        )
+        assert changed.config_snapshot.sections["trade_plan"] == {
+            "entry_limit_atr_multiple": 0.0,
+            "exit_atr_multiple": 2.5,
+            "exit_atr_period": 14,
+            "max_hold_days": 26,
+        }
 
     def test_includes_the_signal_performance_overview(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

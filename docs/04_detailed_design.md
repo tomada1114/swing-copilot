@@ -1245,12 +1245,12 @@ def run_backtest(
     """
 ```
 
-**約定規則（固定）**:
+**約定規則（設定値と既定値）**:
 
 - `backtest.entry`は候補を翌営業日に評価するモードで、`next_open`は`k=0.0`の互換動作を持ち、`next_limit`は常にDay指値を適用する。`entry_limit_atr_multiple=0.0`（`next_open`の互換アーム）では買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`とする。正の`k`では共有純関数`backtest/entries.py::entry_limit_price(close, atr14, k)`の指値を使い、始値が指値以下なら始値（既存のslippage適用）、始値が指値を超えても日中安値が指値以下なら指値ちょうど、安値も指値を超えるなら`limit_not_reached`として当日限り不約定にする。指値が刺さったかの判定は日足OHLCの近似であり、未約定注文は翌日へ持ち越さない。
-- 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。逆指値を本番の終値アンカーへ変更すると`k=0.0`の既存バックテスト数値が動くため、アンカー統一は本Issueでは行わず、現行の約定価格アンカーを維持する。
-- トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。25営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
-- 同日に資金を超える候補がある場合はCandidate順位順。バックテストは移行期間中のシミュレータ固定値（ポジション上限10%、1トレードリスク1%、最大10建玉）を使う。これらは本番`risk`設定ではない。将来データ、提出前財務、同日終値での約定は禁止する。
+- 初期ストップはエントリー価格−`trade_plan.exit_atr_multiple`×`trade_plan.exit_atr_period`期間ATR（既定2.5×ATR14）。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。逆指値を本番の終値アンカーへ変更すると`k=0.0`の既存バックテスト数値が動くため、アンカー統一は本Issueでは行わず、現行の約定価格アンカーを維持する。
+- トレーリングストップは当日引け後に`max(従来値, close−trade_plan.exit_atr_multiple×ATR)`へ更新し、翌営業日から有効とする。`trade_plan.max_hold_days`（既定25）営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
+- 同日に資金を超える候補がある場合はCandidate順位順。バックテストは`backtest.sim_position_cap_pct`（既定10%）、`backtest.sim_trade_risk_pct`（既定1%）、`backtest.max_concurrent_positions`（既定10建玉）を使う。これらは本番`risk`設定ではない。将来データ、提出前財務、同日終値での約定は禁止する。
 - **サイジング基底はequity（Issue #184で変更）**: 1建玉のサイジングは`cash`ではなく`equity = cash + 建玉時価`を基底とする。時価はシグナル日（＝候補生成日）の終値で評価し、約定日当日の終値は使わない。同一日の全約定は同じ基底を共有する。これはバックテスト内部だけの名目資金計算であり、本番/公開分析には接続しない。
 - `start`以前のバーはスクリーニング指標のウォームアップ（最大325取引バー）にのみ使い、注文生成と約定日は`start..end`の取引日に限定する。
 - `copilot-backtest`は`end`以前の最新`universe_membership`を優先する。ただし日ごとの歴史的membershipは復元しないため、履歴が無い場合のcurrent-universeフォールバックを含め、単一構成銘柄集合を全期間へ適用する限界と生存者バイアスを結果へ必ず表示する。
@@ -1275,6 +1275,8 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 **バグ修正（P2-08実装時発見）**: `runner.py`の`candidates_fn`が`fundamentals["filed_at"]`（TIMESTAMPTZ）を素の`date`と直接比較しており、実データ（フィクスチャの空DataFrameでは再現しない）に対して`TypeError`を送出していた。`screening/fundamental_filters.py`と同じ`datetime.combine(day, time.max, tzinfo=UTC)`の終端UTCカットオフ慣習に合わせて修正した。
 
 **P2-09実装時追記（roadmap §5 P2-09）**: `backtest.slippage_multiplier`（既定1.0）を追加し、`BacktestEngine`は`slippage_pct * slippage_multiplier`を単一の`self._slippage_pct`としてエントリー・エグジット（強制清算含む、`_settle_exit`が全exit経路の共通ハンドラのため自動的に両方へ効く）両方に適用する。悲観プリセットは`backtest.pessimistic_slippage_multiplier=1.75`（出典: backtest-expertの1.5〜2.0帯の中央値、要検証）。`BacktestCostOverrides`に`slippage_multiplier: float | None`を追加し、`copilot-backtest --pessimistic`は同一`BacktestRequest`を通常(×1.0)・悲観(×1.75)の2回`run_backtest`実行し、`render_terminal_comparison`/`render_markdown_comparison`（`ReportMeta`共有）で指標差分表を出力する。両レンダー関数は引数過多(PLR0913)回避のため`render_terminal`/`render_markdown`も含め`ReportMeta`（strategy/start/end/missing_data_symbols）dataclassへ統一した。乗数1.0は既存デフォルト計算と完全一致（`test_multiplier_one_matches_default_entry_and_exit_prices`で回帰確認）し、悲観側`final_equity`は通常側以下になることをテストで保証する。
+
+**#349設定境界補足**: 感応度グリッドの基底値は固定リテラルではなく、実行時の`settings.trade_plan.exit_atr_multiple`と`settings.trade_plan.max_hold_days`である。`BacktestCostOverrides`はその値をセルごとに一時的に差し替えるためだけに使い、候補ストリームのキャッシュキーには含めない。
 
 **P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{40,70,100,140,200}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
 
@@ -1778,25 +1780,25 @@ src/swing_copilot/tracking/
 
 #### 3.24.3 更新セマンティクス（`tracking/update.py`）
 
-`update_tracking(state_store, market_store, backtest_config, *, as_of)`。すべて明示`as_of`で、`date.today()`は呼ばず、ネットワークにも触れない。バーは日次runの`1_prices`が保存済みのものだけを読む。
+`update_tracking(state_store, market_store, trade_plan, *, as_of)`。すべて明示`as_of`で、`date.today()`は呼ばず、ネットワークにも触れない。バーは日次runの`1_prices`が保存済みのものだけを読む。
 
 1. **建玉**: `verdicts`のうち`recommendation IN ('proceed','skip')`かつ`as_of <= 指定as_of`で、まだ`verdict_positions`に無いものを開く（対象区分は`get_untracked_verdicts(..., recommendations=...)`の引数であり、ハードコードではない）。`no_trade`（runの相場環境が当日エントリー非推奨だった判断）は**除外しない**——実運用ではCASH_PRIORITY等のレジームで当日の全verdictが`no_trade=true`になるrunもあり、除外すると台帳が空になって定性判断の質を測る材料が集まらない。代わりに`verdicts.no_trade`をそのまま`verdict_positions.no_trade`へ引き継ぎ、`list`/`show`が「銘柄単体はproceedだがrun全体は当日エントリー非推奨だった」ことを視覚的に区別して示す（CLIの表示詳細は`docs/reference.md`が正本）。
    - `entry_price` := `risk_assessments.entry_price`（= run日終値）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
-   - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − exit_atr_multiple × ATR14(entry_date時点)`。ATR14も算出不能（14セッション未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
+   - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − trade_plan.exit_atr_multiple × ATR(entry_date時点, trade_plan.exit_atr_period)`。ATRも算出不能（設定期間未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
    - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
    - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
    - **孤児の削除**: 建玉に先立ち、対応する`verdicts`行が**存在しない**`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、分析対象から外れた銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
    - **区分の追随**（Issue #190）: `proceed`↔`skip`の訂正は孤児では**ない**。両側を同一ルールで追跡している以上、建玉日もエントリー価格も出口ルールも変わらないのでリプレイは依然として正しく、削除すれば訂正のたびにskip側の標本が痩せる。`sync_verdict_position_recommendations`が該当行の`recommendation`だけを`verdicts`側へ追随させ、変更をnoteに出す。
 2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って約定することはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。
 3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
-   `evaluate_exit(open, low, close, stop, days_held, max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
+   `evaluate_exit(open, low, close, stop, days_held, trade_plan.max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
    - ATRは1ポジションにつき1パス（`backtest/exits.py::atr_by_date`）で全セッション分を求め、日ごとに`atr_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
    - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは5のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
 4. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
 5. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
 
-手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間はエンジンと同じく`settings.trade_plan.exit_atr_period`から渡す（Issue #194で配線。`atr_as_of`/`atr_by_date`は既定値を持たず、呼び出し側が必ず設定値を明示する）。
+手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間はエンジンと同じく`trade_plan.exit_atr_period`から渡す（Issue #194で配線。`atr_as_of`/`atr_by_date`は既定値を持たず、呼び出し側が必ず設定値を明示する）。
 
 #### 3.24.4 日次fail-softステップ`track_update`
 

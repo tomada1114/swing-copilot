@@ -2,6 +2,16 @@
 
 同一候補ストリームに対して none, regime+earnings を比較した。
 
+## Reproduction metadata
+
+- Source commit: `da1bf29a2ca0c3649320838c1391e4cc0bd4af7e`（測定時点。後続の文書修正は `5126661cb74d725f68020fe344144f7d54a5dbad`）
+- Command: `uv run copilot-backtest --strategy default --start 2026-01-01 --end 2026-08-19 --limit 30 --policy none,regime+earnings --db data/copilot.duckdb --output reports/backtests/2026-08-21-issue-349-default-policy-ab.md`
+- Settings: `config/settings.yaml` SHA-256 `b4e450de01c03803b334e56cd999d2cb56fd788ea7ddb997f9753a7492d2ec49`
+- Strategy definitions: `config/strategies.yaml` SHA-256 `c87ec7bba63d02c880db31db43438f09eda4c3bc4f9dade9e1479171959f2d48`
+- Input snapshot: object-storage generation `3`; `data/copilot.duckdb` SHA-256 `8f3cf1448e22d036a7ea76235d01cd01581a2c638da0a470072595fef24b9798`; `data/bars/` file-manifest SHA-256 `189edbe63aba869ec0f77999794379526b64756dc3eb82fec33f4ab2f0b1eef9`
+- Simulation contract: initial cash `$100,000`; `trade_plan.entry_limit_atr_multiple=0.0`, `exit_atr_multiple=2.5`, `exit_atr_period=14`, `max_hold_days=25`; `backtest.sim_trade_risk_pct=0.01`, `sim_position_cap_pct=0.10`, `max_concurrent_positions=10`; commission `0.001`, slippage `0.001`, benchmark `SPY`
+- The report was measured on the 30-symbol deterministic sample shown below; both policy arms reused one candidate stream.
+
 ユニバース: 30/503 銘柄の決定論的サンプル（gics_sector 比例配分 + blake2b ハッシュ順、シード固定・再現可能）
 セクター構成: Communication Services 1, Consumer Discretionary 3, Consumer Staples 2, Energy 1, Financials 5, Health Care 4, Industrials 5, Information Technology 4, Materials 1, Real Estate 2, Utilities 2
 
@@ -53,10 +63,7 @@
 | Reason | none | regime+earnings |
 |---|---:|---:|
 | regime | 0 (0d) | 0 (0d) |
-| circuit_breaker | 0 (0d) | 0 (0d) |
-| portfolio_heat | 0 (0d) | 0 (0d) |
 | earnings | 0 (0d) | 1 (1d) |
-| sector | 0 (0d) | 0 (0d) |
 | not_calculable | 0 (0d) | 0 (0d) |
 | max_concurrent | 0 (0d) | 0 (0d) |
 | already_held | 72 (54d) | 71 (53d) |

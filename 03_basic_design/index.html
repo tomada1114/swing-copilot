@@ -1,0 +1,2063 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/03_basic_design/">
+      
+      
+        <link rel="prev" href="../02_project_plan/">
+      
+      
+        <link rel="next" href="../04_detailed_design/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Basic Design - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#03-swing-copilot" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Basic Design
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../10_investment_philosophy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investment Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01_requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../02_project_plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. システム全体構成
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-fr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. コンポーネント一覧（責務・対応FR）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. データフロー（日次バッチのシーケンス）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. データストア設計（2層の使い分け）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 外部インターフェース一覧
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. 外部インターフェース一覧">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-api4discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 データ取得系 外部API（4つ）＋Discord通知
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Claude Codeスキル境界（定性分析）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. エラー処理・フェイルソフト方針
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. 運用設計
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. 運用設計">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 実行環境
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 永続化
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 実行時間
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 監視
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. セキュリティ設計
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. 要件トレーサビリティ表
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI and Dashboard Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../06_reliability_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../07_invariant_test_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../08_architecture_review_2026-08/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Review 2026-08
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../09_research_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 文書情報
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. システム全体構成
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-fr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. コンポーネント一覧（責務・対応FR）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. データフロー（日次バッチのシーケンス）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. データストア設計（2層の使い分け）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 外部インターフェース一覧
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. 外部インターフェース一覧">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-api4discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 データ取得系 外部API（4つ）＋Discord通知
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Claude Codeスキル境界（定性分析）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. エラー処理・フェイルソフト方針
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. 運用設計
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. 運用設計">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 実行環境
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 永続化
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 実行時間
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 監視
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. セキュリティ設計
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. 要件トレーサビリティ表
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="03-swing-copilot">03. 基本設計書（swing-copilot）<a class="headerlink" href="#03-swing-copilot" title="Permanent link">&para;</a></h1>
+<h2 id="1">1. 文書情報<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>システム名（仮称）</td>
+<td>swing-copilot</td>
+</tr>
+<tr>
+<td>対象範囲</td>
+<td>米国株スイング〜ポジショントレードの意思決定支援システム（日次バッチ）。売買判断・発注は人間が行う。完全自動売買・証券会社API連携はスコープ外（CON-01）。</td>
+</tr>
+<tr>
+<td>読者</td>
+<td>本システムの詳細設計・実装を行う開発者・実装エージェント（Claude Codeの <code>/goal</code> による自律実装を含む）</td>
+</tr>
+<tr>
+<td>前提文書</td>
+<td><code>docs/00_human_preparation.md</code>（人間の下準備）、<code>docs/01_requirements.md</code>（要件定義書、FR/NFR/CONのID定義元）</td>
+</tr>
+<tr>
+<td>後続文書</td>
+<td><code>docs/04_detailed_design.md</code>（詳細設計書。本書のコンポーネント設計をモジュール・クラス・スキーマレベルまで具体化する）</td>
+</tr>
+<tr>
+<td>バージョン</td>
+<td>v1.3</td>
+</tr>
+<tr>
+<td>最終更新日</td>
+<td>2026-07-28</td>
+</tr>
+</tbody>
+</table>
+<p>本書は要件定義書（<code>docs/01_requirements.md</code>）で定義された要件ID（FR-01〜FR-12、NFR-01〜NFR-07、CON-01〜CON-04）を前提とし、それらを満たすシステム構成・データフロー・データストア・外部インターフェース・エラー処理方針・運用設計・セキュリティ設計を定める。要件そのものの再定義は行わない。</p>
+<p>文書の役割は、要件・制約=<code>docs/01_requirements.md</code>、アーキテクチャ=<code>docs/03_basic_design.md</code>、実装契約=<code>docs/04_detailed_design.md</code>、現在のデータ/API形状=<code>models.py</code>/<code>storage/schema.py</code>/公開シグネチャ、実行状況=Git・テスト・CIとする。<code>docs/goal-prompts/**</code>は特定の無人実行を支援する履歴資料であり、恒久設計の正本ではない。正本同士が矛盾した場合は暗黙に一方を選ばず、互換性を保ちながら差異を記録し、古い側を同じ変更で更新する。</p>
+<hr />
+<h2 id="2">2. システム全体構成<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
+<p>swing-copilotは、1日1回起動されるコマンド（平日は無人の定時実行、随時は手動実行）を起点に、価格・ファンダメンタルズ・テキスト情報を収集し、スクリーニング・リスクチェックを経てCLI日次ブリーフと監査用Markdownを生成する、単一プロセスのバッチパイプラインである。定性分析（ニュース解釈・開示解釈・スクリーニング評価）はこのプロセスの外にあり、日次バッチが書き出した<code>analysis_input.json</code>をClaude Codeスキルが読み、その回答を<code>copilot-ingest-analysis</code>が検証してレポートへ反映する。Discord通知はオプションであり、自動発注は行わない。</p>
+<p>採用するアーキテクチャパターンは次の通り。</p>
+<ul>
+<li><strong>モジュラーモノリス</strong>: 配布・実行単位は1つのPythonパッケージ/CLIとする。機能別モジュール境界は保つが、プロセス分割・メッセージブローカー・常駐サービスは導入しない。</li>
+<li><strong>Functional Core / Imperative Shell</strong>: 指標、Filter、Signal、候補順位、リスク計算、バックテスト約定規則は、<code>as_of</code>と入力データを受け取る決定的な純粋ロジックに置く。<code>pipeline/daily.py</code>は外部API・clock・ストア・通知を調停する薄いimperative shellとする。</li>
+<li><strong>Ports &amp; Adapters（境界限定）</strong>: 変更可能性または障害可能性が高い<code>DataProvider</code>、テキスト取得、Notifier、clockだけをProtocolで抽象化する。内部モジュール同士を機械的にinterface化しない。定性分析はプロセス内のポートではなく、ファイル（JSON）を介したプロセス外の境界とする。</li>
+<li><strong>Repository + step Unit of Work</strong>: <code>MarketStore</code>/<code>StateStore</code>は同じDuckDBを使う論理repositoryとし、日次バッチの各ステップをトランザクション境界にする。Parquetを跨ぐ処理は自然キーupsertと原子的renameで再実行可能にする。</li>
+<li><strong>明示的composition root</strong>: CLI起動時に設定から具体adapterを組み立てて注入する。import副作用による自動検出やentry-point plugin探索はP1〜P2では行わない。</li>
+</ul>
+<p>この構成は、1人保守・常時稼働サーバーなしというNFR-02に対して、外部サービス差し替えとテスト容易性だけを確保し、分散システムの運用負荷を持ち込まないための選択である。</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>flowchart TD
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    subgraph External[&quot;外部サービス&quot;]
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>        YF[&quot;株価API&lt;br/&gt;(yfinance試作 / EODHD本番)&quot;]
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>        EDGARAPI[&quot;SEC EDGAR API&quot;]
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>        FH[&quot;Finnhub API&lt;br/&gt;(company-news)&quot;]
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        FRED[&quot;FRED API&lt;br/&gt;(経済カレンダー)&quot;]
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        DISCORD[&quot;Discord Webhook&quot;]
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    end
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    subgraph Skills[&quot;Claude Code スキル（別プロセス・GitHub Actionsが起動）&quot;]
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        SKILL[&quot;swing-daily&lt;br/&gt;analyze-news / analyze-filings /&lt;br/&gt;interpret-screening&quot;]
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    end
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    subgraph Batch[&quot;日次バッチ: src/swing_copilot/pipeline/daily.py&quot;]
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        UNIV[&quot;universe.py&lt;br/&gt;FR-01&quot;]
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        DP[&quot;data/*_provider.py&lt;br/&gt;DataProvider (FR-02)&quot;]
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        EDG[&quot;data/edgar.py&lt;br/&gt;FR-03&quot;]
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        SCR[&quot;screening/pipeline.py + execution.py&lt;br/&gt;Filter+Signal+bucket (FR-04, FR-05)&quot;]
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        REG[&quot;regime/*&lt;br/&gt;市場ゲート・DD（P3-13）&quot;]
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>        RISK[&quot;risk/checks.py&lt;br/&gt;FR-06&quot;]
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>        TXT[&quot;text/*&lt;br/&gt;FR-07&quot;]
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>        EXPORT[&quot;analysis/export.py&lt;br/&gt;分析入力の書き出し（FR-08）&quot;]
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>        BRIEF[&quot;report/daily_brief.py&lt;br/&gt;FR-09&quot;]
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>        OUT[&quot;terminal_report.py / markdown_report.py&quot;]
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        NOTIFY[&quot;report/discord_notify.py&lt;br/&gt;FR-09&quot;]
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    end
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>    subgraph Ingest[&quot;取り込みCLI: uv run copilot-ingest-analysis&quot;]
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>        VALIDATE[&quot;analysis/validate.py + safety.py&lt;br/&gt;スキーマ・provenance・CON-03（FR-08）&quot;]
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>    end
+<a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>
+<a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    subgraph Offline[&quot;オフライン支援機能&quot;]
+<a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>        BT[&quot;backtest/*&lt;br/&gt;FR-10&quot;]
+<a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>    end
+<a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>
+<a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>    subgraph Storage[&quot;データストア（2層）&quot;]
+<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>        PARQUET[(&quot;Parquet&lt;br/&gt;bars/ (日足時系列)&quot;)]
+<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>        DUCKDB[(&quot;DuckDB&lt;br/&gt;分析 + 実行状態 + 監査ログ&quot;)]
+<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>    end
+<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a>
+<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>    UNIV --&gt; DP
+<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>    YF --&gt; DP
+<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a>    DP --&gt; PARQUET
+<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a>    PARQUET --&gt; DUCKDB
+<a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a>    EDGARAPI --&gt; EDG
+<a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a>    EDG --&gt; DUCKDB
+<a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a>    DUCKDB --&gt; SCR
+<a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a>    SCR --&gt; DUCKDB
+<a id="__codelineno-0-49" name="__codelineno-0-49" href="#__codelineno-0-49"></a>    SCR --&gt; RISK
+<a id="__codelineno-0-50" name="__codelineno-0-50" href="#__codelineno-0-50"></a>    DP --&gt; REG
+<a id="__codelineno-0-51" name="__codelineno-0-51" href="#__codelineno-0-51"></a>    REG --&gt; DUCKDB
+<a id="__codelineno-0-52" name="__codelineno-0-52" href="#__codelineno-0-52"></a>    REG --&gt; BRIEF
+<a id="__codelineno-0-53" name="__codelineno-0-53" href="#__codelineno-0-53"></a>    RISK --&gt; DUCKDB
+<a id="__codelineno-0-54" name="__codelineno-0-54" href="#__codelineno-0-54"></a>    FH --&gt; TXT
+<a id="__codelineno-0-55" name="__codelineno-0-55" href="#__codelineno-0-55"></a>    EDGARAPI --&gt; TXT
+<a id="__codelineno-0-56" name="__codelineno-0-56" href="#__codelineno-0-56"></a>    FRED --&gt; TXT
+<a id="__codelineno-0-57" name="__codelineno-0-57" href="#__codelineno-0-57"></a>    TXT --&gt; DUCKDB
+<a id="__codelineno-0-58" name="__codelineno-0-58" href="#__codelineno-0-58"></a>    TXT --&gt; EXPORT
+<a id="__codelineno-0-59" name="__codelineno-0-59" href="#__codelineno-0-59"></a>    SCR --&gt; EXPORT
+<a id="__codelineno-0-60" name="__codelineno-0-60" href="#__codelineno-0-60"></a>    RISK --&gt; EXPORT
+<a id="__codelineno-0-61" name="__codelineno-0-61" href="#__codelineno-0-61"></a>    REG --&gt; EXPORT
+<a id="__codelineno-0-62" name="__codelineno-0-62" href="#__codelineno-0-62"></a>    EXPORT --&gt; AIN[(&quot;reports/&lt;date&gt;/analysis_input.json&quot;)]
+<a id="__codelineno-0-63" name="__codelineno-0-63" href="#__codelineno-0-63"></a>    SCR --&gt; BRIEF
+<a id="__codelineno-0-64" name="__codelineno-0-64" href="#__codelineno-0-64"></a>    RISK --&gt; BRIEF
+<a id="__codelineno-0-65" name="__codelineno-0-65" href="#__codelineno-0-65"></a>    DUCKDB --&gt; BRIEF
+<a id="__codelineno-0-66" name="__codelineno-0-66" href="#__codelineno-0-66"></a>    BRIEF --&gt; OUT
+<a id="__codelineno-0-67" name="__codelineno-0-67" href="#__codelineno-0-67"></a>    BRIEF --&gt; RCTX[(&quot;reports/&lt;date&gt;/report_context.json&quot;)]
+<a id="__codelineno-0-68" name="__codelineno-0-68" href="#__codelineno-0-68"></a>    OUT --&gt; STDOUT[&quot;stdout&quot;]
+<a id="__codelineno-0-69" name="__codelineno-0-69" href="#__codelineno-0-69"></a>    OUT --&gt; MDOUT[(&quot;reports/&lt;date&gt;/&lt;run_id&gt;.md&quot;)]
+<a id="__codelineno-0-70" name="__codelineno-0-70" href="#__codelineno-0-70"></a>    BRIEF --&gt; NOTIFY
+<a id="__codelineno-0-71" name="__codelineno-0-71" href="#__codelineno-0-71"></a>    NOTIFY --&gt; DISCORD
+<a id="__codelineno-0-72" name="__codelineno-0-72" href="#__codelineno-0-72"></a>
+<a id="__codelineno-0-73" name="__codelineno-0-73" href="#__codelineno-0-73"></a>    AIN --&gt; SKILL
+<a id="__codelineno-0-74" name="__codelineno-0-74" href="#__codelineno-0-74"></a>    SKILL --&gt; ARES[(&quot;reports/&lt;date&gt;/analysis_result.json&quot;)]
+<a id="__codelineno-0-75" name="__codelineno-0-75" href="#__codelineno-0-75"></a>    AIN --&gt; VALIDATE
+<a id="__codelineno-0-76" name="__codelineno-0-76" href="#__codelineno-0-76"></a>    ARES --&gt; VALIDATE
+<a id="__codelineno-0-77" name="__codelineno-0-77" href="#__codelineno-0-77"></a>    RCTX --&gt; VALIDATE
+<a id="__codelineno-0-78" name="__codelineno-0-78" href="#__codelineno-0-78"></a>    VALIDATE --&gt; OUT
+<a id="__codelineno-0-79" name="__codelineno-0-79" href="#__codelineno-0-79"></a>
+<a id="__codelineno-0-80" name="__codelineno-0-80" href="#__codelineno-0-80"></a>    DUCKDB -.-&gt; BT
+<a id="__codelineno-0-81" name="__codelineno-0-81" href="#__codelineno-0-81"></a>    BT -.-&gt; DUCKDB
+</code></pre></div>
+<p>日次実行は平日1回、GitHub Actions上で<code>uv run copilot-daily</code>を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。<code>data/</code>（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。<code>reports/</code>（生成Markdown）は実行環境に残る成果物である。記録済みのrun・候補・落選を後から閲覧する読み出し専用CLIとして<code>uv run copilot-history</code>がある（roadmap P1-05、<code>docs/04_detailed_design.md</code> 3.22節）。実売買記録機能（旧<code>copilot-decision</code>、旧<code>performance</code>サブコマンド）は2026-08に公開トラックレコード化に伴い撤去した。</p>
+<hr />
+<h2 id="3-fr">3. コンポーネント一覧（責務・対応FR）<a class="headerlink" href="#3-fr" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>コンポーネント</th>
+<th>主な配置</th>
+<th>責務</th>
+<th>対応FR/NFR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Universe管理</td>
+<td><code>universe.py</code></td>
+<td>S&amp;P500構成銘柄のCSVキャッシュとDuckDB履歴の取得・保存・更新。<code>as_of</code>時点で可視な履歴選択、live更新周期、フォールバック警告を一元化する</td>
+<td>FR-01</td>
+</tr>
+<tr>
+<td>DataProvider</td>
+<td><code>data/base.py</code>, <code>data/yfinance_provider.py</code>, <code>data/eodhd_provider.py</code></td>
+<td>日足株価の取得を抽象化し、試作(yfinance)・本番(EODHD)を差し替え可能にする</td>
+<td>FR-02, NFR-07, CON-02</td>
+</tr>
+<tr>
+<td>EDGARクライアント</td>
+<td><code>data/edgar.py</code></td>
+<td>SEC EDGAR公式APIから財務諸表・ファンダメンタルズを取得</td>
+<td>FR-03</td>
+</tr>
+<tr>
+<td>Database</td>
+<td><code>storage/database.py</code></td>
+<td>単一DuckDB接続・スキーマ初期化・トランザクション境界</td>
+<td>NFR-02, NFR-05</td>
+</tr>
+<tr>
+<td>MarketStore</td>
+<td><code>storage/market_store.py</code></td>
+<td>日足時系列（Parquet）・ファンダメンタルズ・分析クエリ（DuckDB）の読み書き</td>
+<td>FR-02, FR-03</td>
+</tr>
+<tr>
+<td>StateStore</td>
+<td><code>storage/state_store.py</code></td>
+<td>実行、候補、リスク評価、収集テキスト、verdictと仮想ポジション追跡を同じDuckDBへ保存</td>
+<td>NFR-05</td>
+</tr>
+<tr>
+<td>Filter/Signal基盤</td>
+<td><code>screening/base.py</code></td>
+<td>フィルタ・シグナルのABCとプラガブルな登録レジストリ</td>
+<td>FR-05, NFR-07</td>
+</tr>
+<tr>
+<td>ファンダフィルタ</td>
+<td><code>screening/fundamental_filters.py</code></td>
+<td>第1段: 黒字継続・FCF・自己資本比率によるユニバース絞り込み</td>
+<td>FR-04</td>
+</tr>
+<tr>
+<td>テクニカルシグナル</td>
+<td><code>screening/technical_signals.py</code></td>
+<td>第2段: pandasで算出するトレンド・押し目・Minervini Stage 2シグナル評価</td>
+<td>FR-05, P5-21</td>
+</tr>
+<tr>
+<td>実行状態バケット</td>
+<td><code>screening/execution.py</code></td>
+<td>実行状態から表示・ランキング用バケットへの写像を一元化。CASH_PRIORITYの表示上書きもここで扱う</td>
+<td>P5-23, FR-09</td>
+</tr>
+<tr>
+<td>ScreeningPipeline</td>
+<td><code>screening/pipeline.py</code></td>
+<td><code>strategies.yaml</code>に従いフィルタ・シグナルをAND合成し、決定的に順位付けした候補を出力</td>
+<td>FR-04, FR-05, NFR-07</td>
+</tr>
+<tr>
+<td>市場レジーム</td>
+<td><code>regime/gate.py</code>, <code>regime/distribution.py</code>, <code>regime/ftd.py</code></td>
+<td>SPY/QQQ/^VIXの<code>as_of</code>までのOHLCVからSMA200主軸の市場ゲート・Distribution Day・FTD再参入状態を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す</td>
+<td>P3-13, P3-16</td>
+</tr>
+<tr>
+<td>RiskChecker</td>
+<td><code>risk/</code></td>
+<td>読者の口座・保有を参照せず、run日終値、計画指値、終値アンカーの逆指値、ATR14、1R、決算/wide-stop警告、市場状態による判定を銘柄単位で返す。CASH_PRIORITYは候補を保持して地合い理由で見送り、REDUCE_ONLYは候補を保持した警戒ラベルだけとする</td>
+<td>FR-06, P3-14</td>
+</tr>
+<tr>
+<td>決算カレンダー</td>
+<td><code>data/earnings.py</code>, <code>data/earnings_finnhub.py</code></td>
+<td>Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示<code>--as-of</code>では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する</td>
+<td>P4-18</td>
+</tr>
+<tr>
+<td>バックテストシミュレーション</td>
+<td><code>backtest/engine.py</code>, <code>config.py</code></td>
+<td>名目資金・サイジング・同時保有数をバックテスト専用設定で評価する。金額は投資助言値ではなく、ポートフォリオ熱量・セクター・相関・サーキットブレーカーをエントリー境界で判定しない</td>
+<td>FR-10</td>
+</tr>
+<tr>
+<td>テキスト収集</td>
+<td><code>text/</code></td>
+<td>ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集</td>
+<td>FR-07</td>
+</tr>
+<tr>
+<td>分析スキーマ</td>
+<td><code>analysis/schemas.py</code></td>
+<td><code>analysis_input.json</code>/<code>analysis_result.json</code>双方のstrict pydanticスキーマ（<code>extra="forbid"</code>）。<code>SourcedFact.source_ids</code>は1件以上必須、<code>SourcedFact.evidence_quote</code>は自身が引用する<code>source_ids</code>の本文からの逐語引用が必須</td>
+<td>FR-08, CON-03</td>
+</tr>
+<tr>
+<td>分析文脈整形</td>
+<td><code>analysis/context.py</code></td>
+<td>コード計算済みのスコア内訳・リスク制約・市場レジーム・実績サマリ・過去判断を、上書き不可の明示付きで不活性テキストへ整形する純関数群</td>
+<td>FR-08, P2-12, P3-15</td>
+</tr>
+<tr>
+<td>分析入力エクスポート</td>
+<td><code>analysis/export.py</code></td>
+<td>上記文脈と収集済み未信頼テキストを<code>analysis_input.json</code>として日付付きレポートディレクトリへ原子的に書き出す。モデルを呼ばない</td>
+<td>FR-08</td>
+</tr>
+<tr>
+<td>ブリーフスナップショット</td>
+<td><code>analysis/snapshot.py</code></td>
+<td>再描画のため<code>DailyBrief</code>・run status・出力先と入力束縛を<code>report_context.json</code>（schema <code>report-context-v4</code>）へ保存/復元する。読み取り時に<code>schema_version</code>を検証し、世代不一致は復旧手段付きで<code>AnalysisIngestError</code>にする</td>
+<td>FR-08, NFR-05</td>
+</tr>
+<tr>
+<td>分析結果検証</td>
+<td><code>analysis/validate.py</code></td>
+<td>スキル出力を信頼せず、strictスキーマ・provenance（<code>source_ids</code> ⊆ 当該銘柄の供給ID）・CON-03を検証し、違反銘柄を銘柄単位でfail-closedに縮退させる</td>
+<td>FR-08, CON-03</td>
+</tr>
+<tr>
+<td>CON-03検査</td>
+<td><code>analysis/safety.py</code></td>
+<td>断定的売買指示・根拠なき心理/行動診断を全ユーザー表示テキストから検出する純関数（旧<code>llm/safety.py</code>）</td>
+<td>CON-03</td>
+</tr>
+<tr>
+<td>分析取り込みCLI</td>
+<td><code>analysis/cli.py</code></td>
+<td><code>copilot-ingest-analysis</code>。3つのJSONだけを読み、検証を通った定性欄でレポートを再描画する。ネットワーク・スクリーニング再計算なし</td>
+<td>FR-08, FR-09</td>
+</tr>
+<tr>
+<td>定性分析スキル</td>
+<td><code>.claude/skills/swing-daily</code> ほか</td>
+<td><code>analysis_input.json</code>を読み、ニュース/開示/スクリーニングの専門家スキルへ並列委譲し、統合レビューとverdict決定を経て<code>analysis_result.json</code>を書く（本リポジトリのPythonパッケージ外、GitHub Actionsから起動）</td>
+<td>FR-08</td>
+</tr>
+<tr>
+<td>日次ブリーフ構築</td>
+<td><code>report/daily_brief.py</code></td>
+<td>市場・候補・リスク・検証済み定性分析を表示非依存の値へ集約</td>
+<td>FR-09</td>
+</tr>
+<tr>
+<td>CLI/Markdown出力</td>
+<td><code>report/terminal_report.py</code>, <code>report/markdown_report.py</code></td>
+<td>stdout表示とrun ID単位の原子的Markdown保存</td>
+<td>FR-09, NFR-05</td>
+</tr>
+<tr>
+<td>Discord通知</td>
+<td><code>report/discord_notify.py</code></td>
+<td>Discord Webhookへの通知送信（デフォルト有効）</td>
+<td>FR-09</td>
+</tr>
+<tr>
+<td>バックテスト</td>
+<td><code>backtest/</code></td>
+<td>日次ロジックを再利用する複数銘柄ポートフォリオシミュレータ。<code>backtest/entries.py</code>の指値価格・日足約定規則を共有し、SPY買い持ちと比較</td>
+<td>FR-10</td>
+</tr>
+<tr>
+<td>日次オーケストレータ</td>
+<td><code>pipeline/daily.py</code></td>
+<td>全ステップの実行順制御・冪等性・フェイルソフト</td>
+<td>FR-12, NFR-04</td>
+</tr>
+<tr>
+<td>設定ロード</td>
+<td><code>config.py</code></td>
+<td><code>settings.yaml</code>/<code>strategies.yaml</code>/環境変数の統合ロード</td>
+<td>NFR-06</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4">4. データフロー（日次バッチのシーケンス）<a class="headerlink" href="#4" title="Permanent link">&para;</a></h2>
+<p><code>pipeline/daily.py</code> は以下の8ステップを固定順で実行する。起動時に一意な<code>run_id</code>を発行し、<code>run_date</code>は取得済み日足の最新取引日または明示された<code>--as-of</code>から決める。ステップ(5)テキスト収集・(6)分析入力エクスポートが失敗しても、ステップ(8)はスクリーニング結果のみの縮退版を出力する。同じ<code>run_date</code>の再実行でも業務データを重複させず、実行履歴は別<code>run_id</code>で残す。</p>
+<p>明示<code>--as-of</code>は、履歴正本を持つ価格・財務・filing・ユニバースだけを時点選択する。
+決算予定の現在値と現在のオープンポジションは、後日取得・記録した情報を過去へ
+持ち込む可能性があり、当時の状態を復元できる監査履歴もない。そのため両方を参照せず
+「不明」として警告へ明示し、ポジション依存の保有銘柄追加・リスク文脈・MAE/MFE更新を
+行わない。通常実行（<code>--as-of</code>なし）は従来どおり現在状態を利用する。</p>
+<p>定性分析そのものはこのシーケンスに含まれない。ステップ(6)は<code>analysis_input.json</code>を書き出すだけであり、モデルを一切呼ばないため常に安全かつ低コストに実行できる。日次バッチが出すレポートの定性欄は常に「分析待ち」である。分析はこの後、Claude Codeスキルと<code>copilot-ingest-analysis</code>が担う（下記の第2シーケンス）。</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>sequenceDiagram
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    participant Local as 実行環境（定時／手動）
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    participant D as pipeline/daily.py
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    participant DP as DataProvider
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    participant EDG as data/edgar.py
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    participant SCR as ScreeningPipeline
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    participant RC as RiskChecker
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    participant TXT as text/*
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    participant EXP as analysis/export.py
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    participant OUT as report/daily_brief + renderers
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    participant DC as report/discord_notify.py
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    participant MS as MarketStore(DuckDB+Parquet)
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    participant ST as StateStore(DuckDB)
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    participant FS as 当日のレポートディレクトリ
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    Local-&gt;&gt;D: uv run copilot-daily
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>    D-&gt;&gt;ST: runs初期化（run_id, run_date, 完全config_hash, metadata_json）
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    D-&gt;&gt;DP: (1) 株価更新: get_daily_bars(universe)
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    DP--&gt;&gt;MS: write_bars()（既取得日はスキップ）
+<a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    D-&gt;&gt;ST: run_steps(step=1, status)
+<a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>
+<a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>    D-&gt;&gt;EDG: (2) ファンダ更新（週1回）
+<a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>    EDG--&gt;&gt;MS: upsert fundamentals
+<a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    D-&gt;&gt;ST: run_steps(step=2, status)
+<a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a>
+<a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>    D-&gt;&gt;SCR: (3) スクリーニング（Filter→Signal）
+<a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a>    SCR--&gt;&gt;ST: signals テーブルへ記録
+<a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    SCR--&gt;&gt;ST: candidates/screening_rejections を同一トランザクションで記録（P1-02）
+<a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>    D-&gt;&gt;ST: run_steps(step=3, status)
+<a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>
+<a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a>    D-&gt;&gt;RC: (4) リスクチェック
+<a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>    RC--&gt;&gt;ST: RiskAssessment 記録
+<a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a>    D-&gt;&gt;ST: run_steps(step=4, status)
+<a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a>
+<a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>    D-&gt;&gt;MS: レジーム算出（SPY/QQQ/^VIX、date &lt;= as_of）
+<a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a>    D-&gt;&gt;ST: regime_snapshotsへ補正upsert
+<a id="__codelineno-1-38" name="__codelineno-1-38" href="#__codelineno-1-38"></a>
+<a id="__codelineno-1-39" name="__codelineno-1-39" href="#__codelineno-1-39"></a>    D-&gt;&gt;TXT: (5) テキスト収集（news/filings/calendar）
+<a id="__codelineno-1-40" name="__codelineno-1-40" href="#__codelineno-1-40"></a>    alt 失敗
+<a id="__codelineno-1-41" name="__codelineno-1-41" href="#__codelineno-1-41"></a>        TXT--&gt;&gt;D: 例外を捕捉
+<a id="__codelineno-1-42" name="__codelineno-1-42" href="#__codelineno-1-42"></a>        D-&gt;&gt;ST: run_steps(step=5, status=failed, detail)
+<a id="__codelineno-1-43" name="__codelineno-1-43" href="#__codelineno-1-43"></a>    else 成功
+<a id="__codelineno-1-44" name="__codelineno-1-44" href="#__codelineno-1-44"></a>        D-&gt;&gt;ST: run_steps(step=5, status=success)
+<a id="__codelineno-1-45" name="__codelineno-1-45" href="#__codelineno-1-45"></a>    end
+<a id="__codelineno-1-46" name="__codelineno-1-46" href="#__codelineno-1-46"></a>
+<a id="__codelineno-1-47" name="__codelineno-1-47" href="#__codelineno-1-47"></a>    D-&gt;&gt;EXP: (6) 分析入力エクスポート（決定論的文脈 + 未信頼テキスト）
+<a id="__codelineno-1-48" name="__codelineno-1-48" href="#__codelineno-1-48"></a>    alt 失敗 or (5)が失敗/テキスト0件
+<a id="__codelineno-1-49" name="__codelineno-1-49" href="#__codelineno-1-49"></a>        EXP--&gt;&gt;D: 例外を捕捉 or スキップ
+<a id="__codelineno-1-50" name="__codelineno-1-50" href="#__codelineno-1-50"></a>        D-&gt;&gt;ST: run_steps(step=6_analysis_export, status=failed/skipped, detail)
+<a id="__codelineno-1-51" name="__codelineno-1-51" href="#__codelineno-1-51"></a>    else 成功
+<a id="__codelineno-1-52" name="__codelineno-1-52" href="#__codelineno-1-52"></a>        EXP--&gt;&gt;FS: analysis_input.json を原子的に書き出し
+<a id="__codelineno-1-53" name="__codelineno-1-53" href="#__codelineno-1-53"></a>        D-&gt;&gt;ST: run_steps(step=6_analysis_export, status=success)
+<a id="__codelineno-1-54" name="__codelineno-1-54" href="#__codelineno-1-54"></a>    end
+<a id="__codelineno-1-55" name="__codelineno-1-55" href="#__codelineno-1-55"></a>
+<a id="__codelineno-1-56" name="__codelineno-1-56" href="#__codelineno-1-56"></a>    D-&gt;&gt;DC: (7) Discord通知（notification.enabled=trueの場合のみ）
+<a id="__codelineno-1-57" name="__codelineno-1-57" href="#__codelineno-1-57"></a>    D-&gt;&gt;ST: run_steps(step=7, status)
+<a id="__codelineno-1-58" name="__codelineno-1-58" href="#__codelineno-1-58"></a>
+<a id="__codelineno-1-59" name="__codelineno-1-59" href="#__codelineno-1-59"></a>    D-&gt;&gt;OUT: (8) DailyBrief構築、Markdown原子保存、stdout表示（定性欄は「分析待ち」）
+<a id="__codelineno-1-60" name="__codelineno-1-60" href="#__codelineno-1-60"></a>    OUT--&gt;&gt;FS: (6)が成功していれば report_context.json も保存
+<a id="__codelineno-1-61" name="__codelineno-1-61" href="#__codelineno-1-61"></a>    OUT--&gt;&gt;Local: CLI日次ブリーフ
+<a id="__codelineno-1-62" name="__codelineno-1-62" href="#__codelineno-1-62"></a>    D-&gt;&gt;ST: run_steps(step=8, status)
+</code></pre></div>
+<p>日次バッチ完了後、GitHub Actions の <code>swing-daily.yml</code> job が <code>swing-daily</code> スキルを
+起動すると以下が続く。この経路はDuckDBへ書き込まず、データ同期以外のネットワークにも
+接続しない。定性分析スキルは CI でのみ実行する。</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>sequenceDiagram
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    participant CI as GitHub Actions（Claude Code）
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    participant SK as swing-daily スキル
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    participant EX as 専門家スキル（news/filings/screening）
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    participant FS as 当日のレポートディレクトリ
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    participant IN as copilot-ingest-analysis
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    participant OUT as report renderers
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    CI-&gt;&gt;SK: スキル起動
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    SK-&gt;&gt;FS: analysis_input.json 読み取り
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>    SK-&gt;&gt;EX: 銘柄 × 専門家を並列委譲（独立コンテキスト）
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    EX--&gt;&gt;FS: analysis_work/ 配下へ断片JSONを書き出し
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    SK-&gt;&gt;SK: 断片のマージ、統合レビュー、verdict決定
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    SK-&gt;&gt;FS: analysis_result.json 書き出し
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>    SK-&gt;&gt;IN: uv run copilot-ingest-analysis を実行
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    IN-&gt;&gt;FS: analysis_input / analysis_result / report_context を読む
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>    IN-&gt;&gt;IN: strictスキーマ・provenance・CON-03を検証
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    alt 銘柄単位で検証不合格
+<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>        IN--&gt;&gt;IN: その銘柄の定性欄を非表示にして継続（fail-closed、リトライなし）
+<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>    end
+<a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>    IN-&gt;&gt;OUT: 定性欄だけを差し替えて再描画
+<a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    OUT--&gt;&gt;CI: Markdown再保存 + 実行ログ
+</code></pre></div>
+<hr />
+<h2 id="5-2">5. データストア設計（2層の使い分け）<a class="headerlink" href="#5-2" title="Permanent link">&para;</a></h2>
+<p>swing-copilotは目的別に2層のデータストアを使い分ける。単一プロセス・単一利用者であるため、SQLiteとDuckDBへ構造化状態を分散させない。</p>
+<table>
+<thead>
+<tr>
+<th>層</th>
+<th>実体</th>
+<th>役割</th>
+<th>主な利用者</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① Parquet</td>
+<td><code>data/bars/</code>（<code>year=YYYY</code>パーティション）</td>
+<td>日足時系列の生データを列指向で永続化。追記・大量読み出しに強い。</td>
+<td>DataProvider（書き込み）、DuckDB（読み出し元）</td>
+</tr>
+<tr>
+<td>② DuckDB</td>
+<td><code>data/copilot.duckdb</code></td>
+<td>Parquetへのビュー、ファンダメンタルズ、ユニバース履歴、実行/ステップ、候補、落選理由、リスク評価、収集テキスト、verdict/仮想ポジションを保持する唯一の構造化ストア。</td>
+<td>screening/<em>, risk/</em>, tracking/<em>, report/</em>, pipeline/<em>, backtest/</em></td>
+</tr>
+<tr>
+<td>③ JSONアーティファクト</td>
+<td><code>reports/&lt;run_date&gt;/</code></td>
+<td>定性分析の入出力（<code>analysis_input.json</code>／<code>analysis_result.json</code>）と再描画用の<code>report_context.json</code>。DuckDBには入れない——プロセス外のスキルが読み書きする受け渡しファイルであり、同時にそのまま監査証跡になる（NFR-05）。落選明細の<code>rejections.json</code>（<code>report/rejections.py</code>）も同じディレクトリに並べる。こちらはDuckDBの<code>screening_rejections</code>の写しに加え、台帳の閉じたenumでは表現できない<code>candidate_limit</code>切り捨て分を持つ。</td>
+<td>analysis/<em>, report/</em>, Claude Codeスキル</td>
+</tr>
+</tbody>
+</table>
+<p>使い分けの原則:
+- <strong>時系列の大量データ（株価）はParquet</strong>に列指向で永続化し、DuckDBはその上の「クエリビュー」として振る舞う（DuckDB自体に生データを二重persistしない）。
+- <strong>ファンダメンタルズとアプリ状態はDuckDBのテーブル</strong>として直接保持し、同じ<code>run_id</code>に紐づけてレポート入力を再構成できるようにする。
+- DuckDB内の論理責務は<code>MarketStore</code>と<code>StateStore</code>へ分けるが、物理DBと接続/トランザクション管理は<code>storage/database.py</code>へ一元化する。
+- ParquetとDuckDBは<code>data/</code>配下に配置し、ローカルファイルシステムへ永続化する。Parquet更新とDuckDB更新を跨ぐ分散トランザクションは行わず、ステップ単位の原子的書き込みと再実行可能なupsertで回復する。
+- 定性分析のJSONアーティファクトは<code>reports/&lt;run_date&gt;/</code>配下へ、宛先と同じディレクトリの一時ファイル＋<code>os.replace()</code>で原子的に書く。失敗時は以前の宛先を保ち、一時ファイルを残さない（Markdown/Parquetと同じ置換規約）。</p>
+<hr />
+<h2 id="6">6. 外部インターフェース一覧<a class="headerlink" href="#6" title="Permanent link">&para;</a></h2>
+<h3 id="61-api4discord">6.1 データ取得系 外部API（4つ）＋Discord通知<a class="headerlink" href="#61-api4discord" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>サービス</th>
+<th>用途</th>
+<th>エンドポイント種別</th>
+<th>認証</th>
+<th>レート制限</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>株価API（yfinance試作 / EODHD本番）</td>
+<td>日足OHLCV取得</td>
+<td>yfinance: 非公式ライブラリ経由（キー不要）。EODHD: REST API（$19.99/月プラン）</td>
+<td>yfinance: なし。EODHD: APIキー（クエリパラメータ、実装時に要確認）</td>
+<td>yfinance: 明示的なSLAなし（過度な連打は避ける）。EODHD: プラン依存（実装時に要確認）</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SEC EDGAR API</td>
+<td>財務諸表・ファンダメンタルズ、8-K/10-Q監視</td>
+<td>公式REST API（edgartools経由）</td>
+<td>不要（ただしUser-Agentヘッダー必須: 氏名/アプリ名＋連絡先メールアドレス）</td>
+<td>10リクエスト/秒上限</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Finnhub API</td>
+<td>ニュース収集（company-newsエンドポイント）</td>
+<td>公式REST API</td>
+<td>APIキー（無料枠）</td>
+<td>60コール/分</td>
+</tr>
+<tr>
+<td>4</td>
+<td>FRED API</td>
+<td>経済カレンダー・指標</td>
+<td>公式REST API</td>
+<td>APIキー（無料）</td>
+<td>明示的なSLAなし（実装時に要確認、常識的な間隔を空ける）</td>
+</tr>
+<tr>
+<td>－</td>
+<td>Discord Webhook</td>
+<td>日次レポート通知（デフォルト有効。無人実行の結果を知る主経路であり、有効なままWebhook URLが無い実行は設定エラーで止まる）</td>
+<td>Webhook POST</td>
+<td>Webhook URL自体が認証情報</td>
+<td>Discord側のWebhookレート制限（実装時に要確認）</td>
+</tr>
+</tbody>
+</table>
+<p>現行の価格providerは<code>yfinance</code>であり、全runのdata tierは<code>prototype</code>である。<code>prototype</code>の最終CLIブリーフとMarkdownには「非公式データに基づく試作結果」を必ず表示する。本番tierはまだ実装していないため、起動モードの追加や曖昧な本番切替は行わない。</p>
+<h3 id="62-claude-code">6.2 Claude Codeスキル境界（定性分析）<a class="headerlink" href="#62-claude-code" title="Permanent link">&para;</a></h3>
+<p>定性分析はネットワーク越しのAPIではなく、<strong>ローカルファイルを介したプロセス外境界</strong>である。本プロセスからLLM APIを呼ばないため、APIキー・タイムアウト・リトライ・レート制限・従量課金はいずれも存在しない。</p>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>用途</td>
+<td>ニュース解釈、開示（8-K/10-Q）解釈、スクリーニング結果の定性評価、銘柄ごとのverdict決定（FR-08）</td>
+</tr>
+<tr>
+<td>実行主体</td>
+<td>GitHub Actions の <code>swing-daily.yml</code> job。統括スキル<code>.claude/skills/swing-daily</code>が、<code>analyze-news</code>／<code>analyze-filings</code>／<code>interpret-screening</code>を独立コンテキストのサブエージェントへ並列委譲する。定性分析スキルの起動経路は CI のみで、Workflowツールは使わず Agent ツールの並列起動を標準とする（条件は<code>.claude/skills/swing-daily/SKILL.md</code>が定める）</td>
+</tr>
+<tr>
+<td>認証</td>
+<td>なし（APIキーを持たない）。GitHub Actions の Claude Code OAuth secret が実行権限を担う</td>
+</tr>
+<tr>
+<td>渡すもの</td>
+<td><code>reports/&lt;run_date&gt;/&lt;run_id&gt;/analysis_input.json</code>（schema <code>analysis-input-v3</code>）。決定論的な文脈ブロックと未信頼テキストをフィールドレベルで分離し、開示にはコード所有のcoverageを含む</td>
+</tr>
+<tr>
+<td>受け取るもの</td>
+<td><code>reports/&lt;run_date&gt;/&lt;run_id&gt;/analysis_result.json</code>（schema <code>analysis-result-v3</code>。旧<code>analysis-result-v2</code>はP8アーカイブ読み込みだけ後方互換で受理し、新規runは<code>copilot-ingest-analysis</code>がhard failさせる）。スキルが書く唯一の成果物</td>
+</tr>
+<tr>
+<td>信頼境界</td>
+<td>スキル出力は未信頼入力として扱う。<code>copilot-ingest-analysis</code>が3文書のstrict schema・run identity・provenance・CON-03を検証するまで、いかなる文字列もレポートへ出さない</td>
+</tr>
+<tr>
+<td>失敗時</td>
+<td>銘柄単位でfail-closed（当該銘柄の定性欄を非表示にして継続、リトライなし）。<code>run_id</code>、<code>as_of</code>、<code>strategy_key</code>、input digest不一致・JSON破損・スキーマ違反は既存レポート不変のrun全体hard fail</td>
+</tr>
+<tr>
+<td>監査記録</td>
+<td>run専用ディレクトリに<code>analysis_input.json</code>／<code>analysis_result.json</code>／<code>report_context.json</code>をそのまま残す（NFR-05）</td>
+</tr>
+<tr>
+<td>未信頼テキストの分離</td>
+<td>ニュース・開示本文はスキーマ上の専用フィールド（<code>news[].summary</code>／<code>filings[].text</code>）に置き、コード計算済みの文脈は別フィールドの<code>&lt;market_regime&gt;</code>等のブロックに置く。本文が指示を含んでもコード側の判定を装えない</td>
+</tr>
+<tr>
+<td>開示の長文境界</td>
+<td>1開示120,000字・1銘柄240,000字を上限とする。10-Q/10-Q-Aは財務諸表・MD&amp;A・リスク要因・法的手続を章優先で構成し、抽出不能時だけ先頭スライスへ縮退する。配分を超える章は先頭と末尾の両方を残し、境界に省略マーカーを置く（末尾の注記・Results of Operationsを無言で落とさない）。coverageで欠落を監査可能にする</td>
+</tr>
+<tr>
+<td>マクロ/経済カレンダー情報</td>
+<td>symbolを持たない<code>TextItem</code>（<code>source_type="calendar"</code>）は候補ごとの<code>news</code>/<code>filings</code>ではなく、run単位の<code>context.calendar_events</code>に載る。provenance検証はこのIDをどの銘柄の分析からの引用も許容する（ニュース/開示IDは引き続き当該銘柄限定）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7">7. エラー処理・フェイルソフト方針<a class="headerlink" href="#7" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>フェイルソフトの原則（FR-12・NFR-04）</strong>: ステップ(5)テキスト収集・(6)分析入力エクスポートが失敗しても、ステップ(8)は候補とリスクを含む縮退ブリーフを生成する。通知、<code>latest.md</code>更新、<code>report_context.json</code>保存が失敗しても、run固有Markdownが残る限りは<code>DEGRADED</code>・終了コード0とし、成果物パスを運用サマリへ表示する。</li>
+<li><strong>各ステップの結果記録</strong>: <code>runs</code>に実行全体、<code>run_steps</code>に8ステップの成否・詳細・所要時間を記録する。(1)〜(4)、ブリーフ生成、またはrun固有Markdown保存の失敗は<code>FAILED</code>・非ゼロ終了とする。CLI終了時は一箇所にrun ID、status、exit code、provider/data tier、欠損source、成果物、次のread-only確認コマンドを表示する。</li>
+<li><strong>冪等性と原子性</strong>: 同じ評価対象日を再実行しても、bars=<code>(symbol,date)</code>、fundamentals=<code>accession_no</code>、signals=<code>(run_date,symbol,strategy_key,signal_name)</code>、text=<code>source_id</code>を自然キーとして訂正可能なupsertを行う。成功済みという理由だけでステップ全体を無条件スキップしない。複数行の論理更新は1トランザクションとし、途中失敗時は全件rollbackする。snapshot再保存は消えた構成員も削除する。CSV/Parquet/reportの置換は宛先と同じディレクトリに一意な一時ファイルを作り、成功時だけ置換する。書き込みまたは置換に失敗した場合は旧宛先を保ち、一時ファイルを必ず除去する。（<strong>P7（スキル移行）での変更</strong>: 以前はLLM成功レスポンスを<code>(model,prompt_hash,schema_version)</code>一致で再利用するキャッシュ規約を置いていたが、LLM API呼び出しの廃止に伴いキャッシュ機構ごと削除した。定性分析の再実行はスキル側の冪等な再入手順（既存の<code>analysis_result.json</code>を勝手に上書きしない、当日の<code>as_of</code>を持つ作業断片だけを流用する）が担う。）（<strong>live検証時の訂正（2026-07-22）、Issue #258で機構を更新</strong>: fundamentalsステップ（<code>pipeline/daily.py</code> 2番目のステップ）は例外で、8.3節の増分リフレッシュ判定でスキップと決まった銘柄はEDGARへの個別ネットワーク取得のみをスキップする。ステップ自体・自然キーupsertロジックは無条件スキップせず毎回実行するため、上記原則には反しない。当初この例外は<code>MarketStore.has_fundamentals_fetched_on()</code>による同日再実行スキップだけを指していたが、8.3節の取得頻度規定との乖離を解消するためIssue #258で増分判定へ置き換えた——同日再実行のスキップは増分判定の「経過0日 &lt; 7日」ケースとして引き続き成立する。この注記が扱うのはあくまで<strong>無条件スキップ禁止原則の例外</strong>であって、8.3節の取得頻度規定そのものではない。詳細は<code>docs/04_detailed_design.md</code> 3.21節）</li>
+<li><strong>欠損検知・リトライ（NFR-04）</strong>: DataProvider・EDGAR/Finnhub/FREDクライアント等、外部I/Oを伴うコンポーネントはtimeout、retry対象例外、総試行上限、backoffを明示する。接続・タイムアウト・HTTP 408/429/5xxだけを一時障害として最大3回（1秒、2秒）再試行し、その他の4xx、設定/検証/プログラミングエラーは即時に失敗させる。レート制御がある境界は各試行へ適用する。個別銘柄の取得失敗はバッチ全体を止めず、失敗銘柄をリストとして返し、後続処理は成功分のみで進める。</li>
+<li><strong>断定的売買指示の禁止（CON-03）</strong>: 分析結果スキーマは事実（<code>facts</code>）と解釈（<code>interpretation</code>）をフィールドレベルで分離する。スキルへの指示だけに依存せず、<code>copilot-ingest-analysis</code>（<code>analysis/validate.py</code>＋<code>analysis/safety.py</code>）が全ユーザー表示テキストを一元検査し、違反銘柄をレポートへ出さない。検証を通すための文言修正・再投入は規約違反であり、リトライしない（fail-closed）。</li>
+</ul>
+<hr />
+<h2 id="8">8. 運用設計<a class="headerlink" href="#8" title="Permanent link">&para;</a></h2>
+<h3 id="81">8.1 実行環境<a class="headerlink" href="#81" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>環境</th>
+<th>用途</th>
+<th>実行方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GitHub Actions</td>
+<td>平日の日次実行（本番）</td>
+<td><code>.github/workflows/swing-daily.yml</code>。cron <code>17 1 * * 2-6</code>（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と<code>workflow_dispatch</code>のみで起動し、R2から<code>data/</code>を取得 → <code>copilot-daily</code> → CI専用の<code>swing-daily</code>定性分析 → 成功時のみR2へ書き戻す。環境変数はGitHub Secrets</td>
+</tr>
+<tr>
+<td>ローカルマシン</td>
+<td>決定論的パイプラインの開発・デバッグ・随時の手動実行</td>
+<td><code>just data-pull</code>で<code>data/</code>を取得してから<code>uv run copilot-daily</code>等を実行し、書き込んだら<code>just data-push</code>で戻す（<code>.env</code>から環境変数をロード）。<code>swing-daily</code>定性分析はローカルでは実行しない</td>
+</tr>
+</tbody>
+</table>
+<p>決定論的なパイプラインは両環境で同じコードを動かす。定性分析だけは GitHub Actions
+に限定し、ローカル実行の分岐をスキルへ持たせない。</p>
+<h3 id="82">8.2 永続化<a class="headerlink" href="#82" title="Permanent link">&para;</a></h3>
+<p>データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの<code>data/</code>はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、<strong>永続化はR2への書き戻しで完了する</strong>。同期は<code>scripts/data_sync.py</code>（<code>pull</code>／<code>push</code>／<code>status</code>、justfileの<code>data-pull</code>／<code>data-push</code>／<code>data-status</code>）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。</p>
+<ul>
+<li>同期対象（R2が正本）: <code>data/</code>（Parquet: <code>bars/</code>、DuckDB: <code>copilot.duckdb</code>）。<code>copilot_dry_run.duckdb</code>と<code>*.bak-*</code>は同期しない</li>
+<li>同期対象外（ローカル／ランナー限り）: <code>reports/&lt;run_date&gt;/&lt;run_id&gt;.md</code>（run別生成Markdown）、<code>reports/latest.md</code>（最新runの便宜コピー）。GitHub Actions上の実行はこれをworkflow artifactとして保存する</li>
+<li>並行書き込みガードは<code>manifest.json</code>の単調増加<code>generation</code>による楽観ロックだけである。<code>push</code>はリモートのgenerationが<code>pull</code>時点と一致するときにのみ成功するので、<strong>書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない</strong></li>
+<li>実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する</li>
+</ul>
+<h3 id="83">8.3 実行時間<a class="headerlink" href="#83" title="Permanent link">&para;</a></h3>
+<p>NFR-03「35分以内」を満たすため、各ステップの<code>duration_s</code>を<code>run_steps</code>に記録し、継続的にボトルネックを監視する。S&amp;P500全銘柄（約500銘柄）に対する外部API呼び出しはレート制限（EDGAR 10req/秒、Finnhub 60コール/分）の制約を受けるため、以下の方針で時間短縮を図る（発注者確定仕様）。</p>
+<ul>
+<li>価格取得: yfinanceの一括ダウンロード（500銘柄バッチ）を用い、銘柄ごとの個別リクエストを避ける。</li>
+<li>
+<p>ファンダメンタルズ更新: 週1回、かつ前回取得以降に新規filingがある銘柄のみを対象とする増分更新とする。具体的には、(1) 取得記録が無い（初回）、(2) <strong>鮮度地平</strong>から7日以上経過、(3) 収集済みfilingメタデータ上で存在が分かっているfilingが、まだ<code>fundamentals</code>へ取り込まれていない（提出日から7日以内の<strong>有界な再試行窓</strong>。EDGARのcompany-facts公開ラグで空振りしても取り込みまで再試行する）——のいずれかを満たし、かつポーリング間隔の抑制に掛からない銘柄だけEDGARへ問い合わせる（<strong>Issue #258で実装</strong>。それまでは同日再実行の重複回避しか行っておらず、本規定と乖離していた）。<code>fundamentals_fetch_log</code>が持つ値はいずれも<strong>メタデータ</strong>であり<code>as_of</code>の代替ではない。鮮度地平は<code>min(壁時計, as_of)</code>で、過去日<code>--as-of</code>のリプレイが実運用の再取得を抑止しないようクランプし、かつ<strong>レコードを返さなかった取得では進めない</strong>（空振りの再試行がバックストップの起点をリセットしないため）。結果として<strong>どの銘柄も7日を超えてポーリングされないままにはならない</strong>。新規filingの判定にはステップ5が既に収集済みの<code>text_items</code>（<code>source_type='filing'</code>）と<code>fundamentals</code>の取り込み済み<code>filed_at</code>を使うので、<strong>外部API呼び出しは増えない</strong>。判定の詳細・境界・被覆の限界（トリガーが効くのはテキスト収集が既に触れた銘柄だけで、初めて候補になる銘柄には最大7日のドリフトが残る）は<code>docs/04_detailed_design.md</code> 3.21節を参照。</p>
+<div class="admonition note">
+<p class="admonition-title">10-Kは増分トリガーを直接armしない（Issue #280）</p>
+<p>ステップ5（テキスト収集）は<code>_FILING_FORM_TYPES</code>（<code>8-K</code>・<code>10-Q</code>）のみを収集し、10-K本文は
+収集対象外である。そのため10-Kそのものは<code>text_items</code>に現れず、上記(3)の新規filingトリガー
+をarmしない。実務上は10-Kに先行する決算8-K（Item 2.02）が収集されてトリガーをarmするため、
+多くの場合は問題にならない。仮に拾えなくても、あらゆる銘柄の鮮度上限は上記(2)の7日バックス
+トップで一律に担保されるため、10-Kだけが特別に遅れることはない。</p>
+<p>なお、新規filingトリガー自体は<strong>フォーム非依存</strong>である。<code>_FILING_FORM_TYPES</code>はテキスト収集
+の対象を絞るためだけに使われ、トリガーの判定条件には共有されていない。そもそも<code>text_items</code>
+テーブルに<code>form</code>列が無く（フォーム種別は<code>title</code>にしか現れない）、現状フォームで絞ること自体
+ができない。10-Kをテキスト収集へ追加する案・<code>fundamentals</code>の提出周期から決算日を射影する案は
+それぞれ収集スコープ拡大とEDGAR呼び出し増、大きな新規結合を伴うため見送り、現状維持を採用した
+（却下理由の詳細はPR説明を参照）。</p>
+</div>
+</li>
+<li>
+<p>ニュース取得・分析入力エクスポート: 保有銘柄＋当日のスクリーニング候補銘柄の合計最大30銘柄に対象を限定する。定性分析自体は日次バッチの外で走るため、NFR-03の35分予算には含まれない。</p>
+</li>
+<li>SEC EDGARアクセス: 10リクエスト/秒の上限を守るスロットリングを実装する。</li>
+</ul>
+<p>実装後の実測に基づく追加チューニング（並列化要否等）は<code>docs/04_detailed_design.md</code>の該当モジュール（3.2, 3.4, 3.6, 3.14節）を参照。</p>
+<h3 id="84">8.4 監視<a class="headerlink" href="#84" title="Permanent link">&para;</a></h3>
+<ul>
+<li>実行結果は<code>runs</code>/<code>run_steps</code>に記録し、レポート末尾へ<code>run_id</code>、評価対象日、データ鮮度、各ステップの状態と所要時間を表示する。</li>
+<li>通知はレポート配信を兼ねた簡易な死活監視としても機能する（通知が来ない＝バッチ未完走のシグナルになる）。無人実行では結果を知る主経路がこれであるため、デフォルトで有効とする。</li>
+</ul>
+<hr />
+<h2 id="9">9. セキュリティ設計<a class="headerlink" href="#9" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>APIキー管理（NFR-06）</strong>: <code>FINNHUB_API_KEY</code>, <code>FRED_API_KEY</code>, <code>EDGAR_IDENTITY</code>, <code>DISCORD_WEBHOOK_URL</code> はすべて環境変数として扱い、ローカルの<code>.env</code>（<code>.gitignore</code>対象、python-dotenvで読み込み、<code>.env.example</code>に項目のみ記載）から読み込む。<code>DISCORD_WEBHOOK_URL</code>は通知が有効な限り必須であり、欠けている実行は縮退せず設定エラーで止まる。</li>
+<li><strong>コードへの秘密情報のハードコード禁止</strong>: <code>settings.yaml</code>・<code>strategies.yaml</code>等の設定ファイルにはAPIキー・Webhook URLを直接記載しない。<code>config.py</code>（pydantic-settings）が環境変数を優先的に読み込む。</li>
+<li><strong>リポジトリの公開範囲</strong>: GitHubリポジトリを利用する場合（コード管理用、利用自体は任意）はプライベートで運用する（<code>docs/00_human_preparation.md</code>項目5に対応）。</li>
+<li><strong>SEC EDGAR User-Agent</strong>: 規約上必須のUser-Agentヘッダーには氏名またはアプリ名＋連絡先メールアドレスを設定する（個人情報の取り扱いに留意）。</li>
+<li><strong>分析アーティファクトの取り扱い</strong>: <code>analysis_input.json</code>・<code>analysis_result.json</code>・<code>report_context.json</code>は<code>reports/&lt;run_date&gt;/</code>へ平文で残る（NFR-05の監査証跡）。入力に含まれるのは公開ニュース・公開開示・コード計算済みの値・自分自身の過去判断だけであり、APIキー等の秘密情報は含めない。<code>data/</code>と<code>reports/</code>はGit管理対象外とし、リポジトリがprivateでもDBファイル・分析アーティファクトをコミットしない。</li>
+<li><strong>監査性と秘密情報の分離</strong>: <code>runs</code>・<code>run_steps</code>等の監査ログにAPIキー自体が記録されないよう、ログ出力箇所でシークレット値をマスクする実装方針とする（詳細は<code>docs/04_detailed_design.md</code>）。</li>
+</ul>
+<hr />
+<h2 id="10">10. 要件トレーサビリティ表<a class="headerlink" href="#10" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>要件ID</th>
+<th>概要</th>
+<th>対応コンポーネント</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-01</td>
+<td>ユニバース管理</td>
+<td><code>universe.py</code></td>
+</tr>
+<tr>
+<td>FR-02</td>
+<td>株価取得・保存（Provider差し替え可）</td>
+<td><code>data/base.py</code>, <code>data/yfinance_provider.py</code>, <code>data/eodhd_provider.py</code>, <code>storage/market_store.py</code></td>
+</tr>
+<tr>
+<td>FR-03</td>
+<td>EDGARファンダ取得</td>
+<td><code>data/edgar.py</code>, <code>storage/market_store.py</code></td>
+</tr>
+<tr>
+<td>FR-04</td>
+<td>ファンダ品質フィルタ（第1段）</td>
+<td><code>screening/fundamental_filters.py</code>, <code>screening/pipeline.py</code></td>
+</tr>
+<tr>
+<td>FR-05</td>
+<td>テクニカルシグナル（第2段・プラガブル）</td>
+<td><code>screening/technical_signals.py</code>, <code>screening/base.py</code>, <code>screening/pipeline.py</code></td>
+</tr>
+<tr>
+<td>FR-06</td>
+<td>リスク管理チェック</td>
+<td><code>risk/position_sizing.py</code>, <code>risk/checks.py</code></td>
+</tr>
+<tr>
+<td>FR-07</td>
+<td>テキスト収集</td>
+<td><code>text/news_finnhub.py</code>, <code>text/edgar_filings.py</code>, <code>text/calendar_fred.py</code></td>
+</tr>
+<tr>
+<td>FR-08</td>
+<td>定性分析（スキル連携、事実/解釈分離）</td>
+<td><code>analysis/export.py</code>, <code>analysis/context.py</code>, <code>analysis/schemas.py</code>, <code>analysis/validate.py</code>, <code>analysis/safety.py</code>, <code>analysis/snapshot.py</code>, <code>analysis/cli.py</code>, <code>.claude/skills/swing-daily</code>（<code>analyze-news</code>/<code>analyze-filings</code>/<code>interpret-screening</code>）</td>
+</tr>
+<tr>
+<td>FR-09</td>
+<td>CLI・Markdown＋Discord通知</td>
+<td><code>report/daily_brief.py</code>, <code>report/terminal_report.py</code>, <code>report/markdown_report.py</code>, <code>report/discord_notify.py</code></td>
+</tr>
+<tr>
+<td>FR-10</td>
+<td>バックテスト（対S&amp;P500）</td>
+<td><code>backtest/strategies.py</code>, <code>backtest/runner.py</code></td>
+</tr>
+<tr>
+<td>FR-11</td>
+<td>ペーパートレード記録（<strong>廃止 2026-08-19</strong>: 公開トラックレコード化に伴い実売買記録機能を撤去）</td>
+<td>—</td>
+</tr>
+<tr>
+<td>FR-12</td>
+<td>日次バッチ（冪等・フェイルソフト）</td>
+<td><code>pipeline/daily.py</code></td>
+</tr>
+<tr>
+<td>NFR-01</td>
+<td>コスト（LLM API従量課金なし）</td>
+<td>定性分析をClaude Codeスキルへ委譲する構成そのもの（<code>src/</code>はLLM APIクライアントを持たない）、$0構成のデータソース選定</td>
+</tr>
+<tr>
+<td>NFR-02</td>
+<td>1人保守</td>
+<td>全体アーキテクチャ（シンプルな単一バッチ構成、<code>config.py</code>による設定一元化）</td>
+</tr>
+<tr>
+<td>NFR-03</td>
+<td>35分以内</td>
+<td><code>pipeline/daily.py</code>（<code>run_steps</code>による所要時間計測）</td>
+</tr>
+<tr>
+<td>NFR-04</td>
+<td>欠損検知・リトライ</td>
+<td><code>data/*_provider.py</code>, <code>data/edgar.py</code>, <code>text/*</code>, <code>pipeline/daily.py</code>（フェイルソフト）</td>
+</tr>
+<tr>
+<td>NFR-05</td>
+<td>監査性（全入出力記録）</td>
+<td><code>storage/database.py</code>, <code>storage/state_store.py</code>（<code>runs</code>, <code>run_steps</code>, <code>signals</code>, <code>candidates</code>, <code>screening_rejections</code>, <code>risk_assessments</code>, <code>text_items</code>, <code>verdicts</code>）、<code>analysis/export.py</code>・<code>analysis/snapshot.py</code>が残す<code>reports/&lt;run_date&gt;/*.json</code></td>
+</tr>
+<tr>
+<td>NFR-06</td>
+<td>キー管理</td>
+<td><code>config.py</code>, <code>.env</code>（python-dotenv）</td>
+</tr>
+<tr>
+<td>NFR-07</td>
+<td>インターフェース分離（Strategy/Filter/Signal/DataProvider/Notifier）</td>
+<td><code>data/base.py</code>, <code>screening/base.py</code>, <code>screening/pipeline.py</code>（Strategy）, <code>report/discord_notify.py</code>（Notifier）</td>
+</tr>
+<tr>
+<td>NFR-08</td>
+<td>テスト品質（カバレッジ95%以上・E2Eスモーク）</td>
+<td>テスト戦略全体（<code>docs/04_detailed_design.md</code> 8章）、<code>pyproject.toml</code>/justfileのカバレッジ設定</td>
+</tr>
+<tr>
+<td>CON-01</td>
+<td>発注自動化なし</td>
+<td>アーキテクチャ全体（証券会社API未接続）</td>
+</tr>
+<tr>
+<td>CON-02</td>
+<td>yfinance試作限定</td>
+<td><code>data/yfinance_provider.py</code>（P1〜P3）、<code>data/eodhd_provider.py</code>（P4）</td>
+</tr>
+<tr>
+<td>CON-03</td>
+<td>断定的売買指示を出力しない</td>
+<td><code>analysis/schemas.py</code>（facts/interpretation分離）、<code>analysis/safety.py</code>＋<code>analysis/validate.py</code>（ingest時の一元検査・fail-closed）、スキル側の規約（<code>.claude/skills/swing-daily/references/analysis-conventions.md</code>）</td>
+</tr>
+<tr>
+<td>CON-04</td>
+<td>ペーパートレード検証ゲート（<strong>廃止 2026-08-19</strong>: 公開トラックレコード化に伴い実売買記録機能を撤去）</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

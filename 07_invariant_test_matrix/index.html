@@ -1,0 +1,2075 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/07_invariant_test_matrix/">
+      
+      
+        <link rel="prev" href="../06_reliability_roadmap/">
+      
+      
+        <link rel="next" href="../08_architecture_review_2026-08/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Invariant Test Matrix - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Invariant Test Matrix
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../10_investment_philosophy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investment Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01_requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../02_project_plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../03_basic_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI and Dashboard Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../06_reliability_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        要件トレーサビリティ
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レビュー修正の回帰対応
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        履歴バックフィルと低ボラバイアス是正
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#e2e" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        日次統合 E2E の境界
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-k-exhibit-991" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        決算 8-K の Exhibit 99.1 取り込み
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        自社材料の供給量の申告
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        断片の契約検証の共通化
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        開示断片の日跨ぎ流用（本文ハッシュ）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        成果物読み取りの失敗型
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-184" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        バックテストへの市場状態ゲート注入（Issue #184）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-253" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レート制限スロットルの記録時点（Issue #253）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-263" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レート制限の単位はアカウント（Issue #263）
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../08_architecture_review_2026-08/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Review 2026-08
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../09_research_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        要件トレーサビリティ
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レビュー修正の回帰対応
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        履歴バックフィルと低ボラバイアス是正
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#e2e" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        日次統合 E2E の境界
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-k-exhibit-991" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        決算 8-K の Exhibit 99.1 取り込み
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        自社材料の供給量の申告
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        断片の契約検証の共通化
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        開示断片の日跨ぎ流用（本文ハッシュ）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        成果物読み取りの失敗型
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-184" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        バックテストへの市場状態ゲート注入（Issue #184）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-253" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レート制限スロットルの記録時点（Issue #253）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-263" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        レート制限の単位はアカウント（Issue #263）
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">不変条件テスト台帳<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
+<p>この台帳は、要件定義書の FR/NFR/CON と回帰テストの対応を一か所に
+固定する。各行の「代表的な反例」は、そのテストが防ぐ入力または状態の
+最小例である。実装上テストに落とせない運用・組織上の条件は、理由と手動
+確認方法を明記する。テストの名称・配置を変える場合は、この台帳も同じ変更
+で更新する。</p>
+<h2 id="_2">要件トレーサビリティ<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FR-01</td>
+<td><code>as_of</code> より未来のユニバースを選ばない</td>
+<td>7/20 時点で 7/22 のスナップショットを採用する</td>
+<td><code>tests/test_universe.py::TestResolveDailyUniverse::test_historical_run_selects_latest_snapshot_not_after_as_of</code></td>
+</tr>
+<tr>
+<td>FR-02</td>
+<td>価格自然キーの補正は既存値を置換する</td>
+<td>同一銘柄・日付の訂正終値が無視される</td>
+<td><code>tests/storage/test_market_store.py::TestWriteAndReadBars::test_write_bars_correction_replaces_same_natural_key</code></td>
+</tr>
+<tr>
+<td>FR-03</td>
+<td>提出日時が <code>as_of</code> より後の財務値を使わない</td>
+<td>将来提出の 10-Q がスクリーニングに混入する</td>
+<td><code>tests/storage/test_market_store.py::TestUpsertFundamentals::test_read_fundamentals_excludes_filings_after_as_of</code></td>
+</tr>
+<tr>
+<td>FR-04</td>
+<td>全フィルタを通過した銘柄だけを残す</td>
+<td>流動性不足銘柄が候補に残る</td>
+<td><code>tests/screening/test_pipeline.py::TestAndSemantics::test_symbol_must_pass_all_filters_and_all_signals</code></td>
+</tr>
+<tr>
+<td>FR-05</td>
+<td>シグナル合致を一候補に集約し、順位を決定的にする</td>
+<td>同一銘柄が重複候補になる</td>
+<td><code>tests/screening/test_pipeline.py::TestCandidateAggregationAndRanking::test_multiple_signal_hits_aggregate_into_one_candidate</code></td>
+</tr>
+<tr>
+<td>FR-06</td>
+<td>公開リスク判定は銘柄単位の指値・逆指値・ATR14・1Rだけを計算し、読者の口座や保有を参照しない</td>
+<td>口座評価額から株数を推測して分析入力へ出す</td>
+<td><code>tests/risk/test_checks.py::TestTradePlan::test_approved_plan_exposes_close_limit_stop_atr_and_one_r</code>、<code>tests/analysis/test_context.py::TestRiskConstraints::test_it_renders_the_symbol_level_trade_plan</code></td>
+</tr>
+<tr>
+<td>FR-07</td>
+<td>一時的な Finnhub 障害は全試行でレート制限を守って再試行する</td>
+<td>429 後の再試行が待機を飛ばす</td>
+<td><code>tests/text/test_news_finnhub.py::TestRetries::test_retries_rate_limited_request_and_throttles_every_attempt</code></td>
+</tr>
+<tr>
+<td>FR-08</td>
+<td>スキル結果の run identity 不一致はレポートを書き換えない</td>
+<td>別 run の <code>analysis_result.json</code> を取り込む</td>
+<td><code>tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report</code></td>
+</tr>
+<tr>
+<td>FR-09</td>
+<td>日次 run はローカル Markdown と 8 つの可視 step を残す</td>
+<td>通知成功後にレポートが作られない</td>
+<td><code>tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_eight_steps_complete_and_produce_a_markdown_brief</code></td>
+</tr>
+<tr>
+<td>FR-10</td>
+<td>売買コストをエントリー・決済の両方に適用する</td>
+<td>決済時のスリッページを損益から漏らす</td>
+<td><code>tests/backtest/test_engine.py::TestBenchmarkAndReproducibility::test_final_equity_includes_exit_slippage_and_commission</code></td>
+</tr>
+<tr>
+<td>FR-11</td>
+<td><strong>廃止(2026-08-19)</strong>: 公開トラックレコード化に伴い実売買記録機能を撤去した。不変条件も対応テストも無い</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>FR-12</td>
+<td>required step の失敗は後続 step を実行せず failed で終える</td>
+<td>価格取得失敗後も分析入力を出力する</td>
+<td><code>tests/pipeline/test_daily_core.py::TestFatalStepFailure::test_price_fetch_failure_marks_run_failed_and_stops</code></td>
+</tr>
+<tr>
+<td>NFR-01</td>
+<td>Python プロセスはモデル API を呼ばない</td>
+<td>API キーや従量課金クライアントを production dependency に追加する</td>
+<td>手動確認: <code>pyproject.toml</code> と依存グラフにモデル SDK がなく、分析は Claude Code スキル境界だけで行うことをレビューする。</td>
+</tr>
+<tr>
+<td>NFR-02</td>
+<td>日次境界は小さく、構成・実行・step 実装を分離する</td>
+<td>CLI が step 実装を直接抱え、テストで fake を差し込めない</td>
+<td><code>tests/test_quality_contracts.py::test_daily_entrypoint_remains_a_compatible_facade_over_split_boundaries</code></td>
+</tr>
+<tr>
+<td>NFR-03</td>
+<td>時間予算超過時もローカル出力を残して縮退終了する</td>
+<td>text/export/notify を延々実行し、結果を残さない</td>
+<td><code>tests/pipeline/test_daily_core.py::TestTimeoutBudget::test_pre_step_breach_skips_network_steps_but_the_run_still_completes</code></td>
+</tr>
+<tr>
+<td>NFR-04</td>
+<td>外部テキスト障害は screening 結果を消さず degraded にする</td>
+<td>ニュース取得例外で run 全体を failed にする</td>
+<td><code>tests/pipeline/test_failsoft.py::TestTextCollectionFailureDegrades::test_text_failure_degrades_but_still_completes_the_run</code></td>
+</tr>
+<tr>
+<td>NFR-05</td>
+<td>run は再構成可能な metadata を保存する</td>
+<td>strategy または universe identity が監査できない</td>
+<td><code>tests/pipeline/test_daily_core.py::TestRunFingerprintAndMetadata::test_run_persists_reconstructable_metadata</code></td>
+</tr>
+<tr>
+<td>NFR-06</td>
+<td>秘密値をログへ露出しない</td>
+<td>HTTP 例外の URL に含まれる API key を stderr へ出す</td>
+<td><code>tests/pipeline/test_cli.py::TestConfigureLoggingRedactsSecrets::test_redacts_secret_from_message_and_traceback</code></td>
+</tr>
+<tr>
+<td>NFR-07</td>
+<td>strategy building block は登録・組合せ可能である</td>
+<td>未登録 filter/signal が暗黙に実行される</td>
+<td><code>tests/screening/test_pipeline.py::test_registry_contains_default_strategy_building_blocks</code></td>
+</tr>
+<tr>
+<td>NFR-08</td>
+<td>line+branch coverage の除外は main/抽象 body だけにする</td>
+<td>到達可能分岐へ <code>no cover</code> を付ける</td>
+<td><code>tests/test_quality_contracts.py::test_no_cover_pragmas_are_limited_to_main_and_abstract_protocol_bodies</code></td>
+</tr>
+<tr>
+<td>CON-01</td>
+<td>発注 API を扱わず、人間だけが発注する</td>
+<td>broker client または注文送信コードを追加する</td>
+<td>手動確認: <code>src/</code> と依存関係をレビューし、broker/order 実装が存在しないことを確認する。</td>
+</tr>
+<tr>
+<td>CON-02</td>
+<td>yfinance は試作データ provider に限定する</td>
+<td>本番 tier が yfinance 固定になる</td>
+<td>手動確認: production provider の採用判断は運用 ADR で行い、<code>YFinanceProvider</code> は <code>DataTier.PROTOTYPE</code> の既定値だけであることをレビューする。</td>
+</tr>
+<tr>
+<td>CON-03</td>
+<td>表示文の断定的売買指示は ingest で fail-closed にする</td>
+<td>全角英字の「ＢＵＹ」を verdict 理由に入れる</td>
+<td><code>tests/analysis/test_safety.py::TestImperativeLanguage::test_normalized_commands_and_obligations_are_rejected</code></td>
+</tr>
+<tr>
+<td>CON-04</td>
+<td><strong>廃止(2026-08-19)</strong>: ペーパートレード記録機能ごと撤去したため、このゲート自体が存在しない</td>
+<td>—</td>
+<td>手動確認: 本アプリに実資金の状態遷移・注文機能が無いことは変わらない。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">レビュー修正の回帰対応<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>#54</td>
+<td>analysis artifact の run identity を厳密に照合する</td>
+<td>同日別 run の result が既存レポートを上書きする</td>
+<td><code>tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report</code></td>
+</tr>
+<tr>
+<td>#55</td>
+<td>ユニバース更新失敗時は保存済みスナップショットを明示警告付きで再利用する</td>
+<td>取得障害で空ユニバースを永続化する</td>
+<td><code>tests/test_universe.py::TestResolveDailyUniverse::test_refresh_failure_reuses_persisted_snapshot_with_warning</code></td>
+</tr>
+<tr>
+<td>#56</td>
+<td>Parquet 置換は失敗しても旧ファイルを残し一時ファイルを掃除する</td>
+<td>置換失敗で価格パーティションを失う</td>
+<td><code>tests/storage/test_market_store.py::TestWriteAndReadBars::test_replace_failure_preserves_partition_and_cleans_unique_temp</code></td>
+</tr>
+<tr>
+<td>#57</td>
+<td>テキスト収集失敗は status/exit/report の fail-soft 契約を保つ</td>
+<td>export 前に text 例外で process が終了する</td>
+<td><code>tests/pipeline/test_failsoft.py::TestTextCollectionFailureDegrades::test_text_failure_degrades_but_still_completes_the_run</code></td>
+</tr>
+<tr>
+<td>#58</td>
+<td>旧相関チェックを本番経路から撤去し、公開リスク判定を銘柄単位に限定する</td>
+<td>重複日付の系列結合や相関制約が公開経路へ戻る</td>
+<td><code>tests/risk/test_checks.py::TestTradePlan::test_public_plan_has_no_account_or_correlation_constraints</code></td>
+</tr>
+<tr>
+<td>#348</td>
+<td>本番経路は口座依存ルールを持たず、旧監査列は新規行でNULLにする</td>
+<td>旧履歴を読めなくする、または新規行へ株数を残す</td>
+<td><code>tests/storage/test_state_store.py::TestRecordRiskAssessments::test_new_rows_leave_legacy_sizing_columns_null</code>、<code>tests/report/test_terminal_markdown_report.py::test_terminal_and_markdown_show_one_r_without_account_sections</code></td>
+</tr>
+<tr>
+<td>#59</td>
+<td>result symbol/source ID/no-trade 契約を strict に検証する</td>
+<td>同一 source ID または空白 no-trade 理由を受理する</td>
+<td><code>tests/analysis/test_schemas.py::TestUniqueAnalysisEntities::test_duplicate_source_ids_within_a_candidate_are_rejected</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_4">履歴バックフィルと低ボラバイアス是正<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、このフェーズで追加した経路の不変条件。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>copilot-backfill</code></td>
+<td>年パーティション全書き直しを避けるため、全チャンクを1回の <code>write_bars</code> に集約する</td>
+<td>チャンクごとに書き、書き直し回数が銘柄数に比例する</td>
+<td><code>tests/pipeline/test_backfill.py::TestBackfillBarsChunking::test_writes_every_chunk_in_a_single_write_bars_call</code></td>
+</tr>
+<tr>
+<td><code>copilot-backfill</code></td>
+<td>既に <code>--start</code> 以前まで届いている銘柄はネットワークを叩かない</td>
+<td>再実行でユニバース全銘柄を取り直す</td>
+<td><code>tests/pipeline/test_backfill.py::TestBackfillBarsResume::test_skips_symbols_already_covered_from_before_start</code></td>
+</tr>
+<tr>
+<td><code>copilot-backfill</code></td>
+<td><code>--start</code> の直後の取引日が最古のバーである銘柄も「届いている」と判定する</td>
+<td><code>--start</code> が市場休日だと resume が全銘柄で成立せず毎回全取得になる</td>
+<td><code>tests/pipeline/test_backfill.py::TestBackfillBarsResume::test_skips_a_symbol_whose_first_bar_is_the_trading_day_after_start</code></td>
+</tr>
+<tr>
+<td><code>copilot-backfill</code></td>
+<td>銘柄単位の取得失敗は他銘柄の取得を止めない</td>
+<td>1銘柄の失敗でバックフィル全体が中断する</td>
+<td><code>tests/pipeline/test_backfill.py::TestBackfillBarsFailSoft::test_a_failing_chunk_does_not_stop_later_chunks</code></td>
+</tr>
+<tr>
+<td><code>copilot-backfill</code></td>
+<td>全銘柄が失敗し 0 行しか書けなかった run は非ゼロ終了する</td>
+<td>後続の <code>&amp;&amp; copilot-backtest</code> が空のDBに対して走る</td>
+<td><code>tests/pipeline/test_backfill.py::TestBackfillCli::test_exits_non_zero_when_every_symbol_failed</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>終値が 0 の銘柄はその銘柄だけ落ちる</td>
+<td><code>atr_pct</code> の除算が run 全体を落とす</td>
+<td><code>tests/screening/test_pipeline.py::TestCandidateAggregationAndRanking::test_symbol_dropped_when_the_last_close_is_zero</code></td>
+</tr>
+<tr>
+<td>却下台帳</td>
+<td>RSI が閾値を通った銘柄は <code>SIGNAL_RSI_NOT_MET</code> と記録されない</td>
+<td>帯で落ちた銘柄に、通過した RSI 値付きで矛盾した理由が付く</td>
+<td><code>tests/screening/test_rejection_classifier.py::TestSignalReasons::test_a_passing_rsi_is_never_reported_as_rsi_not_met</code></td>
+</tr>
+<tr>
+<td><code>pullback_rsi</code></td>
+<td>ATR が NaN または 0 のとき ATR 正規化帯は閉じる</td>
+<td>距離を測れない銘柄を帯の内側として通す</td>
+<td><code>tests/screening/test_technical_signals.py::TestPullbackATRBand::test_a_zero_atr_is_rejected_fail_safe</code></td>
+</tr>
+<tr>
+<td><code>pullback_rsi</code></td>
+<td><code>band_atr_multiple</code> 未設定時の判定は従来どおりである</td>
+<td>追加したモードが既定挙動を書き換える</td>
+<td><code>tests/screening/test_technical_signals.py::TestPullbackATRBand::test_missing_atr_multiple_keeps_the_compatibility_band_hit</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td><code>atr_pct</code> は既定 0.0 で、出荷中のスコアを変えない</td>
+<td>新成分が既定で合成スコアに混入する</td>
+<td><code>tests/screening/test_pipeline.py::TestAtrPctScoreComponent::test_default_weight_is_zero_so_existing_scores_are_unchanged</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td><code>atr_pct</code> も score_weights 合計 1.0 検証の対象である</td>
+<td>新成分を足しても合計 1.0 とみなされる</td>
+<td><code>tests/test_config.py::TestLoadStrategies::test_atr_pct_counts_toward_the_sum_to_one_requirement</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>戦略別成分は既定 0.0 で、出荷中3戦略のスコアを1ビットも動かさない</td>
+<td>機構追加が運用中のランキングを黙って書き換える</td>
+<td><code>tests/screening/test_pipeline.py::TestStrategySpecificScoreComponentsAreOffByDefault::test_a_shipped_strategy_scores_exactly_as_it_did_before_the_components</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>成分内訳のキーは <code>ScoreWeights</code> のフィールドと完全一致する</td>
+<td>成分を足しても実列・レポートに現れず、score と内訳の合計がずれる</td>
+<td><code>tests/screening/test_pipeline.py::TestStrategySpecificScoreComponentsAreOffByDefault::test_the_breakdown_keys_are_exactly_the_score_weights_fields</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>メトリクスを生む signal を持たない戦略で戦略別成分に重みを付けると外部I/O前に落ちる</td>
+<td>全候補が同じ 0.0 を得て他成分の実効重みだけが薄まる</td>
+<td><code>tests/test_config.py::TestLoadStrategies::test_a_weighted_component_without_its_signal_is_rejected</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>ピボットが欠損・非正でもその銘柄だけ 0.0 になり候補からは落ちない</td>
+<td>除算で run 全体が落ちる／成分が事実上のフィルタになる</td>
+<td><code>tests/screening/test_pipeline.py::TestPivotProximityComponent::test_an_absent_or_nonpositive_pivot_scores_zero_and_keeps_the_candidate</code></td>
+</tr>
+<tr>
+<td>ランキング</td>
+<td>戦略別成分を重み付けても同点は symbol 昇順で決まる</td>
+<td>決定的順序が壊れる（REQ-010）</td>
+<td><code>tests/screening/test_pipeline.py::TestPivotProximityComponent::test_a_tie_still_breaks_on_symbol_ascending</code></td>
+</tr>
+<tr>
+<td>ストレージ</td>
+<td>戦略別成分の実列は既存DBへ追加されるが backfill しない</td>
+<td>記録が無い行に 0.0 が入り「計測された寄与ゼロ」と読めてしまう</td>
+<td><code>tests/storage/test_schema_migration.py::TestPromotedColumnBackfill::test_strategy_specific_score_columns_are_added_but_not_backfilled</code></td>
+</tr>
+<tr>
+<td>バックテスト</td>
+<td>発火 0 件の決済理由も 0 として必ず報告する</td>
+<td>一度も出ていない理由がレポートから消える</td>
+<td><code>tests/backtest/test_metrics.py::TestExitReasonBreakdown::test_counts_every_reason_including_the_absent_ones</code></td>
+</tr>
+<tr>
+<td>分析数値整合</td>
+<td>逐語引用と桁が食い違う fact を警告として名指しする</td>
+<td>千ドル単位の 3,495,296 を「35億9,530万ドル」と書いた fact が全検査を素通りする</td>
+<td><code>tests/analysis/test_validate.py::TestNumericConsistencyWarnings::test_a_misconverted_figure_is_warned_about</code></td>
+</tr>
+<tr>
+<td>分析数値整合</td>
+<td>単位変換を跨いだ正しい言い換えは警告しない</td>
+<td>34億9,530万ドルや前年同期 29億2,818万ドルを誤検知する</td>
+<td><code>tests/analysis/test_numeric_consistency.py::TestTheIssueCase::test_the_corrected_figure_is_not_reported</code></td>
+</tr>
+<tr>
+<td>分析数値整合</td>
+<td>数値の警告は銘柄を縮退させない</td>
+<td>誤検知した銘柄の定性セクションが丸ごと消える</td>
+<td><code>tests/analysis/test_validate.py::TestNumericConsistencyWarnings::test_a_warned_symbol_is_still_rendered</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="e2e">日次統合 E2E の境界<a class="headerlink" href="#e2e" title="Permanent link">&para;</a></h2>
+<p>通常経路は <code>DailyDependencies</code> の全外部 port を fake にした offline E2E で、価格・
+財務・screening・risk・text・analysis input export・通知・Markdown を順に確認する。
+スキルは同じ run の fixture result を書くだけで、Python プロセスはモデル呼出しを
+行わない。identity が一致する正経路は
+<code>tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_exported_run_identity_allows_offline_skill_result_ingest</code>、
+不一致時の report 不変性は上表 #54 の node が担保する。</p>
+<p><code>--limit 0</code> の候補ゼロ run は analysis export を成功扱いで skip し、短い report を
+残す。これは
+<code>tests/pipeline/test_failsoft.py::TestAnalysisExportFailureDegrades::test_no_candidates_skips_the_export_without_degrading</code>
+で固定する。</p>
+<h2 id="8-k-exhibit-991">決算 8-K の Exhibit 99.1 取り込み<a class="headerlink" href="#8-k-exhibit-991" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、Issue #128 で追加した経路の不変条件。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>8-K の <code>EX-99*</code> 本文を主文書と同じ <code>content_text</code> へ連結する</td>
+<td>Item 2.02 の告知だけが入力に載り、ガイダンスが存在しない</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibits::test_exhibit_text_is_appended_to_the_primary_document_text</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>8-K 以外は添付一覧を取りに行かない</td>
+<td>10-Q ごとに不要な添付リクエストが増える</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibits::test_forms_other_than_eight_k_never_request_attachments</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>Exhibit 合計は 1 開示 500,000 字の安全弁で打ち切り、切り詰めを本文に明示する</td>
+<td>安全弁超過が黙って落ち、読み手が連結を連続本文と誤認する</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhibit_longer_than_the_budget_is_cut_with_an_inline_marker</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>予算を使い切った後続 Exhibit はダウンロードもしない</td>
+<td>捨てる本文のために SEC へリクエストを投げる</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibitBudget::test_exhausted_budget_skips_the_next_exhibit_without_downloading_it</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>Exhibit 取得の失敗は fail-soft で、主文書と取得済み Exhibit を保持する</td>
+<td>添付 1 件の 404 で開示そのものが入力から消える</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibitFailSoft::test_failing_exhibit_keeps_the_exhibits_already_retrieved</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>添付ダウンロードにも 10 リクエスト/秒の throttle を適用する</td>
+<td>Exhibit 取得だけがレート制限を迂回する</td>
+<td><code>tests/data/test_edgar.py::TestEightKExhibitRateLimiting::test_throttles_the_attachment_index_and_every_exhibit_download</code></td>
+</tr>
+<tr>
+<td><code>analysis/filing_selection.py</code></td>
+<td>予算逼迫時は主文書と EX-99.1 を supplement より優先して配分する</td>
+<td>数倍大きい supplemental package が予算を食い、プレスリリースが削られる</td>
+<td><code>tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_budget_pressure_serves_the_press_release_before_a_supplement</code></td>
+</tr>
+<tr>
+<td><code>analysis/filing_selection.py</code></td>
+<td>割当超過の Exhibit は末尾切りではなく、定型文から落として markdown テーブルを最後まで残す</td>
+<td>末尾に置かれる財務諸表・非 GAAP 調整表が真っ先に落ちる（Issue #157 の GOOG 申告）</td>
+<td><code>tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_a_far_over_allocation_keeps_the_tables_after_everything_else</code></td>
+</tr>
+<tr>
+<td><code>analysis/filing_selection.py</code></td>
+<td>各開示は最低保証字数を確保してから、余りを優先順に配る（優先順位は読める量を決め、読めるかどうかは決めない）</td>
+<td>per-filing 上限に達する開示 2 件で 1 銘柄予算が尽き、3 件目が 10 字（HST）や 0 字（UDR）のまま「分析済み」になる</td>
+<td><code>tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_small_third_filing_survives_two_ceiling_filling_filings</code></td>
+</tr>
+<tr>
+<td><code>analysis/filing_selection.py</code></td>
+<td>保証すら全件に配れないときは割り当て順に保証を配り、尽きたら 0 にする</td>
+<td>窮迫時の配分が実装詳細で変わり、同じ入力から同じ出力が出ない</td>
+<td><code>tests/analysis/test_filing_selection.py::TestPerSymbolMinimumGuarantee::test_a_ceiling_too_small_for_every_guarantee_serves_them_in_priority_order</code></td>
+</tr>
+<tr>
+<td><code>analysis/filing_selection.py</code></td>
+<td>Exhibit 選別は <code>selection_mode</code> / <code>sections_json</code> へ Exhibit 語彙で記録され、P8 から読める</td>
+<td>「開示が切れた」までしか分からず、どの Exhibit が削られたか追跡できない</td>
+<td><code>tests/analysis/test_filing_selection.py::TestEightKExhibitSelection::test_exhibit_coverage_survives_the_analysis_source_coverage_round_trip</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_5">自社材料の供給量の申告<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、Issue #130 で追加した経路の不変条件。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>analysis/news_supply.py</code></td>
+<td>自社材料ゼロの入力を <code>level: "none"</code> として申告する</td>
+<td>20 件供給されているという事実だけが下流に届き、「悪材料なし」と読まれる</td>
+<td><code>tests/analysis/test_news_supply.py::TestSupplyLevel::test_a_full_feed_that_never_names_the_symbol_reports_none</code></td>
+</tr>
+<tr>
+<td><code>analysis/news_supply.py</code></td>
+<td>しきい値の直下は <code>sparse</code>、直上は <code>sufficient</code> になる</td>
+<td>境界が片側にずれ、薄い供給が十分と申告される</td>
+<td><code>tests/analysis/test_news_supply.py::TestSupplyLevel::test_one_below_the_threshold_the_supply_is_sparse</code></td>
+</tr>
+<tr>
+<td><code>analysis/export.py</code></td>
+<td><code>related_symbols</code> が空の記事は選別で降格されないが、自社材料としては数えない</td>
+<td>ティッカー未宣言の記事が自社材料に化け、供給量が水増しされる</td>
+<td><code>tests/analysis/test_export.py::TestBuildAnalysisInput::test_news_without_related_tickers_is_ranked_on_target_but_not_counted</code></td>
+</tr>
+<tr>
+<td><code>analysis/schemas.py</code></td>
+<td><code>news_supply</code> を持たない過去アーカイブが v2/v3 とも読める</td>
+<td>フィールド追加で P8 collect が過去 run を読めなくなる</td>
+<td><code>tests/analysis/test_schemas.py::TestSchemaVersions::test_an_archive_without_news_supply_still_parses</code></td>
+</tr>
+<tr>
+<td><code>analysis/schemas.py</code></td>
+<td><code>level: "none"</code> と件数ゼロが常に一致する</td>
+<td>申告と件数が食い違い、どちらを信じるか読み手が判断できない</td>
+<td><code>tests/analysis/test_schemas.py::TestNewsSupplyCounts::test_the_none_level_must_mean_exactly_zero_mentions</code></td>
+</tr>
+<tr>
+<td><code>.claude/skills/analyze-news/SKILL.md</code></td>
+<td>供給不足の申告経路が指示文に残っている</td>
+<td>コードは数えているのに誰も読まず、下流に届かない</td>
+<td><code>tests/analysis/test_skill_contract.py::test_news_skill_must_declare_a_thin_symbol_specific_supply</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_6">断片の契約検証の共通化<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、Issue #132 で追加した経路の不変条件。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>断片の事前検査は ingest と同じ関数で同じ理由を返す</td>
+<td>grep ベースの自己検査が、NFKC 正規化後に初めて見える違反を「合格」と報告する</td>
+<td><code>tests/analysis/test_fragment.py::TestSharedCheckMatchesIngest::test_a_violating_payload_fails_identically_in_both_paths</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>正規化で吸収されるだけの表記差は落とさない</td>
+<td>全角・NBSP・大小の違いだけで正しい引用が withhold される</td>
+<td><code>tests/analysis/test_fragment.py::TestSharedCheckMatchesIngest::test_a_conforming_payload_passes_identically_in_both_paths</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>断片はペイロードキーをちょうど 1 つだけ持つ</td>
+<td>1 ファイルに 2 専門家分が混ざり、マージが取りこぼす</td>
+<td><code>tests/analysis/test_fragment.py::TestFragmentEnvelope::test_a_fragment_carrying_two_experts_answers_is_rejected</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>別 run の断片は内容検査より先に identity 違反として報告する</td>
+<td>前日の残骸が provenance 違反として報告され、原因を取り違える</td>
+<td><code>tests/analysis/test_fragment.py::TestFragmentIdentity::test_identity_is_reported_before_the_content_checks</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>ファイル名の <code>&lt;kind&gt;-&lt;SYMBOL&gt;</code> とペイロードの不一致を検出する</td>
+<td>別銘柄の断片が正しい名前で置かれ、マージが取り違える</td>
+<td><code>tests/analysis/test_fragment.py::TestFragmentFilename::test_a_filename_naming_another_symbol_is_reported</code></td>
+</tr>
+<tr>
+<td><code>analysis/verify_cli.py</code></td>
+<td>result の dry-run は ingest が縮退させる銘柄と理由を一致させる</td>
+<td>事前検査を通ったのに ingest で縮退する</td>
+<td><code>tests/analysis/test_verify_cli.py::TestVerificationStrengthMatchesIngest::test_the_dry_run_reports_exactly_what_ingest_would_withhold</code></td>
+</tr>
+<tr>
+<td><code>analysis/verify_cli.py</code></td>
+<td>検査はレポートも run ディレクトリも書き換えない</td>
+<td>事前検査が当日の成果物を書き換える</td>
+<td><code>tests/analysis/test_verify_cli.py::TestResultDryRun::test_a_valid_result_passes_without_writing_anything</code></td>
+</tr>
+<tr>
+<td><code>analysis/verify_cli.py</code></td>
+<td>壊れた 1 件が同じディレクトリの他の断片の判定を隠さない</td>
+<td>1 ファイルの JSON 破損で全断片の合否が分からなくなる</td>
+<td><code>tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_one_unreadable_entry_does_not_hide_its_siblings</code></td>
+</tr>
+<tr>
+<td>専門家スキル</td>
+<td>共有コマンドを使う指示が指示文に残っている</td>
+<td>コマンドはあるのに誰も呼ばず、各自が自前検査へ戻る</td>
+<td><code>tests/analysis/test_skill_contract.py::test_every_fragment_author_is_pointed_at_the_shared_checker</code></td>
+</tr>
+<tr>
+<td><code>output-schema.md</code></td>
+<td>「ingest と同一の関数」の主張が関数名で束縛されている</td>
+<td>リネームで主張だけが残り、実体との対応が切れる</td>
+<td><code>tests/analysis/test_skill_contract.py::test_the_schema_reference_binds_the_checker_to_the_ingest_function</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_7">開示断片の日跨ぎ流用（本文ハッシュ）<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、Issue #261 で断片契約を緩めた経路の不変条件。緩めたのは
+<strong>開示断片だけ</strong>であり、この表はその境界と、緩和を安全にしている fail-closed の網を
+束縛する。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>開示本文が同じなら別 run の開示断片を流用できる</td>
+<td>本文が 1 文字も変わらないのに毎日 10-Q を読み直す</td>
+<td><code>tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_an_unchanged_filing_body_makes_yesterdays_reading_reusable</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>本文が変わった開示は再分析になる</td>
+<td>切り詰め量が変わった開示に、古い読みがそのまま載る</td>
+<td><code>tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_changed_filing_body_forces_a_re_analysis</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td>読んでいない開示を含む銘柄は流用できない</td>
+<td>夜間に出た 8-K が「分析済み」として素通りする</td>
+<td><code>tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_filing_the_reading_never_saw_forces_a_re_analysis</code></td>
+</tr>
+<tr>
+<td><code>analysis/fragment.py</code></td>
+<td><code>news_summary</code> / <code>screening_assessment</code> は本文ハッシュに関わらず日跨ぎ流用できない</td>
+<td>前日のニュース解釈・前日のスコア評価が当日のレポートに載る</td>
+<td><code>tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_the_as_of_dependent_readings_are_never_reusable_across_runs</code></td>
+</tr>
+<tr>
+<td><code>analysis/validate.py</code></td>
+<td>誤って流用された古い読みは <code>evidence_quote</code> の逐語検証で FAIL する</td>
+<td>流用の鍵が壊れたとき、provenance を担保するものが何も残らない</td>
+<td><code>tests/analysis/test_fragment.py::TestFilingFragmentReuse::test_a_wrongly_reused_reading_still_fails_the_verbatim_quote_check</code></td>
+</tr>
+<tr>
+<td><code>analysis/slices.py</code></td>
+<td>本文ハッシュは filings スライスだけが載せ、その本文の digest と一致する</td>
+<td>専門家が自分でハッシュを計算し、実装差が流用判定の差になる</td>
+<td><code>tests/analysis/test_slices.py::test_only_the_filings_slice_carries_the_reuse_digests</code></td>
+</tr>
+<tr>
+<td><code>analysis/schemas.py</code></td>
+<td>ハッシュの入力は export 後の本文である</td>
+<td>収集段階の原文で採ると、切り詰め方が変わっても流用されてしまう</td>
+<td><code>tests/analysis/test_slices.py::test_the_reuse_digest_follows_the_exported_body_not_the_original</code></td>
+</tr>
+<tr>
+<td><code>swing-daily</code> / <code>analyze-filings</code> スキル</td>
+<td>緩和が開示に限られる旨と、ハッシュを自分で計算しない旨が指示文に残っている</td>
+<td>指示の書き換えでニュース断片まで日跨ぎ流用され、機械検査では見えない</td>
+<td><code>tests/analysis/test_skill_contract.py::test_only_the_filing_reading_is_reusable_across_trading_days</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_8">成果物読み取りの失敗型<a class="headerlink" href="#_8" title="Permanent link">&para;</a></h2>
+<p>要件 ID を持たない、Issue #153 と Issue #164 で追加した経路の不変条件。
+ファイルをディスクから読む経路は <code>documents.py</code> の
+<code>read_text_document()</code>（テキスト）と、それを土台にした <code>read_json_document()</code>
+（JSON）に集約されており、境界ごとに変わるのは例外型とメッセージ接頭辞だけである。
+JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を通る——
+<code>UnicodeDecodeError</code> は <code>OSError</code> ではなく <code>ValueError</code> なので、
+呼び出し側ごとに <code>except OSError</code> を書き足すやり方では必ずどこかで穴が開く。
+<code>config.py</code> が呼び出し元に含まれるため、この関数は <code>analysis/</code> ではなく
+パッケージ直下に置く（設定ローダーが分析境界を import しないため）。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>analysis/validate.py</code></td>
+<td>UTF-8 として読めない成果物も <code>AnalysisIngestError</code> として届く</td>
+<td>文字化けした <code>analysis_result.json</code> が生の <code>UnicodeDecodeError</code> になり、「壊れた成果物」ではなく想定外の異常として無人実行が落ちる</td>
+<td><code>tests/analysis/test_validate.py::TestHardFailures::test_a_wrongly_encoded_document_is_a_hard_failure</code></td>
+</tr>
+<tr>
+<td><code>analysis/verify_cli.py</code></td>
+<td>事前検査と ingest が同じ読み取り関数で同じ失敗型を返す</td>
+<td>新 CLI だけが不正エンコーディングを FAIL 行に落とし、本番 ingest では例外型が揃わない</td>
+<td><code>tests/analysis/test_verify_cli.py::TestDirectoryExpansion::test_a_wrongly_encoded_fragment_is_reported_rather_than_raised</code></td>
+</tr>
+<tr>
+<td><code>analysis/snapshot.py</code></td>
+<td>UTF-8 として読めない <code>report_context.json</code> も <code>AnalysisIngestError</code> として届く</td>
+<td>レポート再描画のコンテキストだけが <code>except OSError</code> に留まり、無人実行が生んだ文字化けが想定外の異常として漏れる</td>
+<td><code>tests/analysis/test_snapshot.py::TestReadFailures::test_a_wrongly_encoded_context_is_a_hard_failure</code></td>
+</tr>
+<tr>
+<td><code>retro/validate.py</code></td>
+<td>UTF-8 として読めない振り返り成果物も <code>RetroIngestError</code> として届く</td>
+<td><code>retro_input.json</code> / <code>retro_result.json</code> の文字化けが生の <code>UnicodeDecodeError</code> になり、<code>copilot-retro ingest</code> の呼び出し側が壊れた成果物と区別できない</td>
+<td><code>tests/retro/test_validate.py::TestLoading::test_rejects_a_wrongly_encoded_document</code></td>
+</tr>
+<tr>
+<td><code>config.py</code></td>
+<td>UTF-8 として読めない <code>settings.yaml</code> / <code>strategies.yaml</code> も <code>ConfigError</code> として届く</td>
+<td>別エンコーディングで保存された設定が生の <code>UnicodeDecodeError</code> になり、<code>ConfigError</code> を fatal として扱う CLI 境界を素通りする</td>
+<td><code>tests/test_config.py::TestLoadSettings::test_non_utf8_file_raises_config_error</code>、<code>::TestLoadStrategies::test_non_utf8_file_raises_config_error</code></td>
+</tr>
+<tr>
+<td><code>retro/ledger.py</code></td>
+<td>存在するのに読めない提案台帳は <code>RetroIngestError</code> として届き、「空の台帳」に化けない</td>
+<td>台帳が読めないまま <code>closed_proposal_keys()</code> が空になり、却下済みの提案が新しい RP-ID で再び通る</td>
+<td><code>tests/retro/test_ledger.py::TestReadLedger::test_an_unreadable_ledger_fails_instead_of_reading_as_empty</code>、<code>tests/retro/test_cli.py::TestExportCommand::test_exits_when_the_proposal_ledger_cannot_be_read</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="issue-184">バックテストへの市場状態ゲート注入（Issue #184）<a class="headerlink" href="#issue-184" title="Permanent link">&para;</a></h2>
+<p>本番RiskCheckerは市場状態・決算と銘柄単位の価格計画だけを扱う。バックテストは
+Issue #184でこれを注入し、名目資金の株数計算はバックテスト専用の設定で行う。
+ポートフォリオ熱量・セクター・相関・サーキットブレーカーはこの境界で判定しない。
+ここで固定するのはゲート入力のas-of規律である。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>backtest/engine.py</code></td>
+<td>サイジングは equity 基準で、清算後の最終 equity が手計算値と厳密に一致する</td>
+<td>2件目を残現金基準で建て、保有が増えるほどサイズが <code>0.9^n</code> に縮む</td>
+<td><code>tests/backtest/test_engine.py::TestEquityBasedSizing::test_second_entry_sizes_from_equity_not_remaining_cash</code></td>
+</tr>
+<tr>
+<td><code>backtest/engine.py</code></td>
+<td>サイジングの時価評価はシグナル日の終値までで、約定日当日の終値を見ない</td>
+<td>約定日に急騰した保有銘柄の時価で当日の新規建玉を大きくする</td>
+<td><code>tests/backtest/test_engine.py::TestEquityBasedSizing::test_equity_basis_uses_the_signal_days_close_not_the_fill_days</code></td>
+</tr>
+<tr>
+<td><code>backtest/policy.py</code></td>
+<td>レジーム判定はシグナル日のバーだけを見る（直前・同日・直後の3点）</td>
+<td>翌日の VIX 急騰が前日の判断を後ろ向きに書き換える</td>
+<td><code>tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_immediately_before_the_cutoff_leaves_entries_allowed</code>、<code>tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_exactly_at_the_cutoff_is_included_and_blocks</code>、<code>tests/backtest/test_policy.py::TestAsOfDiscipline::test_bar_after_the_cutoff_cannot_reach_back_and_block_an_earlier_day</code></td>
+</tr>
+<tr>
+<td><code>backtest/policy.py</code></td>
+<td><code>CASH_PRIORITY</code> は全候補を <code>regime</code> 理由でブロックする</td>
+<td>レジームが閉じた日にバックテストだけが建玉を作る</td>
+<td><code>tests/backtest/test_policy.py::TestRegimeGate::test_cash_priority_blocks_every_candidate_with_the_regime_reason</code></td>
+</tr>
+<tr>
+<td><code>backtest/policy.py</code></td>
+<td><code>REDUCE_ONLY</code> は警戒ラベルだけで、シミュレータの名目サイジングを上書きしない</td>
+<td>レジームの警戒表示が口座固有のリスク半減や候補削減へ変換される</td>
+<td><code>tests/backtest/test_policy.py::TestRegimeGate::test_reduce_only_is_a_label_and_does_not_override_simulator_sizing</code>、<code>tests/risk/test_checks.py::TestMarketState::test_reduce_only_is_a_label_without_filtering_or_risk_warning</code></td>
+</tr>
+<tr>
+<td><code>backtest/policy.py</code></td>
+<td>価格計画を算出不能な候補は fail-closed で建てない</td>
+<td><code>close</code>/<code>atr14</code> を欠く候補を既定値で建てる</td>
+<td><code>tests/backtest/test_policy.py::TestRegimeGate::test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed</code></td>
+</tr>
+<tr>
+<td><code>backtest/policy.py</code></td>
+<td>SPY/QQQ/^VIX のバーが無い状態の <code>--policy</code> は実行前に落ちる</td>
+<td>レジーム UNKNOWN の fail-closed で全期間ゼロ取引のレポートを黙って出す</td>
+<td><code>tests/backtest/test_policy.py::TestArmSelection::test_missing_regime_bars_fail_fast_instead_of_blocking_silently</code></td>
+</tr>
+<tr>
+<td><code>backtest/earnings_history.py</code></td>
+<td>決算日の推定は <code>filed_at &lt;= as_of</code> の提出だけを見る（直前・同日・直後の3点）</td>
+<td>未提出の決算を先取りして、当時知り得なかった日付でエントリーを止める</td>
+<td><code>tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_from_the_day_after_as_of_is_not_visible</code>、<code>tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_dated_exactly_as_of_is_visible</code>、<code>tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_filing_from_the_day_before_as_of_is_visible</code>、<code>tests/backtest/test_earnings_history.py::TestVisibilityCutoff::test_the_projection_itself_never_reads_past_the_cutoff</code></td>
+</tr>
+<tr>
+<td><code>backtest/earnings_history.py</code></td>
+<td>推定できない銘柄は「不明」と報告し、日付を捏造しない</td>
+<td>提出履歴が1件しか無い銘柄に既定の四半期日程を当てはめる</td>
+<td><code>tests/backtest/test_earnings_history.py::TestProjection::test_a_single_visible_filing_cannot_establish_a_cadence</code>、<code>tests/backtest/test_earnings_history.py::TestProjection::test_symbol_with_no_collected_filings_reports_unknown</code>、<code>tests/backtest/test_earnings_history.py::TestProjection::test_projection_the_calendar_has_outrun_is_reported_as_unknown</code></td>
+</tr>
+<tr>
+<td><code>storage/market_store.py</code></td>
+<td><code>read_filing_dates</code> は <code>filed_at &lt;= as_of</code> を自身のクエリで切る</td>
+<td>呼び出し側の切り忘れで未来の提出が決算推定に混入する</td>
+<td><code>tests/storage/test_market_store.py::TestReadFilingDates::test_filing_accepted_exactly_on_the_cutoff_is_visible</code>、<code>tests/storage/test_market_store.py::TestReadFilingDates::test_filing_accepted_the_day_after_the_cutoff_is_invisible</code></td>
+</tr>
+<tr>
+<td><code>backtest/cli.py</code></td>
+<td><code>--policy</code> の A/B は 1 本の候補ストリームを共有する</td>
+<td>アームごとにスクリーニングし直し、差分がゲート以外にも由来する</td>
+<td><code>tests/backtest/test_cli.py::TestPolicyEndToEnd::test_ab_run_compares_arms_over_one_candidate_stream</code></td>
+</tr>
+<tr>
+<td><code>backtest/cli.py</code></td>
+<td><code>--policy regime+earnings</code> にだけ決算カレンダーを配線する</td>
+<td>決算ゲートを適用しないアームが提出履歴を読み、被覆率だけを表示する</td>
+<td><code>tests/backtest/test_cli.py::TestEarningsGuardWiring::test_regime_risk_arm_receives_the_filing_derived_calendar</code>、<code>tests/backtest/test_cli.py::TestEarningsGuardWiring::test_arms_that_cannot_use_the_gate_never_read_the_filing_history</code></td>
+</tr>
+<tr>
+<td><code>backtest/metrics.py</code></td>
+<td>発火 0 件のエントリー阻止理由も 0 として必ず報告する</td>
+<td>一度も効かなかったゲートがレポートから消え、「効いた」と読めてしまう</td>
+<td><code>tests/backtest/test_metrics.py::TestEntryBlockBreakdown::test_every_known_reason_is_reported_even_at_zero</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="issue-253">レート制限スロットルの記録時点（Issue #253）<a class="headerlink" href="#issue-253" title="Permanent link">&para;</a></h2>
+<p>4つの外部クライアントの <code>_throttle</code> は、待機してから実際にリクエストを
+発行する。記録すべきは「発行時点」であって「スロットル判定を始めた時点」では
+ない。後者を記録すると sleep した分が次回の間隔計算から落ち、発行間隔が
+<code>_MIN_REQUEST_INTERVAL_SECONDS</code> と待機なしの間隔を交互に取って実効レートが
+公称上限を上回る。ここで固定するのは sleep の呼び出し回数や引数ではなく、
+「実際にリクエストが出た時刻の間隔」の下限である。<code>retry_external_call</code> は
+試行ごとに <code>before_attempt</code> を呼ぶため、失敗した試行も1リクエストとして
+同じ不変条件に服する。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>連続する発行時刻の間隔が 10 リクエスト/秒の下限を下回らない</td>
+<td>待機前の時刻を記録し、1回おきに 0.1 秒未満で SEC へ投げる</td>
+<td><code>tests/data/test_edgar.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart</code></td>
+</tr>
+<tr>
+<td><code>data/edgar.py</code></td>
+<td>リトライを挟んでも発行間隔の下限が保たれる</td>
+<td>失敗試行を発行として数えず、後続の待機を過小評価する</td>
+<td><code>tests/data/test_edgar.py::TestRateLimiting::test_retried_attempts_keep_the_minimum_issue_interval</code></td>
+</tr>
+<tr>
+<td><code>text/news_finnhub.py</code></td>
+<td>連続する発行時刻の間隔が 60 calls/分の下限を下回らない</td>
+<td>待機前の時刻を記録し、実効レートが 60/分を超える</td>
+<td><code>tests/text/test_news_finnhub.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart</code></td>
+</tr>
+<tr>
+<td><code>text/news_finnhub.py</code></td>
+<td>リトライを挟んでも発行間隔の下限が保たれる</td>
+<td>429 の試行を発行として数えず、後続の待機を過小評価する</td>
+<td><code>tests/text/test_news_finnhub.py::TestRetries::test_retried_attempts_keep_the_minimum_issue_interval</code></td>
+</tr>
+<tr>
+<td><code>data/earnings_finnhub.py</code></td>
+<td>連続する発行時刻の間隔が 60 calls/分の下限を下回らない</td>
+<td>待機前の時刻を記録し、実効レートが 60/分を超える</td>
+<td><code>tests/data/test_earnings_finnhub.py::test_successive_requests_are_issued_at_least_one_interval_apart</code></td>
+</tr>
+<tr>
+<td><code>data/earnings_finnhub.py</code></td>
+<td>リトライを挟んでも発行間隔の下限が保たれる</td>
+<td>失敗試行を発行として数えず、後続の待機を過小評価する</td>
+<td><code>tests/data/test_earnings_finnhub.py::test_retried_attempts_keep_the_minimum_issue_interval</code></td>
+</tr>
+<tr>
+<td><code>text/calendar_fred.py</code></td>
+<td>連続する発行時刻の間隔が 120 リクエスト/分の下限を下回らない</td>
+<td>待機前の時刻を記録し、enrichment 2件が 0.5 秒未満で続く</td>
+<td><code>tests/text/test_calendar_fred.py::TestRateLimiting::test_successive_requests_are_issued_at_least_one_interval_apart</code></td>
+</tr>
+<tr>
+<td><code>text/calendar_fred.py</code></td>
+<td>リトライを挟んでも発行間隔の下限が保たれる</td>
+<td>失敗試行を発行として数えず、後続の待機を過小評価する</td>
+<td><code>tests/text/test_calendar_fred.py::TestRateLimiting::test_retried_attempts_keep_the_minimum_issue_interval</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="issue-263">レート制限の単位はアカウント（Issue #263）<a class="headerlink" href="#issue-263" title="Permanent link">&para;</a></h2>
+<p>Finnhub の 60 calls/分は API キーの<strong>アカウント</strong>に対する上限であり、
+クライアントオブジェクト単位ではない。<code>FinnhubNewsClient</code> と
+<code>FinnhubEarningsClient</code> は同一キーを使うため、合成ルート
+（<code>pipeline/daily_composition.py::_finnhub_clients</code>）が 1 個の
+<code>ratelimit.MinIntervalThrottle</code> を両者へ注入し、<strong>2クライアント合計</strong>の発行
+間隔を上限以下に保つ。注入しない既定は従来どおりインスタンス固有であり、
+既存の呼び出し元の挙動は変わらない（EDGAR / FRED は別アカウント・別上限
+なので共有しない）。固定するのは Issue #253 と同じく「実際にリクエストが出た
+時刻の間隔」であって、どちらのクライアントが sleep したかではない。</p>
+<p>共有予算は 1 つの時計の上でしか測れないので、スロットル注入と<strong>クライアント
+自身のレート時計の注入</strong>（news の <code>rate_clock</code>、earnings の
+<code>EarningsTiming.rate_clock</code> / <code>sleep_fn</code>）は排他であり、両方渡すと
+<code>ValueError</code> で落とす。黙って無視すると、呼び出し元は動いていない
+タイムラインを信じたままになる。リトライバックオフ（news の <code>sleep_fn</code>、
+earnings の <code>EarningsTiming.backoff_fn</code>）は共有スロットル下でも生きているので
+注入可能なまま残す。</p>
+<table>
+<thead>
+<tr>
+<th>対象</th>
+<th>不変条件</th>
+<th>代表的な反例</th>
+<th>検証</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ratelimit.py</code></td>
+<td>共有スロットルを注入した2クライアントを交互に呼んでも発行間隔が 60 calls/分の下限を下回らない</td>
+<td>クライアントごとに <code>_last_request_at</code> を持ち、合計レートが上限の約2倍になる</td>
+<td><code>tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_keeps_alternating_clients_one_interval_apart</code></td>
+</tr>
+<tr>
+<td><code>ratelimit.py</code></td>
+<td>片方のクライアントのリトライ試行も共有予算を消費する</td>
+<td>失敗試行をアカウントのリクエストとして数えず、もう一方を早く通す</td>
+<td><code>tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_shared_budget_survives_a_retry_inside_one_client</code></td>
+</tr>
+<tr>
+<td><code>ratelimit.py</code></td>
+<td>未注入時はインスタンス固有のままで、既存呼び出し元の挙動が変わらない</td>
+<td>既定を暗黙のグローバル共有にし、単体利用のクライアントに無関係な待機を課す</td>
+<td><code>tests/test_ratelimit.py::TestSharedFinnhubThrottle::test_without_a_shared_budget_each_client_still_throttles_only_itself</code></td>
+</tr>
+<tr>
+<td><code>pipeline/daily_composition.py</code></td>
+<td>日次実行の2つの Finnhub クライアントは同一スロットルを共有する</td>
+<td>生成箇所で別々に <code>MinIntervalThrottle</code> を作り、共有が静かに失われる</td>
+<td><code>tests/pipeline/test_cli.py::TestFinnhubClients::test_both_clients_share_one_account_wide_throttle</code></td>
+</tr>
+<tr>
+<td><code>text/news_finnhub.py</code>・<code>data/earnings_finnhub.py</code></td>
+<td>スロットルとクライアント自身のレート時計の同時注入は <code>ValueError</code> で拒否する</td>
+<td>後から渡した方を黙って無視し、呼び出し元が動かない時計を信じる</td>
+<td><code>tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_rejects_a_rate_clock_beside_a_throttle</code>、<code>tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_rejects_throttle_owned_timing_fields</code></td>
+</tr>
+<tr>
+<td><code>text/news_finnhub.py</code>・<code>data/earnings_finnhub.py</code></td>
+<td>バックオフ関数の注入はスロットル注入下でも受け付ける</td>
+<td>排他の範囲を広げすぎ、リトライを fake sleep で試験できなくする</td>
+<td><code>tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_keeps_sleep_fn_injectable_beside_a_throttle</code>、<code>tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_keeps_backoff_fn_injectable_beside_a_throttle</code></td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -16,8 +16,8 @@ Two properties carry the contract:
 
 * **Verbatim.** Every value is copied out of the *document's own JSON*, not
   re-serialized from a parsed model, so `source_id`s and bodies reach the
-  expert byte for byte and the provenance check at ingest still compares the
-  same strings.
+  expert byte for byte after a filing's ordered `text_chunks` are joined, and
+  the provenance check at ingest still compares the same strings.
 * **Byte-stable.** The same input always produces the same files: fixed
   top-level key order, verbatim nested order, UTF-8, LF, one trailing newline,
   and nothing environment-dependent (no wall clock, no paths, no host) in the
@@ -41,9 +41,10 @@ belongs.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Self
 from uuid import UUID
@@ -54,7 +55,7 @@ from swing_copilot.analysis.fragment import PAYLOAD_FIELD_BY_KIND, FragmentKind
 from swing_copilot.analysis.schemas import (
     AnalysisInput,
     CalendarEventInput,
-    FilingInput,
+    FilingCoverage,
     NewsInput,
     NewsSupply,
     NonBlankText,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from swing_copilot.analysis.schemas import CandidateInput
 
 __all__ = [
+    "MAX_FILING_SLICE_TEXT_LINE_CHARS",
     "SLICE_FILENAME_PREFIX",
     "InputSlice",
     "SliceCandidate",
@@ -85,6 +87,14 @@ __all__ = [
 #: an `analysis_work/<kind>-<SYMBOL>.json` fragment: the two documents share a
 #: naming shape but not a schema, and only fragments are merged into a result.
 SLICE_FILENAME_PREFIX: Final = "slice"
+
+#: The Read tool is line-oriented and caps a single line at roughly 25,000
+#: tokens. Keep each serialized filing-text value far below that cap, including
+#: JSON escaping overhead, while leaving the original `analysis_input.json`
+#: string untouched for provenance and digest checks.
+MAX_FILING_SLICE_TEXT_LINE_CHARS: Final = 8_000
+_MAX_FILING_SLICE_TEXT_JSON_CHARS: Final = MAX_FILING_SLICE_TEXT_LINE_CHARS - 16
+_MAX_FILING_SLICE_TEXT_CHUNK_CHARS: Final = 8_000
 
 #: A symbol becomes part of a filename, so it may not carry a path separator,
 #: a leading dash, or anything else that would resolve elsewhere.
@@ -142,6 +152,34 @@ class SliceContext(_StrictModel):
     calendar_events: list[CalendarEventInput] = []
 
 
+class SliceFiling(_StrictModel):
+    """One filing in a transport slice, with its body split into short lines.
+
+    `analysis_input.json` continues to carry `FilingInput.text` as one string.
+    A slice is a separate work artifact read through a line-oriented tool, so
+    it carries the same body as ordered `text_chunks`; joining them without a
+    separator recreates the exported filing exactly.
+    """
+
+    source_id: SourceId
+    form_type: str
+    filed_at: datetime
+    text_chunks: list[str]
+    url: str
+    coverage: FilingCoverage | None = None
+
+    @model_validator(mode="after")
+    def _verify_text_chunks(self) -> Self:
+        """Reject an empty or lossy transport body before it reaches a skill."""
+        if not self.text_chunks or any(not chunk for chunk in self.text_chunks):
+            msg = "text_chunks must contain at least one non-empty chunk"
+            raise ValueError(msg)
+        if not "".join(self.text_chunks).strip():
+            msg = "text_chunks must preserve a non-blank filing body"
+            raise ValueError(msg)
+        return self
+
+
 class SliceCandidate(_StrictModel):
     """One candidate's fields, restricted to what the expert analyzes.
 
@@ -157,7 +195,7 @@ class SliceCandidate(_StrictModel):
     prior_verdicts: str | None = None
     news: list[NewsInput] | None = None
     news_supply: NewsSupply | None = None
-    filings: list[FilingInput] | None = None
+    filings: list[SliceFiling] | None = None
 
 
 class InputSlice(_StrictModel):
@@ -233,7 +271,7 @@ class InputSlice(_StrictModel):
                 raise ValueError(msg)
             return self
         expected = {
-            item.source_id: filing_body_digest(item.text)
+            item.source_id: filing_body_digest("".join(item.text_chunks))
             for item in self.candidate.filings or []
         }
         if self.filing_body_digests != expected:
@@ -249,9 +287,9 @@ class InputSlice(_StrictModel):
 class SliceDocument:
     """One slice, ready to be written.
 
-    `source_chars` counts the characters of the bodies this slice actually
-    hands the expert, so the orchestrator can bin-pack symbols against SKILL.md
-    Step 2's per-agent ceiling without opening the files.
+    `source_chars` counts the characters of the reconstructed bodies this slice
+    actually hands the expert, so the orchestrator can bin-pack symbols against
+    SKILL.md Step 2's per-agent ceiling without opening the files.
     """
 
     kind: FragmentKind
@@ -435,18 +473,21 @@ def _slice_document(
     if _SAFE_SYMBOL.fullmatch(symbol) is None:
         msg = f"symbol {symbol!r} cannot be used in a slice filename"
         raise SliceExportError(msg)
+    candidate_payload: dict[str, Any] = {"symbol": candidate.raw["symbol"]}
+    for key in _CANDIDATE_KEYS_BY_KIND[kind]:
+        if key not in candidate.raw:
+            continue
+        if kind == "filings":
+            candidate_payload[key] = [
+                _chunk_filing(filing) for filing in candidate.raw[key]
+            ]
+        else:
+            candidate_payload[key] = candidate.raw[key]
     slice_payload: dict[str, Any] = {
         **source.identity(),
         "kind": kind,
         "context": source.context_for(kind),
-        "candidate": {
-            "symbol": candidate.raw["symbol"],
-            **{
-                key: candidate.raw[key]
-                for key in _CANDIDATE_KEYS_BY_KIND[kind]
-                if key in candidate.raw
-            },
-        },
+        "candidate": candidate_payload,
     }
     if kind == "filings":
         slice_payload["filing_body_digests"] = {
@@ -466,6 +507,48 @@ def _slice_document(
     )
 
 
+def _chunk_filing(filing: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace one raw filing body with an ordered, line-safe chunk list."""
+    chunked: dict[str, Any] = {}
+    for key, value in filing.items():
+        chunked["text_chunks" if key == "text" else key] = (
+            _split_filing_text(value) if key == "text" else value
+        )
+    return chunked
+
+
+def _split_filing_text(text: str) -> list[str]:
+    """Split a body without changing the text after chunk concatenation.
+
+    The limit is measured against the JSON-escaped string, not only the source
+    character count, because quotes, backslashes, and control characters grow
+    during serialization. A binary search keeps this cheap for 120,000-character
+    filings while guaranteeing every emitted array item stays below the line
+    budget.
+    """
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        low = start + 1
+        high = min(len(text), start + _MAX_FILING_SLICE_TEXT_CHUNK_CHARS)
+        best = start
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = text[start:middle]
+            encoded_length = len(json.dumps(candidate, ensure_ascii=False))
+            if encoded_length <= _MAX_FILING_SLICE_TEXT_JSON_CHARS:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best == start:
+            msg = "could not create a line-safe chunk from filing text"
+            raise SliceExportError(msg)
+        chunks.append(text[start:best])
+        start = best
+    return chunks
+
+
 def _source_chars(
     kind: FragmentKind, candidate: CandidateInput, raw_context: Mapping[str, Any]
 ) -> int:
@@ -474,7 +557,7 @@ def _source_chars(
     Only the text the expert has to read counts -- JSON punctuation, URLs and
     identifiers do not -- because the number exists to be compared against
     SKILL.md Step 2's per-agent character ceiling, which is stated over
-    `filings[].text`.
+    the reconstructed `filings[].text_chunks` body.
     """
     if kind == "news":
         return sum(

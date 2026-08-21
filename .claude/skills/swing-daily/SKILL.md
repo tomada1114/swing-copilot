@@ -401,6 +401,10 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   スライスを、`filings` が空の銘柄には filings スライスを作らず、`screening` は
   全銘柄に作る。run 単位の context（`market_regime` / `calendar_events`）は
   screening スライスにだけ入る。上表の担当割り当てと同じ規則である
+- filings スライスの `candidate.filings[].text_chunks` は、元の
+  `filings[].text` を順序どおり分割した輸送用配列である。Read の1物理行上限を
+  避けるため各 JSON 文字列行は最大 8,000 文字に制限されている。開示担当は
+  チャンクを区切り文字なしで連結して本文を再構成し、境界に改行や空白を足さない
 - `news` が空でも `news_supply` を持つ銘柄に news スライスを作らないのは、
   `analyze-news` と AC14 が「`news` が空なら `news_summary: null` を書く」ことを
   求めているためである。今のままエージェントを立てても null が返るだけで、
@@ -410,7 +414,8 @@ uv run copilot-export-slices <WORKDIR>/analysis_input.json --out-dir <scratchpad
   文字数）」がタブ区切りで 1 行ずつ出る。**この一覧が正本**で、親はここから各
   エージェントへ渡すパスを選ぶ。スライス本体を親が読む必要はない
 - `source_id` と本文、`run_id` / `as_of` / `input_digest` は元入力からの逐語コピーで、
-  strict スキーマ（`extra="forbid"`）検証を通ってから書かれる。形式・不変条件は
+  filings の本文は `text_chunks` を連結した値が逐語一致し、strict スキーマ
+  （`extra="forbid"`）検証を通ってから書かれる。形式・不変条件は
   [references/output-schema.md](references/output-schema.md) の「サブエージェント入力スライス」
   に従う
 - filings スライスにだけ `filing_body_digests`（`source_id` → 開示本文の SHA-256）が

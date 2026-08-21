@@ -30,6 +30,7 @@ from swing_copilot.pipeline.daily import (
     _config_hash,
     _FundamentalsFreshness,
     _refresh_interval_days,
+    _run_step_fundamentals,
     _select_symbols,
     run_daily,
 )
@@ -2239,20 +2240,18 @@ class TestFundamentalsIncrementalRefresh:
 
         for offset in range(_FUNDAMENTALS_REFRESH_INTERVAL_DAYS):
             day = AS_OF + timedelta(days=offset)
-            run_daily(
-                DailyRunOptions(is_dry_run=True, allow_same_day_rerun=True),
-                DailyDependencies(
-                    data_provider=FakeDataProvider(_bars_for(["AAPL"], day)),
-                    market_store=market_store,
-                    state_store=state_store,
-                    settings=settings,
-                    universe=(_member("AAPL"),),
-                    strategies_config=STRATEGIES_CONFIG,
-                    clock=_FixedClock(day),
-                    edgar_client=edgar_client,
-                    output_dir=str(tmp_path / "reports"),
-                ),
+            deps = DailyDependencies(
+                data_provider=FakeDataProvider(_bars_for(["AAPL"], day)),
+                market_store=market_store,
+                state_store=state_store,
+                settings=settings,
+                universe=(_member("AAPL"),),
+                strategies_config=STRATEGIES_CONFIG,
+                clock=_FixedClock(day),
+                edgar_client=edgar_client,
+                output_dir=str(tmp_path / "reports"),
             )
+            self._run_fundamentals_step(deps, as_of=day - timedelta(days=1))
 
         # Day 0 fetched; days 1..6 are all inside the interval in as-of time.
         assert edgar_client.calls == ["AAPL"]
@@ -2475,25 +2474,34 @@ class TestFundamentalsIncrementalRefresh:
     def _walk_days(  # noqa: PLR0913 - fixtures plus the two knobs the walk needs
         self, settings, market_store, state_store, tmp_path, edgar_client, days
     ):
-        """Run one daily run per calendar day; return the days that polled."""
+        """Run one fundamentals step per calendar day; return the days polled."""
         polled_on: list[date] = []
         for offset in range(days):
             day = AS_OF + timedelta(days=offset)
             before = len(edgar_client.calls)
-            self._run(
-                self._deps(
-                    settings,
-                    market_store,
-                    state_store,
-                    tmp_path,
-                    edgar_client,
-                    clock=_FixedClock(day),
-                ),
-                as_of=day,
+            deps = self._deps(
+                settings,
+                market_store,
+                state_store,
+                tmp_path,
+                edgar_client,
+                clock=_FixedClock(day),
             )
+            self._run_fundamentals_step(deps, as_of=day)
             if len(edgar_client.calls) > before:
                 polled_on.append(day)
         return polled_on
+
+    @staticmethod
+    def _run_fundamentals_step(deps: DailyDependencies, *, as_of: date) -> None:
+        """Exercise the refresh contract without paying for full composition."""
+        _run_step_fundamentals(
+            deps,
+            [member.symbol for member in deps.universe],
+            as_of,
+            float("inf"),
+            held_symbols=frozenset(),
+        )
 
     def test_a_fruitless_retry_never_pushes_the_backstop_out(
         self, settings, market_store, state_store, tmp_path

@@ -461,6 +461,10 @@ def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
     assert "bypassPermissions" not in workflow
     assert "--allowedTools" in workflow
     assert "--disallowedTools" in workflow
+    assert "id: claude" in workflow
+    assert "Summarize Claude permission denials" in workflow
+    assert "permission_denials_count=" in workflow
+    assert "permission_denials[" in workflow
     assert "Bash(uv run:*)" not in workflow
     for command in DAILY_BASH_ALLOW_ENTRIES:
         assert command in workflow

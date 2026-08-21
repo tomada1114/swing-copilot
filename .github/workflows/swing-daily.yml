@@ -94,6 +94,7 @@ jobs:
       # .claude/、.github/) への書き込みを拒否する。スキルが書くのは
       # reports/<run_id>/ 配下の断片と `.swing-daily-scratch/` の一時ファイルだけ。
       - name: Run swing-daily
+        id: claude
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
@@ -122,6 +123,76 @@ jobs:
 
             最後に、どこまで進んだか、打ち切った組、縮退・欠落の理由、
             人間が翌朝確認すべき点を要約して報告してください。
+
+      # The action deliberately hides the full execution JSON because it can contain
+      # untrusted filing/news text and secrets. Keep only a safe aggregate of denied
+      # tool classes so a dontAsk regression is diagnosable without exposing commands
+      # or paths in the public Actions log.
+      - name: Summarize Claude permission denials
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          execution_file = os.environ.get("EXECUTION_FILE", "")
+          if not execution_file:
+              print("permission_denials_summary=unavailable:no_execution_file")
+              raise SystemExit(0)
+
+          try:
+              messages = json.loads(Path(execution_file).read_text())
+          except (OSError, json.JSONDecodeError):
+              print("permission_denials_summary=unavailable:unreadable_execution_file")
+              raise SystemExit(0)
+
+          result_messages = [
+              message
+              for message in messages
+              if message.get("type") == "result"
+          ]
+          denials = [
+              denial
+              for message in result_messages
+              for denial in message.get("permission_denials", [])
+          ]
+
+          def classify(denial: object) -> str:
+              if not isinstance(denial, dict):
+                  return "unknown"
+              tool_name = denial.get("tool_name", "unknown")
+              if tool_name != "Bash":
+                  return str(tool_name)
+              input_value = denial.get("input", {})
+              command = input_value.get("command", "") if isinstance(input_value, dict) else ""
+              if command.startswith("uv run copilot-daily"):
+                  return "Bash:uv-run-copilot-daily"
+              if command.startswith("uv run copilot-verify-analysis"):
+                  return "Bash:uv-run-copilot-verify-analysis"
+              if command.startswith("uv run copilot-ingest-analysis"):
+                  return "Bash:uv-run-copilot-ingest-analysis"
+              if command.startswith("uv run copilot-history"):
+                  return "Bash:uv-run-copilot-history"
+              if command.startswith("uv run copilot-export-slices"):
+                  return "Bash:uv-run-copilot-export-slices"
+              if command.startswith("./scripts/timebox.sh"):
+                  return "Bash:timebox"
+              if command.startswith("uv run"):
+                  return "Bash:uv-run-other"
+              if command.startswith(("pwd", "ls", "cat", "head", "tail", "rg", "grep", "find", "sed")):
+                  return "Bash:read-only-other"
+              if command.startswith(("git", "rm", "mv", "cp", "mkdir", "touch")):
+                  return "Bash:filesystem-or-git"
+              return "Bash:other"
+
+          print(f"permission_denials_count={len(denials)}")
+          for category, count in sorted(Counter(map(classify, denials)).items()):
+              print(f"permission_denials[{category}]={count}")
+          PY
 
       # 失敗した日は push しない = リモート正本は前日のまま。
       # dry-run はライブ DB を触らないので push する対象が無い。

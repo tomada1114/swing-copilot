@@ -46,6 +46,7 @@ CLI_ERROR_CONVERSION_MODULES = {
 #: allowlisted shape of its invocation (#264).
 TIMEBOX_SCRIPT = PROJECT_ROOT / "scripts/timebox.sh"
 DAILY_SKILL = PROJECT_ROOT / ".claude/skills/swing-daily/SKILL.md"
+DAILY_WORKFLOW = PROJECT_ROOT / ".github/workflows/swing-daily.yml"
 CLAUDE_SETTINGS = PROJECT_ROOT / ".claude/settings.json"
 TIMEBOX_COMMAND = "./scripts/timebox.sh"
 TIMEBOX_ALLOW_ENTRY = f"Bash({TIMEBOX_COMMAND}:*)"
@@ -438,8 +439,39 @@ def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
     assert "から数えないこと" in skill_text
     # The escape hatch stays outside the allowlist on purpose: an absolute path
     # differs per checkout, so allowlisting it is impossible, and headless runs
-    # use `bypassPermissions` anyway.
+    # use `dontAsk` anyway.
     assert [entry for entry in allow if "timebox" in entry] == [TIMEBOX_ALLOW_ENTRY]
+
+
+def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
+    """Keep the untrusted-text analysis job behind an explicit permission boundary."""
+    workflow = DAILY_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "--permission-mode dontAsk" in workflow
+    assert "bypassPermissions" not in workflow
+    assert "--allowedTools" in workflow
+    assert "--disallowedTools" in workflow
+    assert "Bash(uv run:*)" not in workflow
+    for command in (
+        "Bash(uv run copilot-daily:*)",
+        "Bash(uv run copilot-verify-analysis:*)",
+        "Bash(uv run copilot-ingest-analysis:*)",
+        "Bash(uv run copilot-history:*)",
+        "Bash(uv run copilot-export-slices:*)",
+        "Bash(./scripts/timebox.sh:*)",
+    ):
+        assert command in workflow
+    for blocked in (
+        "WebFetch",
+        "WebSearch",
+        "Write(src/**)",
+        "Edit(src/**)",
+        "Write(scripts/**)",
+        "Edit(scripts/**)",
+        "Write(.github/**)",
+        "Edit(.github/**)",
+    ):
+        assert blocked in workflow
 
 
 def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():

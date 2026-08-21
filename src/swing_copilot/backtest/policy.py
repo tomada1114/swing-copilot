@@ -12,10 +12,9 @@ decision day and translates its `RiskAssessment`s into engine-level verdicts.
 The `regime` arm applies only market state; `regime+earnings` adds the
 point-in-time earnings gate.
 
-The adapter changes in this issue are intentionally compatibility-only: they
-follow the account-independent public `RiskChecker` contract after #348, while
-#349 owns explicit `backtest.*` simulation settings and removal of the
-simulator-only compatibility gates.
+The adapter now owns only the point-in-time market-state and earnings gates.
+Nominal sizing is configured by `backtest.*` and executed by the engine; the
+production `RiskChecker` remains the source of symbol-level trade-plan values.
 
 Two things the policy deliberately does *not* decide:
 

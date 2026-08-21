@@ -119,6 +119,17 @@ jobs:
             従ってください。ユーザーに質問することはできません。判断が割れる分岐は
             常に保守側 (skip / withhold / 中断) を選んでください。
 
+            Bash の使用は次の6つの形に限定します。`uv run copilot-daily`、
+            `uv run copilot-verify-analysis`、`uv run copilot-ingest-analysis`、
+            `uv run copilot-history`、`uv run copilot-export-slices`、
+            `./scripts/timebox.sh` のいずれかで始まるコマンドだけを使ってください。
+            作業ディレクトリはリポジトリルートです。`cd`、`env`、`export`、`bash`、
+            `sh`、`git`、`python`、`cat`、`ls`、`find`、`sed`、`rm`、`cp`、`mv`、
+            `mkdir`、`sleep`、`date`、`echo`、および `&&`・`|`・`;`・リダイレクト等の
+            前置きやシェル演算子は使わないでください。ファイルの読み取りは
+            Read / Glob / Grep、書き込みは Write / Edit を使います。許可済みコマンドも
+            前置きなしで直接呼び出してください。
+
             ${{ (inputs.mode || 'live') == 'dry-run' && 'swing-daily スキル (`/swing-daily`) を実行してください。ただし `copilot-daily` は `--dry-run` を付けて起動します (`uv run copilot-daily --dry-run`)。dry-run はライブの DuckDB を開かず、`data/copilot_dry_run.duckdb` と `reports/dry_run` にだけ書きます。' || 'swing-daily スキル (`/swing-daily`) を引数なしで実行してください (`uv run copilot-daily`)。これは本番の日次実行です。' }}
 
             最後に、どこまで進んだか、打ち切った組、縮退・欠落の理由、

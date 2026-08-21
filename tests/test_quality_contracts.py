@@ -483,6 +483,20 @@ def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
         assert blocked in workflow
 
 
+def test_headless_daily_run_uses_tool_reads_and_exact_bash_shapes():
+    """Keep routine file access out of denied Bash calls in the headless job."""
+    workflow = DAILY_WORKFLOW.read_text(encoding="utf-8")
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+
+    for text in (workflow, skill_text):
+        assert "Read / Glob / Grep" in text
+        assert "Write / Edit" in text
+        assert "前置きなしで直接" in text
+        for forbidden in ("cat", "ls", "find", "sed", "rm", "git", "python"):
+            assert forbidden in text
+        assert "シェル演算子" in text
+
+
 def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():
     """#323: in an SDK run the parent's final text turn ends the whole session.
 

@@ -857,6 +857,16 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 自体はこのスキルの外で管理される）。ローカルの対話セッションでこのスキルを
 起動する経路は設けず、以下をすべての実行に適用する。
 
+- **Bash の許可境界を自分で広げない。** 無人起動で Bash を使える形は、
+  `uv run copilot-daily`、`uv run copilot-verify-analysis`、
+  `uv run copilot-ingest-analysis`、`uv run copilot-history`、
+  `uv run copilot-export-slices`、`./scripts/timebox.sh` のいずれかで始まる
+  コマンドだけである。作業ディレクトリはリポジトリルートなので、`cd`、`env`、
+  `export`、`bash`、`sh`、`git`、`python`、`cat`、`ls`、`find`、`sed`、`rm`、
+  `cp`、`mv`、`mkdir`、`sleep`、`date`、`echo` や、シェル演算子・リダイレクトを
+  付けない。入力や設定の読み取りには Read / Glob / Grep、ファイルの作成・更新には
+  Write / Edit を使い、許可済み Bash コマンドも前置きなしで直接呼び出す。
+
 - **ユーザーに質問できない前提で動く。** `AskUserQuestion` は使えない。判断が割れる
   分岐（既存 `analysis_result.json` の上書き可否、断片の流用可否、proceed か skip か）は
   **常に保守側**を選ぶ — `skip` / withhold / 中断

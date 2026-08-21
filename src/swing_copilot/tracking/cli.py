@@ -178,7 +178,7 @@ def _run_update(
     result = update_tracking(
         state_store,
         _market_store(state_store, args.db),
-        settings.backtest,
+        settings.trade_plan,
         as_of=_resolve_as_of(args.as_of),
     )
     console.print(
@@ -235,7 +235,7 @@ def _run_list(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
     settings = _load_settings(args.settings)
-    max_hold_days = settings.backtest.max_hold_days
+    max_hold_days = settings.trade_plan.max_hold_days
     status = None if args.status == "all" else args.status
     positions = state_store.get_verdict_positions(
         status, _selected_recommendations(args.recommendation)

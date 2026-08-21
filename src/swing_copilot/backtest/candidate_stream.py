@@ -210,12 +210,12 @@ def compute_cache_key(
 ) -> str:
     """Fingerprint everything screening depends on, and nothing else.
 
-    The exclusions are the contract, not an optimization: `settings.backtest`
-    (`exit_atr_multiple`, `max_hold_days`, `commission_pct`, `slippage_pct`,
-    `slippage_multiplier`, ...), `settings.risk`, and `request.initial_cash`
-    are consumed by `BacktestEngine`, never by `ScreeningPipeline`, so a
-    sensitivity grid or a cost sweep must reuse one stream across all of its
-    cells. Changing any of them deliberately leaves this key unchanged.
+    The exclusions are the contract, not an optimization: `settings.trade_plan`,
+    the simulation-only sizing values in `settings.backtest`, its costs,
+    `settings.risk`, and `request.initial_cash` are consumed by
+    `BacktestEngine`, never by `ScreeningPipeline`, so a sensitivity grid or a
+    cost sweep must reuse one stream across all of its cells. Changing any of
+    them deliberately leaves this key unchanged.
 
     `benchmark_symbol` *is* included: it is the source of the trading-day
     calendar the stream is keyed by.

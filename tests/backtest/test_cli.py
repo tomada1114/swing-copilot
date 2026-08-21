@@ -1775,7 +1775,7 @@ class TestPolicyEndToEnd:
                 "--output",
                 str(output_path),
                 "--policy",
-                "none,regime+risk",
+                "none,regime+earnings",
             ]
         )
 
@@ -1785,7 +1785,7 @@ class TestPolicyEndToEnd:
         # gates and nothing else.
         assert len(screenings) == 1
         report_text = output_path.read_text(encoding="utf-8")
-        assert "| Metric | none | regime+risk |" in report_text
+        assert "| Metric | none | regime+earnings |" in report_text
 
     def test_missing_regime_bars_abort_the_run_with_a_clear_message(
         self, tmp_path, monkeypatch
@@ -1870,7 +1870,7 @@ class TestPolicyEndToEnd:
 
 @pytest.mark.usefixtures("two_symbol_universe")
 class TestEarningsGuardWiring:
-    """`--policy regime+risk` supplies a real earnings calendar (Issue #201).
+    """`--policy regime+earnings` supplies a real earnings calendar (Issue #201).
 
     Before this, `build_entry_policy` was always called without
     `earnings_guard_fn`, so the earnings gate could only ever report 0.
@@ -1938,7 +1938,7 @@ class TestEarningsGuardWiring:
         self._seed_filings(db_path, [days[0] - timedelta(days=91), days[0]])
         captured = self._capture_policy_kwargs(monkeypatch)
 
-        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+risk"))
+        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+earnings"))
 
         assert len(captured) == 1
         assert captured[0] is not None
@@ -1957,7 +1957,7 @@ class TestEarningsGuardWiring:
         self._seed_filings(db_path, filed)
         captured = self._capture_policy_kwargs(monkeypatch)
 
-        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+risk"))
+        main(self._argv(db_path, days, tmp_path / "policy.md", "regime+earnings"))
 
         guard_fn = captured[0]
         assert guard_fn is not None

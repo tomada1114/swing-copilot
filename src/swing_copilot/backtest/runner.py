@@ -121,32 +121,36 @@ def run_backtest(  # noqa: PLR0913 - the three keyword-only injection seams
     entry_limit_atr_multiple = (
         overrides.entry_limit_atr_multiple
         if overrides.entry_limit_atr_multiple is not None
-        else deps.settings.backtest.entry_limit_atr_multiple
+        else deps.settings.trade_plan.entry_limit_atr_multiple
     )
     exit_atr_multiple = (
         overrides.exit_atr_multiple
         if overrides.exit_atr_multiple is not None
-        else deps.settings.backtest.exit_atr_multiple
+        else deps.settings.trade_plan.exit_atr_multiple
     )
     max_hold_days = (
         overrides.max_hold_days
         if overrides.max_hold_days is not None
-        else deps.settings.backtest.max_hold_days
+        else deps.settings.trade_plan.max_hold_days
     )
 
     effective_settings = deps.settings.model_copy(
         update={
+            "trade_plan": deps.settings.trade_plan.model_copy(
+                update={
+                    "entry_limit_atr_multiple": entry_limit_atr_multiple,
+                    "exit_atr_multiple": exit_atr_multiple,
+                    "max_hold_days": max_hold_days,
+                }
+            ),
             "backtest": deps.settings.backtest.model_copy(
                 update={
                     "commission_pct": commission_pct,
                     "slippage_pct": slippage_pct,
                     "slippage_multiplier": slippage_multiplier,
-                    "entry_limit_atr_multiple": entry_limit_atr_multiple,
-                    "exit_atr_multiple": exit_atr_multiple,
-                    "max_hold_days": max_hold_days,
                     "benchmark": benchmark_symbol,
                 }
-            )
+            ),
         }
     )
 

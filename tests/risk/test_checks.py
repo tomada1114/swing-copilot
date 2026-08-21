@@ -16,7 +16,6 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
 from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
 from swing_copilot.risk.checks import (
-    CIRCUIT_BREAKER_REASON_PREFIX,
     EARNINGS_DATE_UNKNOWN_WARNING,
     EARNINGS_PROXIMITY_BLOCK_REASON,
     EARNINGS_PROXIMITY_WARN_WARNING,
@@ -27,7 +26,6 @@ from swing_copilot.risk.checks import (
     RiskChecker,
     RiskRunContext,
 )
-from swing_copilot.risk.circuit_breaker import CircuitBreakerResult, CircuitState
 from swing_copilot.screening.base import Candidate
 
 if TYPE_CHECKING:
@@ -100,10 +98,10 @@ class TestTradePlan:
         assert not hasattr(result, "max_shares")
 
     def test_nonzero_limit_uses_worst_case_fill_for_one_r(self, settings):
-        backtest = settings.backtest.model_copy(
+        trade_plan = settings.trade_plan.model_copy(
             update={"entry_limit_atr_multiple": 0.3}
         )
-        checker = RiskChecker(settings.model_copy(update={"backtest": backtest}))
+        checker = RiskChecker(settings.model_copy(update={"trade_plan": trade_plan}))
 
         result = checker.check([_candidate(close=50.0, atr14=2.0)])[0]
 
@@ -189,19 +187,6 @@ class TestMarketState:
         assert result.status == "approved"
         assert result.binding_constraint is None
         assert result.warnings == ()
-
-    @pytest.mark.parametrize("state", [CircuitState.HALTED, CircuitState.COOLDOWN])
-    def test_backtest_compatibility_circuit_preserves_stable_reason(
-        self, settings, state
-    ):
-        circuit = CircuitBreakerResult(state, 2.0, 2.0, 2.0, 2, ("DAILY_LOSS",), "OK")
-        checker = RiskChecker(settings, RiskRunContext(circuit_breaker=circuit))
-
-        result = checker.check([_candidate()])[0]
-
-        assert result.status == "rejected"
-        assert f"{CIRCUIT_BREAKER_REASON_PREFIX}{state.value}" in result.reasons
-        assert result.binding_constraint == "regime"
 
 
 class TestEarningsGuard:

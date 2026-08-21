@@ -50,7 +50,7 @@ from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ZERO_SHARES,
     DailyExposure,
 )
-from swing_copilot.backtest.policy import EntryPolicyRequest, as_position
+from swing_copilot.backtest.policy import EntryPolicyRequest
 from swing_copilot.risk.position_sizing import calc_position_size
 from swing_copilot.screening.indicators import symbol_ohlc_on, symbol_window
 
@@ -71,10 +71,6 @@ SURVIVORSHIP_BIAS_NOTE = (
     "Removed or delisted symbols may be absent, overstating historical "
     "performance (survivorship bias)."
 )
-
-_LEGACY_SIM_TRADE_RISK_PCT = 0.01
-_LEGACY_SIM_POSITION_CAP_PCT = 0.10
-_LEGACY_SIM_MAX_CONCURRENT_POSITIONS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,17 +287,16 @@ class BacktestEngine:
         """
         self._entry_policy = entry_policy
         self._backtest_config = settings.backtest
-        # Production no longer carries account settings. These preserve the
-        # simulator's existing nominal-money convention until Issue #349 moves
-        # them into explicit `backtest.sim_*` configuration.
-        self._max_concurrent_positions = _LEGACY_SIM_MAX_CONCURRENT_POSITIONS
-        self._max_position_pct = _LEGACY_SIM_POSITION_CAP_PCT
-        self._max_trade_risk_pct = _LEGACY_SIM_TRADE_RISK_PCT
+        self._trade_plan = settings.trade_plan
+        # These values are nominal simulation inputs, not production advice.
+        self._max_concurrent_positions = settings.backtest.max_concurrent_positions
+        self._max_position_pct = settings.backtest.sim_position_cap_pct
+        self._max_trade_risk_pct = settings.backtest.sim_trade_risk_pct
         # Issue #194: the trailing stop's ATR period is configuration, not a
         # constant. It governs the *exit* side only; the entry stop keeps using
         # the screening metric `atr14` so the simulator sizes a position with
         # exactly the number `risk/checks.py` would have used in production.
-        self._exit_atr_period = settings.backtest.exit_atr_period
+        self._exit_atr_period = self._trade_plan.exit_atr_period
         # P2-09: applied on both entry and exit (incl. forced liquidation) --
         # a single computed rate so every call site stays in sync.
         self._slippage_pct = (
@@ -496,7 +491,7 @@ class BacktestEngine:
             equity_basis=signal.equity,
             state=state,
         )
-        decisions = self._policy_decisions(signal.day, considered, context)
+        decisions = self._policy_decisions(signal.day, considered)
 
         for index, candidate in enumerate(considered):
             if len(state.open_positions) >= self._max_concurrent_positions:
@@ -511,35 +506,18 @@ class BacktestEngine:
         self,
         signal_day: date,
         candidates: list[Candidate],
-        context: _FillContext,
     ) -> Mapping[str, EntryDecision]:
         """Consult the injected production gates once for the whole day.
 
-        The batch call is deliberate: `RiskChecker` accumulates portfolio heat
-        across a day's candidates in rank order, exactly as `pipeline/daily.py`
-        does, and a per-candidate call would quietly drop that accumulation.
+        The batch call keeps the policy boundary identical to production and
+        lets the policy evaluate every candidate against the same signal day.
         """
         if self._entry_policy is None:
             return {}
-        state = context.state
         return self._entry_policy.decide(
             EntryPolicyRequest(
                 as_of=signal_day,
                 candidates=tuple(candidates),
-                open_positions=tuple(
-                    as_position(
-                        position.symbol,
-                        position.entry_date,
-                        position.entry_price,
-                        position.shares,
-                        position.stop_price,
-                    )
-                    for position in state.open_positions.values()
-                ),
-                equity=context.equity_basis,
-                realized_pnl_history=tuple(
-                    (trade.exit_date, trade.pnl) for trade in state.closed_trades
-                ),
             )
         )
 
@@ -558,27 +536,23 @@ class BacktestEngine:
         if decision is not None and not decision.is_allowed:
             return decision.reject_reason or ENTRY_BLOCK_NOT_CALCULABLE
 
-        risk_pct = self._max_trade_risk_pct
-        if decision is not None and decision.max_trade_risk_pct is not None:
-            # The policy returns the report's effective configured budget; the
-            # REDUCE_ONLY label never changes account sizing.
-            risk_pct = decision.max_trade_risk_pct
-
         entry_price = self._entry_execution_price(bar, signal_bar, atr14)
         if entry_price is None:
             return ENTRY_BLOCK_LIMIT_NOT_REACHED
-        return self._commit_entry(context, candidate, entry_price, atr14, risk_pct)
+        return self._commit_entry(
+            context, candidate, entry_price, atr14, self._max_trade_risk_pct
+        )
 
     def _entry_execution_price(
         self, bar: dict[str, float], signal_bar: dict[str, float], atr14: float
     ) -> float | None:
         """Resolve one candidate's raw price under the configured entry mode."""
         limit_price = entry_limit_price(
-            signal_bar["close"], atr14, self._backtest_config.entry_limit_atr_multiple
+            signal_bar["close"], atr14, self._trade_plan.entry_limit_atr_multiple
         )
         if (
             self._backtest_config.entry == "next_open"
-            and self._backtest_config.entry_limit_atr_multiple == 0.0
+            and self._trade_plan.entry_limit_atr_multiple == 0.0
         ):
             # Zero is the compatibility/default arm: it measures the
             # historical next-open model, while a positive multiple opts into
@@ -601,7 +575,7 @@ class BacktestEngine:
     ) -> str | None:
         """Size and commit a resolved entry, returning mechanical blocks."""
         state = context.state
-        stop_price = entry_price - self._backtest_config.exit_atr_multiple * atr14
+        stop_price = entry_price - self._trade_plan.exit_atr_multiple * atr14
         try:
             shares = calc_position_size(
                 context.equity_basis,
@@ -645,7 +619,7 @@ class BacktestEngine:
                 close=bar["close"],
                 stop_price=position.stop_price,
                 days_held=position.days_held,
-                max_hold_days=self._backtest_config.max_hold_days,
+                max_hold_days=self._trade_plan.max_hold_days,
             )
             if decision is not None:
                 self._settle_exit(
@@ -704,7 +678,7 @@ class BacktestEngine:
                 current_stop=position.stop_price,
                 close=bar["close"],
                 atr=atr,
-                exit_atr_multiple=self._backtest_config.exit_atr_multiple,
+                exit_atr_multiple=self._trade_plan.exit_atr_multiple,
             )
 
     def _liquidate_remaining(

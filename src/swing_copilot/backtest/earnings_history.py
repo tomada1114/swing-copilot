@@ -95,7 +95,7 @@ class DerivedEarningsCalendar:
 
     `lookup` has the exact shape `build_entry_policy(...,
     earnings_guard_fn=...)` expects, so an instance is wired straight into the
-    `regime+risk` arm.
+    `regime+earnings` arm.
     """
 
     #: `{symbol: distinct filing dates, ascending}`, as

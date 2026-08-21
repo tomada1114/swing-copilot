@@ -7,7 +7,7 @@ no clock, no I/O, and every point-in-time cutoff arrives as an explicit
 `as_of`.
 
 The ATR smoothing period arrives as an explicit `period` argument (Issue #194):
-production callers pass `settings.backtest.exit_atr_period`, so changing that
+production callers pass `settings.trade_plan.exit_atr_period`, so changing that
 setting really does change the trailing stop instead of being a dead key. There
 is deliberately no default here — a silent 14 is exactly how the setting came
 to be unwired in the first place.
@@ -116,7 +116,7 @@ def atr_as_of(
         symbol: Ticker to select.
         as_of: Point-in-time cutoff (inclusive); later bars are never read.
         period: Wilder smoothing period, i.e.
-            `settings.backtest.exit_atr_period` for production callers
+            `settings.trade_plan.exit_atr_period` for production callers
             (validated `>= 1` there).
 
     Returns:

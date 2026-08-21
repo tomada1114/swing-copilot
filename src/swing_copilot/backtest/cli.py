@@ -1070,7 +1070,7 @@ def _earnings_guard_fn(
 ) -> Callable[[date, tuple[str, ...]], EarningsGuardInput] | None:
     """Build the point-in-time earnings lookup, when an arm can use one (#201).
 
-    Only `regime+risk` consults the earnings guard, so the filing history is
+    Only `regime+earnings` consults the earnings guard, so the filing history is
     read only for that arm — a `none`/`regime` run must not pay for a query
     whose answer it would discard, nor print a coverage line about a gate it
     never applies.
@@ -1085,7 +1085,7 @@ def _earnings_guard_fn(
     Returns:
         The lookup, or `None` when no arm applies the earnings gate.
     """
-    if EntryPolicyArm.REGIME_RISK not in arms:
+    if EntryPolicyArm.REGIME_EARNINGS not in arms:
         return None
     calendar = load_derived_earnings_calendar(
         deps.market_store,
@@ -1130,7 +1130,6 @@ def _run_backtest_command(
             build_entry_policy(
                 arm,
                 settings,
-                deps.universe,
                 frame.bars,
                 earnings_guard_fn=earnings_guard_fn,
             )
@@ -1236,7 +1235,7 @@ def _run_grid_command(
 
     cells: list[GridCell] = []
     for atr_pct, max_hold_pct, atr_value, max_hold_value in grid_param_values(
-        settings.backtest.exit_atr_multiple, settings.backtest.max_hold_days
+        settings.trade_plan.exit_atr_multiple, settings.trade_plan.max_hold_days
     ):
         cell_result = run_backtest(
             request,

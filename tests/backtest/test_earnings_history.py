@@ -391,9 +391,8 @@ class TestTheGateFiresOnDerivedHistory:
             {"AAA": filings}, settings.risk.earnings_lookahead_days
         )
         policy = build_entry_policy(
-            EntryPolicyArm.REGIME_RISK,
+            EntryPolicyArm.REGIME_EARNINGS,
             settings,
-            _UNIVERSE,
             bars_frame([*_market_bars(), *flat_bars("AAA", _DAYS, 100.0)]),
             earnings_guard_fn=calendar.lookup,
         )
@@ -404,8 +403,6 @@ class TestTheGateFiresOnDerivedHistory:
         return EntryPolicyRequest(
             as_of=_SIGNAL_DAY,
             candidates=(_candidate(),),
-            open_positions=(),
-            equity=_INITIAL_CASH,
         )
 
     def test_projected_report_within_the_block_window_rejects_the_candidate(

@@ -2,16 +2,15 @@
 
 The public daily path supplies symbol-level trade plans plus regime and earnings
 gates. It does not know a reader's account or holdings. The simulator reuses
-those point-in-time gates and may additionally apply a circuit breaker based on
-its own realized P&L; nominal-money sizing remains inside the engine.
+those point-in-time gates; nominal-money sizing remains inside the engine.
 
 This module closes that hole **by wrapping `risk/checks.py::RiskChecker`, not
 by reimplementing it**. A second copy of the gates inside the engine would
 measure a second system and reintroduce exactly the divergence being fixed, so
 `RiskCheckerEntryPolicy` builds the production checker once per simulated
 decision day and translates its `RiskAssessment`s into engine-level verdicts.
-Arms that exercise fewer gates (`EntryPolicyArm.REGIME`) leave earnings and the
-simulator-only circuit breaker disabled.
+The `regime` arm applies only market state; `regime+earnings` adds the
+point-in-time earnings gate.
 
 The adapter changes in this issue are intentionally compatibility-only: they
 follow the account-independent public `RiskChecker` contract after #348, while
@@ -34,18 +33,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
-from uuid import NAMESPACE_URL, uuid5
-
-import pandas as pd
 
 from swing_copilot.backtest.metrics import (
-    ENTRY_BLOCK_CIRCUIT_BREAKER,
     ENTRY_BLOCK_EARNINGS,
     ENTRY_BLOCK_NOT_CALCULABLE,
     ENTRY_BLOCK_REGIME,
 )
 from swing_copilot.exceptions import SwingCopilotError
-from swing_copilot.models import Position
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import determine_exposure
 from swing_copilot.regime.ftd import FtdThresholds
@@ -55,43 +49,27 @@ from swing_copilot.regime.gate import (
     calculate_regime_snapshot,
 )
 from swing_copilot.risk.checks import (
-    CIRCUIT_BREAKER_REASON_PREFIX,
     EARNINGS_PROXIMITY_BLOCK_REASON,
     REGIME_CASH_PRIORITY_REASON,
     EarningsGuardInput,
     RiskChecker,
     RiskRunContext,
 )
-from swing_copilot.risk.circuit_breaker import (
-    CircuitThresholds,
-    RealizedTrade,
-    evaluate_circuit_breaker,
-    evaluation_time_for_as_of,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from datetime import date
 
+    import pandas as pd
+
     from swing_copilot.config import RegimeConfig, Settings
     from swing_copilot.risk.checks import RiskAssessment
-    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate
-    from swing_copilot.universe import UniverseMember
 
 #: Index/volatility symbols `calculate_regime_snapshot` needs. Narrower than
 #: `report/daily_brief.MARKET_STRIP_SYMBOLS` on purpose: `^TNX` is header
 #: decoration and never reaches the gate.
 REGIME_SYMBOLS = ("SPY", "QQQ", "^VIX")
-
-#: Deterministic namespace for the synthetic `Position.position_id`s handed to
-#: `RiskChecker`. A random UUID would make two runs of the same backtest differ
-#: in a field nothing reads; `uuid5` keeps reproducibility exact.
-_POSITION_NAMESPACE = uuid5(NAMESPACE_URL, "swing_copilot/backtest/policy")
-
-# Temporary simulator-only compatibility values. Issue #349 removes the
-# account gates and replaces implicit nominal-money settings with `backtest.*`.
-_LEGACY_CIRCUIT_THRESHOLDS = CircuitThresholds(2.0, 5.0, 8.0, 2, 24)
 
 
 class EntryPolicyError(SwingCopilotError):
@@ -104,11 +82,10 @@ class EntryPolicyArm(StrEnum):
     #: Deterministic screening/sizing only — the pre-Issue-#184 simulator.
     NONE = "none"
     #: Regime Exposure Ceiling only (`CASH_PRIORITY` block, `REDUCE_ONLY`
-    #: label; it does not halve risk). Earnings and circuit breaker stay off.
+    #: label; it does not halve risk). The earnings gate stays off.
     REGIME = "regime"
-    #: Regime, earnings, and the realized-P&L circuit breaker fed from the
-    #: run's own closed trades.
-    REGIME_RISK = "regime+risk"
+    #: Regime plus the point-in-time earnings gate.
+    REGIME_EARNINGS = "regime+earnings"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +93,6 @@ class EntryDecision:
     """One candidate's gate verdict for one simulated decision day."""
 
     is_allowed: bool
-    #: Effective per-trade risk budget the engine must size with. `None` leaves
-    #: the engine on its configured default; `REDUCE_ONLY` does not change it.
-    max_trade_risk_pct: float | None = None
     #: One of `metrics.ENTRY_BLOCK_REASONS`; `None` while `is_allowed`.
     reject_reason: str | None = None
 
@@ -130,13 +104,6 @@ class EntryPolicyRequest:
     #: The signal day (the candidates' own `as_of`), never the fill day.
     as_of: date
     candidates: tuple[Candidate, ...]
-    open_positions: tuple[Position, ...]
-    #: Account equity as of `as_of`: simulated cash plus marked positions.
-    equity: float
-    #: `(exit_date, realized pnl)` for every trade already closed, feeding the
-    #: circuit breaker the same way `pipeline/daily.py` feeds it closed paper
-    #: positions.
-    realized_pnl_history: tuple[tuple[date, float], ...] = ()
 
 
 class EntryPolicy(Protocol):
@@ -150,7 +117,6 @@ class EntryPolicy(Protocol):
 def build_entry_policy(
     arm: EntryPolicyArm,
     settings: Settings,
-    universe: tuple[UniverseMember, ...],
     bars: pd.DataFrame,
     *,
     earnings_guard_fn: Callable[[date, tuple[str, ...]], EarningsGuardInput]
@@ -161,7 +127,6 @@ def build_entry_policy(
     Args:
         arm: Which gates this arm applies.
         settings: Loaded application settings (`risk.*`, `regime.*`).
-        universe: Current universe retained by the compatibility port.
         bars: The backtest's whole tidy OHLCV frame. It must carry
             `REGIME_SYMBOLS`; the policy trims every read at its own `as_of`.
         earnings_guard_fn: Point-in-time earnings lookups for `as_of` and the
@@ -181,13 +146,11 @@ def build_entry_policy(
     if arm is EntryPolicyArm.NONE:
         return None
     _require_regime_bars(bars)
-    is_full = arm is EntryPolicyArm.REGIME_RISK
+    is_earnings = arm is EntryPolicyArm.REGIME_EARNINGS
     return RiskCheckerEntryPolicy(
         settings,
-        universe,
         bars,
-        is_circuit_breaker_enabled=is_full,
-        earnings_guard_fn=earnings_guard_fn if is_full else None,
+        earnings_guard_fn=earnings_guard_fn if is_earnings else None,
     )
 
 
@@ -230,82 +193,14 @@ def _regime_thresholds(config: RegimeConfig) -> RegimeThresholds:
     )
 
 
-def as_position(
-    symbol: str, entry_date: date, entry_price: float, shares: int, stop_price: float
-) -> Position:
-    """Represent one open simulated holding the way `RiskChecker` expects it.
-
-    Args:
-        symbol: Held ticker.
-        entry_date: Fill date.
-        entry_price: Executed entry price, slippage included.
-        shares: Share count.
-        stop_price: Current stop, which portfolio heat requires to be set.
-
-    Returns:
-        An `open`, paper `Position` with a deterministic identifier.
-    """
-    return Position(
-        position_id=uuid5(_POSITION_NAMESPACE, f"{symbol}:{entry_date.isoformat()}"),
-        symbol=symbol,
-        is_paper=True,
-        entry_date=entry_date,
-        entry_price=entry_price,
-        shares=shares,
-        status="open",
-        stop_price=stop_price,
-    )
-
-
-class _FrameBarReader:
-    """Compatibility reader over the simulator's own point-in-time frame."""
-
-    def __init__(self, bars: pd.DataFrame) -> None:
-        self._columns = list(bars.columns)
-        self._by_symbol: dict[str, pd.DataFrame] = {
-            str(symbol): frame.sort_values("date")
-            for symbol, frame in bars.groupby("symbol")
-        }
-
-    def read_bars(
-        self, symbols: list[str], start: date, end: date, as_of: date
-    ) -> pd.DataFrame:
-        """Return `symbols`' bars over `[start, end]`, never past `as_of`.
-
-        Args:
-            symbols: Ticker symbols to read.
-            start: Inclusive range start.
-            end: Inclusive range end.
-            as_of: Point-in-time guard; the boundary row itself is included.
-
-        Returns:
-            Tidy bars, ordered by symbol then date.
-        """
-        # `date` objects throughout: `RiskChecker` derives its window start as
-        # `as_of - pd.Timedelta(...)`, which stays a plain `date`, and the
-        # frame's `date` column is object-dtype `date` (as `engine._bar`
-        # already assumes).
-        effective_end = min(end, as_of)
-        frames = [
-            frame.loc[(frame["date"] >= start) & (frame["date"] <= effective_end)]
-            for symbol in sorted(symbols)
-            if (frame := self._by_symbol.get(symbol)) is not None
-        ]
-        if not frames:
-            return pd.DataFrame(columns=self._columns)
-        return pd.concat(frames, ignore_index=True)
-
-
 class RiskCheckerEntryPolicy:
     """`EntryPolicy` implemented by running the production `RiskChecker`."""
 
     def __init__(
         self,
         settings: Settings,
-        universe: tuple[UniverseMember, ...],
         bars: pd.DataFrame,
         *,
-        is_circuit_breaker_enabled: bool = False,
         earnings_guard_fn: Callable[[date, tuple[str, ...]], EarningsGuardInput]
         | None = None,
     ) -> None:
@@ -313,30 +208,24 @@ class RiskCheckerEntryPolicy:
 
         Args:
             settings: Settings the wrapped checker runs under.
-            universe: Current universe retained by the compatibility port.
             bars: The backtest's tidy OHLCV frame, covering `REGIME_SYMBOLS`.
-            is_circuit_breaker_enabled: Whether the run's own realized P&L
-                feeds `evaluate_circuit_breaker`.
             earnings_guard_fn: Point-in-time earnings lookups, or `None` to
                 leave the earnings block inert.
         """
         self._settings = settings
-        self._universe = universe
         # Sliced once: `decide` runs per simulated day and must not re-scan
         # the whole multi-year frame for the index strip every time.
         self._regime_bars = {
             symbol: bars.loc[bars["symbol"] == symbol] for symbol in REGIME_SYMBOLS
         }
-        self._bar_reader = _FrameBarReader(bars)
         self._thresholds = _regime_thresholds(settings.regime)
-        self._is_circuit_breaker_enabled = is_circuit_breaker_enabled
         self._earnings_guard_fn = earnings_guard_fn
 
     def decide(self, request: EntryPolicyRequest) -> Mapping[str, EntryDecision]:
         """Assess every candidate through the production gates.
 
         Args:
-            request: The signal day's candidates, holdings, and equity.
+            request: The signal day's candidates.
 
         Returns:
             `{symbol: decision}` for exactly the candidates supplied.
@@ -353,7 +242,6 @@ class RiskCheckerEntryPolicy:
             self._settings,
             RiskRunContext(
                 earnings_guard=self._earnings_guard(request),
-                circuit_breaker=self._circuit_breaker(request),
             ),
         )
         assessments = checker.check(list(request.candidates), exposure)
@@ -367,22 +255,6 @@ class RiskCheckerEntryPolicy:
         symbols = tuple(candidate.symbol for candidate in request.candidates)
         return self._earnings_guard_fn(request.as_of, symbols)
 
-    def _circuit_breaker(
-        self, request: EntryPolicyRequest
-    ) -> CircuitBreakerResult | None:
-        if not self._is_circuit_breaker_enabled:
-            return None
-        return evaluate_circuit_breaker(
-            [
-                RealizedTrade(evaluation_time_for_as_of(exit_date), pnl)
-                for exit_date, pnl in request.realized_pnl_history
-            ],
-            request.equity,
-            request.as_of,
-            evaluation_time_for_as_of(request.as_of),
-            _LEGACY_CIRCUIT_THRESHOLDS,
-        )
-
 
 def _to_decision(assessment: RiskAssessment) -> EntryDecision:
     if assessment.status == "approved":
@@ -394,14 +266,12 @@ def _block_reason(assessment: RiskAssessment) -> str:
     """Pick the one gate reported as "why this entry was not taken".
 
     Several gates can fire on the same candidate, so the order below is the
-    contract: market state, simulator loss gate, earnings, then an invalid
+    contract: market state, earnings, then an invalid
     symbol-level trade plan.
     """
     reasons = assessment.reasons
     if REGIME_CASH_PRIORITY_REASON in reasons:
         return ENTRY_BLOCK_REGIME
-    if any(reason.startswith(CIRCUIT_BREAKER_REASON_PREFIX) for reason in reasons):
-        return ENTRY_BLOCK_CIRCUIT_BREAKER
     if EARNINGS_PROXIMITY_BLOCK_REASON in reasons:
         return ENTRY_BLOCK_EARNINGS
     return ENTRY_BLOCK_NOT_CALCULABLE
@@ -411,7 +281,7 @@ def parse_policy_arms(raw: str) -> tuple[EntryPolicyArm, ...]:
     """Parse a comma-separated `--policy` value into distinct arms, in order.
 
     Args:
-        raw: e.g. `"none,regime+risk"`.
+        raw: e.g. `"none,regime+earnings"`.
 
     Returns:
         The arms in the order given, which is the order the report compares.

@@ -129,8 +129,8 @@ LEDGER = Hint(
         "買い推奨の一覧ではないので、両者を混ぜた平均も意味を持たない。"
     ),
     details=(
-        "手仕舞い規則はバックテストと同じ——backtest.exit_atr_multiple の "
-        "ATR14 トレーリングストップと backtest.max_hold_days の最大保有営業日。"
+        "手仕舞い規則はバックテストと同じ——trade_plan.exit_atr_multiple の "
+        "ATR14 トレーリングストップと trade_plan.max_hold_days の最大保有営業日。"
         "両区分が同じ規則で回るからこそ、proceed と skip の差が"
         "「定性判断が上乗せした分」として読める。",
     ),

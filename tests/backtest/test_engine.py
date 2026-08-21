@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 
 
 INITIAL_CASH = 100_000.0
-LEGACY_SIM_POSITION_CAP_PCT = 0.10
-LEGACY_SIM_TRADE_RISK_PCT = 0.01
+SIM_POSITION_CAP_PCT = 0.10
+SIM_TRADE_RISK_PCT = 0.01
 
 
 def _candidate(
@@ -152,13 +152,15 @@ class TestEntryFill:
         )
 
         expected_entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
-        expected_stop = expected_entry_price - settings.backtest.exit_atr_multiple * 2.0
+        expected_stop = (
+            expected_entry_price - settings.trade_plan.exit_atr_multiple * 2.0
+        )
         expected_shares = calc_position_size(
             INITIAL_CASH,
             expected_entry_price,
             expected_stop,
-            LEGACY_SIM_POSITION_CAP_PCT,
-            LEGACY_SIM_TRADE_RISK_PCT,
+            settings.backtest.sim_position_cap_pct,
+            settings.backtest.sim_trade_risk_pct,
         ).shares
 
         # Verify the open position on its fill day, before the mandatory
@@ -179,7 +181,7 @@ class TestLimitEntryGate:
         return BacktestEngine(
             settings.model_copy(
                 update={
-                    "backtest": settings.backtest.model_copy(
+                    "trade_plan": settings.trade_plan.model_copy(
                         update={"entry_limit_atr_multiple": 0.5}
                     )
                 }
@@ -268,13 +270,15 @@ class TestDuplicateBars:
         )
 
         expected_entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
-        expected_stop = expected_entry_price - settings.backtest.exit_atr_multiple * 2.0
+        expected_stop = (
+            expected_entry_price - settings.trade_plan.exit_atr_multiple * 2.0
+        )
         expected_shares = calc_position_size(
             INITIAL_CASH,
             expected_entry_price,
             expected_stop,
-            LEGACY_SIM_POSITION_CAP_PCT,
-            LEGACY_SIM_TRADE_RISK_PCT,
+            settings.backtest.sim_position_cap_pct,
+            settings.backtest.sim_trade_risk_pct,
         ).shares
         cost = (
             expected_shares
@@ -412,7 +416,7 @@ class TestGapStop:
 
 class TestMaxHold:
     def test_forced_exit_at_max_hold_days(self, settings, engine):
-        max_hold = settings.backtest.max_hold_days
+        max_hold = settings.trade_plan.max_hold_days
         days = LONG_TRADING_DAYS[: max_hold + 3]
         rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
         bars = bars_frame(rows)
@@ -430,7 +434,9 @@ class TestMaxHold:
     def test_stop_takes_precedence_if_triggered_on_max_hold_day(self, settings):
         custom_settings = settings.model_copy(
             update={
-                "backtest": settings.backtest.model_copy(update={"max_hold_days": 2})
+                "trade_plan": settings.trade_plan.model_copy(
+                    update={"max_hold_days": 2}
+                )
             }
         )
         engine = BacktestEngine(custom_settings)
@@ -481,7 +487,7 @@ class TestCashAndRankConstraints:
         }
         assert len(held_symbols) <= 1
 
-    def test_concurrent_positions_use_legacy_simulator_cap(self, engine):
+    def test_concurrent_positions_use_configured_simulator_cap(self, settings, engine):
         days = TRADING_DAYS[:3]
         symbols = [f"SYM{i}" for i in range(20)]
         rows = list(_spy_bars(days))
@@ -499,7 +505,7 @@ class TestCashAndRankConstraints:
             days, bars, lambda d: candidates_by_day.get(d, []), initial_cash=1_000_000.0
         )
 
-        max_concurrent = max(1, int(1 / LEGACY_SIM_POSITION_CAP_PCT))
+        max_concurrent = settings.backtest.max_concurrent_positions
         filled_symbols = {trade.symbol for trade in result.trades}
         assert len(filled_symbols) <= max_concurrent
 
@@ -579,13 +585,13 @@ class TestBenchmarkAndReproducibility:
         )
 
         entry = 100.0 * (1 + settings.backtest.slippage_pct)
-        stop = entry - settings.backtest.exit_atr_multiple
+        stop = entry - settings.trade_plan.exit_atr_multiple
         shares = calc_position_size(
             INITIAL_CASH,
             entry,
             stop,
-            LEGACY_SIM_POSITION_CAP_PCT,
-            LEGACY_SIM_TRADE_RISK_PCT,
+            settings.backtest.sim_position_cap_pct,
+            settings.backtest.sim_trade_risk_pct,
         ).shares
         entry_cost = shares * entry * (1 + settings.backtest.commission_pct)
         exit_price = 100.0 * (1 - settings.backtest.slippage_pct)
@@ -686,7 +692,7 @@ class TestPessimisticSlippageMultiplier:
         assert pessimistic_result.final_equity < normal_result.final_equity
 
     def test_forced_liquidation_exit_also_scales_with_multiplier(self, settings):
-        max_hold = settings.backtest.max_hold_days
+        max_hold = settings.trade_plan.max_hold_days
         days = LONG_TRADING_DAYS[: max_hold + 3]
         rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
         candidates = {days[1]: [_candidate("AAA", atr14=1.0, as_of=days[1])]}
@@ -867,12 +873,10 @@ class _RecordingPolicy:
         *,
         blocked: frozenset[str] = frozenset(),
         reject_reason: str = ENTRY_BLOCK_REGIME,
-        max_trade_risk_pct: float | None = None,
     ) -> None:
         self.requests: list[EntryPolicyRequest] = []
         self._blocked = blocked
         self._reject_reason = reject_reason
-        self._max_trade_risk_pct = max_trade_risk_pct
 
     def decide(self, request: EntryPolicyRequest) -> dict[str, EntryDecision]:
         self.requests.append(request)
@@ -880,9 +884,7 @@ class _RecordingPolicy:
             candidate.symbol: (
                 EntryDecision(is_allowed=False, reject_reason=self._reject_reason)
                 if candidate.symbol in self._blocked
-                else EntryDecision(
-                    is_allowed=True, max_trade_risk_pct=self._max_trade_risk_pct
-                )
+                else EntryDecision(is_allowed=True)
             )
             for candidate in request.candidates
         }
@@ -892,13 +894,13 @@ def _sized(
     settings: Settings, equity: float, *, price: float = 100.0, atr14: float = 2.0
 ) -> int:
     entry_price = price * (1 + settings.backtest.slippage_pct)
-    stop_price = entry_price - settings.backtest.exit_atr_multiple * atr14
+    stop_price = entry_price - settings.trade_plan.exit_atr_multiple * atr14
     return calc_position_size(
         equity,
         entry_price,
         stop_price,
-        LEGACY_SIM_POSITION_CAP_PCT,
-        LEGACY_SIM_TRADE_RISK_PCT,
+        settings.backtest.sim_position_cap_pct,
+        settings.backtest.sim_trade_risk_pct,
     ).shares
 
 
@@ -1016,83 +1018,35 @@ class TestEntryPolicyInjection:
         request = policy.requests[0]
         # The fill happens on days[2]; the gate is evaluated on days[1].
         assert request.as_of == days[1]
-        assert request.equity == pytest.approx(INITIAL_CASH)
-        assert request.open_positions == ()
 
-    def test_reduced_risk_budget_from_the_policy_shrinks_the_position(self, settings):
+    def test_simulation_risk_budget_is_read_from_backtest_settings(self, settings):
         days = TRADING_DAYS[:4]
         rows = [*_spy_bars(days), *flat_bars("AAA", days, 100.0)]
-        halved = LEGACY_SIM_TRADE_RISK_PCT / 2
-        policy = _RecordingPolicy(max_trade_risk_pct=halved)
-        # A wide ATR makes the *risk* cap the binding one, so halving the
-        # budget is actually observable in the share count.
+        sim_risk_pct = settings.backtest.sim_trade_risk_pct / 2
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(
+                    update={"sim_trade_risk_pct": sim_risk_pct}
+                )
+            }
+        )
         candidates_by_day = {days[1]: [_candidate("AAA", atr14=20.0, as_of=days[1])]}
 
-        result = BacktestEngine(settings, policy).run(
+        result = BacktestEngine(custom_settings).run(
             days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
         )
 
-        entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
-        stop_price = entry_price - settings.backtest.exit_atr_multiple * 20.0
+        entry_price = 100.0 * (1 + custom_settings.backtest.slippage_pct)
+        stop_price = entry_price - custom_settings.trade_plan.exit_atr_multiple * 20.0
         expected = calc_position_size(
             INITIAL_CASH,
             entry_price,
             stop_price,
-            LEGACY_SIM_POSITION_CAP_PCT,
-            halved,
+            custom_settings.backtest.sim_position_cap_pct,
+            sim_risk_pct,
         ).shares
         assert result.trades[0].shares == expected
         assert expected < _sized(settings, INITIAL_CASH, atr14=20.0)
-
-    def test_open_positions_reach_the_policy_with_their_current_stop(self, settings):
-        days = TRADING_DAYS[:6]
-        rows = [
-            *_spy_bars(days),
-            *flat_bars("AAA", days, 100.0),
-            *flat_bars("BBB", days, 100.0),
-        ]
-        policy = _RecordingPolicy()
-        candidates_by_day = {
-            days[0]: [_candidate("AAA", as_of=days[0])],
-            days[1]: [_candidate("BBB", as_of=days[1])],
-        }
-
-        BacktestEngine(settings, policy).run(
-            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
-        )
-
-        second_request = policy.requests[1]
-        assert [p.symbol for p in second_request.open_positions] == ["AAA"]
-        assert second_request.open_positions[0].stop_price is not None
-
-    def test_closed_trades_are_offered_to_the_policy_as_realized_pnl(self, settings):
-        days = TRADING_DAYS[:6]
-        rows = [
-            *_spy_bars(days),
-            bar_row("AAA", days[0], (100, 101, 99, 100)),
-            bar_row("AAA", days[1], (100, 101, 99, 100)),
-            # Collapses below the stop the day after the fill.
-            bar_row("AAA", days[2], (50, 51, 49, 50)),
-            bar_row("AAA", days[3], (50, 51, 49, 50)),
-            bar_row("AAA", days[4], (50, 51, 49, 50)),
-            bar_row("AAA", days[5], (50, 51, 49, 50)),
-            *flat_bars("BBB", days, 100.0),
-        ]
-        policy = _RecordingPolicy()
-        candidates_by_day = {
-            days[0]: [_candidate("AAA", as_of=days[0])],
-            days[3]: [_candidate("BBB", as_of=days[3])],
-        }
-
-        result = BacktestEngine(settings, policy).run(
-            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
-        )
-
-        stop_trade = next(t for t in result.trades if t.symbol == "AAA")
-        history = policy.requests[-1].realized_pnl_history
-        assert len(history) == 1
-        assert history[0][0] == stop_trade.exit_date
-        assert history[0][1] == pytest.approx(stop_trade.pnl)
 
 
 class TestEntryInstrumentation:
@@ -1120,7 +1074,7 @@ class TestEntryInstrumentation:
         assert dict(result.entry_block_counts)[ENTRY_BLOCK_ALREADY_HELD] == 1
 
     def test_candidate_beyond_the_concurrency_cap_counts_as_max_concurrent(
-        self, engine
+        self, settings, engine
     ):
         days = TRADING_DAYS[:3]
         symbols = [f"SYM{index}" for index in range(20)]
@@ -1141,7 +1095,7 @@ class TestEntryInstrumentation:
             initial_cash=1_000_000.0,
         )
 
-        max_concurrent = max(1, int(1 / LEGACY_SIM_POSITION_CAP_PCT))
+        max_concurrent = settings.backtest.max_concurrent_positions
         counts = dict(result.entry_block_counts)
         assert counts[ENTRY_BLOCK_MAX_CONCURRENT] == len(symbols) - max_concurrent
         assert result.max_concurrent_reached == max_concurrent
@@ -1223,7 +1177,7 @@ class TestEntryInstrumentation:
 
 
 class TestExitAtrPeriod:
-    """Issue #194: `backtest.exit_atr_period` really drives the trailing stop.
+    """Issue #194: `trade_plan.exit_atr_period` really drives the trailing stop.
 
     The bars ramp with a true range of exactly 2.0 every session, so the ATR
     is exactly 2.0 for *any* period until volatility collapses on session 20.
@@ -1261,7 +1215,7 @@ class TestExitAtrPeriod:
         engine = BacktestEngine(
             settings.model_copy(
                 update={
-                    "backtest": settings.backtest.model_copy(
+                    "trade_plan": settings.trade_plan.model_copy(
                         update={"exit_atr_period": period}
                     )
                 }
@@ -1300,9 +1254,9 @@ class TestExitAtrPeriod:
         # ATR(14) on session 20 = 2 + (0.4 - 2) / 14 = 1.8857... -> stop
         # 104.7857..., below session 21's low (105.00): exactly the
         # pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline.
-        assert settings.backtest.exit_atr_period == 14
+        assert settings.trade_plan.exit_atr_period == 14
 
-        result = self._run(settings, settings.backtest.exit_atr_period)
+        result = self._run(settings, settings.trade_plan.exit_atr_period)
 
         slippage = settings.backtest.slippage_pct
         commission = settings.backtest.commission_pct

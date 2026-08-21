@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from swing_copilot.backtest.metrics import (
-    ENTRY_BLOCK_CIRCUIT_BREAKER,
     ENTRY_BLOCK_EARNINGS,
     ENTRY_BLOCK_NOT_CALCULABLE,
     ENTRY_BLOCK_REGIME,
@@ -23,14 +22,12 @@ from swing_copilot.backtest.policy import (
     EntryPolicyArm,
     EntryPolicyError,
     EntryPolicyRequest,
-    as_position,
     build_entry_policy,
     parse_policy_arms,
 )
 from swing_copilot.data.earnings import EarningsEvent, EarningsLookup
 from swing_copilot.risk.checks import EarningsGuardInput
 from swing_copilot.screening.base import Candidate
-from swing_copilot.universe import UniverseMember
 from tests.backtest.conftest import bar_row, bars_frame, flat_bars
 
 if TYPE_CHECKING:
@@ -42,28 +39,6 @@ if TYPE_CHECKING:
 # production gate's SMA200. A shorter fixture would silently test the UNKNOWN
 # path rather than the policy's actual exposure branches.
 _DAYS = [date(2027, 1, 1) + timedelta(days=index) for index in range(260)]
-_EQUITY = 100_000.0
-
-_UNIVERSE = (
-    UniverseMember(
-        symbol="AAA",
-        company_name="AAA Inc.",
-        gics_sector="Information Technology",
-        source_symbol="AAA",
-    ),
-    UniverseMember(
-        symbol="BBB",
-        company_name="BBB Inc.",
-        gics_sector="Information Technology",
-        source_symbol="BBB",
-    ),
-    UniverseMember(
-        symbol="CCC",
-        company_name="CCC Inc.",
-        gics_sector="Utilities",
-        source_symbol="CCC",
-    ),
-)
 
 
 def _rising(
@@ -137,15 +112,10 @@ def _request(
     *,
     as_of: date | None = None,
     candidates: tuple[Candidate, ...] = (),
-    open_positions: tuple[object, ...] = (),
-    realized: tuple[tuple[date, float], ...] = (),
 ) -> EntryPolicyRequest:
     return EntryPolicyRequest(
         as_of=as_of or _DAYS[-1],
         candidates=candidates or (_candidate(),),
-        open_positions=open_positions,  # type: ignore[arg-type]
-        equity=_EQUITY,
-        realized_pnl_history=realized,
     )
 
 
@@ -159,7 +129,6 @@ def _policy(
     policy = build_entry_policy(
         arm,
         settings,
-        _UNIVERSE,
         bars_frame(rows),
         earnings_guard_fn=earnings_guard_fn,
     )
@@ -173,7 +142,6 @@ class TestArmSelection:
             build_entry_policy(
                 EntryPolicyArm.NONE,
                 settings,
-                _UNIVERSE,
                 bars_frame(_market_bars(vix=12.0)),
             )
             is None
@@ -183,15 +151,11 @@ class TestArmSelection:
         rows = flat_bars("AAA", _DAYS, 100.0)
 
         with pytest.raises(EntryPolicyError, match=r"QQQ"):
-            build_entry_policy(
-                EntryPolicyArm.REGIME, settings, _UNIVERSE, bars_frame(rows)
-            )
+            build_entry_policy(EntryPolicyArm.REGIME, settings, bars_frame(rows))
 
     def test_empty_bars_frame_fails_fast(self, settings):
         with pytest.raises(EntryPolicyError, match=r"SPY"):
-            build_entry_policy(
-                EntryPolicyArm.REGIME, settings, _UNIVERSE, bars_frame([])
-            )
+            build_entry_policy(EntryPolicyArm.REGIME, settings, bars_frame([]))
 
 
 class TestRegimeGate:
@@ -213,7 +177,6 @@ class TestRegimeGate:
         decision = policy.decide(_request())["AAA"]
 
         assert decision.is_allowed is True
-        assert decision.max_trade_risk_pct is None
 
     def test_new_entry_allowed_does_not_override_simulator_sizing(self, settings):
         policy = _policy(
@@ -225,7 +188,6 @@ class TestRegimeGate:
         decision = policy.decide(_request())["AAA"]
 
         assert decision.is_allowed is True
-        assert decision.max_trade_risk_pct is None
 
     def test_a_candidate_the_checker_cannot_size_is_withheld_fail_closed(
         self, settings
@@ -288,104 +250,6 @@ class TestAsOfDiscipline:
         assert decision.is_allowed is True
 
 
-class TestPortfolioHeatRemoval:
-    @staticmethod
-    def _hot_portfolio():
-        # (200 - 100) * 70 = $7,000 of open stop risk = 7% of equity, above
-        # the configured 6% ceiling.
-        return (as_position("BBB", _DAYS[0], 200.0, 70, 100.0),)
-
-    def test_regime_risk_arm_no_longer_applies_account_heat(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME_RISK,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-
-        decision = policy.decide(_request(open_positions=self._hot_portfolio()))["AAA"]
-
-        assert decision.is_allowed is True
-
-    def test_regime_arm_leaves_the_heat_ceiling_out_of_the_way(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-
-        decision = policy.decide(_request(open_positions=self._hot_portfolio()))["AAA"]
-
-        assert decision.is_allowed is True
-
-
-class TestSectorCapRemoval:
-    def test_regime_risk_arm_no_longer_applies_account_sector_cap(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME_RISK,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-        # 300 x $100 = $30,000 = the whole 30% Information Technology budget,
-        # so any further IT exposure breaches it.
-        portfolio = (as_position("BBB", _DAYS[0], 100.0, 300, 99.0),)
-
-        decision = policy.decide(_request(open_positions=portfolio))["AAA"]
-
-        assert decision.is_allowed is True
-
-    def test_regime_arm_leaves_the_sector_ceiling_out_of_the_way(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-        portfolio = (as_position("BBB", _DAYS[0], 100.0, 300, 99.0),)
-
-        decision = policy.decide(_request(open_positions=portfolio))["AAA"]
-
-        assert decision.is_allowed is True
-
-    def test_other_sector_candidate_is_unaffected(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME_RISK,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("CCC", _DAYS, 100.0)],
-        )
-        portfolio = (as_position("BBB", _DAYS[0], 100.0, 300, 99.0),)
-
-        decision = policy.decide(
-            _request(candidates=(_candidate("CCC"),), open_positions=portfolio)
-        )["CCC"]
-
-        assert decision.is_allowed is True
-
-
-class TestCircuitBreaker:
-    _LOSSES = ((_DAYS[-1], -3_000.0),)
-
-    def test_regime_risk_arm_halts_on_the_runs_own_realized_losses(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME_RISK,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-
-        decision = policy.decide(_request(realized=self._LOSSES))["AAA"]
-
-        assert decision.reject_reason == ENTRY_BLOCK_CIRCUIT_BREAKER
-
-    def test_regime_arm_never_consults_the_circuit_breaker(self, settings):
-        policy = _policy(
-            settings,
-            EntryPolicyArm.REGIME,
-            [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
-        )
-
-        decision = policy.decide(_request(realized=self._LOSSES))["AAA"]
-
-        assert decision.is_allowed is True
-
-
 class TestEarningsGuard:
     @staticmethod
     def _guard(as_of: date, symbols: tuple[str, ...]) -> EarningsGuardInput:
@@ -403,7 +267,7 @@ class TestEarningsGuard:
     def test_injected_lookup_blocks_with_the_earnings_reason(self, settings):
         policy = _policy(
             settings,
-            EntryPolicyArm.REGIME_RISK,
+            EntryPolicyArm.REGIME_EARNINGS,
             [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
             earnings_guard_fn=self._guard,
         )
@@ -415,7 +279,7 @@ class TestEarningsGuard:
     def test_without_a_lookup_source_the_earnings_gate_stays_inert(self, settings):
         policy = _policy(
             settings,
-            EntryPolicyArm.REGIME_RISK,
+            EntryPolicyArm.REGIME_EARNINGS,
             [*_market_bars(vix=12.0, is_rising=True), *flat_bars("AAA", _DAYS, 100.0)],
         )
 
@@ -424,35 +288,10 @@ class TestEarningsGuard:
         assert decision.is_allowed is True
 
 
-class TestCorrelationLookback:
-    def test_held_symbol_history_is_read_from_the_simulators_own_frame(self, settings):
-        # A held symbol with a full price history exercises the in-memory
-        # `read_bars` path `RiskChecker` uses for its correlation warning; it
-        # must neither reach storage nor change the verdict.
-        days = [date(2026, 6, 1) + timedelta(days=index) for index in range(200)]
-        rows = [
-            *_market_bars(vix=12.0, is_rising=True, days=days),
-            *_rising("AAA", days, 100.0),
-            *_rising("BBB", days, 50.0),
-        ]
-        policy = build_entry_policy(
-            EntryPolicyArm.REGIME_RISK, settings, _UNIVERSE, bars_frame(rows)
-        )
-        assert policy is not None
-        request = EntryPolicyRequest(
-            as_of=days[-1],
-            candidates=(_candidate(),),
-            open_positions=(as_position("BBB", days[0], 50.0, 10, 49.0),),
-            equity=_EQUITY,
-        )
-
-        assert policy.decide(request)["AAA"].is_allowed is True
-
-
 class TestParsePolicyArms:
     def test_comma_separated_list_keeps_the_given_order(self):
-        assert parse_policy_arms("regime+risk,none") == (
-            EntryPolicyArm.REGIME_RISK,
+        assert parse_policy_arms("regime+earnings,none") == (
+            EntryPolicyArm.REGIME_EARNINGS,
             EntryPolicyArm.NONE,
         )
 
@@ -464,7 +303,7 @@ class TestParsePolicyArms:
 
     def test_unknown_arm_is_rejected_with_the_available_values(self):
         with pytest.raises(
-            EntryPolicyError, match=r"利用可能: none, regime, regime\+risk"
+            EntryPolicyError, match=r"利用可能: none, regime, regime\+earnings"
         ):
             parse_policy_arms("regime,bogus")
 

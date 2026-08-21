@@ -178,8 +178,9 @@ JSON 成果物だけでなく、YAML 設定と Markdown 台帳も同じ入口を
 ## バックテストへの市場状態ゲート注入（Issue #184）
 
 本番RiskCheckerは市場状態・決算と銘柄単位の価格計画だけを扱う。バックテストは
-Issue #184でこれを注入し、名目資金の株数計算とシミュレーション損失ゲートは
-バックテスト内部に限定する。ここで固定するのはゲート入力のas-of規律である。
+Issue #184でこれを注入し、名目資金の株数計算はバックテスト専用の設定で行う。
+ポートフォリオ熱量・セクター・相関・サーキットブレーカーはこの境界で判定しない。
+ここで固定するのはゲート入力のas-of規律である。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
@@ -194,7 +195,7 @@ Issue #184でこれを注入し、名目資金の株数計算とシミュレー�
 | `backtest/earnings_history.py` | 推定できない銘柄は「不明」と報告し、日付を捏造しない | 提出履歴が1件しか無い銘柄に既定の四半期日程を当てはめる | `tests/backtest/test_earnings_history.py::TestProjection::test_a_single_visible_filing_cannot_establish_a_cadence`、`tests/backtest/test_earnings_history.py::TestProjection::test_symbol_with_no_collected_filings_reports_unknown`、`tests/backtest/test_earnings_history.py::TestProjection::test_projection_the_calendar_has_outrun_is_reported_as_unknown` |
 | `storage/market_store.py` | `read_filing_dates` は `filed_at <= as_of` を自身のクエリで切る | 呼び出し側の切り忘れで未来の提出が決算推定に混入する | `tests/storage/test_market_store.py::TestReadFilingDates::test_filing_accepted_exactly_on_the_cutoff_is_visible`、`tests/storage/test_market_store.py::TestReadFilingDates::test_filing_accepted_the_day_after_the_cutoff_is_invisible` |
 | `backtest/cli.py` | `--policy` の A/B は 1 本の候補ストリームを共有する | アームごとにスクリーニングし直し、差分がゲート以外にも由来する | `tests/backtest/test_cli.py::TestPolicyEndToEnd::test_ab_run_compares_arms_over_one_candidate_stream` |
-| `backtest/cli.py` | `--policy regime+risk` にだけ決算カレンダーを配線する | 決算ゲートを適用しないアームが提出履歴を読み、被覆率だけを表示する | `tests/backtest/test_cli.py::TestEarningsGuardWiring::test_regime_risk_arm_receives_the_filing_derived_calendar`、`tests/backtest/test_cli.py::TestEarningsGuardWiring::test_arms_that_cannot_use_the_gate_never_read_the_filing_history` |
+| `backtest/cli.py` | `--policy regime+earnings` にだけ決算カレンダーを配線する | 決算ゲートを適用しないアームが提出履歴を読み、被覆率だけを表示する | `tests/backtest/test_cli.py::TestEarningsGuardWiring::test_regime_risk_arm_receives_the_filing_derived_calendar`、`tests/backtest/test_cli.py::TestEarningsGuardWiring::test_arms_that_cannot_use_the_gate_never_read_the_filing_history` |
 | `backtest/metrics.py` | 発火 0 件のエントリー阻止理由も 0 として必ず報告する | 一度も効かなかったゲートがレポートから消え、「効いた」と読めてしまう | `tests/backtest/test_metrics.py::TestEntryBlockBreakdown::test_every_known_reason_is_reported_even_at_zero` |
 
 ## レート制限スロットルの記録時点（Issue #253）

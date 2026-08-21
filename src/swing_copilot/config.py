@@ -247,8 +247,17 @@ class TechnicalSignalConfig(_StrictModel):
     vcp: VcpSignalConfig = VcpSignalConfig()
 
 
+class TradePlanConfig(_StrictModel):
+    """The trade plan shared by production advice, tracking, and backtests."""
+
+    entry_limit_atr_multiple: float = Field(default=0.0, ge=0.0)
+    exit_atr_multiple: float = Field(default=2.5, gt=0.0)
+    exit_atr_period: int = Field(default=14, ge=1)
+    max_hold_days: int = Field(default=25, ge=1)
+
+
 class BacktestConfig(_StrictModel):
-    """`backtest.*` in `settings.yaml`."""
+    """`backtest.*` simulation and cost settings in `settings.yaml`."""
 
     initial_cash_usd: float = Field(default=100_000, gt=0.0)
     # The engine consumes this mode: candidates are queued after the signal
@@ -257,16 +266,10 @@ class BacktestConfig(_StrictModel):
     # gate. Keeping a Literal prevents an arbitrary, silently ignored string
     # from becoming config.
     entry: Literal["next_open", "next_limit"] = "next_open"
-    # Planned limit-order entry above the run-day close. Kept at zero until
-    # the backtest gate supplies evidence for a non-zero value (#325/#326).
-    entry_limit_atr_multiple: float = Field(default=0.0, ge=0.0)
-    exit_atr_multiple: float = Field(default=2.5, gt=0.0)
-    # Wilder period of the ATR the *exit* side uses: the backtest's trailing
-    # stop and the tracking ledger's replay of it (Issue #194). The entry-side
-    # stop distance keeps using screening's `atr14` ranking metric, so this key
-    # can be swept without moving position sizing or the ranking.
-    exit_atr_period: int = Field(default=14, ge=1)
-    max_hold_days: int = Field(default=60, ge=1)
+    # These are nominal simulation values, never production advice values.
+    sim_trade_risk_pct: float = Field(default=0.01, gt=0.0, le=1.0)
+    sim_position_cap_pct: float = Field(default=0.10, gt=0.0, le=1.0)
+    max_concurrent_positions: int = Field(default=10, ge=1)
     commission_pct: float = Field(default=0.001, ge=0.0, lt=1.0)
     slippage_pct: float = Field(default=0.001, ge=0.0, lt=1.0)
     benchmark: str = "SPY"
@@ -492,6 +495,7 @@ class Settings(_StrictModel):
     risk: RiskConfig = RiskConfig()
     fundamental_filters: FundamentalFilterConfig = FundamentalFilterConfig()
     technical_signals: TechnicalSignalConfig = TechnicalSignalConfig()
+    trade_plan: TradePlanConfig = TradePlanConfig()
     backtest: BacktestConfig = BacktestConfig()
     analysis: AnalysisConfig = AnalysisConfig()
     schedule: ScheduleConfig = ScheduleConfig()

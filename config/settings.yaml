@@ -62,13 +62,19 @@ technical_signals:
     dry_up_weak_min: 0.70
     chase_pivot_pct: 0.05
 
-backtest:
-  initial_cash_usd: 100000
-  entry: "next_open"  # next_limit でk=0.0でもDay指値ゲートを強制
-  entry_limit_atr_multiple: 0.0  # 要検証: 指値を終値より上へ置くATR倍率
+trade_plan:
+  entry_limit_atr_multiple: 0.0 # 要検証: 指値を終値より上へ置くATR倍率
   exit_atr_multiple: 2.5
   exit_atr_period: 14
   max_hold_days: 25
+
+backtest:
+  initial_cash_usd: 100000
+  entry: "next_open"  # next_limit でk=0.0でもDay指値ゲートを強制
+  # すべてバックテストの名目シミュレーション値であり、助言値ではない。
+  sim_trade_risk_pct: 0.01
+  sim_position_cap_pct: 0.10
+  max_concurrent_positions: 10
   commission_pct: 0.001
   slippage_pct: 0.001
   benchmark: "SPY"

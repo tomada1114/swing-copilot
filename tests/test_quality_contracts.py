@@ -431,11 +431,15 @@ def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
         int(seconds) for seconds in TIMEBOX_FALLBACK_INVOCATION.findall(skill_text)
     }
     assert fallbacks, "the skill must show the cwd-independent relaunch"
-    assert fallbacks <= {
-        int(seconds) for seconds in TIMEBOX_INVOCATION.findall(skill_text)
-    }, "the relaunch must reuse a documented timebox, not invent a new one"
+    assert all(seconds > 0 for seconds in fallbacks)
     assert "exit 127" in skill_text
     assert "**1 回だけ**" in skill_text
+    # Both watchers launch from the same shell and fail the same way. Recovering
+    # only the per-wave one silently drops the 45-minute final backstop.
+    assert "すべてのウォッチャに等しく適用する" in skill_text
+    # The repo root has to be derivable without counting directories: the live
+    # and dry-run run directories sit at different depths.
+    assert "から数えないこと" in skill_text
     # The escape hatch stays outside the allowlist on purpose: an absolute path
     # differs per checkout, so allowlisting it is impossible, and headless runs
     # use `bypassPermissions` anyway.

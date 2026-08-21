@@ -621,6 +621,9 @@ def test_dd_level_thresholds_default_to_previous_hardcoded_constants():
     # `_SEVERE_D15=4` on 2026-08-07 (Issue #111; see
     # `reports/regime/2026-08-06-dd-threshold-review.md` §10).
     settings = load_settings("config/settings.yaml")
+    assert settings.regime.sma_period == 200
+    assert settings.regime.bear_spy_sma_ratio == 0.97
+    assert settings.regime.bear_vix_min == 30.0
     assert settings.regime.dd_severe_d25 == 7
     assert settings.regime.dd_severe_d15 == 6
     assert settings.regime.dd_high_d25 == 5
@@ -660,8 +663,12 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
             id="postmortem-weight-sum",
         ),
         pytest.param(
-            {"regime": {"bull_vix_max": 35.0, "bear_vix_min": 30.0}},
-            id="vix-order",
+            {"regime": {"sma_period": 0}},
+            id="sma-period",
+        ),
+        pytest.param(
+            {"regime": {"bear_spy_sma_ratio": 1.0}},
+            id="sma-ratio",
         ),
         pytest.param(
             {"regime": {"dd_severe_d25": 5, "dd_high_d25": 5}},

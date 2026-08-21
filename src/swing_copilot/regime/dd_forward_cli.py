@@ -1,10 +1,10 @@
 """`copilot-dd-forward`: does a Distribution Day level predict what follows?
 
-`config/settings.yaml` ships `regime.dd_*` marked 要検証 (roadmap §5 P3-13) and
-nothing in the repository could check them: `backtest/` imports neither
-`regime.exposure` nor `regime.distribution`, so changing a `dd_*` value cannot
-move a `copilot-backtest` number. Meanwhile `SEVERE` alone drives
-`_base_exposure` to `CASH_PRIORITY`, which zeroes every candidate's share count.
+`config/settings.yaml` ships `regime.dd_*` marked 要検証 (roadmap §5 P3-13).
+This command remains the historical DD-level explorer: it measures whether
+those levels separate subsequent price action, while the live Issue #252
+exposure gate also considers SMA200, VIX, and FTD. The archived DD-only sweep
+must therefore not be read as the live gate's six-branch behavior.
 
 This replays the stored history one `as_of` at a time, classifies each date
 exactly as `pipeline/daily.py::_calculate_regime_snapshot` would, and reports the
@@ -67,6 +67,7 @@ from swing_copilot.regime.distribution import (
     distribution_severity,
 )
 from swing_copilot.regime.exposure import ExposureVerdict
+from swing_copilot.regime.ftd import FtdThresholds
 from swing_copilot.regime.gate import GateThresholds, RegimeThresholds
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
@@ -89,7 +90,7 @@ if TYPE_CHECKING:
 
 DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 #: History read before `--start` so the earliest observation has a full
-#: Distribution Day window and a seeded gate EMA, matching the daily run's own
+#: Distribution Day window and a seeded gate SMA, matching the daily run's own
 #: `2 * PRICE_HISTORY_LOOKBACK_DAYS` warm-up.
 WARMUP_DAYS = 800
 #: Same fixed width as `screening/filter_matrix_cli.py`: Rich must never
@@ -200,9 +201,8 @@ def thresholds_from(config: RegimeConfig) -> RegimeThresholds:
     """
     return RegimeThresholds(
         gate=GateThresholds(
-            ema_period=config.ema_period,
-            bull_vix_max=config.bull_vix_max,
-            bear_spy_ema_ratio=config.bear_spy_ema_ratio,
+            sma_period=config.sma_period,
+            bear_spy_sma_ratio=config.bear_spy_sma_ratio,
             bear_vix_min=config.bear_vix_min,
         ),
         distribution=DistributionThresholds(
@@ -216,6 +216,11 @@ def thresholds_from(config: RegimeConfig) -> RegimeThresholds:
             high_d15=config.dd_high_d15,
             high_d5=config.dd_high_d5,
             caution_d25=config.dd_caution_d25,
+        ),
+        ftd=FtdThresholds(
+            correction_decline_pct=config.ftd_correction_decline_pct,
+            correction_down_days=config.ftd_correction_down_days,
+            ftd_gain_pct=config.ftd_gain_pct,
         ),
     )
 
@@ -331,7 +336,9 @@ def _render_distribution(
     console: Console, scan: ForwardScan, thresholds: DistributionThresholds
 ) -> None:
     levels = level_series(scan, thresholds)
-    table = Table(title="水準の分布と、それが単独で課す露出上限", header_style="bold")
+    table = Table(
+        title="水準の分布と、旧DD単独モデルが課す露出上限", header_style="bold"
+    )
     table.add_column("水準")
     table.add_column("露出上限(DD単独)")
     table.add_column("日数", justify="right")
@@ -354,8 +361,8 @@ def _render_distribution(
         )
     console.print(table)
     console.print(
-        "露出上限は市場ゲートを BULL に固定した DD 単独の寄与。"
-        "実際のゲートは緩めることはなく厳しくするだけなので、これは各日の下限側の制約",
+        "露出上限は市場ゲートを BULL に固定した旧DD単独の比較モデル。"
+        "本番の6分岐は別にSMA200・VIX・FTDを評価する。",
     )
 
 

@@ -45,7 +45,10 @@ if TYPE_CHECKING:
     from swing_copilot.regime.gate import RegimeSnapshot, RegimeThresholds
 
 _AS_OF = date(2027, 1, 1)
-_LENGTH = 200
+# The production gate now needs a seeded SMA200 and the forward tables need
+# rows after each observation. Keep enough history for both contracts rather
+# than accidentally exercising a one-row tail.
+_LENGTH = 320
 
 
 def _stored_db(tmp_path: Path, *, members: tuple[str, ...] = ()) -> tuple[Path, date]:
@@ -479,8 +482,8 @@ def _mixed_level_db(tmp_path: Path) -> tuple[Path, date]:
     severe-trigger table's non-SEVERE skip or a `--grid` candidate that
     actually survives filtering.
     """
-    climb_len = 150
-    tail_len = 60
+    climb_len = 250
+    tail_len = 100
     db_path = tmp_path / "copilot.duckdb"
     database = Database(db_path)
     state_store = StateStore(database)

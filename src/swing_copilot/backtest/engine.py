@@ -556,8 +556,8 @@ class BacktestEngine:
 
         risk_pct = self._max_trade_risk_pct
         if decision is not None and decision.max_trade_risk_pct is not None:
-            # Already halved by the checker under REDUCE_ONLY; the engine
-            # never reapplies the multiplier itself.
+            # The policy returns the report's effective configured budget; the
+            # REDUCE_ONLY label never changes account sizing.
             risk_pct = decision.max_trade_risk_pct
 
         entry_price = self._entry_execution_price(bar, signal_bar, atr14)

@@ -502,13 +502,15 @@ INIT_SCHEMA_STATEMENTS = (
         dd5_qqq         DOUBLE,
         spy_close       DOUBLE,
         spy_ema         DOUBLE,
-        vix_close       DOUBLE
+        vix_close       DOUBLE,
+        spy_sma200      DOUBLE,
+        spy_ftd_state   VARCHAR
     )
     """,
     # Issue #192: the inputs the exposure ceiling was derived from, promoted
     # out of `detail_json` for the same reason as `regime_snapshots` above --
-    # `reduce_only_risk_multiplier` in particular is a config value under
-    # active review, and reviewing it should not require a JSON walk.
+    # The legacy multiplier column is retained for old rows; new REDUCE_ONLY
+    # decisions are labels and carry 1.0 until Issue #342 removes the field.
     """
     CREATE TABLE IF NOT EXISTS exposure_decisions (
         run_id       UUID PRIMARY KEY,
@@ -518,7 +520,10 @@ INIT_SCHEMA_STATEMENTS = (
         gate_verdict VARCHAR,
         dd_level     VARCHAR,
         is_conservatively_downgraded BOOLEAN,
-        reduce_only_risk_multiplier  DOUBLE
+        reduce_only_risk_multiplier  DOUBLE,
+        spy_sma200   DOUBLE,
+        spy_ftd_state VARCHAR,
+        ftd_active   BOOLEAN
     )
     """,
     # Issue #189: the retrospective's own record. Until now a `failure_class`
@@ -721,7 +726,7 @@ ALTER_SCHEMA_STATEMENTS = (
     # Issue #192: the distribution sub-windows and gate inputs, backfilled
     # from `detail_json` on the same "restating a recorded fact" reasoning as
     # the candidate scores above. The guard is `dd15_spy IS NULL` rather than
-    # one of the gate inputs: `spy_close`/`spy_ema`/`vix_close` are legitimately
+    # one of the gate inputs: `spy_close`/`spy_sma200`/`vix_close` are legitimately
     # NULL whenever the gate could not be evaluated, so guarding on them would
     # re-run the UPDATE forever, whereas `d15` is always present in a
     # `DistributionResult`.
@@ -732,6 +737,8 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_close DOUBLE",
     "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_ema DOUBLE",
     "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS vix_close DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_sma200 DOUBLE",
+    "ALTER TABLE regime_snapshots ADD COLUMN IF NOT EXISTS spy_ftd_state VARCHAR",
     """
     UPDATE regime_snapshots SET
         dd15_spy  = CAST(detail_json->'spy'->>'d15' AS DOUBLE),
@@ -752,6 +759,9 @@ ALTER_SCHEMA_STATEMENTS = (
     "ADD COLUMN IF NOT EXISTS is_conservatively_downgraded BOOLEAN",
     "ALTER TABLE exposure_decisions "
     "ADD COLUMN IF NOT EXISTS reduce_only_risk_multiplier DOUBLE",
+    "ALTER TABLE exposure_decisions ADD COLUMN IF NOT EXISTS spy_sma200 DOUBLE",
+    "ALTER TABLE exposure_decisions ADD COLUMN IF NOT EXISTS spy_ftd_state VARCHAR",
+    "ALTER TABLE exposure_decisions ADD COLUMN IF NOT EXISTS ftd_active BOOLEAN",
     """
     UPDATE exposure_decisions SET
         gate_verdict = detail_json->>'gate',

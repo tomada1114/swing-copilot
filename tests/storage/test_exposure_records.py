@@ -55,17 +55,22 @@ class TestPromotedExposureColumns:
                 DataQuality.OK,
                 is_conservatively_downgraded=True,
                 reduce_only_risk_multiplier=0.25,
+                spy_sma200=500.0,
+                vix_close=31.0,
+                spy_ftd_state="FTD_CONFIRMED",
+                is_ftd_active=True,
             ),
         )
 
         with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT gate_verdict, dd_level, is_conservatively_downgraded, "
-                "reduce_only_risk_multiplier FROM exposure_decisions WHERE run_id = ?",
+                "reduce_only_risk_multiplier, spy_sma200, spy_ftd_state, ftd_active "
+                "FROM exposure_decisions WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()
 
-        assert row == ("BEAR", "CAUTION", True, 0.25)
+        assert row == ("BEAR", "CAUTION", True, 0.25, 500.0, "FTD_CONFIRMED", True)
 
     def test_a_correction_rewrites_the_promoted_columns(
         self, state_store: StateStore

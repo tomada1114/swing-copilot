@@ -43,7 +43,7 @@ swing-copilot/
 │   │   ├── position_sizing.py
 │   │   └── checks.py         # FR-06
 │   ├── regime/
-│   │   ├── gate.py           # SPY/EMA/VIX market gate and snapshot
+│   │   ├── gate.py           # SPY/SMA/VIX market gate and snapshot
 │   │   └── distribution.py   # IBD-style Distribution Day counters
 │   ├── text/
 │   │   ├── news_finnhub.py
@@ -596,9 +596,14 @@ class ScreeningPipeline:
 ### 3.12a `regime/gate.py` / `regime/distribution.py`（P3-13）
 
 `regime/`はI/Oを持たない決定論的なfunctional coreである。`calculate_regime_snapshot()`は、
-SPY終値とEMA50、^VIX終値から`BULL`/`BEAR`/`NEUTRAL`を判定し、SPY・QQQを別々に
-Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で集計する。値が閾値と
-等しいときの比較規則は実装・テストで固定し、EMAには2×periodの履歴、DDには比較用の
+SPY終値とSMA200、^VIX終値から市場の3状態を判定する。`SPY >= SMA200`は`BULL`、
+`SMA200 × 0.97 <= SPY < SMA200`は`NEUTRAL`、それ未満は`BEAR`である。VIXは
+20〜30では状態を変えず、`VIX > 30`だけを`is_panic`として別途持つ。SPY・QQQは
+Distribution Day（下落日1.0、停滞日0.5）を25/15/5営業日窓で集計し、同時にFTDの
+状態機械も`as_of`まで再生する。FTD確認日の安値を保持し、その終値割れ、またはSPYが
+SMA200以上へ回復した時点で失効させる。
+
+値が閾値と等しいときの比較規則は実装・テストで固定し、SMAには200本、DDには比較用の
 前日を含む26本を要求する。いずれかの入力履歴が足りなければ例外ではなく
 `UNKNOWN`/`INSUFFICIENT`を返す。すべての入力は関数境界で`date <= as_of`に絞るため、
 将来行は計算へ混入しない。
@@ -606,7 +611,9 @@ Distribution Day（下落日1.0、停滞日0.5）として25/15/5営業日窓で
 `pipeline/daily.py`だけが`MarketStore`からSPY/QQQ/^VIXの履歴を読み、run単位で
 `StateStore.record_regime_snapshot()`へ補正upsertする。`DailyBrief`は同じsnapshotを
 terminal/Markdownの候補一覧より前に描画する。閾値は`settings.yaml`の`regime.*`で管理し、
-`dd_severe_d25`/`dd_severe_d15`を除きroadmap §5 P3-13に従い要検証値として扱う。
+`dd_severe_d25`/`dd_severe_d15`はIssue #111で採用した7/6を維持し、HIGH/CAUTIONの
+境界は表示用として扱う。SEVEREだけがExposureの`REDUCE_ONLY`ラベルへ影響し、HIGH/
+CAUTIONは表示専用である。
 `distribution_level()`が
 NORMAL/CAUTION/HIGH/SEVEREを決めるd25/d15/d5の水準境界（`dd_severe_d25`,
 `dd_severe_d15`, `dd_high_d25`, `dd_high_d15`, `dd_high_d5`, `dd_caution_d25`）も
@@ -620,15 +627,21 @@ NORMAL/CAUTION/HIGH/SEVEREを決めるd25/d15/d5の水準境界（`dd_severe_d25
 ### 3.12b `regime/exposure.py`（P3-14）
 
 `determine_exposure()`は`RegimeSnapshot`を`NEW_ENTRY_ALLOWED`、`REDUCE_ONLY`、
-`CASH_PRIORITY`の3段階へ決定論的に写像する。BEARまたはSEVEREを最優先、次に
-NEUTRALまたはHIGHを適用する。ゲート/DDの一方がUNKNOWNなら既知入力での基準値から
-1段階だけ厳格化し、両方UNKNOWNならCASH_PRIORITYに固定する。日次runではこの判定を
-一度だけ計算して`exposure_decisions`へ補正upsertし、同一run中にデータ回復で緩めない。
+`CASH_PRIORITY`の3段階へ決定論的に写像する。判定順は、(1) VIXパニックは常に
+`CASH_PRIORITY`、(2) SPYがSMA200の3%超下ならFTD非アクティブ時`CASH_PRIORITY`、
+FTDアクティブ時`REDUCE_ONLY`、(3)緩衝帯は`REDUCE_ONLY`、(4) SMA200以上でもDD
+SEVEREなら`REDUCE_ONLY`、それ以外は`NEW_ENTRY_ALLOWED`である。FTDはSPYがSMA200
+未満のときだけ例外としてアクティブになる。ゲート/DDの一方がUNKNOWNなら既知入力での
+基準値から1段階だけ厳格化し、両方UNKNOWNならCASH_PRIORITYに固定する。
+
+`REDUCE_ONLY`は相場の警戒ラベルと説明文だけであり、口座固有のリスク半減や候補数の
+絞り込みは行わない。アカウント依存の旧`reduce_only_risk_multiplier`列はIssue #342の
+削除まで後方互換のため保持するが、新規判定では常に1.0である。日次runでは判定を一度
+だけ計算して`exposure_decisions`へ補正upsertし、同一run中にデータ回復で緩めない。
 
 `RiskChecker`はCASH_PRIORITYで通常サイジングを実行せず、`max_shares=0`、理由
-`REGIME_CASH_PRIORITY`、制約`regime`の拒否結果を返す。REDUCE_ONLYでは
-`regime.reduce_only_risk_multiplier`（既定0.5、roadmap §5 P3-14、要検証）を
-`max_trade_risk_pct`へ掛け、警告を追加する。Exposure Ceilingはterminal/Markdown/Discordで
+`REGIME_CASH_PRIORITY`、制約`regime`の拒否結果を返す。REDUCE_ONLYでは通常の
+`max_trade_risk_pct`をそのまま使い、警戒ラベルをレポートへ渡す。Exposure Ceilingはterminal/Markdown/Discordで
 候補一覧より先に表示する。
 
 ### 3.13 `risk/position_sizing.py` / `risk/checks.py`（FR-06）
@@ -1391,7 +1404,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 **Issue #184実装時追記（本番リスクゲートの注入）**: 候補→建玉の間にある本番の6ゲート（レジーム`CASH_PRIORITY`/`REDUCE_ONLY`、portfolio heat、決算ブロック、サーキットブレーカー、セクター上限）をバックテストへ通す。新規`backtest/policy.py`が唯一のポート`EntryPolicy`（`decide(EntryPolicyRequest) -> Mapping[str, EntryDecision]`）を定義し、その実装`RiskCheckerEntryPolicy`は**`risk/checks.py::RiskChecker`をラップする**。エンジン側にゲートを再実装しない（二重実装は「別の系を測る」という本issueの原因そのものであるため禁止）。
 
 - **as-of規律**: `EntryPolicyRequest.as_of`は約定日ではなく**シグナル日**（候補の`as_of`）である。翌営業日寄付の時点で観測可能な最新事実は前日終値なので、約定日当日のバーでレジームを判定すればそれ自体がlook-aheadになる。`calculate_regime_snapshot`はシグナル日で呼び、`RiskChecker`の決算判定も`candidate.as_of`を見る。境界（直前/同日/直後）は`tests/backtest/test_policy.py::TestAsOfDiscipline`が固定する。
-- **株数はエンジンが決める**: `RiskChecker`はシグナル日終値でサイジングし、エンジンは翌寄付＋スリッページで約定するため、両者が別々に株数を出すと必ず食い違う。`EntryDecision`が返すのは可否と**実効`max_trade_risk_pct`**（`REDUCE_ONLY`の乗数適用済み）だけで、`calc_position_size`の呼び出しはエンジン側の1箇所に保つ。
+- **株数はエンジンが決める**: `RiskChecker`はシグナル日終値でサイジングし、エンジンは翌寄付＋スリッページで約定するため、両者が別々に株数を出すと必ず食い違う。`EntryDecision`が返すのは可否と**実効`max_trade_risk_pct`**（`REDUCE_ONLY`でも通常値）だけで、`calc_position_size`の呼び出しはエンジン側の1箇所に保つ。
 - **バッチ評価**: `decide()`は1日分の候補をまとめて受ける。`RiskChecker`はランク順にportfolio heatを累積する仕様で、候補ごとに呼ぶとこの累積が黙って消えるためである。
 - **アーム**: `EntryPolicyArm` = `none`（ポリシー無し＝従来挙動）/ `regime`（レジームのみ。heat・セクター上限は`settings`のコピー側で事実上無効化＝`max_portfolio_heat_pct`/`max_sector_pct`をともに`1e12`にする。`model_copy(update=...)`はフィールドの`le=1.0`を再検証しない——セクター判定は簿価と現在equityを比べるため、素直に`1.0`を入れるとドローダウン中に第2のゲートとして効いてしまう。ゲートを迂回する分岐をエンジンへ書かないための手段である）/ `regime+risk`（レジーム＋heat＋セクター＋サーキットブレーカー）。サーキットブレーカーはrun自身の決済済みトレード（`(exit_date, pnl)`）を`evaluate_circuit_breaker`へ流すので、`risk.circuit_*`が初めてバックテストの数字を動かす。
 - **決算ブロックの限界**: バックテストは過去の決算カレンダーを持たないため、`build_entry_policy(..., earnings_guard_fn=...)`（point-in-timeの`EarningsGuardInput`を返す注入口）を渡さない限り決算ゲートは不活性（カウント0）である。捏造した日付でゲートを動かすより0と報告する方を選んだ。
@@ -2148,8 +2161,10 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
     dd15_qqq        DOUBLE,
     dd5_qqq         DOUBLE,
     spy_close       DOUBLE,
-    spy_ema         DOUBLE,
-    vix_close       DOUBLE
+    spy_ema         DOUBLE,       -- legacy EMA column; new writes leave it NULL
+    vix_close       DOUBLE,
+    spy_sma200      DOUBLE,
+    spy_ftd_state   VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS exposure_decisions (
@@ -2161,7 +2176,10 @@ CREATE TABLE IF NOT EXISTS exposure_decisions (
     gate_verdict VARCHAR,
     dd_level     VARCHAR,
     is_conservatively_downgraded BOOLEAN,
-    reduce_only_risk_multiplier  DOUBLE
+    reduce_only_risk_multiplier  DOUBLE, -- legacy compatibility until #342
+    spy_sma200  DOUBLE,
+    spy_ftd_state VARCHAR,
+    ftd_active BOOLEAN
 );
 
 -- Issue #192: verdicts.reasons_json の正規化投影。reasons_json は引き続き
@@ -2504,24 +2522,22 @@ schedule:
   timeout_minutes: 35              # NFR-03（ローカル手動実行時の所要時間上限）
 
 regime:
-  ema_period: 50                   # SPY EMA。roadmap §5 P3-13（要検証）
-  bull_vix_max: 20.0               # BULL条件のVIX上限（要検証）
-  bear_spy_ema_ratio: 0.97         # BEAR条件のEMA比率（要検証）
-  bear_vix_min: 30.0               # BEAR条件のVIX下限（要検証）
+  sma_period: 200                   # SPY SMA200。フェーバー系の長期トレンド線
+  bear_spy_sma_ratio: 0.97          # SMA200を3%割り込むと下落トレンド
+  bear_vix_min: 30.0                # VIXは30超のパニック停止だけに使う
   distribution_window_days: 25     # DD失効窓（営業日、要検証）
   dd_decline_pct: -0.002           # DD下落率（要検証）
   stall_abs_change_pct: 0.001      # 停滞日絶対値動き上限（要検証）
   recovery_pct: 0.05               # DD無効化上昇率（要検証）
   dd_severe_d25: 7                 # SEVERE判定のd25閾値（Issue #111で採用済み）
   dd_severe_d15: 6                 # SEVERE判定のd15閾値（Issue #111で採用済み）
-  dd_high_d25: 5                   # HIGH判定のd25閾値（要検証）
-  dd_high_d15: 3                   # HIGH判定のd15閾値（要検証）
-  dd_high_d5: 2                    # HIGH判定のd5閾値（要検証）
-  dd_caution_d25: 3                # CAUTION判定のd25閾値（要検証）
+  dd_high_d25: 5                   # HIGH表示のd25閾値（Exposureには不使用）
+  dd_high_d15: 3                   # HIGH表示のd15閾値（Exposureには不使用）
+  dd_high_d5: 2                    # HIGH表示のd5閾値（Exposureには不使用）
+  dd_caution_d25: 3                # CAUTION表示のd25閾値（Exposureには不使用）
   ftd_correction_decline_pct: 0.03 # FTD調整確定の高値比下落率、roadmap §5 P3-16（要検証）
   ftd_correction_down_days: 3      # FTD調整確定の連続下落日数、roadmap §5 P3-16（要検証）
   ftd_gain_pct: 0.0125             # FTD確認の前日比上昇率、roadmap §5 P3-16（要検証）
-  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLYの取引リスク倍率（P3-14、要検証）
 
 notification:
   enabled: true                    # Discord通知はデフォルト有効。環境変数DISCORD_WEBHOOK_URL（.env）が必須で、欠けている実行は設定エラーで止まる

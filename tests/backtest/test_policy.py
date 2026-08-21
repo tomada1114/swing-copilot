@@ -41,9 +41,9 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
 
 # Long enough for the 25-day Distribution Day window (26 prices) and for the
-# gate's EMA(50), which `indicators.ema` deliberately leaves NaN until
-# `2 * period` bars — a shorter fixture would silently test the UNKNOWN path.
-_DAYS = [date(2027, 1, 1) + timedelta(days=index) for index in range(120)]
+# production gate's SMA200. A shorter fixture would silently test the UNKNOWN
+# path rather than the policy's actual exposure branches.
+_DAYS = [date(2027, 1, 1) + timedelta(days=index) for index in range(260)]
 _EQUITY = 100_000.0
 
 _UNIVERSE = (
@@ -86,22 +86,41 @@ def _rising(
     ]
 
 
+def _neutral(
+    symbol: str, days: list[date], start_price: float
+) -> list[dict[str, object]]:
+    """Drift down gently enough to remain inside the SMA200 buffer."""
+    return [
+        bar_row(
+            symbol,
+            day,
+            (
+                start_price - index * 0.1,
+                start_price - index * 0.1 + 1,
+                start_price - index * 0.1 - 1,
+                start_price - index * 0.1,
+            ),
+        )
+        for index, day in enumerate(days)
+    ]
+
+
 def _market_bars(
     *, vix: float, is_rising: bool = False, days: list[date] | None = None
 ) -> list[dict[str, object]]:
     """SPY/QQQ/^VIX rows that pin one deterministic Exposure Ceiling verdict.
 
-    Flat indices leave `close == EMA`, which the gate's strict comparisons
-    classify as NEUTRAL (-> REDUCE_ONLY); rising ones clear the EMA (-> BULL,
-    i.e. NEW_ENTRY_ALLOWED while VIX is calm). Constant volume means no bar
-    can ever be a Distribution Day, so the DD level is a known NORMAL rather
-    than an UNKNOWN that would conservatively downgrade the verdict.
+    A gentle decline keeps SPY inside the SMA200 buffer (-> REDUCE_ONLY);
+    rising ones clear the SMA200 (-> NEW_ENTRY_ALLOWED while VIX is calm).
+    Constant volume means no bar can ever be a Distribution Day, so the DD
+    level is a known NORMAL rather than an UNKNOWN that would conservatively
+    downgrade the verdict.
     """
     days = days or _DAYS
     index_rows = (
         [*_rising("SPY", days, 400.0), *_rising("QQQ", days, 350.0)]
         if is_rising
-        else [*flat_bars("SPY", days, 400.0), *flat_bars("QQQ", days, 350.0)]
+        else [*_neutral("SPY", days, 400.0), *_neutral("QQQ", days, 350.0)]
     )
     return [*index_rows, *flat_bars("^VIX", days, vix)]
 
@@ -188,7 +207,7 @@ class TestRegimeGate:
         assert decision.is_allowed is False
         assert decision.reject_reason == ENTRY_BLOCK_REGIME
 
-    def test_reduce_only_halves_the_effective_trade_risk_budget(self, settings):
+    def test_reduce_only_keeps_the_configured_trade_risk_budget(self, settings):
         policy = _policy(settings, EntryPolicyArm.REGIME, _market_bars(vix=15.0))
 
         decision = policy.decide(_request())["AAA"]
@@ -196,7 +215,6 @@ class TestRegimeGate:
         assert decision.is_allowed is True
         assert decision.max_trade_risk_pct == pytest.approx(
             settings.risk.max_trade_risk_pct
-            * settings.regime.reduce_only_risk_multiplier
         )
 
     def test_new_entry_allowed_keeps_the_configured_trade_risk_budget(self, settings):

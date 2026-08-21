@@ -248,6 +248,8 @@ def _render_regime(console: Console, brief: DailyBrief) -> None:
         "[bold]Market regime[/bold] "
         f"Gate: {brief.regime.gate} / DD: {brief.regime.dd_level} "
         f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
+        f"Trend: SPY {_number(brief.regime.spy_close)} vs SMA200 "
+        f"{_number(brief.regime.spy_sma200)} ({_percent(brief.regime.spy_trend_gap_pct)}) / "
         f"Data quality: {brief.regime.data_quality}"
     )
     if brief.regime.spy_ftd_state is not None:

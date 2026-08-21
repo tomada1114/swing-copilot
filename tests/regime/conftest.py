@@ -59,7 +59,7 @@ def sawtooth(length: int, *, base: float = 100.0) -> list[float]:
 
 
 def market_bars(length: int = 120) -> pd.DataFrame:
-    """SPY, QQQ, and ^VIX bars long enough to clear the EMA and window warm-up."""
+    """SPY, QQQ, and ^VIX bars for compact, threshold-injected fixtures."""
     spy = sawtooth(length)
     qqq = sawtooth(length, base=300.0)
     vix = [15.0 + (index % 7) for index in range(length)]

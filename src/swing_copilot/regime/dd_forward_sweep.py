@@ -6,12 +6,14 @@ The level boundaries change only how counts are *classified*, never the counts:
 inside `distribution_level`. One expensive replay (`dd_forward.scan_forward`)
 therefore supports thousands of cheap re-classifications here.
 
-Five boundaries are swept, not six. `regime/exposure.py::_base_exposure` maps
+Five boundaries are swept, not six. The archived DD-only counterfactual maps
 `SEVERE` to `CASH_PRIORITY` and `HIGH` to `REDUCE_ONLY`, and falls through for
 everything else -- `CAUTION` and `NORMAL` reach the identical branch, and
-`DistributionLevel.CAUTION` has no other consumer in the package. So
-`dd_caution_d25` cannot move an exposure ceiling and is held at its configured
-value; scoring it would invent a distinction the pipeline does not make.
+`DistributionLevel.CAUTION` has no other consumer in the package. The live
+Issue #252 exposure gate is separate: it maps DD SEVERE to a `REDUCE_ONLY`
+label and also considers SMA200, VIX, and FTD. So `dd_caution_d25` cannot move
+the explorer's DD-only ceiling and is held at its configured value; scoring it
+would invent a distinction the pipeline does not make.
 
 Candidates are filtered through the same order constraints
 `config.RegimeConfig._validate_dd_level_order` enforces, so a sweep can only
@@ -24,21 +26,14 @@ validate them.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
 from enum import StrEnum
 from itertools import product
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from swing_copilot.regime.distribution import (
-    DataQuality,
-    DistributionLevel,
-    DistributionResult,
-    DistributionThresholds,
-)
-from swing_copilot.regime.exposure import ExposureVerdict, determine_exposure
-from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
+from swing_copilot.regime.distribution import DistributionLevel, DistributionThresholds
+from swing_copilot.regime.exposure import ExposureVerdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -261,28 +256,20 @@ class SweepPoint:
 
 
 def dd_only_exposure(level: DistributionLevel) -> ExposureVerdict:
-    """The ceiling this level alone imposes, holding the market gate at `BULL`.
+    """Return the historical DD-only counterfactual used by this explorer.
 
-    Calls the shipped `determine_exposure` instead of restating
-    `_base_exposure`'s table, so this cannot drift from the daily run. A real
-    gate can only make the result stricter, so this is the loosest ceiling a day
-    at `level` could have had.
+    `copilot-dd-forward` and its sweep intentionally remain an in-sample
+    diagnostic from before Issue #252. Its ``SEVERE -> CASH_PRIORITY`` axis
+    measures the old DD-only policy; the live six-branch decision stays in
+    `regime/exposure.py` and maps live SEVERE to the `REDUCE_ONLY` label.
+    Keeping the explorer's counterfactual stable preserves comparability with
+    the archived threshold review.
     """
-    counts = DistributionResult(0.0, 0.0, 0.0, level, DataQuality.OK)
-    snapshot = RegimeSnapshot(
-        as_of=_UNUSED_DATE,
-        gate=MarketGate(GateVerdict.BULL, 1.0, 1.0, 1.0),
-        spy_distribution=counts,
-        qqq_distribution=counts,
-        dd_level=level,
-        data_quality=DataQuality.OK,
-    )
-    return determine_exposure(snapshot).verdict
-
-
-#: `determine_exposure` never reads `RegimeSnapshot.as_of`; a fixed placeholder
-#: keeps `dd_only_exposure` free of a clock it has no business touching.
-_UNUSED_DATE = date(1970, 1, 1)
+    if level is DistributionLevel.SEVERE:
+        return ExposureVerdict.CASH_PRIORITY
+    if level is DistributionLevel.HIGH:
+        return ExposureVerdict.REDUCE_ONLY
+    return ExposureVerdict.NEW_ENTRY_ALLOWED
 
 
 @dataclass(frozen=True, slots=True)

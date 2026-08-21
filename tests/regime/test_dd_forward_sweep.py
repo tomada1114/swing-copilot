@@ -7,6 +7,7 @@ scored under must be the one `regime/exposure.py` would really assign.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pandas as pd
@@ -39,6 +40,10 @@ _HORIZON = 5
 #: collapsing -- properties that hold at any size -- so scoring the full
 #: `GRID_RANGES` product would only make the suite slow.
 _SMALL_RANGES = {name: GRID_RANGES[name][:3] for name in BOUNDARY_NAMES}
+_TEST_THRESHOLDS = replace(
+    DEFAULT_REGIME_THRESHOLDS,
+    gate=replace(DEFAULT_REGIME_THRESHOLDS.gate, sma_period=5),
+)
 
 
 @pytest.fixture
@@ -49,7 +54,7 @@ def frame() -> ScanFrame:
             bars=bars,
             start=date.min,
             as_of=max(bars["date"]),
-            thresholds=DEFAULT_REGIME_THRESHOLDS,
+            thresholds=_TEST_THRESHOLDS,
             horizons=(_HORIZON,),
         )
     )
@@ -125,8 +130,8 @@ def test_applied_to_clamps_caution_below_high() -> None:
     assert loose.applied_to(base).caution_d25 == 3
 
 
-def test_dd_only_exposure_matches_the_shipped_mapping() -> None:
-    """The three DD-driven ceilings are exactly `_base_exposure`'s, gate held BULL."""
+def test_dd_only_exposure_matches_the_archived_counterfactual() -> None:
+    """The explorer keeps its archived DD-only counterfactual stable."""
     assert dd_only_exposure(DistributionLevel.SEVERE) is ExposureVerdict.CASH_PRIORITY
     assert dd_only_exposure(DistributionLevel.HIGH) is ExposureVerdict.REDUCE_ONLY
     assert (

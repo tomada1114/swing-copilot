@@ -264,10 +264,10 @@ class TestPromotedColumnBackfill:
         with store.database.connect() as conn:
             row = conn.execute(
                 "SELECT dd15_spy, dd5_spy, dd15_qqq, dd5_qqq, spy_close, spy_ema, "
-                "vix_close FROM regime_snapshots"
+                "vix_close, spy_sma200, spy_ftd_state FROM regime_snapshots"
             ).fetchone()
 
-        assert row == (2.0, 1.0, 3.0, 2.0, 520.0, 500.0, 15.0)
+        assert row == (2.0, 1.0, 3.0, 2.0, 520.0, 500.0, 15.0, None, None)
 
     def test_exposure_inputs_are_restated(self, tmp_path: Path) -> None:
         store = _migrated(tmp_path)
@@ -275,10 +275,11 @@ class TestPromotedColumnBackfill:
         with store.database.connect() as conn:
             row = conn.execute(
                 "SELECT gate_verdict, dd_level, is_conservatively_downgraded, "
-                "reduce_only_risk_multiplier FROM exposure_decisions"
+                "reduce_only_risk_multiplier, spy_sma200, spy_ftd_state, ftd_active "
+                "FROM exposure_decisions"
             ).fetchone()
 
-        assert row == ("BULL", "NORMAL", False, 0.5)
+        assert row == ("BULL", "NORMAL", False, 0.5, None, None, None)
 
     def test_verdict_reasons_are_normalized_out_of_reasons_json(
         self, tmp_path: Path

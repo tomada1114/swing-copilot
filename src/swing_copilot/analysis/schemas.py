@@ -374,7 +374,7 @@ class CalendarEventInput(_StrictModel):
 
 
 class AnalysisContextBlocks(_StrictModel):
-    """Run-wide (not per-candidate) deterministic context blocks."""
+    """Run-wide deterministic context, including the SMA200/FTD regime block."""
 
     market_regime: str | None
     calendar_events: list[CalendarEventInput] = []

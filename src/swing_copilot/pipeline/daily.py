@@ -51,7 +51,7 @@ from swing_copilot.pipeline.postmortem import run_postmortem_step
 from swing_copilot.pipeline.progress import NullProgressReporter, ProgressReporter
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import ExposureDecision, determine_exposure
-from swing_copilot.regime.ftd import FtdSnapshot, FtdThresholds, calculate_ftd_snapshot
+from swing_copilot.regime.ftd import FtdSnapshot, FtdThresholds
 from swing_copilot.regime.gate import (
     GateThresholds,
     RegimeSnapshot,
@@ -1213,9 +1213,8 @@ def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSn
     config = deps.settings.regime
     thresholds = RegimeThresholds(
         gate=GateThresholds(
-            ema_period=config.ema_period,
-            bull_vix_max=config.bull_vix_max,
-            bear_spy_ema_ratio=config.bear_spy_ema_ratio,
+            sma_period=config.sma_period,
+            bear_spy_sma_ratio=config.bear_spy_sma_ratio,
             bear_vix_min=config.bear_vix_min,
         ),
         distribution=DistributionThresholds(
@@ -1229,6 +1228,11 @@ def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSn
             high_d15=config.dd_high_d15,
             high_d5=config.dd_high_d5,
             caution_d25=config.dd_caution_d25,
+        ),
+        ftd=FtdThresholds(
+            correction_decline_pct=config.ftd_correction_decline_pct,
+            correction_down_days=config.ftd_correction_down_days,
+            ftd_gain_pct=config.ftd_gain_pct,
         ),
     )
     return calculate_regime_snapshot(
@@ -1253,31 +1257,19 @@ def _record_exposure_decision(
     deps: DailyDependencies, run_id: UUID, snapshot: RegimeSnapshot
 ) -> ExposureDecision:
     """Derive and persist one immutable-in-run Exposure Ceiling decision."""
-    decision = determine_exposure(
-        snapshot,
-        reduce_only_risk_multiplier=deps.settings.regime.reduce_only_risk_multiplier,
-    )
+    decision = determine_exposure(snapshot)
     deps.state_store.record_exposure_decision(run_id, decision)
     return decision
 
 
 def _record_ftd_snapshot(
-    deps: DailyDependencies, run_id: UUID, as_of: date
+    deps: DailyDependencies, run_id: UUID, regime_snapshot: RegimeSnapshot
 ) -> FtdSnapshot:
-    """Calculate and persist display-only FTD transitions for both indices."""
-    history_start = as_of - timedelta(days=2 * PRICE_HISTORY_LOOKBACK_DAYS)
-    bars = deps.market_store.read_bars(["SPY", "QQQ"], history_start, as_of, as_of)
-    config = deps.settings.regime
-    snapshot = calculate_ftd_snapshot(
-        bars.loc[bars["symbol"] == "SPY"],
-        bars.loc[bars["symbol"] == "QQQ"],
-        as_of,
-        thresholds=FtdThresholds(
-            correction_decline_pct=config.ftd_correction_decline_pct,
-            correction_down_days=config.ftd_correction_down_days,
-            ftd_gain_pct=config.ftd_gain_pct,
-        ),
-    )
+    """Persist the FTD state already calculated as part of the regime snapshot."""
+    snapshot = regime_snapshot.ftd
+    if snapshot is None:
+        msg = "regime snapshot did not include the FTD state"
+        raise RuntimeError(msg)
     deps.state_store.record_ftd_history(run_id, snapshot)
     return snapshot
 

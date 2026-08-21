@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
 from swing_copilot.regime.distribution import DataQuality
 from swing_copilot.regime.ftd import FtdState, calculate_ftd, calculate_ftd_snapshot
@@ -40,6 +41,37 @@ def test_detects_correction_day1_and_day5_ftd_with_medium_quality():
         FtdState.DAY2_3,
         FtdState.FTD_CONFIRMED,
     ]
+
+
+def test_ftd_expires_when_close_breaks_the_confirmation_day_low():
+    closes = [100.0, 99.0, 98.0, 97.0, 98.0, 98.2, 98.4, 98.6, 100.079]
+    volumes = [100, 100, 100, 100, 100, 100, 100, 100, 150]
+    exact = _bars([*closes, 99.579], [*volumes, 100])
+    below = _bars([*closes, 99.579, 99.0], [*volumes, 100, 100])
+
+    exact_result = calculate_ftd("SPY", exact, date(2020, 3, 10))
+    result = calculate_ftd("SPY", below, date(2020, 3, 11))
+
+    assert exact_result.state is FtdState.FTD_CONFIRMED
+    assert exact_result.ftd_day_low == pytest.approx(99.579)
+    assert result.state is FtdState.EXPIRED
+    assert result.ftd_day_low is None
+    assert result.transitions[-1].state is FtdState.EXPIRED
+
+
+def test_ftd_expires_when_spy_recovers_to_the_sma_and_does_not_resurrect():
+    bars = _bars(
+        [110.0, 106.0, 102.0, 100.0, 104.0, 110.0, 105.0, 104.0, 105.3, 108.0],
+        [100, 100, 100, 100, 100, 100, 100, 100, 150, 100],
+    )
+
+    active = calculate_ftd("SPY", bars, date(2020, 3, 9), sma_period=5)
+    expired = calculate_ftd("SPY", bars, date(2020, 3, 10), sma_period=5)
+
+    assert active.state is FtdState.FTD_CONFIRMED
+    assert active.ftd_day_low == pytest.approx(104.8)
+    assert expired.state is FtdState.EXPIRED
+    assert expired.ftd_day_low is None
 
 
 def test_day1_low_break_resets_to_correction_confirmed():

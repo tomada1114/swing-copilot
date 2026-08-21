@@ -123,10 +123,10 @@ notification:
   enabled: true
 
 regime:
-  # roadmap §5 P3-13（要検証）: code-owned market gate and DD thresholds.
-  ema_period: 50
-  bull_vix_max: 20.0
-  bear_spy_ema_ratio: 0.97
+  # SPY SMA200 trend gate. The 3% buffer prevents one-day whipsaws; VIX is
+  # used only as a panic stop when it closes above 30.
+  sma_period: 200
+  bear_spy_sma_ratio: 0.97
   bear_vix_min: 30.0
   distribution_window_days: 25
   dd_decline_pct: -0.002
@@ -136,15 +136,16 @@ regime:
   # Order constraints: dd_severe_d25 > dd_high_d25 > dd_caution_d25;
   # dd_severe_d15 > dd_high_d15. The severe pair was decided 2026-08-07 in
   # Issue #111 (evidence: reports/regime/2026-08-06-dd-threshold-review.md
-  # §10); dd_high_* and dd_caution_d25 remain 要検証.
+  # §10); dd_high_* and dd_caution_d25 are display-only.
   dd_severe_d25: 7
   dd_severe_d15: 6
   dd_high_d25: 5
   dd_high_d15: 3
   dd_high_d5: 2
   dd_caution_d25: 3
-  reduce_only_risk_multiplier: 0.5 # REDUCE_ONLY trade-risk multiplier (要検証)
-  # roadmap §5 P3-16（要検証）: FTD is display-only, never an exposure input.
+  # REDUCE_ONLY is a label/explanation only; the legacy multiplier is ignored
+  # and will be removed with the account-rule cleanup in Issue #342.
+  # roadmap §5 P3-16（要検証）: FTD is a narrow below-SMA re-entry exception.
   ftd_correction_decline_pct: 0.03
   ftd_correction_down_days: 3
   ftd_gain_pct: 0.0125

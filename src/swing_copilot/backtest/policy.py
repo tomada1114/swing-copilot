@@ -2,7 +2,7 @@
 
 Between a ranked candidate and an actual position, `pipeline/daily.py` puts
 six gates: the regime Exposure Ceiling (`CASH_PRIORITY` blocks outright,
-`REDUCE_ONLY` halves the per-trade risk budget), portfolio heat, the earnings
+`REDUCE_ONLY` is a report label), portfolio heat, the earnings
 proximity block, the realized-P&L circuit breaker, and the sector cap. The
 simulator used to apply none of them, so `risk.reduce_only_risk_multiplier`,
 `risk.max_portfolio_heat_pct`, `risk.earnings_block_business_days` and
@@ -21,9 +21,10 @@ Two things the policy deliberately does *not* decide:
 
 - **The share count.** `RiskChecker` sizes from the signal day's close, while
   the engine fills at the next open plus adverse slippage. The policy returns
-  the *effective* `max_trade_risk_pct` (already halved under `REDUCE_ONLY`)
+  the *effective* configured `max_trade_risk_pct` (unchanged under `REDUCE_ONLY`)
   and the engine performs the single sizing call at the real fill price, so
-  the two never disagree about what was bought.
+  the two never disagree about what was bought. `REDUCE_ONLY` is intentionally
+  not converted into an account-specific risk multiplier.
 - **The as-of date.** `EntryPolicyRequest.as_of` is the *signal* day, never
   the fill day: at tomorrow's open, today's close is the newest observable
   fact, so evaluating the regime on the fill day's own bar would be exactly
@@ -51,6 +52,7 @@ from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.models import Position
 from swing_copilot.regime.distribution import DistributionThresholds
 from swing_copilot.regime.exposure import determine_exposure
+from swing_copilot.regime.ftd import FtdThresholds
 from swing_copilot.regime.gate import (
     GateThresholds,
     RegimeThresholds,
@@ -117,7 +119,8 @@ class EntryPolicyArm(StrEnum):
     #: Deterministic screening/sizing only — the pre-Issue-#184 simulator.
     NONE = "none"
     #: Regime Exposure Ceiling only (`CASH_PRIORITY` block, `REDUCE_ONLY`
-    #: risk halving). Heat and sector ceilings are configured out of the way;
+    #: label; it does not halve risk). Heat and sector ceilings are configured
+    #: out of the way;
     #: the earnings guard and circuit breaker stay off.
     REGIME = "regime"
     #: Every gate the simulator can supply inputs for: regime, portfolio heat,
@@ -131,9 +134,8 @@ class EntryDecision:
     """One candidate's gate verdict for one simulated decision day."""
 
     is_allowed: bool
-    #: Effective per-trade risk budget the engine must size with, already
-    #: reduced by the `REDUCE_ONLY` multiplier. `None` leaves the engine on
-    #: its configured default.
+    #: Effective per-trade risk budget the engine must size with. `None` leaves
+    #: the engine on its configured default; `REDUCE_ONLY` does not change it.
     max_trade_risk_pct: float | None = None
     #: One of `metrics.ENTRY_BLOCK_REASONS`; `None` while `is_allowed`.
     reject_reason: str | None = None
@@ -238,12 +240,11 @@ def _regime_only_settings(settings: Settings) -> Settings:
 
 
 def _regime_thresholds(config: RegimeConfig) -> RegimeThresholds:
-    """Mirror `pipeline/daily.py::_calculate_regime_snapshot`'s threshold wiring."""
+    """Mirror the daily regime snapshot's threshold wiring exactly."""
     return RegimeThresholds(
         gate=GateThresholds(
-            ema_period=config.ema_period,
-            bull_vix_max=config.bull_vix_max,
-            bear_spy_ema_ratio=config.bear_spy_ema_ratio,
+            sma_period=config.sma_period,
+            bear_spy_sma_ratio=config.bear_spy_sma_ratio,
             bear_vix_min=config.bear_vix_min,
         ),
         distribution=DistributionThresholds(
@@ -257,6 +258,11 @@ def _regime_thresholds(config: RegimeConfig) -> RegimeThresholds:
             high_d15=config.dd_high_d15,
             high_d5=config.dd_high_d5,
             caution_d25=config.dd_caution_d25,
+        ),
+        ftd=FtdThresholds(
+            correction_decline_pct=config.ftd_correction_decline_pct,
+            correction_down_days=config.ftd_correction_down_days,
+            ftd_gain_pct=config.ftd_gain_pct,
         ),
     )
 
@@ -388,10 +394,7 @@ class RiskCheckerEntryPolicy:
             request.as_of,
             thresholds=self._thresholds,
         )
-        exposure = determine_exposure(
-            snapshot,
-            reduce_only_risk_multiplier=self._settings.regime.reduce_only_risk_multiplier,
-        )
+        exposure = determine_exposure(snapshot)
         checker = RiskChecker(
             self._settings,
             self._universe,

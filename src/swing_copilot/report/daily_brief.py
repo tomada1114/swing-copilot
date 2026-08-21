@@ -74,6 +74,9 @@ class BriefRegime:
     spy_d25: float
     qqq_d25: float
     data_quality: str
+    spy_close: float | None = None
+    spy_sma200: float | None = None
+    spy_trend_gap_pct: float | None = None
     spy_ftd_state: str | None = None
     spy_ftd_day_number: int | None = None
     spy_ftd_quality_score: int | None = None
@@ -475,6 +478,11 @@ def _regime_brief(
         spy_d25=snapshot.spy_distribution.d25,
         qqq_d25=snapshot.qqq_distribution.d25,
         data_quality=snapshot.data_quality.value,
+        spy_close=snapshot.gate.spy_close,
+        spy_sma200=snapshot.gate.spy_sma200,
+        spy_trend_gap_pct=_relative_gap(
+            snapshot.gate.spy_close, snapshot.gate.spy_sma200
+        ),
         spy_ftd_state=ftd_snapshot.spy.state.value if ftd_snapshot else None,
         spy_ftd_day_number=ftd_snapshot.spy.day_number if ftd_snapshot else None,
         spy_ftd_quality_score=ftd_snapshot.spy.quality_score if ftd_snapshot else None,
@@ -482,6 +490,13 @@ def _regime_brief(
         qqq_ftd_day_number=ftd_snapshot.qqq.day_number if ftd_snapshot else None,
         qqq_ftd_quality_score=ftd_snapshot.qqq.quality_score if ftd_snapshot else None,
     )
+
+
+def _relative_gap(close: float | None, trend: float | None) -> float | None:
+    """Return the code-owned close-to-trend gap for the regime display."""
+    if close is None or trend is None or trend == 0.0:
+        return None
+    return close / trend - 1.0
 
 
 def _exposure_brief(decision: ExposureDecision | None) -> BriefExposure | None:

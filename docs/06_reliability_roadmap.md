@@ -322,12 +322,13 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 
 - **目的**: D3 の解消。表示専用だった市場データを判断ロジックに接続する第一歩。
 - **スコープ**: 新パッケージ `src/swing_copilot/regime/`（`gate.py`, `distribution.py`）、
-  `screening/indicators.py`（EMA 追加）、`storage/schema.py`（regime スナップショット）、
+  `screening/indicators.py`（SMA利用）、`storage/schema.py`（regime スナップショット）、
   `config/settings.yaml`
 - **主要仕様**:
-  - 市場ゲートスコア（決定論・純関数）: 入力 = SPY 終値 vs EMA50、^VIX 終値。
-    BULL = SPY > EMA50 かつ VIX < 20、BEAR = SPY < EMA50×0.97 または VIX > 30、
-    それ以外 NEUTRAL。閾値はすべて config（出典: canslim-screener の M ゲート、(要検証)）。
+  - 市場ゲート（決定論・純関数）: 入力 = SPY 終値 vs SMA200、^VIX 終値。
+    `SPY >= SMA200` は通常、SMA200の3%以内の下側は警戒、それ未満は停止。
+    VIXは30超のパニック停止だけに使う。閾値はすべて config（フェーバー系の
+    長期トレンド線とオーナー決定）。
   - IBD 式 Distribution Day カウンター（SPY・QQQ 各指数）:
     DD = 前日比 −0.2% 以下かつ出来高が前日超。停滞日（出来高増・値動き +0.1% 未満）は
     0.5 日換算。25 営業日で失効、または DD 当日終値から +5% 上昇で無効化。
@@ -339,21 +340,22 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **動作確認**: dry-run で terminal/markdown にレジーム節（ゲート判定・DD カウント・
   水準）が表示されること。指数データを意図的に欠損させたフィクスチャで UNKNOWN と
   なり例外にならないこと。
-- **Not in scope**: エクスポージャー judgement への接続（P3-14）、FTD（P3-16）、
-  ブレッド指標（ユニバース全体の MA 上比率等は将来検討）
+- **Not in scope**: ブレッド指標（ユニバース全体の MA 上比率等は将来検討）。
+  Exposure接続はP3-14、FTD再参入接続はP3-16で完了した。
 - **依存**: なし（フェーズ基盤）
-- **(要検証) の現状**: 2026-08-07、#111 で `dd_severe_d25: 7` / `dd_severe_d15: 6`
+- **(要検証) の履歴**: 2026-08-07、#111 で `dd_severe_d25: 7` / `dd_severe_d15: 6`
   を採用し `config/settings.yaml` に反映した。根拠は 2000-01-03〜2026-08-06
   （6,589観測日）への履歴延長・holdout・エピソード単位ブロックブートストラップに
-  よる再検証で、①現行 6/4 では SEVERE（= `CASH_PRIORITY`）が全期間の 61% を
+  よる再検証で、①当時のDD単独モデル（6/4）では SEVERE（= `CASH_PRIORITY`）が全期間の 61% を
   占める既定状態だったこと（7/6 で 35%、前半/後半分割でも安定）、②SEVERE の
   先行き平均ドローダウンが最深で、SEVERE−(CAUTION+NORMAL) の差はブートストラップ
   95%CI でも有意なこと。先行きリターンの単調性は期間分割で再現せず根拠から
   撤回した。`dd_high_*`（5/3/2）は据え置きで引き続き要検証。実損益への効果は
   `backtest/` が exposure を消費しないため未測定（P3-14 の範囲）。詳細は
   `reports/regime/2026-08-06-dd-threshold-review.md` §10。
-  なお `dd_caution_d25` は `_base_exposure` が `CAUTION` と `NORMAL` を同じ
-  分岐に落とすため、露出上限を1日も動かせない表示専用のラベルである
+  なお `dd_high_*` と `dd_caution_d25` は表示専用である。Issue #252後の本番Exposureは
+  DD単独ではなくSMA200/VIX/FTDを先に評価し、`SEVERE`はSMA200以上のときだけ
+  `REDUCE_ONLY`ラベルに影響する。`REDUCE_ONLY`は口座固有のリスク半減を行わない。
 
 ### P3-14 【依存あり/worktree:p3-regime】regime/risk/report - Exposure Ceiling 統合
 
@@ -361,15 +363,15 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
 - **スコープ**: `regime/exposure.py`（新規）、`risk/checks.py`, `risk/position_sizing.py`,
   `report/daily_brief.py`, `report/*`, `pipeline/daily.py`
 - **主要仕様**:
-  - 判定: ゲートスコアと DD 水準から
-    `NEW_ENTRY_ALLOWED`（BULL かつ NORMAL/CAUTION）、
-    `REDUCE_ONLY`（NEUTRAL または HIGH）、
-    `CASH_PRIORITY`（BEAR または SEVERE）を決定（マッピングは config、(要検証)）。
+  - 判定は上から、VIX>30は`CASH_PRIORITY`、SMA200を3%超下回りFTD非アクティブは
+    `CASH_PRIORITY`、同じ下落域でFTDアクティブは`REDUCE_ONLY`、SMA200直下3%以内は
+    `REDUCE_ONLY`、SMA200以上でもDD SEVEREなら`REDUCE_ONLY`、それ以外は
+    `NEW_ENTRY_ALLOWED`とする。HIGH/CAUTIONは表示専用。
   - 欠損時保守則: 入力のいずれかが UNKNOWN なら判定を 1 段階厳しい側へ倒す。
     緩める方向への自動変更は行わない（出典: exposure-coach の安全第一原則）。
   - リスク統合: CASH_PRIORITY では新規候補のサイジングを 0 株 +
-    理由 `REGIME_CASH_PRIORITY` で返す。REDUCE_ONLY では max_trade_risk_pct を
-    半減し warning を付す。
+    理由 `REGIME_CASH_PRIORITY` で返す。REDUCE_ONLYは警戒ラベルと説明文だけで、
+    max_trade_risk_pctや候補掲載数を変更しない。旧倍率列はIssue #342の削除まで互換保持する。
   - レポート: terminal / markdown / discord の**先頭**（候補一覧より前）に
     Exposure Ceiling ブロック（判定・根拠・データ品質）を表示。
 - **動作確認**: フィクスチャで3判定それぞれを再現する dry-run を行い、
@@ -407,14 +409,15 @@ Issue 化の際は planning-tickets テンプレートに従い EARS 形式に�
   - Day1 = 前日終値超え（または当日レンジ上位 50% で引け）。Day2-3 は Day1 安値
     割れでリセット。FTD = Day4-10 に +1.25% 以上かつ前日超え出来高。
   - 品質スコア: Day4-7 基礎 60 点、Day8-10 基礎 50 点、上昇率 1.25/1.5/2.0% で段階加点、
-    SPY・QQQ 両指数同時確認で +15 点。
+    SPY・QQQ 両指数同時確認で +15 点。FTD確認日の安値割れ、またはSPY終値の
+    SMA200回復でFTDを失効させる。
   - 「FTD 成功率 25%」等の成功率言説は採用しない（一次資料未確認）。
     表示は状態と品質スコアのみ。
   - 状態機械は明示的な状態遷移（純関数 + 状態列挙）で実装し、全遷移をテストする。
 - **動作確認**: 2020年3月・2022年等の実データ相当フィクスチャで既知の FTD 相当日を
   検出すること。リセット条件のテスト。dry-run のレジーム節に FTD 状態が出ること。
-- **Not in scope**: FTD を自動でエクスポージャー判定に組み込む（表示のみ。接続は
-  実績評価後に判断）
+- **Not in scope**: FTD成功率などの統計的な採否検証。FTDは既にSMA200下の
+  `CASH_PRIORITY`を`REDUCE_ONLY`へ戻す狭い例外としてExposureへ接続済み。
 - **依存**: P3-13
 
 ---

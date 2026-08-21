@@ -16,6 +16,24 @@ them: this project never calls a model API directly. Qualitative analysis
 Python pipeline itself; the workflow's Claude Code OAuth secret provides the
 execution environment.
 
+## Codex cloud
+
+Codex cloud can use the repository's setup script as both its setup script and
+its optional maintenance script:
+
+```text
+./scripts/codex_setup.sh
+```
+
+The script runs `uv sync --locked --all-groups`, so the cloud container gets the
+same locked runtime, development, documentation, and operational dependencies
+as this repository. It then imports the package and checks that Python 3.14 or
+newer is active. It deliberately does not pull `data/` or use repository
+secrets: Codex cloud secrets are available during setup only and are removed
+before the agent phase. Configure secrets in the Codex environment only when a
+setup-time operation genuinely needs them, and use a separate task-specific
+command for any data synchronization.
+
 ## Two-stage Daily Workflow
 
 A daily run has two stages: a deterministic Python pipeline (Stage 1) and a

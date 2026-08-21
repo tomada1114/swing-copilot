@@ -82,6 +82,11 @@ Add `--pessimistic` to also run a higher-slippage scenario (1.75x) and print a
 normal-vs-pessimistic comparison, checking the strategy doesn't rely on
 unrealistically favorable fills.
 
+Backtest sizing uses `backtest.sim_trade_risk_pct`,
+`backtest.sim_position_cap_pct`, and `backtest.max_concurrent_positions` as
+nominal simulation values. They are not production account settings or
+investment advice values.
+
 `--policy` decides which of the production entry gates the simulation applies
 between a candidate and a fill. Pass several arms to compare them over one
 identical candidate stream, so the difference is attributable to the gates and
@@ -89,7 +94,7 @@ nothing else:
 
 ```bash
 uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 \
-    --limit 30 --policy none,regime,regime+risk
+    --limit 30 --policy none,regime,regime+earnings
 ```
 
 Check whether a strategy is overfit to its ATR-stop/max-hold parameters with a

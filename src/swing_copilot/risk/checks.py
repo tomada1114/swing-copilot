@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings
     from swing_copilot.data.earnings import EarningsLookup
     from swing_copilot.regime.exposure import ExposureDecision
-    from swing_copilot.risk.circuit_breaker import CircuitBreakerResult
     from swing_copilot.screening.base import Candidate
 
 _MISSING_DATA_REASON = "missing candidate price/ATR data"
@@ -36,8 +35,6 @@ EARNINGS_PROXIMITY_BLOCK_REASON = "EARNINGS_PROXIMITY_BLOCK"
 EARNINGS_PROXIMITY_WARN_WARNING = "EARNINGS_PROXIMITY_WARN"
 EARNINGS_DATE_UNKNOWN_WARNING = "EARNINGS_DATE_UNKNOWN"
 EARNINGS_RECENTLY_REPORTED_WARNING = "EARNINGS_RECENTLY_REPORTED"
-CIRCUIT_BREAKER_REASON_PREFIX = "CIRCUIT_BREAKER_"
-
 # A stored earnings-calendar row within this many business days before `as_of`
 # is recent enough to flag. The configurable windows classify upcoming events.
 _RECENTLY_REPORTED_BUSINESS_DAYS = 3
@@ -55,15 +52,9 @@ class EarningsGuardInput:
 
 @dataclass(frozen=True, slots=True)
 class RiskRunContext:
-    """Run-wide controls supplied to the deterministic checker.
-
-    `circuit_breaker` remains only as a temporary simulator compatibility seam;
-    the production daily path never supplies it. Issue #349 owns removal from
-    the backtest policy.
-    """
+    """Run-wide controls supplied to the deterministic checker."""
 
     earnings_guard: EarningsGuardInput | None = None
-    circuit_breaker: CircuitBreakerResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,11 +97,10 @@ class RiskChecker:
     ) -> None:
         """Create the checker from validated settings and prefetched controls."""
         self._risk_config = settings.risk
-        self._stop_atr_multiple = settings.backtest.exit_atr_multiple
-        self._entry_limit_atr_multiple = settings.backtest.entry_limit_atr_multiple
+        self._stop_atr_multiple = settings.trade_plan.exit_atr_multiple
+        self._entry_limit_atr_multiple = settings.trade_plan.entry_limit_atr_multiple
         context = run_context or RiskRunContext()
         self._earnings_guard = context.earnings_guard or EarningsGuardInput(False, {})
-        self._circuit_breaker = context.circuit_breaker
 
     def check(
         self,
@@ -127,7 +117,7 @@ class RiskChecker:
                 self._earnings_guard.lookups_by_symbol.get(candidate.symbol),
                 self._earnings_guard.is_enabled,
             )
-            assessments.append(self._apply_circuit_breaker(assessment))
+            assessments.append(assessment)
         return assessments
 
     def _assess(
@@ -211,20 +201,6 @@ class RiskChecker:
             stop_distance_pct=stop_distance_pct,
             reasons=(),
             warnings=warnings,
-        )
-
-    def _apply_circuit_breaker(self, assessment: RiskAssessment) -> RiskAssessment:
-        result = self._circuit_breaker
-        if result is None or result.state.value == "TRADING_ALLOWED":
-            return assessment
-        return replace(
-            assessment,
-            status="rejected",
-            reasons=(
-                *assessment.reasons,
-                f"{CIRCUIT_BREAKER_REASON_PREFIX}{result.state.value}",
-            ),
-            binding_constraint=_binding_constraint_after(assessment, "regime"),
         )
 
     def _apply_earnings_guard(

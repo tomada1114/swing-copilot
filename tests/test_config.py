@@ -600,14 +600,28 @@ def test_removed_reduce_only_multiplier_is_rejected():
         Settings.model_validate({"regime": {"reduce_only_risk_multiplier": 0.5}})
 
 
-def test_entry_limit_atr_multiple_defaults_to_zero():
+def test_trade_plan_defaults_are_shared_across_consumers():
     settings = load_settings("config/settings.yaml")
-    assert settings.backtest.entry_limit_atr_multiple == 0.0
+    assert settings.trade_plan.entry_limit_atr_multiple == 0.0
+    assert settings.trade_plan.exit_atr_multiple == 2.5
+    assert settings.trade_plan.exit_atr_period == 14
+    assert settings.trade_plan.max_hold_days == 25
+    assert settings.backtest.sim_trade_risk_pct == 0.01
+    assert settings.backtest.sim_position_cap_pct == 0.10
+    assert settings.backtest.max_concurrent_positions == 10
 
 
-def test_entry_limit_atr_multiple_rejects_negative_values():
+def test_trade_plan_rejects_negative_values_and_old_aliases():
     with pytest.raises(ValidationError, match="entry_limit_atr_multiple"):
-        Settings.model_validate({"backtest": {"entry_limit_atr_multiple": -0.1}})
+        Settings.model_validate({"trade_plan": {"entry_limit_atr_multiple": -0.1}})
+    with pytest.raises(ValidationError, match=r"backtest.*entry_limit_atr_multiple"):
+        Settings.model_validate({"backtest": {"entry_limit_atr_multiple": 0.1}})
+
+
+@pytest.mark.parametrize("field", ["sim_trade_risk_pct", "sim_position_cap_pct"])
+def test_simulation_percentages_are_bounded(settings, field):
+    with pytest.raises(ValidationError, match=field):
+        settings.backtest.model_validate({field: 0.0})
 
 
 def test_backtest_entry_rejects_unimplemented_modes():

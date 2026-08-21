@@ -38,7 +38,7 @@ from tests.tracking.conftest import (
 if TYPE_CHECKING:
     import duckdb
 
-    from swing_copilot.config import BacktestConfig, Settings
+    from swing_copilot.config import Settings, TradePlanConfig
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
 
@@ -87,8 +87,8 @@ class _FlakyConnection:
 
 
 @pytest.fixture
-def backtest_config(settings: Settings) -> BacktestConfig:
-    return settings.backtest
+def backtest_config(settings: Settings) -> TradePlanConfig:
+    return settings.trade_plan
 
 
 def _rise(session_date: date, close: float) -> dict[str, Any]:
@@ -107,7 +107,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -139,7 +139,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Issue #190: the counterfactual only exists if the rejected
         # candidates are carried exactly the way the accepted ones are.
@@ -161,7 +161,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store, symbol="SKP", recommendation="skip")
         write_bars(market_store, flat_prelude(symbol="SKP"))
@@ -174,7 +174,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # CASH_PRIORITY (or any regime that sets the run-level no_trade flag)
         # must not leave the ledger empty: the symbol's own proceed is still
@@ -198,7 +198,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # No risk assessment and no bars at all: nothing to price the entry at.
         seed_verdict(state_store)
@@ -225,7 +225,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # No risk assessment, and the run day's own bar has no close.
         seed_verdict(state_store)
@@ -254,7 +254,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         write_bars(
@@ -273,7 +273,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # The risk assessment carries both prices, so the entry needs no bars;
         # without any, there is simply no session to replay.
@@ -294,7 +294,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store, stop_price=None)
@@ -312,7 +312,7 @@ class TestOpening:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Five sessions is below ATR(14)'s minimum, so no stop exists at all.
         seed_verdict(state_store)
@@ -341,7 +341,7 @@ class TestDailyAdvance:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -382,7 +382,7 @@ class TestDailyAdvance:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -409,7 +409,7 @@ class TestDailyAdvance:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -454,7 +454,7 @@ class TestDailyAdvance:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -482,7 +482,7 @@ class TestExits:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -512,7 +512,7 @@ class TestExits:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -534,7 +534,7 @@ class TestExits:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         config = backtest_config.model_copy(update={"max_hold_days": 2})
         seed_verdict(state_store)
@@ -555,7 +555,7 @@ class TestExits:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         config = backtest_config.model_copy(update={"max_hold_days": 1})
         seed_verdict(state_store)
@@ -577,7 +577,7 @@ class TestExits:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -616,7 +616,7 @@ class TestAsOfBoundary:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
         as_of: date,
         expected_opened: int,
     ) -> None:
@@ -635,7 +635,7 @@ class TestAsOfBoundary:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -659,7 +659,7 @@ class TestVerdictReconciliation:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -684,7 +684,7 @@ class TestVerdictReconciliation:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Issue #190: skip is tracked too, so the replay stays valid and the
         # row moves strata instead of being destroyed (which would also shrink
@@ -711,7 +711,7 @@ class TestVerdictReconciliation:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -731,7 +731,7 @@ class TestDataQuality:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # The risk row prices the entry, so the position opens -- but the
         # symbol goes dark straight afterwards (delisting, universe exit), so
@@ -755,7 +755,7 @@ class TestDataQuality:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # No risk assessment, so the entry falls back to the run day's close.
         # An infinite close passes `<= 0` but would poison every later return.
@@ -788,7 +788,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -832,7 +832,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -860,7 +860,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -883,7 +883,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -905,7 +905,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -929,7 +929,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Too few sessions for ATR(14): the seeded position opens with no
         # stop at all, the same path REQ-006 exercises.
@@ -961,7 +961,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # The risk assessment prices the entry directly, so the position
         # opens without any bar ever having been written for ENTRY_DATE.
@@ -987,7 +987,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Not reachable through normal seeding (which refuses entry_price<=0
         # outright); constructed directly to prove the guard against a
@@ -1036,7 +1036,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         seed_verdict(state_store)
         seed_risk(state_store)
@@ -1076,7 +1076,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         other_symbol = "BBB"
         # A single run can carry more than one verdict, so both symbols'
@@ -1124,7 +1124,7 @@ class TestSplitRebase:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         seed_verdict(state_store)
@@ -1162,7 +1162,7 @@ class TestSplitRebase:
 
 
 class TestExitAtrPeriod:
-    """Issue #194: the ledger's ATR period is `backtest.exit_atr_period` too.
+    """Issue #194: the ledger's ATR period is `trade_plan.exit_atr_period` too.
 
     The prelude's true range is exactly 2.00 every session, so ATR is 2.00 for
     any period. `_QUIET_DAY` then drops the true range to 0.40, which the
@@ -1182,7 +1182,7 @@ class TestExitAtrPeriod:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         config = backtest_config.model_copy(
             update={"exit_atr_period": self._SHORT_PERIOD}
@@ -1207,7 +1207,7 @@ class TestExitAtrPeriod:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # The pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline:
         # 95.285714... sits below DAY_2's low, so nothing closes.
@@ -1230,7 +1230,7 @@ class TestExitAtrPeriod:
         self,
         state_store: StateStore,
         market_store: MarketStore,
-        backtest_config: BacktestConfig,
+        backtest_config: TradePlanConfig,
     ) -> None:
         # Six sessions are too few for ATR(14) but enough for ATR(5), so the
         # configured period decides whether a verdict without a risk stop is

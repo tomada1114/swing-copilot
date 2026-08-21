@@ -25,7 +25,7 @@ from swing_copilot.backtest.exits import (
 from swing_copilot.screening.indicators import symbol_window
 
 _START = date(2027, 1, 1)
-#: `settings.backtest.exit_atr_period`'s shipped value; these tests pin the
+#: `settings.trade_plan.exit_atr_period`'s shipped value; these tests pin the
 #: shape of the function, not the configured number (Issue #194).
 _PERIOD = 14
 

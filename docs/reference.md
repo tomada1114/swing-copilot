@@ -111,8 +111,11 @@ digestで束縛せず、読み戻す経路も持たない診断用の成果物�
 `EARNINGS_PROXIMITY_WARN`とする。予定不明は`EARNINGS_DATE_UNKNOWN`を明示し、
 Finnhubキー未設定時はガード全体を`NO_EARNINGS_DATA`として無効化する。
 
-`risk/circuit_breaker.py`はバックテスト互換の純関数として残るが、日次の本番/公開経路には
-配線しない。バックテストだけが自身のシミュレーション実現損益を渡す。
+バックテストの名目資金・サイジングは`settings.backtest.sim_trade_risk_pct`・
+`sim_position_cap_pct`・`max_concurrent_positions`で決まるシミュレーション専用値であり、
+本番の助言値ではない。市場状態、決算、`not_calculable`だけがバックテストの
+エントリー境界に残り、ポートフォリオ熱量・セクター・相関・サーキットブレーカーは
+その境界では判定しない。
 
 ## 定性分析の境界（`analysis/`、FR-08・CON-03）
 
@@ -475,7 +478,7 @@ copilot-track stats --recommendation skip        # 1区分だけ
 `risk_assessments.entry_price`（= run日終値）を使い、これは計画指値とは別の仮想台帳用基準値である。計画指値は
 `risk_assessments.limit_price`、初期stopは同`stop_price`で、いずれも
 NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
-代替する（ATR期間はバックテストと同じ`settings.backtest.exit_atr_period`）。
+代替する（ATR期間はバックテストと同じ`settings.trade_plan.exit_atr_period`）。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
 前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
@@ -719,7 +722,7 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 `REDUCE_ONLY`の警戒ラベルに影響し、HIGH/CAUTIONは表示専用である。
 `CASH_PRIORITY`はSMA200を3%超下回る非FTD状態、またはVIX>30に限定する。
 
-Issue #184の`copilot-backtest --policy none|regime|regime+risk`は、この閉路を
+Issue #184の`copilot-backtest --policy none|regime|regime+earnings`は、この閉路を
 戦略まるごとの水準で開いた（`backtest/policy.py`が本番の`RiskChecker`を包んで
 注入する）。以下の`copilot-dd-forward`はそれと補完関係にあり、戦略の勝ち負けに
 混ぜず**水準そのもの**の予測力だけを分離して見る道具である。
@@ -746,7 +749,7 @@ copilot-dd-forward --as-of 2026-08-06 --settings /tmp/variant/settings.yaml
 | --- | --- | --- |
 | `--as-of` | 必須 | 可視性の基準日。これ以降のバーはどの用途でも読まない |
 | `--start` | 履歴の先頭 | 最初の観測日。手前は助走（DD窓とSMA200シード）として読む |
-| `--horizons` | `5,10,25` | 先行きリターンの保有営業日数。25は`backtest.max_hold_days` |
+| `--horizons` | `5,10,25` | 先行きリターンの保有営業日数。25は`trade_plan.max_hold_days` |
 | `--sweep` | off | 閾値を1つずつ動かした感度表 |
 | `--grid` | off | 順序制約を満たすグリッドの全走査（既定レンジで約1分） |
 | `--score-target` / `--score-horizon` | `SPY` / `10` | `--sweep`・`--grid`・ゲート表の採点軸。測定していない対象・保有日数を指定するとエラーで落ちる（空欄の表を出さないため）。`--horizons`を絞ったら合わせて指定する |
@@ -825,7 +828,7 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 
 ### 指値約定ゲート（Issue #326）
 
-`backtest.entry_limit_atr_multiple` が`0.0`のときは既存互換の翌営業日寄付モデルを
+`trade_plan.entry_limit_atr_multiple` が`0.0`のときは既存互換の翌営業日寄付モデルを
 使う。正の`k`では、シグナル日の終値とATR14から共有純関数
 `backtest/entries.py::entry_limit_price(close, atr14, k)`で
 `limit = close + k × ATR14`を作る。翌日のOHLCが始値`<= limit`なら始値に通常の
@@ -842,9 +845,9 @@ entry slippageを適用し、始値が上でも安値`<= limit`なら指値ち�
 順に渡す。`k=0.0`で既存の数値を再現する必要があるため、このIssueではバックテスト
 の初期逆指値アンカー（約定価格）を本番の終値アンカーへ変更していない。
 
-## 決算ゲートの決算日はどこから来るか（`--policy regime+risk`）
+## 決算ゲートの決算日はどこから来るか（`--policy regime+earnings`）
 
-`--policy regime+risk`のアームだけが決算ブロック（`risk.earnings_block_business_days`）
+`--policy regime+earnings`のアームだけが決算ブロック（`risk.earnings_block_business_days`）
 を適用する。バックテストには過去の決算カレンダーが無いので、決算日は
 **収集済みの提出履歴（`fundamentals`テーブルの`10-K`/`10-Q`）から推定**する。
 外部の決算カレンダーAPIは呼ばない。実行時に
@@ -922,20 +925,19 @@ markdownレポートの冒頭に必ず出る（`run`・`--pessimistic`比較・`
 
 ## 本番ゲートのA/B（`--policy`）
 
-`--policy`は「候補→建玉」の間に市場状態、決算ブロック、バックテスト自身の
-シミュレーション損失ゲートをどこまで通すかを選ぶ。カンマ区切りで複数指定すると、
+`--policy`は「候補→建玉」の間に市場状態と決算ブロックをどこまで通すかを選ぶ。
+カンマ区切りで複数指定すると、
 **同一の候補ストリーム**に対してアームごとにエンジンだけを走らせ、指標と
 ゲート発動回数を列比較する。
 
 ```bash
 copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
-  --policy none,regime,regime+risk
+  --policy none,regime,regime+earnings
 ```
 
 - `none`: ゲート無し（従来の挙動）
 - `regime`: レジームのExposure Ceilingのみ
-- `regime+risk`: レジーム＋決算ブロック＋シミュレーション損失ゲート
-  （最後のゲートはrun自身の決済損益から評価する）
+- `regime+earnings`: レジーム＋決算ブロック
 
 レポートの`Entry blocks`は「入らなかった理由」を*候補件数（発動セッション数）*
 の形で出す。`regime`が`120 (37d)`なら、37営業日でレジームが閉じ、その日の候補
@@ -948,10 +950,12 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 なるため）。これらの価格履歴が無い状態で`--policy`を指定すると、レジームが
 UNKNOWNのまま全期間を塞ぐ結果を黙って出す代わりに、実行前にエラーで止まる。
 
-`--policy`はサイジング基底の変更（Issue #184）とセットである。1建玉のサイズは
+`--policy`とは独立して、1建玉のサイズは
 残現金ではなく`equity = cash + 建玉時価`から決まる。旧来の現金基準は保有が
 増えるたびにサイズを`0.9^n`で縮め、10銘柄満玉でも投下資本が約65%にしかならず、
-本番/公開分析とは独立した名目資金系である。`run`の指標に
+本番/公開分析とは独立した名目資金系である。なお、ここでの金額と比率は
+バックテストのシミュレーション値であり、投資助言や本番のポジションサイズではない。
+`run`の指標に
 出る`avg_invested_pct`（各日の建玉時価/equityの平均）と
 `max_concurrent_reached`が、この投下度合いをそのまま数字にする。
 
@@ -992,8 +996,9 @@ copilot-backtest grid --strategy default --start 2020-01-02 --end 2026-07-30 \
 `fundamental_filters`、ユニバース、対象銘柄、`--start`/`--end`、ベンチマーク
 （取引日カレンダーの源泉）、そして価格・ファンダの内容ダイジェストである。
 
-`settings.backtest`（`exit_atr_multiple`・`exit_atr_period`・`max_hold_days`・
-`commission_pct`・`slippage_pct`・`slippage_multiplier`）と`settings.risk`、初期資金は
+`settings.trade_plan`（`entry_limit_atr_multiple`・`exit_atr_multiple`・
+`exit_atr_period`・`max_hold_days`）と、`settings.backtest`のコスト・名目資金設定、
+`settings.risk`、初期資金は
 **キーに含めない**。これらはエンジンの入力であってFilter/Signalは一切読まない
 ため、手仕舞いパラメータやコストを振ってもキャッシュは無効化されない——
 感応度グリッドやコスト比較を同じキャッシュで回せることが、この設計の目的で

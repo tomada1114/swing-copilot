@@ -1653,7 +1653,7 @@ def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome
     """
     try:
         summary = update_tracking(
-            deps.state_store, deps.market_store, deps.settings.backtest, as_of=as_of
+            deps.state_store, deps.market_store, deps.settings.trade_plan, as_of=as_of
         )
     except Exception as exc:
         logger.exception("track update step raised unexpectedly")

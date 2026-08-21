@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date
 
-#: Forward horizons in trading days. 25 is `backtest.max_hold_days`, so the
+#: Forward horizons in trading days. 25 is `trade_plan.max_hold_days`, so the
 #: longest horizon matches how long a swing position is actually carried.
 DEFAULT_HORIZONS = (5, 10, 25)
 

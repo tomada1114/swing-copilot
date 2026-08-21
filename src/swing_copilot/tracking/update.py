@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
     import pandas as pd
 
-    from swing_copilot.config import BacktestConfig
+    from swing_copilot.config import TradePlanConfig
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.storage.tracking_records import TrackableVerdict
@@ -112,7 +112,7 @@ class _Advanced:
 def update_tracking(
     state_store: StateStore,
     market_store: MarketStore,
-    backtest_config: BacktestConfig,
+    trade_plan: TradePlanConfig,
     *,
     as_of: date,
 ) -> TrackingUpdateResult:
@@ -121,8 +121,8 @@ def update_tracking(
     Args:
         state_store: Verdict source and tracking-ledger target.
         market_store: Stored bars; nothing is fetched.
-        backtest_config: `exit_atr_multiple`, `exit_atr_period` and
-            `max_hold_days`, the same values the simulator uses.
+        trade_plan: Shared plan values used by production advice and the
+            simulator.
         as_of: Inclusive point-in-time cutoff. No bar dated later is read, and
             no verdict from a later run is opened.
 
@@ -152,7 +152,7 @@ def update_tracking(
 
     pending: list[_Work] = []
     for candidate in candidates:
-        work = _seed_position(bars, backtest_config, candidate, notes)
+        work = _seed_position(bars, trade_plan, candidate, notes)
         if work is not None:
             pending.append(work)
     opened_count = len(pending)
@@ -163,7 +163,7 @@ def update_tracking(
 
     advanced_count = closed_count = 0
     for work in pending:
-        advanced = _advance(backtest_config, work, as_of, notes)
+        advanced = _advance(trade_plan, work, as_of, notes)
         state_store.upsert_verdict_position(advanced.position, advanced.marks)
         if advanced.day_count > 0:
             advanced_count += 1
@@ -308,7 +308,7 @@ def _rebase_position(
 
 def _seed_position(
     all_bars: pd.DataFrame,
-    config: BacktestConfig,
+    config: TradePlanConfig,
     candidate: TrackableVerdict,
     notes: list[str],
 ) -> _Work | None:
@@ -368,7 +368,7 @@ def _seed_position(
 
 
 def _advance(
-    config: BacktestConfig, work: _Work, as_of: date, notes: list[str]
+    config: TradePlanConfig, work: _Work, as_of: date, notes: list[str]
 ) -> _Advanced:
     """Replay one position from its last marked day up to `as_of`.
 

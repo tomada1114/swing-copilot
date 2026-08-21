@@ -351,21 +351,25 @@ class TestCacheKeyContract:
         return compute_cache_key(request_, deps, load_market_frame(request_, deps))
 
     @pytest.mark.parametrize(
-        "update",
+        ("section", "update"),
         [
-            pytest.param({"exit_atr_multiple": 1.0}, id="exit_atr_multiple"),
-            pytest.param({"max_hold_days": 3}, id="max_hold_days"),
-            pytest.param({"commission_pct": 0.05}, id="commission_pct"),
-            pytest.param({"slippage_pct": 0.02}, id="slippage_pct"),
-            pytest.param({"slippage_multiplier": 3.0}, id="slippage_multiplier"),
+            pytest.param(
+                "trade_plan", {"exit_atr_multiple": 1.0}, id="exit_atr_multiple"
+            ),
+            pytest.param("trade_plan", {"max_hold_days": 3}, id="max_hold_days"),
+            pytest.param("backtest", {"commission_pct": 0.05}, id="commission_pct"),
+            pytest.param("backtest", {"slippage_pct": 0.02}, id="slippage_pct"),
+            pytest.param(
+                "backtest", {"slippage_multiplier": 3.0}, id="slippage_multiplier"
+            ),
         ],
     )
-    def test_engine_only_backtest_settings_leave_the_key_unchanged(
-        self, request_, deps, baseline, update
+    def test_engine_only_settings_leave_the_key_unchanged(
+        self, request_, deps, baseline, section, update
     ):
         expected_key, _frame = baseline
         varied = deps.settings.model_copy(
-            update={"backtest": deps.settings.backtest.model_copy(update=update)}
+            update={section: getattr(deps.settings, section).model_copy(update=update)}
         )
 
         varied_deps = BacktestDependencies(

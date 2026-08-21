@@ -170,6 +170,7 @@ jobs:
                   return str(tool_name)
               input_value = denial.get("tool_input", denial.get("input", {}))
               command = input_value.get("command", "") if isinstance(input_value, dict) else ""
+              command = str(command).strip()
               if re.search(r"\buv run copilot-daily\b", command):
                   return "Bash:uv-run-copilot-daily-with-prefix"
               if re.search(r"\buv run copilot-verify-analysis\b", command):
@@ -196,6 +197,12 @@ jobs:
                   return "Bash:filesystem-or-git"
               if re.search(r"(?:^|[;&|]\s*)(?:cd|export|env|bash|sh)\b", command):
                   return "Bash:shell-wrapper"
+              if re.search(
+                  r"^(?:if|for|while|case|source|set|echo|printf|test|sleep|date|"
+                  r"python|python3|jq|awk|timeout|which|command|true|false)\b",
+                  command,
+              ):
+                  return "Bash:common-shell-or-script"
               return "Bash:other"
 
           print(f"permission_denials_count={len(denials)}")

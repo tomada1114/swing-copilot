@@ -83,8 +83,8 @@ jobs:
       # 値に含まれる文字次第で JSON が壊れるため不可)。
       # 権限は claude_args で CLI に直接渡す (settings の defaultMode や
       # permissions は SDK 経由の起動には効かない)。リポジトリの
-      # .claude/settings.json (guard/format/stop_check フックと
-      # ./scripts/timebox.sh の許可) は project スコープとして別途読まれる。
+      # .claude/settings.json (guard/format/stop_check フックと、この同じ狭い
+      # コマンド許可リスト) は project スコープとして別途読まれる。
       #
       # dontAsk: 承認待ちで止まらず、許可されていないツール呼び出しは拒否して続行する。
       # 許可するのは swing-daily スキルが実際に使うコマンドだけで、`uv run` 全体には

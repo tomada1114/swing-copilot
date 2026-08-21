@@ -458,8 +458,14 @@ def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():
     for section in (headless_policy, prohibitions):
         assert "ツール呼び出しを含まないターン" in section
     # The alternative to waiting must be named, or "do not idle" reads as "do not
-    # launch subagents at all".
+    # launch subagents at all". Naming it is not enough either: a background
+    # watcher returns immediately, so the mechanism has to be the foreground
+    # call, chunked under the Bash tool's own timeout ceiling.
     assert "待つこと自体をツール呼び出しにする" in headless_policy
+    assert "run_in_background を付けない" in headless_policy
+    # Cancelling a wave seconds after fanning out turns a 2-of-30 day into a
+    # 0-of-30 day, so the clock-free fallback needs a floor.
+    assert "起動直後の波を打ち切らない" in skill_text
     # A note written only at the end is lost with the session it was describing.
     assert "最初の波を起動する前に一度書き" in headless_policy
 

@@ -53,6 +53,14 @@ TIMEBOX_INVOCATION = re.compile(
     rf"^\s*{re.escape(TIMEBOX_COMMAND)} (\d+)\s*$",
     re.MULTILINE,
 )
+#: The cwd-independent escape hatch for the relative form above (#323). The
+#: relative path is what keeps the launch allowlisted, and it is also what makes
+#: it exit 127 from any working directory other than the repository root.
+TIMEBOX_FALLBACK_COMMAND = "<REPO_ROOT>/scripts/timebox.sh"
+TIMEBOX_FALLBACK_INVOCATION = re.compile(
+    rf"^\s*{re.escape(TIMEBOX_FALLBACK_COMMAND)} (\d+)\s*$",
+    re.MULTILINE,
+)
 
 
 def test_invariant_matrix_maps_every_requirement_and_review_fix_to_real_tests():
@@ -319,10 +327,12 @@ def test_storage_defaults_stay_inside_the_directory_the_guard_watches():
         assert (PROJECT_ROOT.resolve() / default).parent == _REPO_DATA_DIR
 
 
-def _run_timebox(*arguments: str) -> subprocess.CompletedProcess[str]:
+def _run_timebox(
+    *arguments: str, cwd: Path = PROJECT_ROOT
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - fixed repo script, static arguments
         [str(TIMEBOX_SCRIPT), *arguments],
-        cwd=PROJECT_ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         timeout=60,
@@ -330,15 +340,26 @@ def _run_timebox(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_timebox_watcher_marks_the_deadline_and_stays_directly_executable():
-    """`swing-daily` background-launches the watcher and waits for its marker.
+@pytest.mark.parametrize("is_launched_from_repo_root", [True, False])
+def test_timebox_watcher_marks_the_deadline_and_stays_directly_executable(
+    tmp_path, is_launched_from_repo_root
+):
+    """`swing-daily` launches the watcher and waits for its marker.
 
     The completion notification *is* the wave's deadline, so both halves of the
     contract are pinned here: the file stays executable (it is invoked as
     `./scripts/timebox.sh`, not through an interpreter) and it announces the
     deadline with the single `TIMEBOX_REACHED` line the skill looks for.
+
+    The second case is the precondition for #323's recovery. The documented
+    launch is relative, which is the only shape the allowlist can prefix-match —
+    and also why a shell sitting anywhere else exits 127. The skill recovers by
+    relaunching the same file through an absolute path, which only works while
+    the script itself resolves nothing against the caller's cwd.
     """
-    result = _run_timebox("1")
+    cwd = PROJECT_ROOT if is_launched_from_repo_root else tmp_path
+
+    result = _run_timebox("1", cwd=cwd)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "TIMEBOX_REACHED"
@@ -384,6 +405,91 @@ def test_daily_skill_watcher_stays_in_its_allowlisted_script_form():
     assert [entry for entry in allow if "timebox" in entry] == [TIMEBOX_ALLOW_ENTRY]
     assert "ウォッチャを起動できない場合" in skill_text
     assert "**再試行せず**" in skill_text
+
+
+def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
+    """#323: exit 127 must have a documented, bounded recovery.
+
+    The allowlisted form is relative, so a shell left outside the repository root
+    kills the parent's only blocking wait before the first wave even starts — a
+    2026-08-19 dry-run recorded exactly this exit 127 in its `headless_note.md`
+    and fell through to the completion-based fallback. One absolute-path retry
+    recovers it without widening the allowlist; the widened `Bash()` prefix is
+    deliberately *not* added, so this pins that the recovery is documented
+    instead.
+    """
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+    allow = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))["permissions"][
+        "allow"
+    ]
+
+    fallbacks = {
+        int(seconds) for seconds in TIMEBOX_FALLBACK_INVOCATION.findall(skill_text)
+    }
+    assert fallbacks, "the skill must show the cwd-independent relaunch"
+    assert all(seconds > 0 for seconds in fallbacks)
+    assert "exit 127" in skill_text
+    assert "**1 回だけ**" in skill_text
+    # Both watchers launch from the same shell and fail the same way. Recovering
+    # only the per-wave one silently drops the 45-minute final backstop.
+    assert "すべてのウォッチャに等しく適用する" in skill_text
+    # The repo root has to be derivable without counting directories: the live
+    # and dry-run run directories sit at different depths.
+    assert "から数えないこと" in skill_text
+    # The escape hatch stays outside the allowlist on purpose: an absolute path
+    # differs per checkout, so allowlisting it is impossible, and headless runs
+    # use `bypassPermissions` anyway.
+    assert [entry for entry in allow if "timebox" in entry] == [TIMEBOX_ALLOW_ENTRY]
+
+
+def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():
+    """#323: in an SDK run the parent's final text turn ends the whole session.
+
+    The 2026-08-19 live run returned a text-only turn while the first wave was
+    still fanned out, so the session died with 2 of 30 fragments, no
+    `analysis_result.json`, and no `headless_note.md` — and the job still went
+    green. The rule has to be in the headless policy *and* in the prohibitions,
+    because the parent reads the latter when it is deciding to stop.
+    """
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+    # Partition on the headless heading first: splitting only on 禁止事項 would
+    # leave the whole document above it as "the headless policy", and the rule
+    # could drift into any other step while this test stayed green.
+    _, heading, below = skill_text.partition("## 無人実行（headless）時の方針")
+    headless_policy, _, prohibitions = below.partition("## 禁止事項")
+
+    assert heading, "the headless policy section must exist"
+    assert prohibitions, "the prohibitions must follow the headless policy"
+    for section in (headless_policy, prohibitions):
+        assert "ツール呼び出しを含まないターン" in section
+    # The alternative to waiting must be named, or "do not idle" reads as "do not
+    # launch subagents at all". Naming it is not enough either: a background
+    # watcher returns immediately, so the mechanism has to be the foreground
+    # call, chunked under the Bash tool's own timeout ceiling.
+    assert "待つこと自体をツール呼び出しにする" in headless_policy
+    assert "run_in_background を付けない" in headless_policy
+    # Cancelling a wave seconds after fanning out turns a 2-of-30 day into a
+    # 0-of-30 day, so the clock-free fallback needs a floor.
+    assert "起動直後の波を打ち切らない" in skill_text
+    # A note written only at the end is lost with the session it was describing.
+    assert "最初の波を起動する前に一度書き" in headless_policy
+
+
+def test_daily_skill_makes_the_per_subagent_time_limit_self_enforced():
+    """#323: the only cutoff that survives a parent that stopped listening.
+
+    The watcher and `TaskStop` both assume the parent session is alive and still
+    receiving background-task notifications. A subagent that may — but need not —
+    stop itself leaves no cutoff at all when that assumption breaks, so the
+    permissive wording must not come back.
+    """
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+
+    assert "自ら終了してよい" not in skill_text
+    assert "**サブエージェント自身が必ず打ち切る**" in skill_text
+    assert "親に何も起きなくても効く唯一の機構" in skill_text
+    # Self-termination must not become a licence to emit half-written fragments.
+    assert "親に打ち切られた場合とまったく同じ" in skill_text
 
 
 def _is_protocol_or_abc(base: ast.expr) -> bool:

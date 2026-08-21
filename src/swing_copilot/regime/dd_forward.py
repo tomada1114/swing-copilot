@@ -1,11 +1,9 @@
 """Pure measurement of Distribution Day levels against the price action that followed.
 
-`regime/distribution.py` classifies one `as_of` date; `regime/exposure.py` turns
-that level into an Exposure Ceiling that can zero every candidate's share count.
-Nothing in the repository measured whether the levels separate good forward
-periods from bad ones -- `backtest/` never imports `regime.exposure` or
-`regime.distribution`, so `settings.yaml`'s `dd_*` thresholds cannot move a
-backtest number at all.
+`regime/distribution.py` classifies one `as_of` date. This module is the
+historical DD-level explorer, kept separate from the live Issue #252 Exposure
+gate: the live six-branch decision also uses SMA200, VIX, and FTD, so a
+DD-only forward result is not a production exposure decision.
 
 This module answers that question directly and read-only: replay every
 observation date over a stored history, classify it with the same composite rule
@@ -40,7 +38,7 @@ from swing_copilot.regime.gate import (
     RegimeThresholds,
     evaluate_market_gate,
 )
-from swing_copilot.screening.indicators import ema
+from swing_copilot.screening.indicators import sma
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -136,7 +134,7 @@ class ForwardScanRequest:
     #: repository read.
     bars: pd.DataFrame
     #: First observation date. Earlier rows are still read, as the history the
-    #: counter and the EMA need.
+    #: counter and the SMA need.
     start: date
     #: Last visible date. Nothing after it is read, for any purpose.
     as_of: date
@@ -153,7 +151,7 @@ class ForwardScan:
     horizons: tuple[int, ...]
     observations: tuple[Observation, ...]
     #: Trading dates in `[start, as_of]` skipped because the history before
-    #: them was too short to count a full window or seed the gate EMA.
+    #: them was too short to count a full window or seed the gate SMA.
     warmup_skipped: int
     #: Symbols contributing to `UNIVERSE_TARGET`, 0 when only index bars were
     #: supplied (the basket target is then absent from every observation).
@@ -287,11 +285,10 @@ def scan_forward(request: ForwardScanRequest) -> ForwardScan:
         if symbol not in INDEX_TARGETS and not symbol.startswith("^")
     )
 
-    # Seeded from the first `ema_period` closes of whatever series it is given,
-    # so a longer history than the daily run's 800-day window shifts the value
-    # by the seed's decayed weight only -- ~1e-13 at period 50 after two years.
-    # `tests/regime/test_dd_forward.py` pins that this never flips a verdict.
-    spy_ema = ema(spy_bars["close"], request.thresholds.gate.ema_period)
+    # Mirror the daily gate's SMA input. `sma()` returns NaN until the full
+    # configured window is visible, so warm-up observations cannot be treated
+    # as an established trend state.
+    spy_sma200 = sma(spy_bars["close"], request.thresholds.gate.sma_period)
     series_by_target = {
         SPY_TARGET: closes[SPY_TARGET].reindex(calendar),
         QQQ_TARGET: closes[QQQ_TARGET].reindex(calendar),
@@ -307,10 +304,10 @@ def scan_forward(request: ForwardScanRequest) -> ForwardScan:
         if as_of < request.start:
             continue
         qqq_index = qqq_rows.get(as_of)
-        ema_value = (
-            float(spy_ema.iloc[index]) if pd.notna(spy_ema.iloc[index]) else None
+        sma_value = (
+            float(spy_sma200.iloc[index]) if pd.notna(spy_sma200.iloc[index]) else None
         )
-        if qqq_index is None or ema_value is None:
+        if qqq_index is None or sma_value is None:
             warmup_skipped += 1
             continue
         spy_counts = calculate_distribution_days(
@@ -328,7 +325,7 @@ def scan_forward(request: ForwardScanRequest) -> ForwardScan:
             continue
         gate = evaluate_market_gate(
             float(spy_bars.iloc[index]["close"]),
-            ema_value,
+            sma_value,
             vix_closes.get(as_of),
             thresholds=request.thresholds.gate,
         )

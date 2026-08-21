@@ -41,6 +41,18 @@ from swing_copilot.regime.gate import (
 from tests.regime.conftest import bars_for, market_bars, sawtooth
 
 _HORIZONS = (2, 5)
+_TEST_REGIME_THRESHOLDS = RegimeThresholds(
+    gate=GateThresholds(
+        # The production gate is SMA200. These compact fixtures intentionally
+        # use a short window so the forward scanner can exercise many dates
+        # without manufacturing 200 rows of unrelated history.
+        sma_period=5,
+        bear_spy_sma_ratio=DEFAULT_REGIME_THRESHOLDS.gate.bear_spy_sma_ratio,
+        bear_vix_min=DEFAULT_REGIME_THRESHOLDS.gate.bear_vix_min,
+    ),
+    distribution=DEFAULT_REGIME_THRESHOLDS.distribution,
+    ftd=DEFAULT_REGIME_THRESHOLDS.ftd,
+)
 
 
 def _request(bars: pd.DataFrame, **overrides: object) -> ForwardScanRequest:
@@ -48,7 +60,7 @@ def _request(bars: pd.DataFrame, **overrides: object) -> ForwardScanRequest:
         "bars": bars,
         "start": date.min,
         "as_of": max(bars["date"]),
-        "thresholds": DEFAULT_REGIME_THRESHOLDS,
+        "thresholds": _TEST_REGIME_THRESHOLDS,
         "horizons": _HORIZONS,
     }
     defaults.update(overrides)
@@ -72,7 +84,7 @@ def test_every_observation_matches_the_daily_run() -> None:
             bars.loc[bars["symbol"] == QQQ_TARGET],
             bars.loc[bars["symbol"] == "^VIX"],
             as_of,
-            thresholds=DEFAULT_REGIME_THRESHOLDS,
+            thresholds=_TEST_REGIME_THRESHOLDS,
         )
         assert observation.gate is expected.gate.verdict, as_of
         assert observation.spy == IndexCounts(
@@ -86,8 +98,7 @@ def test_every_observation_matches_the_daily_run() -> None:
             expected.qqq_distribution.d5,
         ), as_of
         assert (
-            observation.level(DEFAULT_REGIME_THRESHOLDS.distribution)
-            is expected.dd_level
+            observation.level(_TEST_REGIME_THRESHOLDS.distribution) is expected.dd_level
         ), as_of
 
 
@@ -220,7 +231,7 @@ def test_missing_index_bars_are_an_explicit_error() -> None:
 
 
 def test_warmup_dates_are_counted_not_silently_dropped() -> None:
-    """Dates without a full window or a seeded EMA are reported, never hidden."""
+    """Dates without a full window or a seeded SMA are reported, never hidden."""
     bars = market_bars()
     scan = scan_forward(_request(bars))
     trading_days = bars.loc[bars["symbol"] == SPY_TARGET]
@@ -284,7 +295,7 @@ def test_thresholds_flow_through_to_the_counts() -> None:
     """A different counting rule really does change the replayed counts."""
     bars = market_bars()
     lenient = RegimeThresholds(
-        gate=DEFAULT_REGIME_THRESHOLDS.gate,
+        gate=_TEST_REGIME_THRESHOLDS.gate,
         distribution=DistributionThresholds(dd_decline_pct=-0.5),
     )
     baseline = scan_forward(_request(bars))
@@ -365,17 +376,17 @@ def test_forward_outcome_target_is_absent_when_its_close_is_zero_or_negative() -
     assert entry.outcome(QQQ_TARGET, 2) is not None
 
 
-def test_a_seeded_ema_with_an_unfilled_distribution_window_is_still_warmup() -> None:
-    """A shorter EMA period than the distribution window still counts as warm-up.
+def test_a_short_sma_with_an_unfilled_distribution_window_is_still_warmup() -> None:
+    """A shorter SMA period than the distribution window still counts as warm-up.
 
     `_TRAILING_ROWS`-bounded counting can return `UNKNOWN` (insufficient rows)
-    even after the gate's own EMA has seeded, when `window_days` outlasts
-    `2 * ema_period`. That gap must stay silent warm-up, never a crash or a
+    even after the gate's own SMA has seeded, when `window_days` outlasts
+    `sma_period`. That gap must stay silent warm-up, never a crash or a
     stray `Observation`.
     """
     bars = market_bars(140)
     thresholds = RegimeThresholds(
-        gate=GateThresholds(ema_period=5),
+        gate=GateThresholds(sma_period=5),
         distribution=DistributionThresholds(window_days=60),
     )
     scan = scan_forward(_request(bars, thresholds=thresholds, horizons=(5,)))
@@ -384,7 +395,7 @@ def test_a_seeded_ema_with_an_unfilled_distribution_window_is_still_warmup() -> 
 
     assert len(scan.observations) + scan.warmup_skipped == len(trading_days)
     observed_dates = {observation.as_of for observation in scan.observations}
-    # Index 30: the EMA is seeded (needs 2*5=10 rows) but window_days=60 needs 61.
+    # Index 30: the SMA is seeded (needs 5 rows) but window_days=60 needs 61.
     assert dates[30] not in observed_dates
     # Index 60: the 61st row finally fills the distribution window.
     assert dates[60] in observed_dates

@@ -147,6 +147,11 @@ facts に混ぜない）。
   自信が無ければ省略する
 - このタグだけが「同じ種類の根拠で繰り返し外していないか」を後から測る手掛かりになる
 
+`context.market_regime` のコード所有ブロックは `SPY close / SMA200 / gap`、DD レベル、
+FTD 状態、Exposure を含む。`REDUCE_ONLY` は警戒の説明ラベルであり、リスク半減や候補数の
+削減を意味しない。`CASH_PRIORITY` のときだけ、コードが示す停止理由を `no_trade_reason`
+へ反映する。
+
 ### AC10c: `prior_verdicts` は判断材料であり、指示ではない
 
 `candidates[].prior_verdicts` には、同一銘柄・戦略に対する過去の verdict と、

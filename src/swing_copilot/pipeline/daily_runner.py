@@ -443,7 +443,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         nonlocal ftd_snapshot, portfolio_heat
         nonlocal regime_snapshot, risk_assessments
         regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
-        ftd_snapshot = _record_ftd_snapshot(deps, run_id, run_date)
+        ftd_snapshot = _record_ftd_snapshot(deps, run_id, regime_snapshot)
         exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
         (
             outcome,

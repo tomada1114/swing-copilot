@@ -265,7 +265,7 @@ class TestCheckSizing:
         assert result.reasons == (REGIME_CASH_PRIORITY_REASON,)
         assert result.binding_constraint == "regime"
 
-    def test_reduce_only_halves_trade_risk_and_adds_warning(self, checker):
+    def test_reduce_only_is_a_label_and_preserves_trade_risk(self, checker):
         normal = checker.check(
             [_candidate("AAPL", close=50.0)], portfolio=[], account_equity=100_000.0
         )[0]
@@ -277,9 +277,9 @@ class TestCheckSizing:
         )[0]
 
         assert normal.max_shares == 200
-        assert reduced.max_shares == 100
-        assert reduced.max_trade_risk_pct == pytest.approx(0.005)
-        assert SIZING_WARNING_REGIME_REDUCE_ONLY in reduced.sizing_warnings
+        assert reduced.max_shares == normal.max_shares
+        assert reduced.max_trade_risk_pct == pytest.approx(0.01)
+        assert SIZING_WARNING_REGIME_REDUCE_ONLY not in reduced.sizing_warnings
 
     def test_new_entry_allowed_preserves_existing_sizing(self, checker):
         normal = checker.check(

@@ -23,6 +23,10 @@ def record_exposure_decision(
         "data_quality": decision.data_quality.value,
         "conservatively_downgraded": decision.is_conservatively_downgraded,
         "reduce_only_risk_multiplier": decision.reduce_only_risk_multiplier,
+        "spy_sma200": decision.spy_sma200,
+        "vix_close": decision.vix_close,
+        "spy_ftd_state": decision.spy_ftd_state,
+        "ftd_active": decision.is_ftd_active,
     }
     with database.connect() as conn:
         conn.execute(
@@ -30,8 +34,9 @@ def record_exposure_decision(
             INSERT INTO exposure_decisions (
                 run_id, verdict, data_quality, detail_json,
                 gate_verdict, dd_level, is_conservatively_downgraded,
-                reduce_only_risk_multiplier
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                reduce_only_risk_multiplier, spy_sma200, spy_ftd_state,
+                ftd_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (run_id) DO UPDATE SET
                 verdict = EXCLUDED.verdict,
                 data_quality = EXCLUDED.data_quality,
@@ -41,7 +46,10 @@ def record_exposure_decision(
                 is_conservatively_downgraded =
                     EXCLUDED.is_conservatively_downgraded,
                 reduce_only_risk_multiplier =
-                    EXCLUDED.reduce_only_risk_multiplier
+                    EXCLUDED.reduce_only_risk_multiplier,
+                spy_sma200 = EXCLUDED.spy_sma200,
+                spy_ftd_state = EXCLUDED.spy_ftd_state,
+                ftd_active = EXCLUDED.ftd_active
             """,
             [
                 str(run_id),
@@ -55,5 +63,8 @@ def record_exposure_decision(
                 decision.dd_level.value,
                 decision.is_conservatively_downgraded,
                 decision.reduce_only_risk_multiplier,
+                decision.spy_sma200,
+                decision.spy_ftd_state,
+                decision.is_ftd_active,
             ],
         )

@@ -69,6 +69,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 "## Market regime",
                 "",
                 f"- Gate: `{brief.regime.gate}`",
+                f"- Trend: SPY close {_number(brief.regime.spy_close)} / SMA200 {_number(brief.regime.spy_sma200)} ({_percent(brief.regime.spy_trend_gap_pct)})",
                 f"- Distribution Day level: `{brief.regime.dd_level}`",
                 f"- SPY d25: {brief.regime.spy_d25:g}; QQQ d25: {brief.regime.qqq_d25:g}",
                 f"- Data quality: `{brief.regime.data_quality}`",

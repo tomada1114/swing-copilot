@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from math import isnan
 from typing import TYPE_CHECKING
 
 from swing_copilot.regime.distribution import DataQuality
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class FtdState(StrEnum):
-    """Explicit FTD lifecycle states; no state implies automatic exposure changes."""
+    """Explicit FTD lifecycle states used by the market exposure label."""
 
     UNKNOWN = "UNKNOWN"
     AWAITING_CORRECTION = "AWAITING_CORRECTION"
@@ -70,11 +71,12 @@ class FtdResult:
     quality_score: int | None
     confirmed_at: date | None
     transitions: tuple[FtdTransition, ...]
+    ftd_day_low: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FtdSnapshot:
-    """SPY/QQQ FTD outcomes for one run; display-only by design."""
+    """SPY/QQQ FTD outcomes for one point-in-time regime snapshot."""
 
     as_of: date
     spy: FtdResult
@@ -88,6 +90,7 @@ class _Machine:
     day_number: int | None = None
     quality_score: int | None = None
     confirmed_at: date | None = None
+    ftd_day_low: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +109,21 @@ def calculate_ftd_snapshot(
     as_of: date,
     *,
     thresholds: FtdThresholds = DEFAULT_FTD_THRESHOLDS,
+    spy_sma_period: int | None = None,
 ) -> FtdSnapshot:
-    """Calculate both index state machines using rows visible at ``as_of`` only."""
-    spy = calculate_ftd("SPY", spy_bars, as_of, thresholds=thresholds)
+    """Calculate both FTD states using rows visible at ``as_of`` only.
+
+    ``spy_sma_period`` is optional so the standalone FTD diagnostic remains
+    independent. The production regime path supplies SMA200 so a confirmed
+    FTD expires when the index has recovered to the normal trend regime.
+    """
+    spy = calculate_ftd(
+        "SPY",
+        spy_bars,
+        as_of,
+        thresholds=thresholds,
+        sma_period=spy_sma_period,
+    )
     qqq = calculate_ftd("QQQ", qqq_bars, as_of, thresholds=thresholds)
     if (
         spy.state is FtdState.FTD_CONFIRMED
@@ -126,10 +141,16 @@ def calculate_ftd(
     as_of: date,
     *,
     thresholds: FtdThresholds = DEFAULT_FTD_THRESHOLDS,
+    sma_period: int | None = None,
 ) -> FtdResult:
-    """Run one explicit FTD state machine over a point-in-time OHLCV series."""
+    """Run one explicit FTD state machine over a point-in-time OHLCV series.
+
+    When supplied, ``sma_period`` expires a confirmed SPY FTD on the first
+    visible close at or above that SMA. This is a state transition, rather
+    than a final-result filter, so a later dip cannot resurrect an old FTD.
+    """
     visible = bars.loc[bars["date"] <= as_of].sort_values("date").reset_index(drop=True)
-    if len(visible) < _MIN_BARS:
+    if len(visible) < _MIN_BARS or not {"low", "high"}.issubset(visible.columns):
         return FtdResult(
             symbol, FtdState.UNKNOWN, DataQuality.INSUFFICIENT, None, None, None, ()
         )
@@ -138,6 +159,11 @@ def calculate_ftd(
     transitions: list[FtdTransition] = []
     rolling_high = float(visible.iloc[0]["close"])
     down_days = 0
+    sma_values = (
+        visible["close"].rolling(window=sma_period, min_periods=sma_period).mean()
+        if sma_period is not None
+        else None
+    )
     for index in range(1, len(visible)):
         previous = visible.iloc[index - 1]
         current = visible.iloc[index]
@@ -166,6 +192,17 @@ def calculate_ftd(
             ),
             thresholds=thresholds,
         )
+        current_sma = (
+            float(sma_values.iloc[index])
+            if sma_values is not None and not isnan(float(sma_values.iloc[index]))
+            else None
+        )
+        if (
+            machine.state is FtdState.FTD_CONFIRMED
+            and current_sma is not None
+            and close >= current_sma
+        ):
+            machine = _Machine(FtdState.EXPIRED)
         if (
             machine.state is FtdState.FTD_CONFIRMED
             and before.state is not FtdState.FTD_CONFIRMED
@@ -188,6 +225,7 @@ def calculate_ftd(
         machine.quality_score,
         machine.confirmed_at,
         tuple(transitions),
+        machine.ftd_day_low,
     )
 
 
@@ -223,10 +261,16 @@ def transition(  # noqa: PLR0911 - each explicit state branch is part of the aud
                 machine.day1_low,
                 day_number,
                 _quality_score(day_number, gain, thresholds),
+                None,
+                observation.low,
             )
         if day_number >= _FTD_LAST_DAY:
             return _Machine(FtdState.EXPIRED)
         return _Machine(FtdState.DAY2_3, machine.day1_low, day_number)
+    if machine.state is FtdState.FTD_CONFIRMED:
+        if machine.ftd_day_low is not None and observation.close < machine.ftd_day_low:
+            return _Machine(FtdState.EXPIRED)
+        return machine
     return machine
 
 

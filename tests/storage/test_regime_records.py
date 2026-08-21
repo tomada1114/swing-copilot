@@ -67,7 +67,7 @@ class TestPromotedRegimeColumns:
         with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT dd_count_spy, dd_count_qqq, dd15_spy, dd5_spy, dd15_qqq, "
-                "dd5_qqq, spy_close, spy_ema, vix_close FROM regime_snapshots "
+                "dd5_qqq, spy_close, spy_sma200, vix_close FROM regime_snapshots "
                 "WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()
@@ -88,7 +88,7 @@ class TestPromotedRegimeColumns:
 
         with state_store.database.connect() as conn:
             row = conn.execute(
-                "SELECT spy_close, spy_ema, vix_close FROM regime_snapshots "
+                "SELECT spy_close, spy_sma200, vix_close FROM regime_snapshots "
                 "WHERE run_id = ?",
                 [str(run_id)],
             ).fetchone()

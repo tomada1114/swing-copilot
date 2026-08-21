@@ -491,13 +491,10 @@ class RiskChecker:
             entry_price, atr14, self._entry_limit_atr_multiple
         )
 
+        # REDUCE_ONLY is deliberately a report label, not an account-sized
+        # constraint. Readers decide their own allocation; the service does
+        # not halve a risk budget it cannot know.
         effective_risk_pct = self._risk_config.max_trade_risk_pct
-        is_reduce_only = (
-            exposure is not None and exposure.verdict.value == "REDUCE_ONLY"
-        )
-        if is_reduce_only:
-            multiplier = exposure.reduce_only_risk_multiplier if exposure else 1.0
-            effective_risk_pct *= multiplier
 
         stop_price = entry_price - self._stop_atr_multiple * atr14
         try:
@@ -524,9 +521,6 @@ class RiskChecker:
         sizing_warnings = self._sizing_warnings(
             limit_price, stop_price, account_equity, sizing, effective_risk_pct
         )
-        if is_reduce_only:
-            sizing_warnings += (SIZING_WARNING_REGIME_REDUCE_ONLY,)
-
         reasons: list[str] = []
         status = "approved"
         # REQ-004 tie-break: equal intermediate values favor trade_risk.

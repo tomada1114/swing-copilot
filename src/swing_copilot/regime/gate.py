@@ -14,7 +14,13 @@ from swing_copilot.regime.distribution import (
     calculate_distribution_days,
     distribution_severity,
 )
-from swing_copilot.screening.indicators import ema
+from swing_copilot.regime.ftd import (
+    DEFAULT_FTD_THRESHOLDS,
+    FtdSnapshot,
+    FtdThresholds,
+    calculate_ftd_snapshot,
+)
+from swing_copilot.screening.indicators import sma
 
 if TYPE_CHECKING:
     from datetime import date
@@ -33,12 +39,13 @@ class GateVerdict(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class MarketGate:
-    """Result of comparing SPY trend and VIX risk appetite."""
+    """Result of comparing SPY's long trend with the panic VIX threshold."""
 
     verdict: GateVerdict
     spy_close: float | None
-    spy_ema: float | None
+    spy_sma200: float | None
     vix_close: float | None
+    is_panic: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,15 +58,15 @@ class RegimeSnapshot:
     qqq_distribution: DistributionResult
     dd_level: DistributionLevel
     data_quality: DataQuality
+    ftd: FtdSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class GateThresholds:
     """Configurable, unvalidated market-gate thresholds."""
 
-    ema_period: int = 50
-    bull_vix_max: float = 20.0
-    bear_spy_ema_ratio: float = 0.97
+    sma_period: int = 200
+    bear_spy_sma_ratio: float = 0.97
     bear_vix_min: float = 30.0
 
 
@@ -69,6 +76,7 @@ class RegimeThresholds:
 
     gate: GateThresholds
     distribution: DistributionThresholds
+    ftd: FtdThresholds = DEFAULT_FTD_THRESHOLDS
 
 
 DEFAULT_GATE_THRESHOLDS = GateThresholds()
@@ -80,28 +88,31 @@ DEFAULT_REGIME_THRESHOLDS = RegimeThresholds(
 
 def evaluate_market_gate(
     spy_close: float | None,
-    spy_ema: float | None,
+    spy_sma200: float | None,
     vix_close: float | None,
     *,
     thresholds: GateThresholds = DEFAULT_GATE_THRESHOLDS,
 ) -> MarketGate:
     """Classify the market without I/O or wall-clock access.
 
-    The strict comparisons deliberately keep threshold-equal observations
-    neutral, as required by Issue #22.
+    The trend state uses a 3% SMA200 buffer. The VIX threshold is a separate
+    panic flag because VIX values from 20 through 30 intentionally do not
+    change the trend state or exposure decision.
     """
-    if spy_close is None or spy_ema is None or vix_close is None:
-        return MarketGate(GateVerdict.UNKNOWN, spy_close, spy_ema, vix_close)
-    if (
-        spy_close < spy_ema * thresholds.bear_spy_ema_ratio
-        or vix_close > thresholds.bear_vix_min
-    ):
+    is_panic = vix_close is not None and vix_close > thresholds.bear_vix_min
+    if spy_close is None or spy_sma200 is None or vix_close is None:
+        # VIX is an independent hard stop. Preserve a visible panic even when
+        # the trend inputs are incomplete, so UNKNOWN cannot loosen VIX > 30.
+        return MarketGate(
+            GateVerdict.UNKNOWN, spy_close, spy_sma200, vix_close, is_panic
+        )
+    if spy_close < spy_sma200 * thresholds.bear_spy_sma_ratio:
         verdict = GateVerdict.BEAR
-    elif spy_close > spy_ema and vix_close < thresholds.bull_vix_max:
-        verdict = GateVerdict.BULL
-    else:
+    elif spy_close < spy_sma200:
         verdict = GateVerdict.NEUTRAL
-    return MarketGate(verdict, spy_close, spy_ema, vix_close)
+    else:
+        verdict = GateVerdict.BULL
+    return MarketGate(verdict, spy_close, spy_sma200, vix_close, is_panic)
 
 
 def calculate_regime_snapshot(
@@ -120,20 +131,20 @@ def calculate_regime_snapshot(
     qqq = qqq_bars.loc[qqq_bars["date"] <= as_of].sort_values("date")
     vix = vix_bars.loc[vix_bars["date"] <= as_of].sort_values("date")
     spy_close = float(spy.iloc[-1]["close"]) if not spy.empty else None
-    spy_ema_series = (
-        ema(spy["close"], thresholds.gate.ema_period) if not spy.empty else None
+    spy_sma_series = (
+        sma(spy["close"], thresholds.gate.sma_period) if not spy.empty else None
     )
-    spy_ema = (
-        float(spy_ema_series.iloc[-1])
-        if spy_ema_series is not None
-        and not spy_ema_series.empty
-        and spy_ema_series.notna().iloc[-1]
+    spy_sma200 = (
+        float(spy_sma_series.iloc[-1])
+        if spy_sma_series is not None
+        and not spy_sma_series.empty
+        and spy_sma_series.notna().iloc[-1]
         else None
     )
     vix_close = float(vix.iloc[-1]["close"]) if not vix.empty else None
     gate = evaluate_market_gate(
         spy_close,
-        spy_ema,
+        spy_sma200,
         vix_close,
         thresholds=thresholds.gate,
     )
@@ -142,6 +153,13 @@ def calculate_regime_snapshot(
     )
     qqq_distribution = calculate_distribution_days(
         qqq, as_of, thresholds=thresholds.distribution
+    )
+    ftd = calculate_ftd_snapshot(
+        spy,
+        qqq,
+        as_of,
+        thresholds=thresholds.ftd,
+        spy_sma_period=thresholds.gate.sma_period,
     )
     if (
         spy_distribution.level is DistributionLevel.UNKNOWN
@@ -163,4 +181,5 @@ def calculate_regime_snapshot(
         qqq_distribution,
         dd_level,
         DataQuality.INSUFFICIENT if is_insufficient else DataQuality.OK,
+        ftd,
     )

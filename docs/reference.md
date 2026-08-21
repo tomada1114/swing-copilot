@@ -726,9 +726,9 @@ NaNになり、Filterは落とすがミラーは通す）も、閾値につい�
 `regime.dd_*`は roadmap §5 P3-13 で**要検証**のまま本番に入っていた。しかも
 当初は検証する手段が無かった。`backtest/`は`regime.exposure`も
 `regime.distribution`もimportしておらず、`dd_*`をどう動かしても
-`copilot-backtest`の数字は1つも動かなかった。一方で`SEVERE`は`_base_exposure`で
-単独に`CASH_PRIORITY`まで落とし、その日の候補は全銘柄`shares=0`になる。
-**効果を測れないまま、最も強い制約を課しているパラメーターだった。**
+`copilot-backtest`の数字は1つも動かなかった。現在は`SEVERE`だけが
+`REDUCE_ONLY`の警戒ラベルに影響し、HIGH/CAUTIONは表示専用である。
+`CASH_PRIORITY`はSMA200を3%超下回る非FTD状態、またはVIX>30に限定する。
 
 Issue #184の`copilot-backtest --policy none|regime|regime+risk`は、この閉路を
 戦略まるごとの水準で開いた（`backtest/policy.py`が本番の`RiskChecker`を包んで
@@ -743,7 +743,7 @@ Issue #184の`copilot-backtest --policy none|regime|regime+risk`は、この閉�
 この検証の結果、`dd_severe_d25`/`dd_severe_d15`は2026-08-07にIssue #111で
 `7`/`6`（従来`6`/`4`）で**採用済み**（根拠:
 `reports/regime/2026-08-06-dd-threshold-review.md` §10）。`dd_high_*`（5/3/2）と
-`dd_caution_d25`は据え置きで、引き続き**要検証**。
+`dd_caution_d25`は据え置きで、Exposureには影響しない表示用である。
 
 ```bash
 copilot-dd-forward --as-of 2026-08-06
@@ -756,7 +756,7 @@ copilot-dd-forward --as-of 2026-08-06 --settings /tmp/variant/settings.yaml
 | オプション | 既定 | 意味 |
 | --- | --- | --- |
 | `--as-of` | 必須 | 可視性の基準日。これ以降のバーはどの用途でも読まない |
-| `--start` | 履歴の先頭 | 最初の観測日。手前は助走（窓とEMAシード）として読む |
+| `--start` | 履歴の先頭 | 最初の観測日。手前は助走（DD窓とSMA200シード）として読む |
 | `--horizons` | `5,10,25` | 先行きリターンの保有営業日数。25は`backtest.max_hold_days` |
 | `--sweep` | off | 閾値を1つずつ動かした感度表 |
 | `--grid` | off | 順序制約を満たすグリッドの全走査（既定レンジで約1分） |
@@ -781,8 +781,10 @@ copilot-dd-forward --as-of 2026-08-06 --settings /tmp/variant/settings.yaml
 `CAUTION`と`NORMAL`を同じ分岐に落とし、`DistributionLevel.CAUTION`は
 パッケージ内に他の消費者を持たない——つまり**`dd_caution_d25`は露出上限を
 1日も動かせない表示専用のラベルである**。グリッドはさらに
-`CASH_PRIORITY`軸（`severe_*`だけが決める）と`REDUCE_ONLY`軸（`high_*`だけが
-決める）に分けて出す。2つは独立なので、片方の差で5次元を並べると
+`CASH_PRIORITY`軸（旧来のDD単独モデルで`severe_*`だけが決める）と
+`REDUCE_ONLY`軸（`high_*`だけが決める）に分けて出す。これは保存済みの閾値レビューと
+比較可能にする探索用の写像であり、本番のIssue #252の6分岐（SMA200/VIX/FTDを含む）を
+再現するものではない。2つは独立なので、片方の差で5次元を並べると
 もう片方の同じ挙動の変種で埋まるためである。候補は
 `config.RegimeConfig._validate_dd_level_order`と同じ順序制約を通したものだけで、
 そのまま`settings.yaml`に書けば読める。

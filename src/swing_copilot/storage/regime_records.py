@@ -32,8 +32,17 @@ def record_regime_snapshot(
         },
         "gate_inputs": {
             "spy_close": snapshot.gate.spy_close,
-            "spy_ema": snapshot.gate.spy_ema,
+            "spy_sma200": snapshot.gate.spy_sma200,
             "vix_close": snapshot.gate.vix_close,
+            "is_panic": snapshot.gate.is_panic,
+        },
+        "ftd": {
+            "spy_state": (
+                snapshot.ftd.spy.state.value if snapshot.ftd is not None else None
+            ),
+            "spy_day_low": (
+                snapshot.ftd.spy.ftd_day_low if snapshot.ftd is not None else None
+            ),
         },
     }
     with database.connect() as conn:
@@ -43,8 +52,8 @@ def record_regime_snapshot(
                 run_id, as_of, gate_verdict, dd_count_spy, dd_count_qqq,
                 dd_level, data_quality, detail_json,
                 dd15_spy, dd5_spy, dd15_qqq, dd5_qqq,
-                spy_close, spy_ema, vix_close
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                spy_close, spy_ema, vix_close, spy_sma200, spy_ftd_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (run_id) DO UPDATE SET
                 as_of = EXCLUDED.as_of,
                 gate_verdict = EXCLUDED.gate_verdict,
@@ -58,8 +67,9 @@ def record_regime_snapshot(
                 dd15_qqq = EXCLUDED.dd15_qqq,
                 dd5_qqq = EXCLUDED.dd5_qqq,
                 spy_close = EXCLUDED.spy_close,
-                spy_ema = EXCLUDED.spy_ema,
-                vix_close = EXCLUDED.vix_close
+                vix_close = EXCLUDED.vix_close,
+                spy_sma200 = EXCLUDED.spy_sma200,
+                spy_ftd_state = EXCLUDED.spy_ftd_state
             """,
             [
                 str(run_id),
@@ -79,7 +89,9 @@ def record_regime_snapshot(
                 snapshot.qqq_distribution.d15,
                 snapshot.qqq_distribution.d5,
                 snapshot.gate.spy_close,
-                snapshot.gate.spy_ema,
+                None,
                 snapshot.gate.vix_close,
+                snapshot.gate.spy_sma200,
+                snapshot.ftd.spy.state.value if snapshot.ftd is not None else None,
             ],
         )

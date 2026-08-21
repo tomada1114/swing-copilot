@@ -449,11 +449,10 @@ class PostmortemConfig(_StrictModel):
 
 
 class RegimeConfig(_StrictModel):
-    """`regime.*` thresholds (roadmap §5 P3-13; 未決分は要検証)."""
+    """`regime.*` thresholds for the deterministic market gate."""
 
-    ema_period: int = Field(default=50, ge=1)
-    bull_vix_max: float = Field(default=20.0, ge=0.0)
-    bear_spy_ema_ratio: float = Field(default=0.97, gt=0.0)
+    sma_period: int = Field(default=200, ge=1)
+    bear_spy_sma_ratio: float = Field(default=0.97, gt=0.0, lt=1.0)
     bear_vix_min: float = Field(default=30.0, ge=0.0)
     distribution_window_days: int = Field(default=25, ge=1)
     dd_decline_pct: float = Field(default=-0.002, le=0.0)
@@ -462,26 +461,21 @@ class RegimeConfig(_StrictModel):
     # Distribution Day level-classification boundaries (roadmap §5 P3-13).
     # severe defaults follow the 2026-08-07 decision (Issue #111; see
     # reports/regime/2026-08-06-dd-threshold-review.md §10). high/caution
-    # defaults reproduce the previously hardcoded module constants (要検証).
+    # defaults reproduce the previously hardcoded display boundaries.
     dd_severe_d25: int = Field(default=7, ge=1)
     dd_severe_d15: int = Field(default=6, ge=1)
     dd_high_d25: int = Field(default=5, ge=1)
     dd_high_d15: int = Field(default=3, ge=1)
     dd_high_d5: int = Field(default=2, ge=1)
     dd_caution_d25: int = Field(default=3, ge=1)
-    # Exposure Ceiling's REDUCE_ONLY multiplier (roadmap §5 P3-14, 要検証).
-    reduce_only_risk_multiplier: float = Field(default=0.5, gt=0.0, le=1.0)
-    # roadmap §5 P3-16（要検証）: display-only Follow-Through Day thresholds.
+    # Transitional schema compatibility for Issue #342. REDUCE_ONLY is a
+    # public label only; this value is no longer consumed by sizing.
+    reduce_only_risk_multiplier: float = Field(default=1.0, gt=0.0, le=1.0)
+    # roadmap §5 P3-16（要検証）: Follow-Through Day thresholds. The state is
+    # now also consumed by the exposure gate as a narrow re-entry exception.
     ftd_correction_decline_pct: float = Field(default=0.03, gt=0.0)
     ftd_correction_down_days: int = Field(default=3, ge=1)
     ftd_gain_pct: float = Field(default=0.0125, gt=0.0)
-
-    @model_validator(mode="after")
-    def _validate_vix_threshold_order(self) -> RegimeConfig:
-        if self.bear_vix_min < self.bull_vix_max:
-            msg = "bear_vix_min must be >= bull_vix_max"
-            raise ValueError(msg)
-        return self
 
     @model_validator(mode="after")
     def _validate_dd_level_order(self) -> RegimeConfig:

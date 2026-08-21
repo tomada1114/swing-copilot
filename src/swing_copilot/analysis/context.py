@@ -63,15 +63,39 @@ def format_market_regime(snapshot: RegimeSnapshot, exposure: ExposureDecision) -
         if snapshot.data_quality.value == "INSUFFICIENT"
         else ""
     )
+    spy_close = _format_number(snapshot.gate.spy_close)
+    spy_sma200 = _format_number(snapshot.gate.spy_sma200)
+    trend_gap = _format_percent(
+        _relative_gap(snapshot.gate.spy_close, snapshot.gate.spy_sma200)
+    )
+    spy_ftd_state = (
+        snapshot.ftd.spy.state.value if snapshot.ftd is not None else "UNKNOWN"
+    )
     return (
         "<market_regime>\n"
         f"Gate: {snapshot.gate.verdict.value}\n"
+        f"SPY trend: close={spy_close}, SMA200={spy_sma200}, gap={trend_gap}\n"
         f"Distribution Day level: {snapshot.dd_level.value}\n"
+        f"FTD SPY: {spy_ftd_state} (active={exposure.is_ftd_active})\n"
         f"Exposure Ceiling: {exposure.verdict.value}\n"
         f"Data quality: {snapshot.data_quality.value}"
         f"{warning}\n"
         "</market_regime>\n"
     )
+
+
+def _relative_gap(close: float | None, trend: float | None) -> float | None:
+    if close is None or trend is None or trend == 0.0:
+        return None
+    return close / trend - 1.0
+
+
+def _format_number(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _format_percent(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2%}"
 
 
 def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str:

@@ -769,6 +769,10 @@ Step 3.6 の反証エージェントと**同一の入力契約**を使う: 当�
   空リストにせず、確認できない ID は書かない
 - 全銘柄が `skip`、または市場環境（`context.market_regime`）から当日の新規エントリーを
   推奨しないと判断した場合は `no_trade: true` とし、`no_trade_reason` に理由を書く
+- `context.market_regime` はコードが固定した `SPY close / SMA200 / gap`、DD レベル、
+  FTD 状態、Exposure を読むためのブロックである。`REDUCE_ONLY` は相場の警戒ラベルと
+ して説明するだけで、リスク半減や候補数の削減を推論しない。`CASH_PRIORITY` の場合は
+ その理由（VIX パニック、SMA200 乖離、またはデータ不足）を `no_trade_reason` に書く
 - 最終判断は人間。verdict は指示ではなく推奨として書く（命令形・断定的売買指示は禁止）
 
 ## Step 5: analysis_result.json の書き出し

@@ -90,12 +90,12 @@ def _with_band_atr_multiple(settings, value):
 
 
 class TestPullbackATRBand:
-    """The ATR-normalized band (`band_atr_multiple`), and the legacy default."""
+    """The ATR-normalized band and its fixed-percentage compatibility mode."""
 
     # 60-day rally then a sharp 14-day slide: RSI 21.5, close 11.20 below
     # SMA50 with ATR14 2.64 -> 4.24 ATR units away, and 7.9% away in
-    # percentage terms. The percentage band (3%) rejects it; a generous ATR
-    # multiple admits it, so the two modes are distinguishable on one series.
+    # percentage terms. The fixed compatibility band (3%) rejects it; a
+    # generous ATR multiple admits it, so the two modes are distinguishable.
     _CLOSES = [100.0 + i for i in range(60)] + [159.0 - i * 2.0 for i in range(1, 15)]
     # A shallower slide that lands 1.1% from SMA50 with RSI 31.7 -- inside
     # the legacy percentage band, so "unchanged default" is observable as a
@@ -110,7 +110,7 @@ class TestPullbackATRBand:
         configured = _with_band_atr_multiple(settings, band_atr_multiple)
         return PullbackRSISignal(configured).evaluate(data, {"AAPL"})
 
-    def test_none_keeps_the_legacy_percentage_band_hit(self, settings):
+    def test_missing_atr_multiple_keeps_the_compatibility_band_hit(self, settings):
         bars = make_bars("AAPL", self._LEGACY_HIT_CLOSES, start=date(2026, 1, 1))
         data = _screening_input(bars)
 
@@ -120,14 +120,16 @@ class TestPullbackATRBand:
         assert [hit.symbol for hit in legacy] == ["AAPL"]
         assert [hit.symbol for hit in explicit_none] == ["AAPL"]
 
-    def test_none_keeps_the_legacy_percentage_band_rejection(self, settings):
+    def test_missing_atr_multiple_keeps_the_compatibility_band_rejection(
+        self, settings
+    ):
         bars = make_bars("AAPL", self._CLOSES, start=date(2026, 1, 1))
         data = _screening_input(bars)
 
         assert PullbackRSISignal(settings).evaluate(data, {"AAPL"}) == []
         assert self._hits(settings, None) == []
 
-    def test_a_generous_multiple_admits_a_close_the_percentage_band_rejects(
+    def test_a_generous_multiple_admits_a_close_the_compatibility_band_rejects(
         self, settings
     ):
         assert [hit.symbol for hit in self._hits(settings, 20.0)] == ["AAPL"]
@@ -139,22 +141,6 @@ class TestPullbackATRBand:
         # Distance is 4.24 ATR units: 4.3 admits, 4.2 does not.
         assert [hit.symbol for hit in self._hits(settings, 4.3)] == ["AAPL"]
         assert self._hits(settings, 4.2) == []
-
-    def test_the_atr_band_ignores_the_percentage_band_entirely(self, settings):
-        # sma_band_pct set absurdly narrow: if the two modes were combined,
-        # no close could ever qualify. A generous ATR multiple still hits.
-        bars = make_bars("AAPL", self._CLOSES, start=date(2026, 1, 1))
-        data = _screening_input(bars)
-        pullback = settings.technical_signals.pullback.model_copy(
-            update={"sma_band_pct": 0.0001, "band_atr_multiple": 20.0}
-        )
-        technical = settings.technical_signals.model_copy(update={"pullback": pullback})
-
-        hits = PullbackRSISignal(
-            settings.model_copy(update={"technical_signals": technical})
-        ).evaluate(data, {"AAPL"})
-
-        assert [hit.symbol for hit in hits] == ["AAPL"]
 
     def test_a_zero_atr_is_rejected_fail_safe(self, settings):
         # ATR14 is exactly zero when every bar's high and low sit on the prior

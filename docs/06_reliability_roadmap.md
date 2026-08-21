@@ -7,6 +7,12 @@
   Issue 単位で `docs/03_basic_design.md` / `docs/04_detailed_design.md` /
   `docs/reference.md` へ反映し、本書は履歴として残す（AGENTS.md の正本優先則に従う）。
 
+> **Exposure の正本と変更手順**: Exposure の判定状態・表示バケット・新規エントリー
+> 許可の写像は `docs/10_investment_philosophy.md` を正本とする。変更時はまず同書の
+> 判断規約を改訂し、その後 `docs/04_detailed_design.md`、`docs/reference.md`、
+> `src/swing_copilot/screening/` と回帰テストを同じ変更単位で同期する。本書は
+> 変更計画と履歴だけを記録し、実装仕様を上書きしない。
+
 > **現況注記（P7 スキル移行後）**: P2-12 / P3-15 / P6-26 / P6-27 は完了記録として
 > そのまま残すが、これらが対象としていた Anthropic API 直呼びの `llm/` パッケージ、
 > `llm_calls` テーブル、月次予算ゲート、応答キャッシュと near-stale 警告は、

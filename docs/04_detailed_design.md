@@ -36,6 +36,7 @@ swing-copilot/
 │   │   └── state_store.py    # DuckDB上の実行状態・監査ログ
 │   ├── screening/
 │   │   ├── base.py           # Filter ABC / Signal ABC（NFR-07）
+│   │   ├── execution.py      # 実行状態→表示バケット写像（P5-23）
 │   │   ├── fundamental_filters.py  # FR-04
 │   │   ├── technical_signals.py    # FR-05（pandas実装）
 │   │   └── pipeline.py       # strategies.yamlに従い合成
@@ -1174,7 +1175,7 @@ def main(argv: list[str] | None = None) -> None: ...
 
 ### 3.18 `report/daily_brief.py` / renderer / notifier（FR-09, NFR-07）
 
-`build_daily_brief()`が`DailyBriefContext`、`MarketStore`、`StateStore`から共通の`DailyBrief`を構築する。ターミナルとMarkdownはこの値だけを描画し、データ取得や判断ロジックを持たない。価格・財務読み取りは常に`context.run_date`を`as_of`へ渡す。
+`build_daily_brief()`が`DailyBriefContext`、`MarketStore`、`StateStore`から共通の`DailyBrief`を構築する。ターミナルとMarkdownはこの値だけを描画し、データ取得や判断ロジックを持たない。価格・財務読み取りは常に`context.run_date`を`as_of`へ渡す。実行状態から表示バケットへの写像は`screening/execution.py::execution_bucket()`を両レンダラーが共有し、レポート側で再実装しない。
 
 `BriefRisk`は`RiskAssessment`の`entry_price`、`limit_price`、`stop_price`、`atr14`、
 `stop_distance_pct`、`status`、`reasons`、`warnings`、残存する`binding_constraint`だけを
@@ -1701,7 +1702,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 `signal_performance`の行だけはIDを持たない。P2-11の出力を逐語同梱しているだけでretroが採番していないためで、シグナルについて提案するときはシグナル名ではなくそれを示す指標IDかサプライズIDを引くことになる。
 
-`config_snapshot`は提案対象になりうる設定（`risk` / `fundamental_filters` / `technical_signals` / `backtest` / `analysis` / `postmortem` / `regime` / `retro`）の抜粋と`config_hash`で、提案が「どの設定に対する変更か」を一意にする。
+`config_snapshot`は提案対象になりうる設定（`risk` / `fundamental_filters` / `technical_signals` / `trade_plan` / `backtest` / `analysis` / `postmortem` / `regime` / `retro`）の抜粋と`config_hash`で、提案が「どの設定に対する変更か」を一意にする。
 
 #### 3.23.5 `retro-result-v1`（スキルの回答）と`ingest`の検証
 
@@ -1823,7 +1824,7 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 1. `pullback_rsi`の帯`|close − SMA50| / SMA50 ≤ 0.03`が事実上のローボラフィルタとして働く（ATR% < 2.5%の通過率44.0%に対し、ATR% > 5%は9.7%）
 2. ランキング最大重み`rsi_pullback: 0.5`が「RSIが低いほど高得点」である
 
-いずれも**既定では無効**なスイッチとして是正手段だけを追加した。`PullbackSignalConfig.band_atr_multiple`（既定`null`）はSMA50からの距離をATR14単位で測るモードで、`sma_band_pct`とは排他である。距離をATR単位で測る発想はパイプラインに既にあり、`execution.fair_max_d: 2.0`と`screening/pipeline.py`の`_execution_distance = (close - sma50) / atr14`が同じ尺度を使っている。プルバック帯だけが無関係な絶対%を使っていた内部不整合の解消でもある。ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
+いずれも**既定では無効**なスイッチとして是正手段だけを追加した。`PullbackSignalConfig.band_atr_multiple`（既定`null`）はSMA50からの距離をATR14単位で測るモードで、未設定時は固定3%の互換帯を使う。距離をATR単位で測る発想はパイプラインに既にあり、`execution.fair_max_d: 2.0`と`screening/pipeline.py`の`_execution_distance = (close - sma50) / atr14`が同じ尺度を使っている。プルバック帯だけが無関係な絶対%を設定で持っていた内部不整合を解消した。ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
 
 `ScoreWeights.atr_pct`（既定`0.0`）はATR%が高いほど高得点の成分で、`_ATR_PCT_NORMALIZATION = 0.06`を満点とする絶対正規化である。候補集合内パーセンタイルを採らないのは、候補が5件程度の集合では`liquidity`成分が既に抱える小標本ノイズを再生産するためである。`score_weights`の合計1.0検証にも加算する（検証は`ScoreWeights.model_fields`を走査するので、成分を足せば自動的に対象になる）。
 
@@ -1831,9 +1832,9 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 
 `pivot_proximity`の正規化幅は、かつて`_PIVOT_PROXIMITY_NORMALIZATION = 0.05`という独立の定数だった（Issue #297）。`vcp.chase_pivot_pct`（ピボットからどこまで上に離れた候補を通すかの上限）と偶然同じ0.05だったため段階1では実害がなかったが、`chase_pivot_pct`を動かすと帯域の上限だけ広がりスコアは相変わらず5%で0.0に飽和し、拡大された帯域の候補が全員同点になるという時限式の結合だった。フィルタが通す帯域とスコアのダイナミックレンジが一致しているのは本来偶然ではないため、正規化幅は`chase_pivot_pct`から導出する（`ScreeningPipeline.__init__`が`settings.technical_signals.vcp.chase_pivot_pct`を読み、`_component_values`/`_pivot_proximity`へ引数として渡す。`screening/`は純粋層のままで、正規化幅の取得経路にI/Oやclockは持ち込まない）。`chase_pivot_pct`は幅として意味を成さない`0.0`を弾くため`config.py`で`gt=0.0`に締めてある（既定値`0.05`は変更なし）。なお帯域が一致するのは`is_chasing_pivot`が縛る**上側だけ**で、ピボットより下に対応するフィルタは無い。下側で同じ幅を使うのは尺度をそろえる設計上の選択であり、その非対称性は`docs/reference.md`に記す。
 
-旧モードを消さずに両方残しているのは、採用判断を比較実験の結果に基づいて人間が行うためで、先に既定を差し替えるとA/B比較そのものが不能になる。バックテスト側の`--settings` / `--strategies`は、この比較をリポジトリの設定を書き換えずに回すための入り口である（`score_weights`は`strategies.yaml`側にあるので、`--settings`だけでは重みバリアントを表現できない）。
+比較実験で採用を判断するため、バックテスト側の`--settings` / `--strategies`はリポジトリの設定を書き換えずに比較を回す入り口である（`score_weights`は`strategies.yaml`側にあるので、`--settings`だけでは重みバリアントを表現できない）。
 
-比較は2026-07-30に実施され（`reports/backtests/2026-07-30-strategy-comparison.md`）、その結果に基づき2026-08-04に`band_atr_multiple: 2.0`（R2構成）を`config/settings.yaml`で採用した。根拠は期待値$12.65→$35.37・PF 1.082→1.203・Sharpe 0.242→0.497の改善とDD同等（21.08%→21.82%）である。`score_atr_pct`（R3構成）はR2比で上積みが観測されなかったため見送り、重み`0.0`のまま据え置く。旧モード（`sma_band_pct`）はロールバック経路として残す。**この段落の数値は旧cash基準サイジングのものである**（Issue #200）。#184でサイジング基底をequity（現金＋建玉時価）へ変更した後の同一期間再走行は`reports/backtests/2026-08-17-policy-ab-equity-basis.md`にあり、R2採用の結論とR3見送りの結論はいずれも維持される（R1→R2の期待値は$9.18→$59.28）一方、DDの水準は21%台ではなく35.58%→37.80%と読み替える必要がある。
+比較は2026-07-30に実施され（`reports/backtests/2026-07-30-strategy-comparison.md`）、その結果に基づき2026-08-04に`band_atr_multiple: 2.0`（R2構成）を`config/settings.yaml`で採用した。根拠は期待値$12.65→$35.37・PF 1.082→1.203・Sharpe 0.242→0.497の改善とDD同等（21.08%→21.82%）である。`score_atr_pct`（R3構成）はR2比で上積みが観測されなかったため見送り、重み`0.0`のまま据え置く。未設定時の固定3%帯は外部設定との互換経路としてコード内に残す。**この段落の数値は旧cash基準サイジングのものである**（Issue #200）。#184でサイジング基底をequity（現金＋建玉時価）へ変更した後の同一期間再走行は`reports/backtests/2026-08-17-policy-ab-equity-basis.md`にあり、R2採用の結論とR3見送りの結論はいずれも維持される（R1→R2の期待値は$9.18→$59.28）一方、DDの水準は21%台ではなく35.58%→37.80%と読み替える必要がある。
 
 決済側の計器として`Trade.days_held`と`BacktestResult`の3フィールド（決済理由内訳・`max_hold`バインド率・保有日数の中央値/四分位）を追加し、感応度グリッドの`MAX_HOLD_PCT_GRID`を基準値比`(40, 70, 100, 140, 200)%`へ広げた。ATR軸が±50%を探索するのに時間軸だけ±20%では、「そのパラメータが効かない」のか「一度も発火していない」のかを区別できないためである。
 
@@ -2193,7 +2194,7 @@ CREATE TABLE IF NOT EXISTS retro_narrations (
 
 -- Issue #189: runs.config_hash が何を指していたか。config_hash は一方向
 -- なので、settings.yaml を編集した時点で過去 run の設定値は復元不能になる。
--- sections_json は提案対象になりうる8セクション（config.CONFIG_SNAPSHOT_SECTIONS）
+- sections_json は提案対象になりうる9セクション（config.CONFIG_SNAPSHOT_SECTIONS）
 -- のみ、snapshot_hash はそのダイジェスト。
 CREATE TABLE IF NOT EXISTS config_versions (
     config_hash         VARCHAR PRIMARY KEY,
@@ -2356,7 +2357,7 @@ technical_signals:
   pullback:
     rsi_period: 14
     rsi_threshold: 45
-    sma_band_pct: 0.03
+    band_atr_multiple: 2.0
   volume:
     avg_volume_days: 20
     min_avg_volume: 1000000
@@ -2430,7 +2431,7 @@ notification:
 
 #### 検証契約
 
-`settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`と`sma_band_pct`は[0, 1]、`rsi_threshold`は[0, 100]であり、`sma_short < sma_long`を必須とする。
+`settings.yaml`は未知キーとスカラー値の暗黙変換を拒否するstrictスキーマで読む。YAML配列だけは`strategies.*.filters_all`/`signals_all`の不変tuple APIへ変換するシリアライズ境界として明示的に受容する。`universe.refresh_interval_days`、`fundamental_filters.min_profitable_quarters`、SMA/RSI/出来高の期間、`schedule.timeout_minutes`は1以上でなければならない。`min_equity_ratio`は[0, 1]、`rsi_threshold`は[0, 100]、`band_atr_multiple`は設定する場合に0より大きく、`sma_short < sma_long`を必須とする。
 
 `copilot-daily --limit N`の`N`は非負整数である。`N`銘柄の選び方は`universe_sampling.select_universe_sample()`の決定論的サンプル（`gics_sector`比例配分+salt付きblake2bハッシュ順）であり、`ORDER BY symbol`の先頭N件ではない。アルファベット順先頭N銘柄はセクター構成が歪むだけでなく、MinerviniのRSパーセンタイル（条件7）のように渡された集合内の相対順位で決まるチェックの意味自体を変えるため、スモーク実行が本番と別の条件を検証してしまう（Issue #205）。`N=0`はユニバース由来の新規候補を選ばず、開いている保有銘柄（3.14節の仮想台帳の保有集合）だけを価格取得・分析の対象に残す。仮想建玉はサイジング・集中度・相関などのリスク監視には混ぜない（3.13節）。保有銘柄の合流は`--limit`未指定（本番経路）でも同じく行う（Issue #212、3.21節）。負数はPythonの負sliceに渡さず、依存性compose・外部I/O・run DB作成より前にargparseのusage error（終了コード2）で拒否する。これらは`tests/test_config.py`の設定境界テストと`tests/pipeline/test_cli.py`/`test_daily_core.py`のCLI・保有銘柄回帰テストで固定する。
 
@@ -2477,7 +2478,7 @@ strategies:
 
 `minervini_stage2`は既定`default`戦略とは分離され、明示した場合だけ有効になる。終値とSMA150/SMA200、SMA200の連続上昇日数、SMA50、252営業日窓の52週高安、ユニバース内の63/126/189/252日加重リターンRSを7条件として判定する。252日リターンに必要な履歴がない銘柄はRS条件を満たさず、52週窓が200本未満なら高安条件も満たさない。候補には`minervini_criteria_met`と各条件・実値をmetricsとして保存し、terminal/Markdownでは`X/7条件`を根拠に表示する。既存の拒否コード制約にはMinervini専用値がないため、通常の条件未充足は`SIGNAL_TREND_NOT_MET`に`signal: minervini_stage2`を付けて互換的に記録し、履歴不足だけは既存の`DATA_INSUFFICIENT_HISTORY`とする。
 
-P5-23では、ランキング後の各候補に`d = (close - SMA50) / ATR14`による実行状態を付す。`d < -3`は`DAMAGED`、`[-3, 0)`は`PULLBACK_ZONE`、`[0, 2)`は`FAIR`、`[2, 4)`は`EXTENDED`、`d >= 4`は`OVEREXTENDED`である（閾値は`technical_signals.execution`の要検証設定）。`PULLBACK_ZONE`/`FAIR`は「即検討可」、`EXTENDED`は「様子見」、`DAMAGED`/`OVEREXTENDED`および指標不足の`UNKNOWN`は「見送り」とする。状態はスコアより優先し、見送りを必ず候補リスト末尾へ降格するが、候補から削除しない。terminal/Markdownは3バケット見出しと状態・d値を併記する。
+P5-23では、ランキング後の各候補に`d = (close - SMA50) / ATR14`による実行状態を付す。`d < -3`は`DAMAGED`、`[-3, 0)`は`PULLBACK_ZONE`、`[0, 2)`は`FAIR`、`[2, 4)`は`EXTENDED`、`d >= 4`は`OVEREXTENDED`である（閾値は`technical_signals.execution`の要検証設定）。`PULLBACK_ZONE`/`FAIR`は「即検討可」、`EXTENDED`は「様子見」、`DAMAGED`/`OVEREXTENDED`および指標不足の`UNKNOWN`は「見送り」とする。状態はスコアより優先し、見送りを必ず候補リスト末尾へ降格するが、候補から削除しない。状態→バケット写像は`screening/execution.py::execution_bucket()`を正本とし、terminal/Markdownは同じ3バケット見出しと状態・d値を併記する。
 
 P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略である。終値の局所高安をATR14の2.0倍以上の反転だけに絞るジグザグから高値→安値の収縮列を作り、**直近`max_contractions`個（既定4）の収縮だけを1パターンとして採用**した上で、初回深さ・逓減率・最低2回・15〜325営業日（`pattern_days`は採用範囲で算出）を検証する（Issue #186: 履歴全域を1パターンと扱う旧定義の構造欠陥修正）。最終収縮高値をピボットとし、手前10本平均出来高/50日平均でdry-upを表す。closeがピボットを5%より大きく超える場合は追いかけとして候補にしない。収縮数・各深さ・dry-up比・ピボットはmetricsを通じて根拠列に表示する。全閾値は`technical_signals.vcp`の要検証設定である。
 

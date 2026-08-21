@@ -25,6 +25,7 @@ from swing_copilot.screening.base import (
     ScreeningResult,
     TruncatedCandidate,
 )
+from swing_copilot.screening.execution import EXECUTION_BUCKETS, execution_bucket
 from swing_copilot.screening.indicators import (
     percentile_ranks,
     symbol_window,
@@ -522,19 +523,9 @@ def _execution_state(
     return "OVEREXTENDED"
 
 
-def _execution_bucket(state: str) -> str:
-    """Map an execution state to its user-facing P5-23 bucket."""
-    if state in {"PULLBACK_ZONE", "FAIR"}:
-        return "即検討可"
-    if state == "EXTENDED":
-        return "様子見"
-    return "見送り"
-
-
 def _state_sort_key(state: str, score: float, symbol: str) -> tuple[int, float, str]:
     """State cap first, then the established score/symbol ordering."""
-    bucket_order = {"即検討可": 0, "様子見": 1, "見送り": 2}
-    return bucket_order[_execution_bucket(state)], -score, symbol
+    return EXECUTION_BUCKETS.index(execution_bucket(state)), -score, symbol
 
 
 def _clamp01(value: float) -> float:

@@ -61,7 +61,7 @@
 | ランキング | 終値が 0 の銘柄はその銘柄だけ落ちる | `atr_pct` の除算が run 全体を落とす | `tests/screening/test_pipeline.py::TestCandidateAggregationAndRanking::test_symbol_dropped_when_the_last_close_is_zero` |
 | 却下台帳 | RSI が閾値を通った銘柄は `SIGNAL_RSI_NOT_MET` と記録されない | 帯で落ちた銘柄に、通過した RSI 値付きで矛盾した理由が付く | `tests/screening/test_rejection_classifier.py::TestSignalReasons::test_a_passing_rsi_is_never_reported_as_rsi_not_met` |
 | `pullback_rsi` | ATR が NaN または 0 のとき ATR 正規化帯は閉じる | 距離を測れない銘柄を帯の内側として通す | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_a_zero_atr_is_rejected_fail_safe` |
-| `pullback_rsi` | `band_atr_multiple` 未設定時の判定は従来どおりである | 追加したモードが既定挙動を書き換える | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_none_keeps_the_legacy_percentage_band_hit` |
+| `pullback_rsi` | `band_atr_multiple` 未設定時の判定は従来どおりである | 追加したモードが既定挙動を書き換える | `tests/screening/test_technical_signals.py::TestPullbackATRBand::test_missing_atr_multiple_keeps_the_compatibility_band_hit` |
 | ランキング | `atr_pct` は既定 0.0 で、出荷中のスコアを変えない | 新成分が既定で合成スコアに混入する | `tests/screening/test_pipeline.py::TestAtrPctScoreComponent::test_default_weight_is_zero_so_existing_scores_are_unchanged` |
 | ランキング | `atr_pct` も score_weights 合計 1.0 検証の対象である | 新成分を足しても合計 1.0 とみなされる | `tests/test_config.py::TestLoadStrategies::test_atr_pct_counts_toward_the_sum_to_one_requirement` |
 | ランキング | 戦略別成分は既定 0.0 で、出荷中3戦略のスコアを1ビットも動かさない | 機構追加が運用中のランキングを黙って書き換える | `tests/screening/test_pipeline.py::TestStrategySpecificScoreComponentsAreOffByDefault::test_a_shipped_strategy_scores_exactly_as_it_did_before_the_components` |

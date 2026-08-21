@@ -30,6 +30,9 @@ if TYPE_CHECKING:
     from swing_copilot.config import MinerviniSignalConfig, Settings
 
 _PULLBACK_SMA_WINDOW = 50
+# Compatibility mode used when `band_atr_multiple` is omitted. This is a
+# code-owned fallback, not a second configurable threshold.
+_FIXED_PULLBACK_BAND_PCT = 0.03
 #: ATR period of `pullback.band_atr_multiple`'s band. Was `wilder_atr`'s
 #: default before the band read its ATR from a precomputed column (#214);
 #: named here so the column key is explicit rather than implied by a default.
@@ -421,8 +424,8 @@ class PullbackRSISignal:
     ) -> bool:
         """Whether the close sits inside the pullback band around SMA50.
 
-        Two exclusive modes. The default measures the gap as a fixed
-        percentage of SMA50; `band_atr_multiple` instead measures it in ATR14
+        Two exclusive modes. The compatibility mode measures the gap as a
+        fixed percentage of SMA50; `band_atr_multiple` instead measures it in ATR14
         units, matching how `execution.fair_max_d` already reasons about
         distance from SMA50 elsewhere in the pipeline. An ATR that is NaN or
         zero leaves the distance undefined, so the band closes rather than
@@ -431,7 +434,7 @@ class PullbackRSISignal:
         distance = abs(last_close - last_sma50)
         multiple = self._config.band_atr_multiple
         if multiple is None:
-            return distance / last_sma50 <= self._config.sma_band_pct
+            return distance / last_sma50 <= _FIXED_PULLBACK_BAND_PCT
 
         atr14 = window.atr(_PULLBACK_BAND_ATR_PERIOD)
         if math.isnan(atr14) or atr14 <= 0:

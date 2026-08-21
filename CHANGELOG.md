@@ -732,7 +732,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[... exhibit truncated ...]` marker・`coverage.exhibit_truncated` の読み戻しは
   変更していない
 - `technical_signals.pullback.band_atr_multiple` を `null` から `2.0` へ変更し、
-  プルバック帯の判定を絶対%（`sma_band_pct`）から ATR14 単位へ切り替えた。
+  プルバック帯の判定を固定割合から ATR14 単位へ切り替えた。
   `reports/backtests/2026-07-30-strategy-comparison.md` の R2（期待値・PF・
   Sharpe 改善、DD 同等）に基づく採用判断。`score_weights.atr_pct` は R3 で
   上積みが観測されなかったため `0.0` のまま見送り

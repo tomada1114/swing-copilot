@@ -1022,13 +1022,14 @@ copilot-backtest grid --strategy default --start 2020-01-02 --end 2026-07-30 \
 
 | 設定 | 場所 | 現在値 | 効果 |
 | --- | --- | --- | --- |
-| `technical_signals.pullback.band_atr_multiple` | `settings.yaml` | `2.0`（キー削除で旧モードに戻る） | `\|close − SMA50\| / ATR14 ≤ 倍率`で帯を判定し、`sma_band_pct`を無視する |
+| `technical_signals.pullback.band_atr_multiple` | `settings.yaml` | `2.0` | `\|close − SMA50\| / ATR14 ≤ 倍率`で帯を判定する |
 | `ranking.score_weights.atr_pct` | `strategies.yaml` | `0.0`（無効） | ATR%が高いほど高得点の成分を合成スコアへ加える |
 
-`band_atr_multiple`が無ければ帯は`|close − SMA50| / SMA50 ≤ 0.03`という
-絶対3%で、これは低ボラ銘柄を高ボラ銘柄の約4.5倍通過させる事実上の
-ローボラフィルタとして働く。ATR単位で測れば、パイプラインが既に執行距離に
-使っている`execution.fair_max_d`（SMA50からATR 2.0個分）と同じ尺度になる。
+`band_atr_multiple`が無ければ互換モードとして帯は
+`|close − SMA50| / SMA50 ≤ 0.03`という固定3%で判定される。これは低ボラ銘柄を
+高ボラ銘柄の約4.5倍通過させる事実上のローボラフィルタとして働く。ATR単位で
+測れば、パイプラインが既に執行距離に使っている`execution.fair_max_d`（SMA50から
+ATR 2.0個分）と同じ尺度になる。
 ATRがNaNまたは0のときは距離が定義できないため帯を閉じる（安全側）。
 
 `atr_pct`成分は候補集合内のパーセンタイルではなく、ATR% 6%を満点とする

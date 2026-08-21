@@ -56,7 +56,7 @@ def _pullback_closes() -> list[float]:
     Rising 0.5/session for 200 sessions then falling 1.0/session for 10 keeps
     `close > SMA200` and `SMA50 > SMA200` (so `trend_sma` hits) while pulling
     RSI(14) down to ~31 and leaving the close ~0.6% from SMA50 (so
-    `pullback_rsi` hits its `rsi_threshold` 45 and `sma_band_pct` 0.03).
+    `pullback_rsi` hits its `rsi_threshold` 45 and fixed 3% compatibility band).
     """
     rising = [100.0 + 0.5 * session for session in range(_RISING_SESSIONS)]
     return rising + [

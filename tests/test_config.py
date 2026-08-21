@@ -33,6 +33,19 @@ class TestLoadSettings:
             "earnings_warn_business_days",
             "wide_stop_threshold_pct",
         }
+        assert set(type(settings.technical_signals.pullback).model_fields) == {
+            "rsi_period",
+            "rsi_threshold",
+            "band_atr_multiple",
+        }
+        assert settings.postmortem.model_dump() == {
+            "horizon_5d_weight": 0.6,
+            "horizon_20d_weight": 0.4,
+            "neutral_threshold_pct": 0.5,
+            "severe_threshold_pct": 2.0,
+            "preliminary_sample_threshold": 20,
+            "lookback_window_days": 90,
+        }
         assert settings.notification.enabled is True
 
     def test_missing_file_raises_config_error(self, tmp_path):
@@ -504,14 +517,6 @@ def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
             id="rsi-threshold-over-one-hundred",
         ),
         pytest.param(
-            {"technical_signals": {"pullback": {"sma_band_pct": -0.01}}},
-            id="sma-band-negative",
-        ),
-        pytest.param(
-            {"technical_signals": {"pullback": {"sma_band_pct": 1.01}}},
-            id="sma-band-over-one",
-        ),
-        pytest.param(
             {"technical_signals": {"pullback": {"band_atr_multiple": 0.0}}},
             id="band-atr-multiple-zero",
         ),
@@ -945,7 +950,7 @@ def test_band_atr_multiple_is_adopted_in_the_repo_settings():
 
 
 def test_band_atr_multiple_defaults_to_none_when_absent():
-    # Absence keeps the legacy percentage band, so older/external settings
+    # Absence keeps the fixed compatibility band, so older/external settings
     # files keep their behavior.
     settings = Settings.model_validate({})
 

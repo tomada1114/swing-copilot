@@ -340,15 +340,26 @@ def _run_timebox(
     )
 
 
-def test_timebox_watcher_marks_the_deadline_and_stays_directly_executable():
-    """`swing-daily` background-launches the watcher and waits for its marker.
+@pytest.mark.parametrize("is_launched_from_repo_root", [True, False])
+def test_timebox_watcher_marks_the_deadline_and_stays_directly_executable(
+    tmp_path, is_launched_from_repo_root
+):
+    """`swing-daily` launches the watcher and waits for its marker.
 
     The completion notification *is* the wave's deadline, so both halves of the
     contract are pinned here: the file stays executable (it is invoked as
     `./scripts/timebox.sh`, not through an interpreter) and it announces the
     deadline with the single `TIMEBOX_REACHED` line the skill looks for.
+
+    The second case is the precondition for #323's recovery. The documented
+    launch is relative, which is the only shape the allowlist can prefix-match —
+    and also why a shell sitting anywhere else exits 127. The skill recovers by
+    relaunching the same file through an absolute path, which only works while
+    the script itself resolves nothing against the caller's cwd.
     """
-    result = _run_timebox("1")
+    cwd = PROJECT_ROOT if is_launched_from_repo_root else tmp_path
+
+    result = _run_timebox("1", cwd=cwd)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "TIMEBOX_REACHED"
@@ -371,21 +382,6 @@ def test_timebox_watcher_fails_loudly_on_an_unusable_timebox(arguments):
     assert result.returncode == 2
     assert "TIMEBOX_REACHED" not in result.stdout
     assert result.stderr.strip()
-
-
-def test_timebox_watcher_does_not_depend_on_its_working_directory(tmp_path):
-    """#323: the absolute-path escape hatch only works if the script is cwd-free.
-
-    The documented launch is relative (`./scripts/timebox.sh`), which is the only
-    shape the allowlist can prefix-match — and also the reason it exits 127 when
-    the session's shell is not sitting at the repository root. The skill's
-    recovery is to relaunch the same script by absolute path, so the script
-    itself must never read or resolve anything relative to the caller's cwd.
-    """
-    result = _run_timebox("1", cwd=tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "TIMEBOX_REACHED"
 
 
 def test_daily_skill_watcher_stays_in_its_allowlisted_script_form():
@@ -456,9 +452,14 @@ def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():
     because the parent reads the latter when it is deciding to stop.
     """
     skill_text = DAILY_SKILL.read_text(encoding="utf-8")
-    headless_policy, _, prohibitions = skill_text.partition("## 禁止事項")
+    # Partition on the headless heading first: splitting only on 禁止事項 would
+    # leave the whole document above it as "the headless policy", and the rule
+    # could drift into any other step while this test stayed green.
+    _, heading, below = skill_text.partition("## 無人実行（headless）時の方針")
+    headless_policy, _, prohibitions = below.partition("## 禁止事項")
 
-    assert "## 無人実行（headless）時の方針" in headless_policy
+    assert heading, "the headless policy section must exist"
+    assert prohibitions, "the prohibitions must follow the headless policy"
     for section in (headless_policy, prohibitions):
         assert "ツール呼び出しを含まないターン" in section
     # The alternative to waiting must be named, or "do not idle" reads as "do not

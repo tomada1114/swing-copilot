@@ -121,8 +121,12 @@ Step 2 の専門家・Step 3 と Step 3.5 の再分析／追加分析・Step 3.6
    （run 32305475841）の `headless_note.md` にこの exit 127 が記録されており、
    待つための唯一のブロッキング手段が無いまま 4 の代替規則へ落ちていた。
    背景プロセスが `TIMEBOX_REACHED` を出さずに終了していたら、リポジトリルートの
-   **絶対パス**（Step 1 で拾った `analysis_input.json` の絶対パスから辿れる）で
-   **1 回だけ**起動し直す:
+   **絶対パス**で**1 回だけ**起動し直す。`<REPO_ROOT>` は**このスキルファイル自身の
+   絶対パス**（`<REPO_ROOT>/.claude/skills/swing-daily/SKILL.md`）から `.claude/` の
+   直前までを取る。`<WORKDIR>` から数えないこと — live は
+   `reports/<as_of>/<run_id>/`、dry-run は `reports/dry_run/<as_of>/<run_id>/` で
+   階層が 1 つ違い、階層を決め打ちすると dry-run で存在しないパスを叩いて
+   もう一度 127 になり、1 回だけの再起動を使い切る:
 
    ```bash
    <REPO_ROOT>/scripts/timebox.sh 900

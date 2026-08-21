@@ -183,6 +183,7 @@ def _context(
                 stop_price=102.5,
                 reasons=(),
                 warnings=(CorrelationWarning("MSFT", 0.81),),
+                limit_price=113.0,
             )
         ]
         if with_risk
@@ -398,6 +399,7 @@ def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
                 stop_price=45.0,
                 reasons=(),
                 warnings=(),
+                limit_price=50.6,
                 shares_by_risk=200,
                 shares_by_position_cap=500,
                 binding_constraint="trade_risk",
@@ -414,6 +416,7 @@ def test_risk_brief_propagates_sizing_breakdown_from_the_pipeline() -> None:
     )
 
     risk = brief.candidates[0].risk
+    assert risk.limit_price == pytest.approx(50.6)
     assert risk.shares_by_risk == 200
     assert risk.shares_by_position_cap == 500
     assert risk.binding_constraint == "trade_risk"

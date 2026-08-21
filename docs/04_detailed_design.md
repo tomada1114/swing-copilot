@@ -645,10 +645,12 @@ class RiskAssessment:
     symbol: str
     status: str  # "approved" | "rejected" | "not_calculable"
     max_shares: int | None
+    # run日終値。仮想台帳の基準であり、計画指値とは別の値。
     entry_price: float | None
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[CorrelationWarning, ...] = ()
+    limit_price: float | None = None  # close + entry_limit_atr_multiple * ATR14
     # P1-03 (roadmap §5): サイジング内訳と binding constraint。
     shares_by_risk: int | None = None
     shares_by_position_cap: int | None = None
@@ -692,7 +694,9 @@ class RiskChecker:
         各候補について、
         - account_equityが未設定なら株数を推測せずnot_calculable
         - 1銘柄=資金のmax_position_pct上限
-        - 1トレードのリスク=資金のmax_trade_risk_pct上限（ストップ幅基準）
+        - 1トレードのリスク=資金のmax_trade_risk_pct上限（limit_price - stop_price基準）。
+          stop_priceはrun日終値−exit_atr_multiple×ATR14、limit_priceは
+          run日終値＋entry_limit_atr_multiple×ATR14で算出する
         - 同一セクター上限max_sector_pct
         - 保有中ポジションと、それまでに承認した候補のstopリスク合計が
           max_portfolio_heat_pct（既定6.0%、単位はpercentage points）を超えないこと
@@ -710,7 +714,7 @@ class RiskChecker:
         （同値の場合はtrade_riskを優先、決定的）。correlationは列挙値として
         用意するが、相関チェックは現状ブロックしない警告のみのため到達しない
         （P4-17でポートフォリオヒートを導入するまでの既知の未到達分岐）。
-        損切り幅（entry_price - stop_price）/ entry_price が
+        損切り幅（limit_price - stop_price）/ limit_price が
         risk.wide_stop_threshold_pct（既定10.0%）を超える場合はWIDE_STOP、
         最終sharesが0に切り捨てられる場合、またはリスク予算
         （account_equity × max_trade_risk_pct）が$1未満（P1-03の判断基準、
@@ -2183,6 +2187,7 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     status          VARCHAR NOT NULL CHECK (status IN ('approved','rejected','not_calculable')),
     max_shares      BIGINT,
     entry_price     DOUBLE,
+    limit_price     DOUBLE,
     stop_price      DOUBLE,
     reasons_json    JSON NOT NULL,
     warnings_json   JSON NOT NULL,
@@ -2470,6 +2475,7 @@ technical_signals:
 backtest:
   initial_cash_usd: 100000
   entry: "next_open"           # シグナル翌日寄付
+  entry_limit_atr_multiple: 0.0  # 要検証: 指値を終値より上へ置くATR倍率
   exit_atr_multiple: 2.5
   exit_atr_period: 14
   max_hold_days: 25
@@ -2627,6 +2633,7 @@ P5-24の`vcp_breakout`は既定`default`に含めない明示選択戦略であ�
 | 項目 | 値 | 設定キー |
 |---|---|---|
 | エントリー | シグナル翌日寄付 | `backtest.entry="next_open"` |
+| 計画指値 | run日終値 + k×ATR14（既定k=0.0、要検証） | `backtest.entry_limit_atr_multiple=0.0` |
 | イグジット | ATRトレーリングストップ(2.5×ATR14) または25営業日 | `backtest.exit_atr_multiple=2.5`, `exit_atr_period=14`, `max_hold_days=25`（出典: 2026-08-03 戦略パラメータレビュー、下記解決ログ参照） |
 | 手数料 | 0.1% | `backtest.commission_pct=0.001` |
 | スリッページ | 0.1% | `backtest.slippage_pct=0.001` |

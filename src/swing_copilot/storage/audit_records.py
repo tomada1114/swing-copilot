@@ -592,15 +592,16 @@ def _insert_risk_assessments(
         conn.execute(
             """
                 INSERT INTO risk_assessments (
-                    run_id, symbol, status, max_shares, entry_price,
+                    run_id, symbol, status, max_shares, entry_price, limit_price,
                     stop_price, reasons_json, warnings_json,
                     shares_by_risk, shares_by_position_cap,
                     binding_constraint, sizing_warnings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (run_id, symbol) DO UPDATE SET
                     status = EXCLUDED.status,
                     max_shares = EXCLUDED.max_shares,
                     entry_price = EXCLUDED.entry_price,
+                    limit_price = EXCLUDED.limit_price,
                     stop_price = EXCLUDED.stop_price,
                     reasons_json = EXCLUDED.reasons_json,
                     warnings_json = EXCLUDED.warnings_json,
@@ -615,6 +616,7 @@ def _insert_risk_assessments(
                 assessment.status,
                 assessment.max_shares,
                 assessment.entry_price,
+                assessment.limit_price,
                 assessment.stop_price,
                 dumps_safe(list(assessment.reasons)),
                 dumps_safe(

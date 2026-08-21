@@ -76,6 +76,7 @@ def _brief() -> DailyBrief:
                     stop_price=164.80,
                     reasons=(),
                     warnings=("AMDとの相関 0.82",),
+                    limit_price=172.00,
                 ),
                 analysis=BriefAnalysis(
                     degraded=False,
@@ -179,9 +180,9 @@ def test_markdown_candidates_table_is_self_contained_per_bucket() -> None:
 
     header = (
         "| Rank | Symbol | Close | Change | RSI14 | Score | Execution | "
-        "Signals | Risk | Shares | Stop |"
+        "Signals | Risk | Shares | Stop | Limit |"
     )
-    separator = "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|"
+    separator = "|---:|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|"
     header_indices = [index for index, line in enumerate(lines) if line == header]
 
     # One populated bucket (即検討可) gets one table; the other populated
@@ -427,6 +428,7 @@ def test_terminal_output_is_a_compact_decision_brief() -> None:
     assert "スコア" in output
     assert "株数" in output
     assert "ストップ" in output
+    assert "指値" in output
     assert "approved" not in output
     assert "Breakdown" not in output
     assert "Execution" not in output

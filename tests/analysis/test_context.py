@@ -110,6 +110,7 @@ class TestRiskConstraints:
             entry_price=100.0,
             stop_price=95.0,
             reasons=(),
+            limit_price=102.0,
             shares_by_risk=128,
             shares_by_position_cap=200,
             binding_constraint="trade_risk",
@@ -119,6 +120,8 @@ class TestRiskConstraints:
         block = format_risk_constraints(assessment)
 
         assert "binding_constraint: trade_risk" in block
+        assert "指値(limit_price): 102.00" in block
+        assert "逆指値(stop_price): 95.00" in block
         assert "リスク基準の株数(shares_by_risk): 128" in block
         assert "ポジション上限基準の株数(shares_by_position_cap): 200" in block
         assert "最終株数(shares): 128" in block
@@ -139,6 +142,8 @@ class TestRiskConstraints:
         # The "code already declined to size this" signal must reach the
         # analysis, so this never degrades to an empty string.
         assert "binding_constraint: not_calculable" in block
+        assert "指値(limit_price): 不明" in block
+        assert "逆指値(stop_price): 不明" in block
         assert "最終株数(shares): 不明" in block
         assert "warnings: なし" in block
 

@@ -223,6 +223,7 @@ class BriefRisk:
     stop_price: float | None
     reasons: tuple[str, ...]
     warnings: tuple[str, ...]
+    limit_price: float | None = None
     # P1-03 sizing breakdown (REQ-005/REQ-006).
     shares_by_risk: int | None = None
     shares_by_position_cap: int | None = None
@@ -670,6 +671,7 @@ def _risk_brief(
         assessment.stop_price,
         assessment.reasons,
         warnings,
+        limit_price=assessment.limit_price,
         shares_by_risk=assessment.shares_by_risk,
         shares_by_position_cap=assessment.shares_by_position_cap,
         binding_constraint=assessment.binding_constraint,

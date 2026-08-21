@@ -81,6 +81,7 @@ technical_signals:
 backtest:
   initial_cash_usd: 100000
   entry: "next_open"
+  entry_limit_atr_multiple: 0.0  # 要検証: 指値を終値より上へ置くATR倍率
   exit_atr_multiple: 2.5
   exit_atr_period: 14
   max_hold_days: 25

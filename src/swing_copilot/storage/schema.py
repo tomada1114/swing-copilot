@@ -253,6 +253,7 @@ INIT_SCHEMA_STATEMENTS = (
             CHECK (status IN ('approved','rejected','not_calculable')),
         max_shares      BIGINT,
         entry_price     DOUBLE,
+        limit_price     DOUBLE,
         stop_price      DOUBLE,
         reasons_json    JSON NOT NULL,
         warnings_json   JSON NOT NULL,
@@ -596,6 +597,10 @@ INIT_SCHEMA_STATEMENTS = (
 # P1-03: additive columns for a database created before this change. See the
 # module docstring for why these are unconstrained (no CHECK/NOT NULL).
 ALTER_SCHEMA_STATEMENTS = (
+    # Issue #325: legacy risk rows gain the planned limit price lazily. DuckDB
+    # cannot add a constrained column here, so application validation remains
+    # the only guarantee for rows written after the migration.
+    "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS limit_price DOUBLE",
     "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS shares_by_risk BIGINT",
     "ALTER TABLE risk_assessments "
     "ADD COLUMN IF NOT EXISTS shares_by_position_cap BIGINT",

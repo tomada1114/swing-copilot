@@ -101,8 +101,9 @@ digestで束縛せず、読み戻す経路も持たない診断用の成果物�
 
 ## 口座レベルリスク
 
-`risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションと承認候補の
-stopリスクを口座資産に対する百分率で計算する。実売買記録機能一式の撤去
+`risk/checks.py`の`calculate_portfolio_heat()`は、保有中ポジションの
+`entry_price`と`stop_price`の差によるリスクを口座資産に対する百分率で計算する。
+`RiskChecker.check()`が承認候補を積み上げるときは、計画指値`limit_price`と`stop_price`の差を使う。実売買記録機能一式の撤去
 （2026-08、FR-11/CON-04）に伴い、日次パイプラインは保有中ポジションを常に
 空リストとして渡す——バーチャルなverdict追跡台帳（`verdict_positions`）は
 実際に持っていない建玉なのでここへ代入しない。`RiskChecker.check()`は
@@ -482,7 +483,8 @@ copilot-track stats --recommendation skip        # 1区分だけ
 `CASH_PRIORITY`のrunで全verdictが`no_trade=true`になることがあり、除外すると
 台帳が空になって定性判断の質を測る材料が集まらないため、`verdicts.no_trade`を
 そのまま`verdict_positions.no_trade`へ引き継いで建玉する。エントリー価格は
-`risk_assessments.entry_price`（= run日終値）、初期stopは同`stop_price`で、いずれも
+`risk_assessments.entry_price`（= run日終値）を使い、これは計画指値とは別の仮想台帳用基準値である。計画指値は
+`risk_assessments.limit_price`、初期stopは同`stop_price`で、いずれも
 NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
 代替する（ATR期間はバックテストと同じ`settings.backtest.exit_atr_period`）。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する

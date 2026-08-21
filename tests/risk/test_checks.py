@@ -143,7 +143,68 @@ class TestCheckSizing:
         assert result[0].status == "approved"
         assert result[0].max_shares is not None
         assert result[0].max_shares > 0
+        assert result[0].entry_price == pytest.approx(100.0)
+        assert result[0].limit_price == pytest.approx(100.0)
         assert result[0].stop_price == pytest.approx(100.0 - 2.5 * 2.0)
+
+    def test_nonzero_limit_multiple_sizes_from_the_worst_case_fill(
+        self, settings, market_store
+    ):
+        backtest = settings.backtest.model_copy(
+            update={"entry_limit_atr_multiple": 0.3}
+        )
+        checker = RiskChecker(
+            settings.model_copy(update={"backtest": backtest}),
+            universe=(),
+            market_store=market_store,
+        )
+
+        result = checker.check(
+            [_candidate("AAPL", close=50.0, atr14=2.0)],
+            portfolio=[],
+            account_equity=100_000.0,
+        )[0]
+
+        assert result.entry_price == pytest.approx(50.0)
+        assert result.limit_price == pytest.approx(50.6)
+        assert result.stop_price == pytest.approx(45.0)
+        limit_price = result.limit_price
+        stop_price = result.stop_price
+        max_shares = result.max_shares
+        assert limit_price is not None
+        assert stop_price is not None
+        assert max_shares is not None
+        assert limit_price > stop_price
+        assert result.shares_by_risk == 178
+        assert max_shares == 178
+        assert max_shares * (limit_price - stop_price) <= 1_000.0
+
+    def test_a_large_limit_multiple_can_floor_shares_to_zero(
+        self, settings, market_store
+    ):
+        backtest = settings.backtest.model_copy(
+            update={"entry_limit_atr_multiple": 1_000.0}
+        )
+        checker = RiskChecker(
+            settings.model_copy(update={"backtest": backtest}),
+            universe=(),
+            market_store=market_store,
+        )
+
+        result = checker.check(
+            [_candidate("AAPL", close=50.0, atr14=2.0)],
+            portfolio=[],
+            account_equity=100_000.0,
+        )[0]
+
+        assert result.status == "approved"
+        assert result.max_shares == 0
+        limit_price = result.limit_price
+        stop_price = result.stop_price
+        assert limit_price is not None
+        assert stop_price is not None
+        assert limit_price > stop_price
+        assert "SMALL_ACCOUNT_FRICTION" in result.sizing_warnings
 
     def test_sizing_breakdown_is_populated_on_approval(self, checker):
         result = checker.check(

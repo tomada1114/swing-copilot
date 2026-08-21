@@ -13,6 +13,11 @@ decision day and translates its `RiskAssessment`s into engine-level verdicts.
 Arms that exercise fewer gates (`EntryPolicyArm.REGIME`) leave earnings and the
 simulator-only circuit breaker disabled.
 
+The adapter changes in this issue are intentionally compatibility-only: they
+follow the account-independent public `RiskChecker` contract after #348, while
+#349 owns explicit `backtest.*` simulation settings and removal of the
+simulator-only compatibility gates.
+
 Two things the policy deliberately does *not* decide:
 
 - **The share count.** The engine alone performs nominal-money sizing at the

@@ -1296,7 +1296,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 - **出来高平均に`rolling().mean()`を使わない理由**: pandasのrolling meanはKahan補正付きの逐次加減算で、1窓をpairwise加算する`Series.mean()`とは float の最下位ビットが食い違う（実測で浮動小数の約43%の窓）。旧実装は全て`tail(w).mean()`だったので、`_trailing_mean`は`sliding_window_view`＋pairwise加算でその総和順序を再現する。窓が埋まらない期間は`NaN`（旧実装の呼び出し側は例外なく`len(series) < w`で先にスキップしていた）。
 - **`CACHE_KEY_VERSION`は据え置く**: 永続レイアウトもキー構成も変えていない上、出力が旧実装とビット一致することを上記2つのテストが固定しているため、既存キャッシュは今も正しい。上げると正しいキャッシュを捨てるだけになる。
 
-**Issue #184実装時追記（市場状態ゲートの注入）**: `backtest/policy.py`が唯一のポート`EntryPolicy`（`decide(EntryPolicyRequest) -> Mapping[str, EntryDecision]`）を定義し、その実装`RiskCheckerEntryPolicy`は`risk/checks.py::RiskChecker`をラップする。本番から口座依存ルールを撤去した後も、市場状態・決算・バックテスト自身の損失ゲートをpoint-in-timeで共有する。
+**Issue #184実装時追記（市場状態ゲートの注入）**: `backtest/policy.py`が唯一のポート`EntryPolicy`（`decide(EntryPolicyRequest) -> Mapping[str, EntryDecision]`）を定義し、その実装`RiskCheckerEntryPolicy`は`risk/checks.py::RiskChecker`をラップする。本番から口座依存ルールを撤去した後も、市場状態・決算・バックテスト自身の損失ゲートをpoint-in-timeで共有する。#348ではこの公開`RiskChecker`契約に合わせた互換修正だけを行い、`backtest.*`の明示的なシミュレーション設定と互換ゲートの撤去は#349で扱う。
 
 - **as-of規律**: `EntryPolicyRequest.as_of`は約定日ではなく**シグナル日**（候補の`as_of`）である。翌営業日寄付の時点で観測可能な最新事実は前日終値なので、約定日当日のバーでレジームを判定すればそれ自体がlook-aheadになる。`calculate_regime_snapshot`はシグナル日で呼び、`RiskChecker`の決算判定も`candidate.as_of`を見る。境界（直前/同日/直後）は`tests/backtest/test_policy.py::TestAsOfDiscipline`が固定する。
 - **名目株数はエンジンが決める**: `RiskChecker`は銘柄単位の価格計画と可否だけを返し、`calc_position_size`はエンジン内部の1箇所に留める。`EntryDecision.max_trade_risk_pct`はバックテスト互換の任意上書きで、`REDUCE_ONLY`は値を設定しない。

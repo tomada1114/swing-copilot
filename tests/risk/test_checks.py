@@ -154,6 +154,33 @@ class TestMarketState:
         assert result.binding_constraint == "regime"
         assert result.reasons == (REGIME_CASH_PRIORITY_REASON,)
 
+    @pytest.mark.parametrize("missing", ["close", "atr14"])
+    def test_cash_priority_wins_when_a_trade_plan_is_missing_data(
+        self, settings, missing
+    ):
+        candidate = _candidate(
+            close=None if missing == "close" else 100.0,
+            atr14=None if missing == "atr14" else 2.0,
+        )
+
+        result = RiskChecker(settings).check(
+            [candidate], _exposure(GateVerdict.BEAR, DistributionLevel.NORMAL)
+        )[0]
+
+        assert result.status == "rejected"
+        assert result.binding_constraint == "regime"
+        assert result.reasons == (REGIME_CASH_PRIORITY_REASON,)
+
+    def test_cash_priority_wins_when_the_stop_is_not_usable(self, settings):
+        result = RiskChecker(settings).check(
+            [_candidate(atr14=0.0)],
+            _exposure(GateVerdict.BEAR, DistributionLevel.NORMAL),
+        )[0]
+
+        assert result.status == "rejected"
+        assert result.binding_constraint == "regime"
+        assert result.reasons == (REGIME_CASH_PRIORITY_REASON,)
+
     def test_reduce_only_is_a_label_without_filtering_or_risk_warning(self, settings):
         result = RiskChecker(settings).check(
             [_candidate()], _exposure(GateVerdict.NEUTRAL, DistributionLevel.NORMAL)

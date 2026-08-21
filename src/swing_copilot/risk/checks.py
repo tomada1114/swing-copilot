@@ -137,17 +137,24 @@ class RiskChecker:
     ) -> RiskAssessment:
         entry_price = candidate.metrics.get("close")
         atr14 = candidate.metrics.get("atr14")
+        is_cash_priority = (
+            exposure is not None and exposure.verdict.value == "CASH_PRIORITY"
+        )
         if entry_price is None or atr14 is None:
             return RiskAssessment(
                 symbol=candidate.symbol,
-                status="not_calculable",
+                status="rejected" if is_cash_priority else "not_calculable",
                 entry_price=entry_price,
                 limit_price=None,
                 stop_price=None,
                 atr14=atr14,
                 stop_distance_pct=None,
-                reasons=(_MISSING_DATA_REASON,),
-                binding_constraint="not_calculable",
+                reasons=(
+                    (REGIME_CASH_PRIORITY_REASON,)
+                    if is_cash_priority
+                    else (_MISSING_DATA_REASON,)
+                ),
+                binding_constraint=("regime" if is_cash_priority else "not_calculable"),
             )
 
         limit_price = entry_limit_price(
@@ -161,14 +168,18 @@ class RiskChecker:
         ):
             return RiskAssessment(
                 symbol=candidate.symbol,
-                status="not_calculable",
+                status="rejected" if is_cash_priority else "not_calculable",
                 entry_price=entry_price,
                 limit_price=limit_price,
                 stop_price=stop_price,
                 atr14=atr14,
                 stop_distance_pct=None,
-                reasons=(_INVALID_STOP_REASON,),
-                binding_constraint="not_calculable",
+                reasons=(
+                    (REGIME_CASH_PRIORITY_REASON,)
+                    if is_cash_priority
+                    else (_INVALID_STOP_REASON,)
+                ),
+                binding_constraint=("regime" if is_cash_priority else "not_calculable"),
             )
 
         stop_distance_pct = (limit_price - stop_price) / limit_price
@@ -177,7 +188,7 @@ class RiskChecker:
             if stop_distance_pct * 100 > self._risk_config.wide_stop_threshold_pct
             else ()
         )
-        if exposure is not None and exposure.verdict.value == "CASH_PRIORITY":
+        if is_cash_priority:
             return RiskAssessment(
                 symbol=candidate.symbol,
                 status="rejected",

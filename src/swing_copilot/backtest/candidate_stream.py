@@ -1,8 +1,9 @@
 """Candidate generation, separated from engine execution (Issue #185).
 
 `copilot-backtest grid` runs the same screening 25 times: every cell varies
-only `exit_atr_multiple`/`max_hold_days`, which the *engine* consumes and the
-*screening pipeline* never reads. Screening is the dominant cost of a
+only engine-side parameters such as `exit_atr_multiple`/`max_hold_days`; the
+entry-limit experiment also varies `entry_limit_atr_multiple`. The *screening
+pipeline* never reads any of them. Screening is the dominant cost of a
 multi-year backtest, so the grid paid for it 25 times over to produce 25
 byte-identical candidate streams.
 

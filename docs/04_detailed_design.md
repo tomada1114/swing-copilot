@@ -64,6 +64,7 @@ swing-copilot/
 │   │   ├── rejections.py     # rejections.json（落選明細＋candidate_limit切り捨て）
 │   │   └── discord_notify.py # FR-09
 │   ├── backtest/
+│   │   ├── entries.py        # 指値価格・日足約定規則（リスク評価と共有）
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
 │   │   └── runner.py         # FR-10
 │   └── pipeline/
@@ -83,12 +84,12 @@ P4対象の`data/eodhd_provider.py`はP1〜P2ではスタブも作成しない�
 2. **単一構造化ストア**: 構造化データは`data/copilot.duckdb`へ集約し、株価時系列のみParquetへ外出しする。SQLiteは導入しない。`MarketStore`と`StateStore`は論理的な責務分離であり、同じ`Database`を共有する。
 3. **再実行可能性と原子性**: 毎回新しい`run_id`を作り、`runs`/`run_steps`に履歴を残す。業務データは訂正可能な自然キーupsertとし、複数行の論理更新は1トランザクションで全件commit/rollbackする。snapshot置換では消えた行も削除する。Parquet/report/分析JSONは同一directoryのtemp fileから`os.replace()`し、失敗時は旧destinationを保持する。過去の成功だけを理由にステップ全体を飛ばさない。（**P7（スキル移行）での変更**: LLM応答キャッシュ（`(model,prompt_hash,schema_version)`による再利用とcache hit再検証）は、LLM API呼び出しの廃止に伴い機構ごと削除した。）
 4. **決定的な候補生成**: 全Filterと全required SignalはAND条件。複数の`SignalHit`を銘柄単位の`Candidate`へ集約し、`(rsi14昇順, avg_volume降順, symbol昇順)`で順位付けして最大10件に絞る。根拠のない合成スコアは作らない。
-5. **同一ロジックの再利用**: 指標・Filter・Signalは純粋関数として日次処理とバックテストで共用する。バックテスト専用に似たロジックを再実装しない。
+5. **同一ロジックの再利用**: 指標・Filter・Signal・指値価格は純粋関数として日次処理とバックテストで共用する。バックテスト専用に似たロジックを再実装しない。
 6. **機能単位の秘密情報検証**: 設定ファイルは常にロード可能にし、秘密情報は使用する機能の開始時にだけ検証する。`--skip-text`やオフラインE2EにFinnhub/FREDキーを要求しない。定性分析はLLM APIキーを一切必要としない。
 7. **境界と内部型**: Pydanticは設定・外部API・分析入出力JSONなどの境界だけに使用し、内部値は`@dataclass(frozen=True, slots=True)`またはEnumを使う。
 8. **外部境界の失敗契約**: 外部I/Oはtimeout、retry対象例外、総試行上限、backoffを明示し、rate limitを各試行へ適用する。設定/入力検証/プログラミングエラーをretryしない。通常pytestはsocket接続を既定拒否し、live canaryを分離する。
 9. **定量計算の整列**: 複数銘柄の時系列演算は取引日indexで整列する。相関はinner join後の重複しない共通日だけを使い、必要本数未満・定数系列・NaNはdata-qualityとして明示する。
-10. **バックテスト会計**: 買いと売りの双方へ不利なslippageとcommissionを適用し、stop/max-hold/最終強制清算を同じ決済関数へ集約する。final equityは清算後cashと一致し、SPY benchmarkは端株を買わない残cashを保持する。
+10. **バックテスト会計**: 買いと売りの双方へ不利なslippageとcommissionを適用し、指値未到達・stop/max-hold/最終強制清算を同じ決定的な約定・決済規則へ集約する。final equityは清算後cashと一致し、SPY benchmarkは端株を買わない残cashを保持する。
 11. **分析境界防御**: 定性分析はプロセス外のClaude Codeスキルが行う。コード計算済みの文脈と未信頼の外部本文は`analysis_input.json`上の別フィールドへ分離し、外部本文はescape済みdelimiter内のdataとして渡す。スキル出力は未信頼入力として扱い、strictスキーマ（`extra="forbid"`）で受ける。全factは非空・非blankで、当該銘柄について供給した集合内の`source_ids`を持ち、その`source_ids`の本文からの逐語引用`evidence_quote`を持つ。CON-03とprovenance（`source_ids`の部分集合検証・`evidence_quote`の本文一致検証）は呼び出し元任せにせず`analysis/validate.py`で一元適用し、違反は銘柄単位でfail-closed（リトライなし）とする。
 
 ### 2.2 モジュール依存ルール
@@ -1342,8 +1343,8 @@ def run_backtest(
 
 **約定規則（固定）**:
 
-- 当日終値確定後の候補を翌営業日寄付で約定する。買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`、売り約定単価=`raw_exit * (1 - slippage_pct)`、売りcash増加=`shares * exit_execution * (1 - commission_pct)`とし、すべてのexit path（stop、max-hold、最終強制清算）へ同じ式を適用する。
-- 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。
+- `backtest.entry`は候補を翌営業日に評価するモードで、`next_open`は`k=0.0`の互換動作を持ち、`next_limit`は常にDay指値を適用する。`entry_limit_atr_multiple=0.0`（`next_open`の互換アーム）では買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`とする。正の`k`では共有純関数`backtest/entries.py::entry_limit_price(close, atr14, k)`の指値を使い、始値が指値以下なら始値（既存のslippage適用）、始値が指値を超えても日中安値が指値以下なら指値ちょうど、安値も指値を超えるなら`limit_not_reached`として当日限り不約定にする。指値が刺さったかの判定は日足OHLCの近似であり、未約定注文は翌日へ持ち越さない。
+- 初期ストップはエントリー価格−2.5×シグナル日のATR14。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。逆指値を本番の終値アンカーへ変更すると`k=0.0`の既存バックテスト数値が動くため、アンカー統一は本Issueでは行わず、現行の約定価格アンカーを維持する。
 - トレーリングストップは当日引け後に`max(従来値, close−2.5×ATR14)`へ更新し、翌営業日から有効とする。25営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。同時保有は`risk.max_position_pct`から導かれる上限を超えない。将来データ、提出前財務、同日終値での約定は禁止する。
 - **サイジング基底はequity（Issue #184で変更）**: 1建玉のサイジングは`cash`ではなく`equity = cash + 建玉時価`を基底とする。時価はシグナル日（＝候補生成日）の終値で評価し、約定日当日の終値は使わない（寄付時点では未知のため）。同一日の全約定は同じ基底を共有するので、当日どの候補が先に約定したかでサイズが変わらない。本番`pipeline/daily.py`が固定の`risk.account_equity_usd`基準でサイジングするのと同じ意味論であり、旧cash基準（保有n件でサイズが0.9^nに縮み、10件満玉でも投下資本≒65%）とは別系だった問題を解消する。equity基底により「10%×10件＝100%＋手数料」が現金残高を超える場合があり、その候補は`insufficient_cash`として計上される（本番も同じ性質を持つ）。
@@ -1373,6 +1374,8 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 
 **P2-10実装時追記（roadmap §5 P2-10）**: 新規`backtest/sensitivity.py`（純関数、`backtest/engine.py`/`runner.py`に依存しない）が5×5パラメータ感応度グリッドの生成（`grid_param_values(base_atr_multiplier, base_max_hold_days)`、ATRストップ倍率{50,75,100,125,150}%×最大保有日数{40,70,100,140,200}%の row-major 25セル）と判定（`judge_grid(cells, thresholds: BacktestConfig)`）を提供する。`GridCell(atr_multiplier_pct, max_hold_pct, expectancy_per_trade, trade_count)`のtrade_count<`backtest.insufficient_trade_count_threshold`（P2-07で追加済みの閾値を再利用、新規閾値を増やさない）は`is_gray_cell()`で灰色扱い（結論から除外）。判定は非灰色セルの最良値（`expectancy_per_trade`最大）を基準に: (1) その上下左右4近傍（非灰色のみ、境界セルは2〜3近傍、近傍が全て灰色/存在しない場合はスパイク判定をスキップ）の中央値に対し最良値が`backtest.sensitivity_spike_multiplier=1.5`（要検証）を**超える**場合「スパイク（過学習疑い）」、(2) 非灰色セル全てが最良値の±`backtest.sensitivity_plateau_tolerance_pct=0.20`（要検証、基準点は最良セルの値と実装時に決定）以内なら「プラトー（頑健）」、(3) 非灰色セルが1つもなければ「判定不能（データ不足）」、(4) いずれでもなければ「判定なし」。`backtest/runner.py`の`BacktestCostOverrides`に`exit_atr_multiple`/`max_hold_days`を追加し、`run_backtest`が各セルの実パラメータで25回独立に実行される。`copilot-backtest grid --strategy <name> --start ... --end ... [--limit N] [--output PATH] [--db PATH]`サブコマンドを追加（`argparse`の`add_subparsers(dest="command")`、`--strategy`等は`required=True`にできない — 親parserの必須オプションはサブコマンド委譲後も強制されるため、`_validate_args`側で必須チェックする実装に変更した）。既定出力は`reports/backtests/<end>-<strategy>-grid.md`。terminal/markdown双方にマトリクス（`expectancy_per_trade (n=trade_count)`、灰色セルは`*`マーカー）と判定ラベルを表示する（Issueの必須要件はmarkdownのみだが、他コマンドとの一貫性のためterminalにも出力）。
 
+**Issue #326実装時追記（指値約定ゲート）**: 指値価格は`backtest/entries.py::entry_limit_price()`の1実装を`risk/checks.py`と`backtest/engine.py`から呼ぶ。既存の5×5出口感応度グリッドとは別に、`ENTRY_LIMIT_ATR_MULTIPLE_GRID=(0.0, 0.5, 1.0, 1.5, 2.0)`と`entry_limit_grid_values()`を固定し、`BacktestCostOverrides(entry_limit_atr_multiple=...)`で同じ候補ストリームを各kへ注入できる。基準値が0.0のため、他の感応度軸のような基準値比率ではなく絶対ATR倍率を使う。`backtest.entry`は`Literal["next_open", "next_limit"]`へ狭め、`next_open`はk=0.0で互換動作、`next_limit`は常にDay指値ゲートを適用する。
+
 **Issue #185実装時追記**: 候補生成をエンジン走行から分離し、新規`backtest/candidate_stream.py`へ移した（`_SCREENING_WARMUP_CALENDAR_DAYS`と`_trading_days`も`runner.py`から本モジュールへ移動）。`load_market_frame`が取引日・バー・ファンダを1回だけ読んで`MarketFrame`（内容ダイジェスト付き）にし、`generate_candidate_stream`が全取引日を先行スクリーニングして`CandidateStream`（`date -> ランク順candidate列`、候補0件の日はキーを持たない）にする。`run_backtest(request, deps, overrides, *, candidate_stream=None, market_frame=None)`は両者を注入でき、省略時は従来どおり内部で生成するため既存呼び出しと後方互換である。`copilot-backtest grid`の25セルと`--pessimistic`の2シナリオは1本のストリームを共有し、スクリーニングは1回しか走らない（従来はセルごとに1回、25回走っていた——フル期間1 run 54分×25セル≒22時間で、一度も完走していなかった）。
 
 **キャッシュキー契約（本issueの核心）**: `compute_cache_key`はスクリーニングが読む入力だけをダイジェストする——`strategy_key`とその`StrategySpec`、`settings.technical_signals`、`settings.fundamental_filters`、ユニバース、`request.symbols`、`start`/`end`、`benchmark_symbol`（取引日カレンダーの源泉なので必要）、バー/ファンダの内容ダイジェスト、および`CACHE_KEY_VERSION`。**`settings.backtest`・`settings.risk`・`request.initial_cash`は含めない**。`ScreeningPipeline`は`technical_signals`と`fundamental_filters`しか読まないため、手仕舞い・コストパラメータを振ってもキーは動かず、同一ストリームがグリッド全セルで再利用できる（この等価性は`tests/backtest/test_candidate_stream.py::test_screening_ignores_backtest_settings`が固定する）。注入されたストリームのキーは`run_backtest`が毎回再検証し、不一致は`CandidateStreamMismatchError`でfail-fastする（黙って別のユニバースを測らない）。バー行の順序が変わってもダイジェストは不変である。
@@ -1395,7 +1398,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 - **相関警告のバー読み出し**: `RiskChecker`がstoreへ触れるのは相関「警告」だけ（ブロックはしない）なので、`_FrameBarReader`がエンジンの手持ちバーからas-ofカットオフ付きで供給する。ストレージ接続を増やさず、テストもオフラインのままにできる。`RiskChecker.__init__`の型注釈は広げない（checks registryのリファクタはIssue #193の範囲）ため、呼び出し側で1箇所だけ明示的な`cast`を置いている。
 - **`REGIME_SYMBOLS = ("SPY", "QQQ", "^VIX")`** は`load_market_frame`が**常に**読み込む。アーム依存で読み分けると`bars_digest`＝`cache_key`がアームごとに変わり、A/Bが1本のストリームを共有できなくなるためである。スクリーニングは`universe`を走査するので余分な銘柄の影響を受けない。これらのバーが無い状態で`--policy`を指定した場合は`EntryPolicyError`でfail-fastする（レジームがUNKNOWN→fail-closedで全期間全候補ブロック、という無意味な結果を黙って出さない）。
 
-**`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`＝`regime` / `circuit_breaker` / `portfolio_heat` / `earnings` / `sector` / `not_calculable` / `max_concurrent` / `already_held` / `missing_data` / `invalid_stop` / `zero_shares` / `insufficient_cash`を0件でも必ず全件報告する。複数ゲートが同時に成立した候補はこの順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
+**`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`＝`regime` / `circuit_breaker` / `portfolio_heat` / `earnings` / `sector` / `not_calculable` / `max_concurrent` / `already_held` / `missing_data` / `limit_not_reached` / `invalid_stop` / `zero_shares` / `insufficient_cash`を0件でも必ず全件報告する。複数ゲートが同時に成立した候補はこの順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
 
 **CLI**: `copilot-backtest --policy none|regime|regime+risk`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
 

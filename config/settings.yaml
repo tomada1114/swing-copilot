@@ -80,7 +80,7 @@ technical_signals:
 
 backtest:
   initial_cash_usd: 100000
-  entry: "next_open"
+  entry: "next_open"  # next_limit でk=0.0でもDay指値ゲートを強制
   entry_limit_atr_multiple: 0.0  # 要検証: 指値を終値より上へ置くATR倍率
   exit_atr_multiple: 2.5
   exit_atr_period: 14

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Self
+from typing import TYPE_CHECKING, Any, Final, Literal, Self
 
 import yaml
 from pydantic import (
@@ -268,7 +268,12 @@ class BacktestConfig(_StrictModel):
     """`backtest.*` in `settings.yaml`."""
 
     initial_cash_usd: float = Field(default=100_000, gt=0.0)
-    entry: str = "next_open"
+    # The engine consumes this mode: candidates are queued after the signal
+    # close and evaluated against the next session's OHLC. `next_open` keeps
+    # the zero-k compatibility arm; `next_limit` always applies the Day-limit
+    # gate. Keeping a Literal prevents an arbitrary, silently ignored string
+    # from becoming config.
+    entry: Literal["next_open", "next_limit"] = "next_open"
     # Planned limit-order entry above the run-day close. Kept at zero until
     # the backtest gate supplies evidence for a non-zero value (#325/#326).
     entry_limit_atr_multiple: float = Field(default=0.0, ge=0.0)

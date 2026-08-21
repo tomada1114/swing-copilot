@@ -823,6 +823,25 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
 「そのパラメータが効かない」のか「一度も発火していない」のかを区別するために
 ある。binding rateが0%に近ければ、`max_hold_days`をどう振っても結果は動かない。
 
+### 指値約定ゲート（Issue #326）
+
+`backtest.entry_limit_atr_multiple` が`0.0`のときは既存互換の翌営業日寄付モデルを
+使う。正の`k`では、シグナル日の終値とATR14から共有純関数
+`backtest/entries.py::entry_limit_price(close, atr14, k)`で
+`limit = close + k × ATR14`を作る。翌日のOHLCが始値`<= limit`なら始値に通常の
+entry slippageを適用し、始値が上でも安値`<= limit`なら指値ちょうどで約定する。
+安値も指値を上回る日はDay注文の窓内に刺さらなかったとして約定せず、レポートの
+`Entry blocks`に`limit_not_reached`を1候補日として計上する。未約定注文は翌日へ
+持ち越さない。日中足がないため、安値に触れたことを約定とみなす日足近似であり、
+実板での約定保証ではない。
+
+`risk/checks.py`も同じ価格関数を使い、計画指値を上限として株数・候補ヒート・
+セクターエクスポージャーを計算する。感応度を測る場合は
+`backtest.sensitivity.entry_limit_grid_values()`の絶対ATR倍率
+`0.0/0.5/1.0/1.5/2.0`を`BacktestCostOverrides(entry_limit_atr_multiple=...)`へ
+順に渡す。`k=0.0`で既存の数値を再現する必要があるため、このIssueではバックテスト
+の初期逆指値アンカー（約定価格）を本番の終値アンカーへ変更していない。
+
 ## 決算ゲートの決算日はどこから来るか（`--policy regime+risk`）
 
 `--policy regime+risk`のアームだけが決算ブロック（`risk.earnings_block_business_days`）

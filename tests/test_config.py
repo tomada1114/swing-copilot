@@ -583,6 +583,11 @@ def test_entry_limit_atr_multiple_rejects_negative_values():
         Settings.model_validate({"backtest": {"entry_limit_atr_multiple": -0.1}})
 
 
+def test_backtest_entry_rejects_unimplemented_modes():
+    with pytest.raises(ValidationError, match="next_open"):
+        Settings.model_validate({"backtest": {"entry": "next_close"}})
+
+
 def test_earnings_guard_thresholds_default_to_two_and_five_business_days():
     settings = load_settings("config/settings.yaml")
     assert settings.risk.earnings_block_business_days == 2

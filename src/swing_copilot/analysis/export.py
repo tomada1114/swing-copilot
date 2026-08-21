@@ -157,7 +157,7 @@ def build_analysis_input(request: ExportRequest) -> AnalysisInput:
         "context": context.model_dump(mode="json"),
         "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
     }
-    return AnalysisInput.model_validate(
+    document = AnalysisInput.model_validate(
         {
             **unsigned_payload,
             "input_digest": canonical_json_digest(
@@ -165,6 +165,26 @@ def build_analysis_input(request: ExportRequest) -> AnalysisInput:
             ),
         }
     )
+    _assert_readable_back(document)
+    return document
+
+
+def _assert_readable_back(document: AnalysisInput) -> None:
+    """Fail before persistence if the serialized input cannot validate again.
+
+    ``write_analysis_input`` persists ``model_dump(mode="json")``, which
+    materializes every default.  Re-validating that exact representation keeps
+    a newly added defaulted field from being omitted from the signed payload
+    and creating an input that can never be read back successfully.
+
+    Args:
+        document: The input assembled and validated by this export.
+
+    Raises:
+        ValidationError: If the representation that would be written fails
+            the strict input schema or digest validation.
+    """
+    AnalysisInput.model_validate(document.model_dump(mode="json"))
 
 
 def write_analysis_input(payload: AnalysisInput, output_dir: str | Path) -> Path:

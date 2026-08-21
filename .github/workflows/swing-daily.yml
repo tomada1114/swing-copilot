@@ -136,6 +136,7 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import re
           from collections import Counter
           from pathlib import Path
 
@@ -169,24 +170,32 @@ jobs:
                   return str(tool_name)
               input_value = denial.get("input", {})
               command = input_value.get("command", "") if isinstance(input_value, dict) else ""
-              if command.startswith("uv run copilot-daily"):
-                  return "Bash:uv-run-copilot-daily"
-              if command.startswith("uv run copilot-verify-analysis"):
-                  return "Bash:uv-run-copilot-verify-analysis"
-              if command.startswith("uv run copilot-ingest-analysis"):
-                  return "Bash:uv-run-copilot-ingest-analysis"
-              if command.startswith("uv run copilot-history"):
-                  return "Bash:uv-run-copilot-history"
-              if command.startswith("uv run copilot-export-slices"):
-                  return "Bash:uv-run-copilot-export-slices"
-              if command.startswith("./scripts/timebox.sh"):
-                  return "Bash:timebox"
-              if command.startswith("uv run"):
+              if re.search(r"\buv run copilot-daily\b", command):
+                  return "Bash:uv-run-copilot-daily-with-prefix"
+              if re.search(r"\buv run copilot-verify-analysis\b", command):
+                  return "Bash:uv-run-copilot-verify-analysis-with-prefix"
+              if re.search(r"\buv run copilot-ingest-analysis\b", command):
+                  return "Bash:uv-run-copilot-ingest-analysis-with-prefix"
+              if re.search(r"\buv run copilot-history\b", command):
+                  return "Bash:uv-run-copilot-history-with-prefix"
+              if re.search(r"\buv run copilot-export-slices\b", command):
+                  return "Bash:uv-run-copilot-export-slices-with-prefix"
+              if re.search(r"(?:^|[;&|]\s*)\.\.?/scripts/timebox\.sh\b", command):
+                  return "Bash:timebox-with-prefix"
+              if re.search(r"\buv run\b", command):
                   return "Bash:uv-run-other"
-              if command.startswith(("pwd", "ls", "cat", "head", "tail", "rg", "grep", "find", "sed")):
+              if re.search(
+                  r"(?:^|[;&|]\s*)(?:pwd|ls|cat|head|tail|rg|grep|find|sed)\b",
+                  command,
+              ):
                   return "Bash:read-only-other"
-              if command.startswith(("git", "rm", "mv", "cp", "mkdir", "touch")):
+              if re.search(
+                  r"(?:^|[;&|]\s*)(?:git|rm|mv|cp|mkdir|touch)\b",
+                  command,
+              ):
                   return "Bash:filesystem-or-git"
+              if re.search(r"(?:^|[;&|]\s*)(?:cd|export|env|bash|sh)\b", command):
+                  return "Bash:shell-wrapper"
               return "Bash:other"
 
           print(f"permission_denials_count={len(denials)}")

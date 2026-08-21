@@ -58,6 +58,7 @@ class BacktestCostOverrides:
     slippage_pct: float | None = None
     benchmark_symbol: str | None = None
     slippage_multiplier: float | None = None
+    entry_limit_atr_multiple: float | None = None  # Issue #326: entry sensitivity
     exit_atr_multiple: float | None = None  # P2-10: sensitivity grid parameter
     max_hold_days: int | None = None  # P2-10: sensitivity grid parameter
 
@@ -117,6 +118,11 @@ def run_backtest(  # noqa: PLR0913 - the three keyword-only injection seams
         if overrides.slippage_multiplier is not None
         else deps.settings.backtest.slippage_multiplier
     )
+    entry_limit_atr_multiple = (
+        overrides.entry_limit_atr_multiple
+        if overrides.entry_limit_atr_multiple is not None
+        else deps.settings.backtest.entry_limit_atr_multiple
+    )
     exit_atr_multiple = (
         overrides.exit_atr_multiple
         if overrides.exit_atr_multiple is not None
@@ -135,6 +141,7 @@ def run_backtest(  # noqa: PLR0913 - the three keyword-only injection seams
                     "commission_pct": commission_pct,
                     "slippage_pct": slippage_pct,
                     "slippage_multiplier": slippage_multiplier,
+                    "entry_limit_atr_multiple": entry_limit_atr_multiple,
                     "exit_atr_multiple": exit_atr_multiple,
                     "max_hold_days": max_hold_days,
                     "benchmark": benchmark_symbol,

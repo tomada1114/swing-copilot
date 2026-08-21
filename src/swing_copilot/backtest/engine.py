@@ -12,7 +12,9 @@ can be unit-tested in isolation while
 actual use — both paths share this one engine.
 
 Per-day order of operations (never looks past the current day's own bars):
-1. Fill entries queued from the previous day's candidates, at today's open.
+1. Evaluate entries queued from the previous day's candidates against today's
+   OHLC (the default zero-k arm keeps the next-open fill; a positive limit
+   multiple can leave the Day order unfilled).
 2. Check today's exits (gap/stop/max-hold) for already-open positions.
 3. Update trailing stops after today's close (effective from tomorrow).
 4. Generate today's candidates and queue them for tomorrow's fill.
@@ -38,11 +40,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
+from swing_copilot.backtest.entries import entry_limit_price, evaluate_entry_fill
 from swing_copilot.backtest.exits import evaluate_exit, next_trailing_stop
 from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
     ENTRY_BLOCK_INSUFFICIENT_CASH,
     ENTRY_BLOCK_INVALID_STOP,
+    ENTRY_BLOCK_LIMIT_NOT_REACHED,
     ENTRY_BLOCK_MAX_CONCURRENT,
     ENTRY_BLOCK_MISSING_DATA,
     ENTRY_BLOCK_NOT_CALCULABLE,
@@ -196,6 +200,9 @@ class _FillContext:
     """Everything one day's entry fills are evaluated against."""
 
     day: date
+    #: The close used to calculate the candidate's planned limit. This is the
+    #: signal day, never the fill day, so the gate cannot look ahead.
+    signal_day: date
     bars: pd.DataFrame
     #: Equity as of the signal day's close — the sizing basis for every fill
     #: attempted on `day`, so a candidate's size never depends on which of the
@@ -480,6 +487,7 @@ class BacktestEngine:
         # `TestEquityBasis` pins the identity.
         context = _FillContext(
             day=day,
+            signal_day=signal.day,
             bars=bars,
             equity_basis=signal.equity,
             state=state,
@@ -538,10 +546,10 @@ class BacktestEngine:
         decision: EntryDecision | None,
     ) -> str | None:
         """Attempt one entry; return the block reason, or `None` on a fill."""
-        state = context.state
         bar = _bar(context.bars, candidate.symbol, context.day)
+        signal_bar = _latest_bar(context.bars, candidate.symbol, context.signal_day)
         atr14 = candidate.metrics.get("atr14")
-        if bar is None or atr14 is None:
+        if bar is None or signal_bar is None or atr14 is None:
             return ENTRY_BLOCK_MISSING_DATA
         if decision is not None and not decision.is_allowed:
             return decision.reject_reason or ENTRY_BLOCK_NOT_CALCULABLE
@@ -552,7 +560,43 @@ class BacktestEngine:
             # never reapplies the multiplier itself.
             risk_pct = decision.max_trade_risk_pct
 
-        entry_price = bar["open"] * (1 + self._slippage_pct)
+        entry_price = self._entry_execution_price(bar, signal_bar, atr14)
+        if entry_price is None:
+            return ENTRY_BLOCK_LIMIT_NOT_REACHED
+        return self._commit_entry(context, candidate, entry_price, atr14, risk_pct)
+
+    def _entry_execution_price(
+        self, bar: dict[str, float], signal_bar: dict[str, float], atr14: float
+    ) -> float | None:
+        """Resolve one candidate's raw price under the configured entry mode."""
+        limit_price = entry_limit_price(
+            signal_bar["close"], atr14, self._backtest_config.entry_limit_atr_multiple
+        )
+        if (
+            self._backtest_config.entry == "next_open"
+            and self._backtest_config.entry_limit_atr_multiple == 0.0
+        ):
+            # Zero is the compatibility/default arm: it measures the
+            # historical next-open model, while a positive multiple opts into
+            # the Day-limit gate and its not-reached instrumentation.
+            return bar["open"] * (1 + self._slippage_pct)
+        return evaluate_entry_fill(
+            open_price=bar["open"],
+            low=bar["low"],
+            limit_price=limit_price,
+            slippage_pct=self._slippage_pct,
+        )
+
+    def _commit_entry(
+        self,
+        context: _FillContext,
+        candidate: Candidate,
+        entry_price: float,
+        atr14: float,
+        risk_pct: float,
+    ) -> str | None:
+        """Size and commit a resolved entry, returning mechanical blocks."""
+        state = context.state
         stop_price = entry_price - self._backtest_config.exit_atr_multiple * atr14
         try:
             shares = calc_position_size(

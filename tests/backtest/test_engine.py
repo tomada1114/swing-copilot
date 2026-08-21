@@ -11,6 +11,7 @@ from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
     ENTRY_BLOCK_INSUFFICIENT_CASH,
     ENTRY_BLOCK_INVALID_STOP,
+    ENTRY_BLOCK_LIMIT_NOT_REACHED,
     ENTRY_BLOCK_MAX_CONCURRENT,
     ENTRY_BLOCK_MISSING_DATA,
     ENTRY_BLOCK_REASONS,
@@ -169,6 +170,71 @@ class TestEntryFill:
         expected_cash_after_fill = INITIAL_CASH - cost
         expected_equity_on_fill_day = expected_cash_after_fill + expected_shares * 102.0
         assert equity_by_day[days[2]] == pytest.approx(expected_equity_on_fill_day)
+
+
+class TestLimitEntryGate:
+    def _engine(self, settings):
+        return BacktestEngine(
+            settings.model_copy(
+                update={
+                    "backtest": settings.backtest.model_copy(
+                        update={"entry_limit_atr_multiple": 0.5}
+                    )
+                }
+            )
+        )
+
+    def _rows(self, days, fill_ohlc):
+        return [
+            *_spy_bars(days),
+            *[
+                bar_row("AAA", days[0], (100.0, 101.0, 99.0, 100.0)),
+                bar_row("AAA", days[1], (100.0, 101.0, 99.0, 100.0)),
+                bar_row("AAA", days[2], fill_ohlc),
+                bar_row("AAA", days[3], (101.0, 102.0, 100.0, 101.0)),
+            ],
+        ]
+
+    def test_gap_up_without_a_limit_touch_is_counted_and_not_filled(self, settings):
+        days = TRADING_DAYS[:4]
+        result = self._engine(settings).run(
+            days,
+            bars_frame(self._rows(days, (105.0, 106.0, 102.0, 105.0))),
+            lambda day: [_candidate("AAA", as_of=day)] if day == days[1] else [],
+            INITIAL_CASH,
+        )
+
+        assert result.trades == ()
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_LIMIT_NOT_REACHED] == 1
+        assert dict(result.entry_block_days)[ENTRY_BLOCK_LIMIT_NOT_REACHED] == 1
+
+    def test_intraday_touch_fills_at_the_limit_without_adverse_slippage(self, settings):
+        days = TRADING_DAYS[:4]
+        result = self._engine(settings).run(
+            days,
+            bars_frame(self._rows(days, (105.0, 106.0, 100.0, 105.0))),
+            lambda day: [_candidate("AAA", as_of=day)] if day == days[1] else [],
+            INITIAL_CASH,
+        )
+
+        assert result.trades[0].entry_price == pytest.approx(101.0)
+
+    def test_next_limit_mode_enables_the_gate_even_at_zero_multiple(self, settings):
+        limited_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(update={"entry": "next_limit"})
+            }
+        )
+        days = TRADING_DAYS[:4]
+        result = BacktestEngine(limited_settings).run(
+            days,
+            bars_frame(self._rows(days, (105.0, 106.0, 102.0, 105.0))),
+            lambda day: [_candidate("AAA", as_of=day)] if day == days[1] else [],
+            INITIAL_CASH,
+        )
+
+        assert result.trades == ()
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_LIMIT_NOT_REACHED] == 1
 
 
 class TestDuplicateBars:

@@ -8,12 +8,14 @@ import pytest
 
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
+    ENTRY_LIMIT_ATR_MULTIPLE_GRID,
     INCONCLUSIVE,
     MAX_HOLD_PCT_GRID,
     NEITHER,
     PLATEAU,
     SPIKE,
     GridCell,
+    entry_limit_grid_values,
     grid_param_values,
     is_gray_cell,
     judge_grid,
@@ -74,6 +76,10 @@ class TestGridParamValues:
         atr_pct, max_hold_pct, _atr_value, max_hold_days = cells[0]
         assert (atr_pct, max_hold_pct) == (50, 40)
         assert max_hold_days == 1
+
+    def test_entry_limit_grid_is_absolute_and_includes_compatibility_arm(self):
+        assert entry_limit_grid_values() == ENTRY_LIMIT_ATR_MULTIPLE_GRID
+        assert entry_limit_grid_values() == (0.0, 0.5, 1.0, 1.5, 2.0)
 
 
 class TestIsGrayCell:

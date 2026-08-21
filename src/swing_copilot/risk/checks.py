@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from swing_copilot.backtest.entries import entry_limit_price
 from swing_copilot.risk.earnings import business_days_since, evaluate_earnings_proximity
 from swing_copilot.risk.position_sizing import PositionSizeResult, calc_position_size
 
@@ -436,7 +437,9 @@ class RiskChecker:
         atr14 = candidate.metrics.get("atr14")
         limit_price: float | None = None
         if entry_price is not None and atr14 is not None:
-            limit_price = entry_price + self._entry_limit_atr_multiple * atr14
+            limit_price = entry_limit_price(
+                entry_price, atr14, self._entry_limit_atr_multiple
+            )
         warnings = tuple(
             self.check_correlation(
                 candidate.symbol, portfolio, self._market_store, candidate.as_of
@@ -484,7 +487,9 @@ class RiskChecker:
 
         # The missing-data branch above narrows both operands, so the normal
         # path keeps a non-optional planned price for sizing and heat checks.
-        limit_price = entry_price + self._entry_limit_atr_multiple * atr14
+        limit_price = entry_limit_price(
+            entry_price, atr14, self._entry_limit_atr_multiple
+        )
 
         effective_risk_pct = self._risk_config.max_trade_risk_pct
         is_reduce_only = (

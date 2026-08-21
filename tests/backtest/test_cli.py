@@ -1128,6 +1128,7 @@ class TestSingleArmMarkdownIsPinned:
 | max_concurrent | 0 (0d) |
 | already_held | 0 (0d) |
 | missing_data | 0 (0d) |
+| limit_not_reached | 0 (0d) |
 | invalid_stop | 0 (0d) |
 | zero_shares | 0 (0d) |
 | insufficient_cash | 0 (0d) |

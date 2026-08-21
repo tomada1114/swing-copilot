@@ -325,7 +325,11 @@ class TestBitExactReuse:
         path = tmp_path / "candidates.parquet"
         save_candidate_stream(generate_candidate_stream(request_, deps, frame), path)
         reloaded = load_candidate_stream(path)
-        overrides = BacktestCostOverrides(exit_atr_multiple=1.0, max_hold_days=2)
+        overrides = BacktestCostOverrides(
+            entry_limit_atr_multiple=0.5,
+            exit_atr_multiple=1.0,
+            max_hold_days=2,
+        )
 
         baseline = run_backtest(request_, deps, overrides)
         reused = run_backtest(

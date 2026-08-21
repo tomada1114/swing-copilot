@@ -25,6 +25,10 @@ ATR_MULTIPLIER_PCT_GRID: tuple[int, ...] = (50, 75, 100, 125, 150)
 # configured 25-session base these are 10/18/25/35/50 sessions.
 MAX_HOLD_PCT_GRID: tuple[int, ...] = (40, 70, 100, 140, 200)
 _GRID_COLS = len(MAX_HOLD_PCT_GRID)
+# Absolute ATR multiples are used instead of percentages of the configured
+# base because the production default is intentionally 0.0. A relative grid
+# around zero would otherwise measure the same cell five times.
+ENTRY_LIMIT_ATR_MULTIPLE_GRID: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0)
 
 SPIKE = "SPIKE"
 PLATEAU = "PLATEAU"
@@ -64,6 +68,21 @@ def grid_param_values(
         for atr_pct in ATR_MULTIPLIER_PCT_GRID
         for max_hold_pct in MAX_HOLD_PCT_GRID
     ]
+
+
+def entry_limit_grid_values() -> tuple[float, ...]:
+    """Return the fixed planned-entry ATR multiples for sensitivity runs.
+
+    The regular 5x5 grid varies exit ATR and max-hold days. This independent
+    axis lets a caller run the same candidate stream through
+    ``BacktestCostOverrides(entry_limit_atr_multiple=value)`` without trying
+    to scale from the default zero base. Keeping the values here makes the
+    entry experiment explicit and reproducible alongside the existing grid.
+
+    Returns:
+        Five non-negative ATR multiples, including the compatibility arm.
+    """
+    return ENTRY_LIMIT_ATR_MULTIPLE_GRID
 
 
 @dataclass(frozen=True, slots=True)

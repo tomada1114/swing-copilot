@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
@@ -20,6 +21,7 @@ from swing_copilot.analysis.export import (
     write_json_atomically,
 )
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
+from swing_copilot.analysis.schemas import AnalysisInput
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
@@ -493,6 +495,38 @@ class TestBuildAnalysisInput:
         payload = build_analysis_input(_request())
 
         assert payload.context.calendar_events == []
+
+
+class TestBuildReadRoundTrip:
+    """The representation written by analysis export must remain readable."""
+
+    @staticmethod
+    def _schema_with_a_field_the_export_forgot() -> type[AnalysisInput]:
+        """Add a defaulted field that the hand-built unsigned payload omits."""
+
+        class _AnalysisInputWithAForgottenField(AnalysisInput):
+            forgotten_metric_count: int = 0
+
+        return _AnalysisInputWithAForgottenField
+
+    def test_a_normal_document_round_trips_through_the_strict_schema(self):
+        payload = build_analysis_input(_request())
+
+        reread = AnalysisInput.model_validate(payload.model_dump(mode="json"))
+
+        assert reread == payload
+
+    def test_refuses_to_build_a_document_it_could_not_read_back(self, monkeypatch):
+        monkeypatch.setattr(
+            "swing_copilot.analysis.export.AnalysisInput",
+            self._schema_with_a_field_the_export_forgot(),
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="input_digest does not match canonical analysis input JSON",
+        ):
+            build_analysis_input(_request())
 
 
 class TestCalendarEvents:

@@ -120,7 +120,7 @@ jobs:
 
       # 分析セッションはほとんど何も書かないまま "success" で終わることがある。
       # データを先に push してから落とすので、その日の価格・ファンダメンタルズ・
-      # 台帳は残り、定性分析だけを後からローカルの /swing-daily で仕上げられる。
+      # 台帳は残る。定性分析の実行経路はこの GitHub Actions job だけとする。
       - name: Verify the analysis completed
         if: ${{ success() && (inputs.mode || 'live') == 'live' }}
         run: uv run python scripts/check_daily_complete.py

@@ -18,9 +18,9 @@
 ### P0: プロジェクト開始前に完了させる項目
 
 - [ ] **1. Claude Code 実行環境の確認**
-  - 手順概要: 定性分析（ニュース解釈・開示解釈・スクリーニング評価）はPythonからLLM APIを呼ばず、`.claude/skills/swing-daily`系のClaude Codeスキルとして実行する。そのためAnthropic APIキーの取得・課金設定は不要で、代わりに手元のClaude Codeが起動でき、本リポジトリのスキルを読める状態であることだけを確認する。
+  - 手順概要: 定性分析（ニュース解釈・開示解釈・スクリーニング評価）はPythonからLLM APIを呼ばず、GitHub Actionsの`.github/workflows/swing-daily.yml`がClaude Codeスキルとして実行する。そのためAnthropic APIキーの取得・課金設定は不要で、Claude Code OAuthトークンをGitHub Actions secretへ登録し、workflowが本リポジトリのスキルを読める状態であることを確認する。
   - 所要時間目安: 5分
-  - 完了確認方法: `claude`（Claude Code）が起動し、`.claude/skills/`配下のスキルが一覧に出ることを確認できる。`ANTHROPIC_API_KEY`は本プロジェクトでは使用しない。
+  - 完了確認方法: GitHub Actionsのdry-run dispatchが起動し、`.claude/skills/`配下のスキルを読めることを確認できる。`ANTHROPIC_API_KEY`は本プロジェクトでは使用しない。
 
 - [ ] **2. Finnhub 無料APIキー取得**
   - 手順概要: finnhub.io でアカウント登録→無料枠（60コール/分）のAPIキーを発行。

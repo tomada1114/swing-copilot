@@ -244,17 +244,17 @@ def test_an_out_dir_holding_another_runs_input_is_refused(
     assert not list(other_run.glob("slice-*.json"))
 
 
-def test_a_scratch_directory_beside_the_run_is_accepted(
+def test_the_ci_scratch_directory_beside_the_run_is_accepted(
     workdir: Path, tmp_path: Path
 ) -> None:
-    """The positive control: an unrelated directory is not refused."""
-    exported = export_slices(workdir, tmp_path / "scratch" / "slices")
+    """The CI-only scratch sibling is outside the report tree."""
+    exported = export_slices(workdir, tmp_path / ".swing-daily-scratch" / "slices")
 
     assert len(exported) == 7
 
 
 def test_the_output_directory_is_required(workdir: Path) -> None:
-    """Slices belong in the session scratchpad, never beside the fragments."""
+    """The caller must choose the CI scratch destination explicitly."""
     with pytest.raises(SystemExit) as exit_info:
         main([str(workdir)])
 

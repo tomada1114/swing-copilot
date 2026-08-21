@@ -169,11 +169,13 @@ uv run copilot-verify-analysis <WORKDIR>/analysis_work/news-AAPL.json
 **作業用の輸送形式**であり、`AnalysisInput` の JSON スキーマでも、成果物でもない。
 
 **手で切り出さず、`uv run copilot-export-slices <analysis_input.json> --out-dir
-<scratchpad>/slices` が生成する**（Issue #260）。ファイル名は
+<REPO_ROOT>/.swing-daily-scratch/slices` が生成する**（Issue #260）。ファイル名は
 `slice-<kind>-<SYMBOL>.json`（`<kind>` は `news` / `filings` / `screening`）で、
 `analysis_work/<kind>-<SYMBOL>.json` の断片と取り違えないよう `slice-` が付く。
-置き場所は**セッションの scratchpad ディレクトリ配下**とし、`<WORKDIR>` 配下
-（`analysis_work/` を含む）やリポジトリ配下には置かない。実行後に削除もしない
+置き場所は GitHub Actions の checkout 直下にある、`.gitignore` 済みの
+`.swing-daily-scratch/` 配下とする。`<WORKDIR>` 配下（`analysis_work/` を含む）には
+置かず、実行後に `rm` で削除もしない。GitHub-hosted runner がジョブ終了時に
+checkout 全体を破棄するため、これがこの作業ファイルの掃除方針である
 （SKILL.md「一時ファイルと後始末」を参照）。
 
 ```jsonc

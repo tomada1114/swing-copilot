@@ -331,9 +331,9 @@ def write_slices(
     Args:
         documents: The slices to write, as returned by `build_slices`.
         out_dir: Destination directory, created when absent. It must not be the
-            run directory or anywhere in the repository: slices are session
-            scratch, and one written beside the fragments would sit in
-            operator-owned output that nothing deletes.
+            run directory or its ancestors. The CI-only workflow uses the
+            ignored `.swing-daily-scratch` sibling, so slices never sit beside
+            report fragments and are discarded with the ephemeral runner.
 
     Returns:
         The resolved absolute paths, in `documents` order.

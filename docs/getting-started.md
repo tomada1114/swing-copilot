@@ -11,18 +11,18 @@ uv sync --all-groups
 Copy `.env.example` to `.env` and fill in the API keys for the features you
 enable (see `docs/00_human_preparation.md`). `ANTHROPIC_API_KEY` is not one of
 them: this project never calls a model API directly. Qualitative analysis
-(news/filings/screening interpretation) runs entirely inside a Claude Code
-skill (Stage 2 below), so no LLM billing is incurred by the Python pipeline
-itself; the only requirement is a working Claude Code environment that can
-read this repository's `.claude/skills/`.
+(news/filings/screening interpretation) runs in the GitHub Actions
+`swing-daily.yml` job (Stage 2 below), so no LLM billing is incurred by the
+Python pipeline itself; the workflow's Claude Code OAuth secret provides the
+execution environment.
 
 ## Two-stage Daily Workflow
 
 A daily run has two stages: a deterministic Python pipeline (Stage 1) and a
-Claude Code skill that adds qualitative analysis on top of it (Stage 2). Stage
-1 alone already produces a complete, decision-ready report; Stage 2 is
-optional and only enriches it with narrative context. Either way, the final
-buy/sell decision is always made by a human.
+GitHub Actions Claude Code job that adds qualitative analysis on top of it
+(Stage 2). Stage 1 alone already produces a complete, decision-ready report;
+Stage 2 enriches it with narrative context when the CI job succeeds. Either
+way, the final buy/sell decision is always made by a human.
 
 ### Stage 1: `copilot-daily` (deterministic pipeline)
 
@@ -70,11 +70,10 @@ If no candidates survive screening (or text collection produced nothing),
 `analysis_input.json` is not exported and there is nothing for Stage 2 to do;
 the Markdown report and terminal brief are still produced.
 
-### Stage 2: the `swing-daily` Claude Code skill (qualitative analysis)
+### Stage 2: the CI-only `swing-daily` Claude Code skill (qualitative analysis)
 
-In a Claude Code session opened on this repository, run the `swing-daily`
-skill (e.g. by asking for "日次分析" / "run the pipeline", or invoking it by
-name). It re-runs `copilot-daily` itself if needed, then:
+The `.github/workflows/swing-daily.yml` job is the only supported entry point
+for the `swing-daily` skill. It runs `copilot-daily` and then:
 
 1. reads `analysis_input.json`;
 2. fans out per-symbol news, filing, and screening interpretation to the
@@ -99,7 +98,9 @@ as its first argument and resolves `analysis_input.json` /
 override them. It performs no network access and no re-screening; a symbol
 that fails verification is withheld fail-closed (its qualitative section
 stays pending) rather than retried, and a schema mismatch exits nonzero. Run
-`uv run copilot-ingest-analysis --help` for the full option list.
+`uv run copilot-ingest-analysis --help` for the full option list. This command
+is useful for local, read-only inspection of a downloaded CI artifact; it is
+not an alternate local entry point for the `swing-daily` skill.
 
 If every symbol ends up as `skip`, or the market regime does not favor new
 entries, the report may instead show a "本日は取引なし" (no trade today)

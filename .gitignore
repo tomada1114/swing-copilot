@@ -33,6 +33,10 @@ site/
 # Generated Markdown decision briefs are reproducible from DuckDB.
 /reports/
 
+# CI-only swing-daily input slices; the GitHub-hosted runner discards them
+# with the checkout after each job.
+/.swing-daily-scratch/
+
 # Point-in-time universe fallback, auto-generated on first successful fetch
 /config/universe_snapshot.csv
 

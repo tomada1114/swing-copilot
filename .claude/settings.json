@@ -18,6 +18,11 @@
       "Bash(uv sync:*)",
       "Bash(uv lock:*)",
       "Bash(uv build)",
+      "Bash(uv run copilot-daily:*)",
+      "Bash(uv run copilot-verify-analysis:*)",
+      "Bash(uv run copilot-ingest-analysis:*)",
+      "Bash(uv run copilot-history:*)",
+      "Bash(uv run copilot-export-slices:*)",
       "Bash(./scripts/timebox.sh:*)"
     ],
     "deny": [

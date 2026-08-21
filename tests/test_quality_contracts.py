@@ -46,9 +46,18 @@ CLI_ERROR_CONVERSION_MODULES = {
 #: allowlisted shape of its invocation (#264).
 TIMEBOX_SCRIPT = PROJECT_ROOT / "scripts/timebox.sh"
 DAILY_SKILL = PROJECT_ROOT / ".claude/skills/swing-daily/SKILL.md"
+DAILY_WORKFLOW = PROJECT_ROOT / ".github/workflows/swing-daily.yml"
 CLAUDE_SETTINGS = PROJECT_ROOT / ".claude/settings.json"
 TIMEBOX_COMMAND = "./scripts/timebox.sh"
 TIMEBOX_ALLOW_ENTRY = f"Bash({TIMEBOX_COMMAND}:*)"
+DAILY_BASH_ALLOW_ENTRIES = (
+    "Bash(uv run copilot-daily:*)",
+    "Bash(uv run copilot-verify-analysis:*)",
+    "Bash(uv run copilot-ingest-analysis:*)",
+    "Bash(uv run copilot-history:*)",
+    "Bash(uv run copilot-export-slices:*)",
+    TIMEBOX_ALLOW_ENTRY,
+)
 TIMEBOX_INVOCATION = re.compile(
     rf"^\s*{re.escape(TIMEBOX_COMMAND)} (\d+)\s*$",
     re.MULTILINE,
@@ -438,8 +447,54 @@ def test_daily_skill_recovers_a_watcher_that_cannot_resolve_its_relative_path():
     assert "から数えないこと" in skill_text
     # The escape hatch stays outside the allowlist on purpose: an absolute path
     # differs per checkout, so allowlisting it is impossible, and headless runs
-    # use `bypassPermissions` anyway.
+    # use `dontAsk` anyway.
     assert [entry for entry in allow if "timebox" in entry] == [TIMEBOX_ALLOW_ENTRY]
+
+
+def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
+    """Keep the untrusted-text analysis job behind an explicit permission boundary."""
+    workflow = DAILY_WORKFLOW.read_text(encoding="utf-8")
+    settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+    project_allow = settings["permissions"]["allow"]
+
+    assert "--permission-mode dontAsk" in workflow
+    assert "bypassPermissions" not in workflow
+    assert "--allowedTools" in workflow
+    assert "--disallowedTools" in workflow
+    assert "id: claude" in workflow
+    assert "Summarize Claude permission denials" in workflow
+    assert "permission_denials_count=" in workflow
+    assert "permission_denials[" in workflow
+    assert "Bash(uv run:*)" not in workflow
+    for command in DAILY_BASH_ALLOW_ENTRIES:
+        assert command in workflow
+        assert command in project_allow
+    assert "Bash(uv run:*)" not in project_allow
+    for blocked in (
+        "WebFetch",
+        "WebSearch",
+        "Write(src/**)",
+        "Edit(src/**)",
+        "Write(scripts/**)",
+        "Edit(scripts/**)",
+        "Write(.github/**)",
+        "Edit(.github/**)",
+    ):
+        assert blocked in workflow
+
+
+def test_headless_daily_run_uses_tool_reads_and_exact_bash_shapes():
+    """Keep routine file access out of denied Bash calls in the headless job."""
+    workflow = DAILY_WORKFLOW.read_text(encoding="utf-8")
+    skill_text = DAILY_SKILL.read_text(encoding="utf-8")
+
+    for text in (workflow, skill_text):
+        assert "Read / Glob / Grep" in text
+        assert "Write / Edit" in text
+        assert "前置きなしで直接" in text
+        for forbidden in ("cat", "ls", "find", "sed", "rm", "git", "python"):
+            assert forbidden in text
+        assert "シェル演算子" in text
 
 
 def test_daily_skill_forbids_a_text_only_turn_while_subagents_are_running():

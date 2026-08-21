@@ -120,8 +120,9 @@ Step 2 の専門家・Step 3 と Step 3.5 の再分析／追加分析・Step 3.6
 
    リポジトリルートを作業ディレクトリとして `run_in_background` で起動し、完了通知
    （`TIMEBOX_REACHED`）をその波の締切とみなす。**この呼び出しの形をそのまま使う。**
-   `.claude/settings.json` の allowlist に登録されているのはこの 1 形だけで、同じ処理を
-   bash のワンライナーへ展開すると無人実行中に承認待ちで止まり、打ち切り機構そのものが
+   `.claude/settings.json` と headless 起動時の CLI allowlist には、この形と定性分析で
+   必要な5つの専用 `copilot-*` コマンドだけが登録されている。同じ処理を bash の
+   ワンライナーへ展開すると無人実行中に承認待ちで止まり、打ち切り機構そのものが
    居残りの原因になる。起動した各エージェントの ID／名前は `TaskStop` に渡すため
    必ず控える
 
@@ -855,6 +856,16 @@ result ファイルと同じディレクトリから解決する）。hard fail 
 （ワークフローの構成は `CLAUDE.md` の "Scheduled Daily Run" を参照。スケジュール
 自体はこのスキルの外で管理される）。ローカルの対話セッションでこのスキルを
 起動する経路は設けず、以下をすべての実行に適用する。
+
+- **Bash の許可境界を自分で広げない。** 無人起動で Bash を使える形は、
+  `uv run copilot-daily`、`uv run copilot-verify-analysis`、
+  `uv run copilot-ingest-analysis`、`uv run copilot-history`、
+  `uv run copilot-export-slices`、`./scripts/timebox.sh` のいずれかで始まる
+  コマンドだけである。作業ディレクトリはリポジトリルートなので、`cd`、`env`、
+  `export`、`bash`、`sh`、`git`、`python`、`cat`、`ls`、`find`、`sed`、`rm`、
+  `cp`、`mv`、`mkdir`、`sleep`、`date`、`echo` や、シェル演算子・リダイレクトを
+  付けない。入力や設定の読み取りには Read / Glob / Grep、ファイルの作成・更新には
+  Write / Edit を使い、許可済み Bash コマンドも前置きなしで直接呼び出す。
 
 - **ユーザーに質問できない前提で動く。** `AskUserQuestion` は使えない。判断が割れる
   分岐（既存 `analysis_result.json` の上書き可否、断片の流用可否、proceed か skip か）は

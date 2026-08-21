@@ -81,10 +81,20 @@ jobs:
       # 最小権限: 分析セッションには R2 の資格情報を渡さない。
       # API キーはステップの env: で渡す (settings JSON への secrets 埋め込みは
       # 値に含まれる文字次第で JSON が壊れるため不可)。
-      # 権限モードは claude_args で CLI に直接渡す (settings の defaultMode は
-      # SDK 経由の起動には効かない)。リポジトリの .claude/settings.json
-      # (guard/format/stop_check フック) は project スコープとして別途読まれる。
+      # 権限は claude_args で CLI に直接渡す (settings の defaultMode や
+      # permissions は SDK 経由の起動には効かない)。リポジトリの
+      # .claude/settings.json (guard/format/stop_check フックと、この同じ狭い
+      # コマンド許可リスト) は project スコープとして別途読まれる。
+      #
+      # dontAsk: 承認待ちで止まらず、許可されていないツール呼び出しは拒否して続行する。
+      # 許可するのは swing-daily スキルが実際に使うコマンドだけで、`uv run` 全体には
+      # 広げない (`uv run python ...` が任意コード実行になり、ニュース・開示という
+      # 信頼できないテキストを読むセッションで injection 耐性が消えるため)。
+      # 同じ理由で、実行経路になるファイル (src/、scripts/、config/、ビルド定義、
+      # .claude/、.github/) への書き込みを拒否する。スキルが書くのは
+      # reports/<run_id>/ 配下の断片と `.swing-daily-scratch/` の一時ファイルだけ。
       - name: Run swing-daily
+        id: claude
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
@@ -96,17 +106,120 @@ jobs:
           # Claude GitHub App は未インストールなので、OIDC 交換ではなく
           # workflow の GITHUB_TOKEN を渡す。Claude は GitHub へ書き込まない。
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--model opus --permission-mode bypassPermissions"
+          claude_args: >-
+            --model opus
+            --permission-mode dontAsk
+            --allowedTools
+            "Bash(uv run copilot-daily:*),Bash(uv run copilot-verify-analysis:*),Bash(uv run copilot-ingest-analysis:*),Bash(uv run copilot-history:*),Bash(uv run copilot-export-slices:*),Bash(./scripts/timebox.sh:*),Write,Edit"
+            --disallowedTools
+            "WebFetch,WebSearch,Write(src/**),Edit(src/**),Write(scripts/**),Edit(scripts/**),Write(config/**),Edit(config/**),Write(.claude/**),Edit(.claude/**),Write(.github/**),Edit(.github/**),Write(pyproject.toml),Edit(pyproject.toml),Write(justfile),Edit(justfile)"
           prompt: |
             これは GitHub Actions 上の無人実行 (headless) です。
             `.claude/skills/swing-daily/SKILL.md` の「無人実行（headless）時の方針」に
             従ってください。ユーザーに質問することはできません。判断が割れる分岐は
             常に保守側 (skip / withhold / 中断) を選んでください。
 
+            Bash の使用は次の6つの形に限定します。`uv run copilot-daily`、
+            `uv run copilot-verify-analysis`、`uv run copilot-ingest-analysis`、
+            `uv run copilot-history`、`uv run copilot-export-slices`、
+            `./scripts/timebox.sh` のいずれかで始まるコマンドだけを使ってください。
+            作業ディレクトリはリポジトリルートです。`cd`、`env`、`export`、`bash`、
+            `sh`、`git`、`python`、`cat`、`ls`、`find`、`sed`、`rm`、`cp`、`mv`、
+            `mkdir`、`sleep`、`date`、`echo`、および `&&`・`|`・`;`・リダイレクト等の
+            前置きやシェル演算子は使わないでください。ファイルの読み取りは
+            Read / Glob / Grep、書き込みは Write / Edit を使います。許可済みコマンドも
+            前置きなしで直接呼び出してください。
+
             ${{ (inputs.mode || 'live') == 'dry-run' && 'swing-daily スキル (`/swing-daily`) を実行してください。ただし `copilot-daily` は `--dry-run` を付けて起動します (`uv run copilot-daily --dry-run`)。dry-run はライブの DuckDB を開かず、`data/copilot_dry_run.duckdb` と `reports/dry_run` にだけ書きます。' || 'swing-daily スキル (`/swing-daily`) を引数なしで実行してください (`uv run copilot-daily`)。これは本番の日次実行です。' }}
 
             最後に、どこまで進んだか、打ち切った組、縮退・欠落の理由、
             人間が翌朝確認すべき点を要約して報告してください。
+
+      # The action deliberately hides the full execution JSON because it can contain
+      # untrusted filing/news text and secrets. Keep only a safe aggregate of denied
+      # tool classes so a dontAsk regression is diagnosable without exposing commands
+      # or paths in the public Actions log.
+      - name: Summarize Claude permission denials
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from collections import Counter
+          from pathlib import Path
+
+          execution_file = os.environ.get("EXECUTION_FILE", "")
+          if not execution_file:
+              print("permission_denials_summary=unavailable:no_execution_file")
+              raise SystemExit(0)
+
+          try:
+              messages = json.loads(Path(execution_file).read_text())
+          except (OSError, json.JSONDecodeError):
+              print("permission_denials_summary=unavailable:unreadable_execution_file")
+              raise SystemExit(0)
+
+          result_messages = [
+              message
+              for message in messages
+              if message.get("type") == "result"
+          ]
+          denials = [
+              denial
+              for message in result_messages
+              for denial in message.get("permission_denials", [])
+          ]
+
+          def classify(denial: object) -> str:
+              if not isinstance(denial, dict):
+                  return "unknown"
+              tool_name = denial.get("tool_name", "unknown")
+              if tool_name != "Bash":
+                  return str(tool_name)
+              input_value = denial.get("tool_input", denial.get("input", {}))
+              command = input_value.get("command", "") if isinstance(input_value, dict) else ""
+              command = str(command).strip()
+              if re.search(r"\buv run copilot-daily\b", command):
+                  return "Bash:uv-run-copilot-daily-with-prefix"
+              if re.search(r"\buv run copilot-verify-analysis\b", command):
+                  return "Bash:uv-run-copilot-verify-analysis-with-prefix"
+              if re.search(r"\buv run copilot-ingest-analysis\b", command):
+                  return "Bash:uv-run-copilot-ingest-analysis-with-prefix"
+              if re.search(r"\buv run copilot-history\b", command):
+                  return "Bash:uv-run-copilot-history-with-prefix"
+              if re.search(r"\buv run copilot-export-slices\b", command):
+                  return "Bash:uv-run-copilot-export-slices-with-prefix"
+              if re.search(r"(?:^|[;&|]\s*)\.\.?/scripts/timebox\.sh\b", command):
+                  return "Bash:timebox-with-prefix"
+              if re.search(r"\buv run\b", command):
+                  return "Bash:uv-run-other"
+              if re.search(
+                  r"(?:^|[;&|]\s*)(?:pwd|ls|cat|head|tail|rg|grep|find|sed)\b",
+                  command,
+              ):
+                  return "Bash:read-only-other"
+              if re.search(
+                  r"(?:^|[;&|]\s*)(?:git|rm|mv|cp|mkdir|touch)\b",
+                  command,
+              ):
+                  return "Bash:filesystem-or-git"
+              if re.search(r"(?:^|[;&|]\s*)(?:cd|export|env|bash|sh)\b", command):
+                  return "Bash:shell-wrapper"
+              if re.search(
+                  r"^(?:if|for|while|case|source|set|echo|printf|test|sleep|date|"
+                  r"python|python3|jq|awk|timeout|which|command|true|false)\b",
+                  command,
+              ):
+                  return "Bash:common-shell-or-script"
+              return "Bash:other"
+
+          print(f"permission_denials_count={len(denials)}")
+          for category, count in sorted(Counter(map(classify, denials)).items()):
+              print(f"permission_denials[{category}]={count}")
+          PY
 
       # 失敗した日は push しない = リモート正本は前日のまま。
       # dry-run はライブ DB を触らないので push する対象が無い。

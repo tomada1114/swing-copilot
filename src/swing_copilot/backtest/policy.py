@@ -18,9 +18,10 @@ production `RiskChecker` remains the source of symbol-level trade-plan values.
 
 Two things the policy deliberately does *not* decide:
 
-- **The share count.** The engine alone performs nominal-money sizing at the
-  fill price. `REDUCE_ONLY` is intentionally not converted into an
-  account-specific risk multiplier.
+- **The share count.** The engine alone performs nominal-money sizing, against
+  the worst-case planned limit price rather than the fill price.
+  `REDUCE_ONLY` is intentionally not converted into an account-specific risk
+  multiplier.
 - **The as-of date.** `EntryPolicyRequest.as_of` is the *signal* day, never
   the fill day: at tomorrow's open, today's close is the newest observable
   fact, so evaluating the regime on the fill day's own bar would be exactly

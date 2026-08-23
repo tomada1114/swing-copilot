@@ -214,11 +214,21 @@ class _FillContext:
 
 @dataclass(frozen=True, slots=True)
 class _EntryExecution:
-    """Signal-day bases and the actual price for one filled entry."""
+    """Signal-day bases and the actual price for one filled entry.
+
+    `sizing_price` is the worst-case anchor `_commit_entry` sizes against. In
+    the Day-limit arm it is `max(limit_price, execution_price)`, since the
+    fill's own slippage can push the execution price fractionally above the
+    limit that gated it; in the no-real-limit compatibility arm it is
+    `limit_price` (== the signal close) as-is, since no order was ever capped
+    there and treating an overnight gap as "slippage past the limit" would
+    defeat the point of anchoring to the plan the reader saw.
+    """
 
     signal_close: float
     limit_price: float
     execution_price: float
+    sizing_price: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,28 +574,33 @@ class BacktestEngine:
         limit_price = entry_limit_price(
             signal_close, atr14, self._trade_plan.entry_limit_atr_multiple
         )
-        execution_price: float | None
         if (
             self._backtest_config.entry == "next_open"
             and self._trade_plan.entry_limit_atr_multiple == 0.0
         ):
             # Zero is the compatibility/default arm: it measures the
             # historical next-open model, while a positive multiple opts into
-            # the Day-limit gate and its not-reached instrumentation.
+            # the Day-limit gate and its not-reached instrumentation. No real
+            # limit order is placed here, so the plan's own anchor stands as
+            # the sizing basis even though the open can gap past it.
             execution_price = bar["open"] * (1 + self._slippage_pct)
+            sizing_price = limit_price
         else:
-            execution_price = evaluate_entry_fill(
+            fill_price = evaluate_entry_fill(
                 open_price=bar["open"],
                 low=bar["low"],
                 limit_price=limit_price,
                 slippage_pct=self._slippage_pct,
             )
-        if execution_price is None:
-            return None
+            if fill_price is None:
+                return None
+            execution_price = fill_price
+            sizing_price = max(limit_price, execution_price)
         return _EntryExecution(
             signal_close=signal_close,
             limit_price=limit_price,
             execution_price=execution_price,
+            sizing_price=sizing_price,
         )
 
     def _commit_entry(
@@ -598,13 +613,20 @@ class BacktestEngine:
     ) -> str | None:
         """Size and commit a resolved entry, returning mechanical blocks."""
         state = context.state
+        if (
+            not math.isfinite(execution.execution_price)
+            or execution.execution_price <= 0
+        ):
+            # A non-positive fill (malformed OHLC) would otherwise size fine
+            # off `limit_price` and then post negative cash below.
+            return ENTRY_BLOCK_INVALID_STOP
         stop_price = initial_stop_price(
             execution.signal_close, atr14, self._trade_plan.exit_atr_multiple
         )
         try:
             shares = calc_position_size(
                 context.equity_basis,
-                execution.limit_price,
+                execution.sizing_price,
                 stop_price,
                 self._max_position_pct,
                 risk_pct,

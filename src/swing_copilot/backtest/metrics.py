@@ -215,9 +215,14 @@ def trade_r_multiple(trade: ClosedTrade) -> float | None:
 
     Returns:
         `pnl / (risk_per_share * shares)`, or `None` when the initial stop
-        was never recorded or sits at/above the entry (a data anomaly, not a
-        legitimately zero risk). Public so callers that must *report* how many
-        trades were omitted -- `paper/journal.py`'s
+        was never recorded or sits at/above the entry. Since Issue #341
+        anchored `initial_stop_price` to the signal-day close rather than the
+        fill, this is no longer only a data anomaly: a fill that gaps straight
+        through its own stop on the same session it opened (see
+        `TestGapStop::test_gap_below_initial_stop_on_fill_day_settles_with_both_side_costs`)
+        legitimately has entry <= initial_stop, and is likewise omitted rather
+        than reported as a nonsensical negative-risk ratio. Public so callers
+        that must *report* how many trades were omitted -- `paper/journal.py`'s
         `r_multiple_omitted_count` -- can count them without re-deriving the
         rule.
     """

@@ -357,6 +357,10 @@ class TestStopAnchorParity:
     def test_fill_paths_keep_the_initial_stop_anchored_to_signal_close(
         self, settings, entry_mode, entry_limit_multiple, fill_ohlc, expected_entry
     ):
+        # Signal-day close (100.0) and ATR14 (2.0) are fixed by the bars/candidate
+        # below; the worst-case limit for sizing is derived the same way
+        # `entry_limit_price` does, without importing it just for this literal.
+        expected_limit = 100.0 + entry_limit_multiple * 2.0
         days = TRADING_DAYS[:4]
         custom_settings = settings.model_copy(
             update={
@@ -384,6 +388,80 @@ class TestStopAnchorParity:
 
         assert result.trades[0].entry_price == pytest.approx(expected_entry)
         assert result.trades[0].initial_stop_price == pytest.approx(95.0)
+        # Sizing must key off the worst-case `limit_price`, not the actual
+        # fill: a regression that sized from `entry_price` instead would pass
+        # every other assertion here while breaking acceptance criterion 2.
+        expected_shares = calc_position_size(
+            INITIAL_CASH,
+            expected_limit,
+            95.0,
+            custom_settings.backtest.sim_position_cap_pct,
+            custom_settings.backtest.sim_trade_risk_pct,
+        ).shares
+        assert result.trades[0].shares == expected_shares
+
+    def test_sizing_widens_past_the_limit_when_the_fills_own_slippage_exceeds_it(
+        self, settings
+    ):
+        # The open sits exactly at the limit (101.0), so `evaluate_entry_fill`
+        # takes the open-with-slippage arm and the execution price
+        # (101.101) ends up fractionally above the limit it was gated by.
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(
+                    update={"entry": "next_limit"}
+                ),
+                "trade_plan": settings.trade_plan.model_copy(
+                    update={"entry_limit_atr_multiple": 0.5}
+                ),
+            }
+        )
+        days = TRADING_DAYS[:4]
+        result = BacktestEngine(custom_settings).run(
+            days,
+            bars_frame(
+                [
+                    *_spy_bars(days),
+                    *flat_bars("AAA", days[:2], 100.0),
+                    bar_row("AAA", days[2], (101.0, 102.0, 99.0, 100.5)),
+                    bar_row("AAA", days[3], (100.0, 101.0, 99.0, 100.0)),
+                ]
+            ),
+            lambda day: (
+                [_candidate("AAA", atr14=2.0, as_of=days[1])] if day == days[1] else []
+            ),
+            INITIAL_CASH,
+        )
+
+        execution_price = 101.0 * (1 + custom_settings.backtest.slippage_pct)
+        assert result.trades[0].entry_price == pytest.approx(execution_price)
+        # A regression that sized off the bare `limit_price` (101.0) would
+        # produce 99 shares here instead of 98.
+        expected_shares = calc_position_size(
+            INITIAL_CASH,
+            execution_price,
+            95.0,
+            custom_settings.backtest.sim_position_cap_pct,
+            custom_settings.backtest.sim_trade_risk_pct,
+        ).shares
+        assert result.trades[0].shares == expected_shares
+
+    def test_nonpositive_fill_is_rejected_as_an_invalid_stop(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days[:1], 100.0),
+            bar_row("AAA", days[1], (100.0, 101.0, 99.0, 100.0)),
+            bar_row("AAA", days[2], (0.0, 1.0, 0.0, 0.5)),
+        ]
+        candidates_by_day = {days[1]: [_candidate("AAA", atr14=2.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert result.trades == ()
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_INVALID_STOP] == 1
 
 
 def _naive_equity(bars, cash, positions, day):
@@ -525,6 +603,14 @@ class TestGapStop:
         assert result.trades[0].days_held == 0
         assert result.trades[0].exit_reason == "stop"
         assert result.trades[0].exit_date == days[2]
+        # This anchor unification is what first makes `entry_price <
+        # initial_stop_price` possible (the fill gapped straight through a
+        # stop anchored to the *signal* close, not to the fill itself), and
+        # `trade_r_multiple` (backtest/metrics.py) treats a non-positive
+        # entry-to-stop distance as unrepresentable and omits the trade from
+        # `avg_r_multiple` rather than computing a nonsensical negative-risk
+        # ratio. Pinned here so the omission reads as known, not missed.
+        assert result.avg_r_multiple is None
 
     def test_intraday_touch_fills_at_stop_price_not_low(self, engine):
         days = TRADING_DAYS[:5]

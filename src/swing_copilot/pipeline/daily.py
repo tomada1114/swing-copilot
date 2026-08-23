@@ -60,6 +60,7 @@ from swing_copilot.regime.gate import (
 )
 from swing_copilot.report.daily_brief import (
     MARKET_STRIP_SYMBOLS,
+    BriefTrackedRow,
     DailyBrief,
     DailyBriefContext,
     build_daily_brief,
@@ -90,6 +91,7 @@ from swing_copilot.text.edgar_filings import (
     FilingLookbackBounds,
     fetch_recent_filings_text,
 )
+from swing_copilot.tracking.board import build_board, position_records
 from swing_copilot.tracking.update import update_tracking
 from swing_copilot.universe_sampling import select_universe_sample
 
@@ -1695,6 +1697,7 @@ def _run_step_output(
     deps: DailyDependencies,
     output: _OutputContext,
 ) -> tuple[_StepOutcome, Path | None, DailyBrief | None]:
+    tracked = _published_tracking(deps, output.run.run_date)
     context = DailyBriefContext(
         run_id=output.run.run_id,
         run_date=output.run.run_date,
@@ -1712,6 +1715,7 @@ def _run_step_output(
         ftd_snapshot=output.run.ftd_snapshot,
         provider_name=deps.provider_name,
         data_tier=deps.data_tier.value,
+        tracked=tracked,
     )
     try:
         brief = build_daily_brief(context, deps.market_store)
@@ -1769,6 +1773,38 @@ def _run_step_output(
             brief,
         )
     return _StepOutcome(True), report_path, brief
+
+
+def _published_tracking(
+    deps: DailyDependencies, as_of: date
+) -> tuple[BriefTrackedRow, ...]:
+    """Build the report's published board after the ledger update has run."""
+    positions = deps.state_store.get_verdict_positions()
+    latest_marks = deps.state_store.get_latest_verdict_position_marks()
+    board = build_board(
+        position_records(positions, latest_marks),
+        as_of=as_of,
+        retention_business_days=(
+            deps.settings.tracking.published_retention_business_days
+        ),
+    )
+    return tuple(
+        BriefTrackedRow(
+            symbol=row.symbol,
+            run_id=row.run_id,
+            entry_date=row.entry_date,
+            entry_price=row.entry_price,
+            last_close=row.last_close,
+            unrealized_return_pct=row.unrealized_return_pct,
+            stop_price=row.stop_price,
+            status=row.status,
+            exit_date=row.exit_date,
+            exit_reason=row.exit_reason,
+            days_held=row.days_held,
+            days_remaining=row.days_remaining,
+        )
+        for row in board
+    )
 
 
 def _notification_summary(

@@ -185,6 +185,20 @@ class TestHistoryPageWithoutData:
 
 
 @pytest.mark.usefixtures("populated")
+class TestTrackingPage:
+    def test_renders_the_public_proceed_board_without_account_quantities(
+        self, client: TestClient
+    ) -> None:
+        response = client.get("/tracking")
+
+        assert response.status_code == HTTPStatus.OK
+        assert "追跡中の推奨" in response.text
+        assert "AAPL" in response.text
+        assert "株数" not in response.text
+        assert "保有額" not in response.text
+
+
+@pytest.mark.usefixtures("populated")
 class TestReadingHints:
     """Every section that shows a judgement carries its own "how to read it".
 

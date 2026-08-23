@@ -43,9 +43,9 @@ if TYPE_CHECKING:
 _UPSERT_POSITION = """
     INSERT INTO verdict_positions (
         run_id, symbol, strategy_key, recommendation, no_trade, entry_date,
-        entry_price, stop_price, days_held, status, exit_date, exit_price,
-        exit_reason, realized_return_pct, last_marked_date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        entry_price, stop_price, days_held, max_hold_days, status, exit_date,
+        exit_price, exit_reason, realized_return_pct, last_marked_date
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (run_id, symbol) DO UPDATE SET
         strategy_key = EXCLUDED.strategy_key,
         recommendation = EXCLUDED.recommendation,
@@ -54,6 +54,7 @@ _UPSERT_POSITION = """
         entry_price = EXCLUDED.entry_price,
         stop_price = EXCLUDED.stop_price,
         days_held = EXCLUDED.days_held,
+        max_hold_days = EXCLUDED.max_hold_days,
         status = EXCLUDED.status,
         exit_date = EXCLUDED.exit_date,
         exit_price = EXCLUDED.exit_price,
@@ -74,8 +75,8 @@ _UPSERT_MARK = """
 
 _POSITION_COLUMNS = """
     run_id, symbol, strategy_key, recommendation, no_trade, entry_date,
-    entry_price, stop_price, days_held, status, exit_date, exit_price,
-    exit_reason, realized_return_pct, last_marked_date
+    entry_price, stop_price, days_held, max_hold_days, status, exit_date,
+    exit_price, exit_reason, realized_return_pct, last_marked_date
 """
 
 OPEN = "open"
@@ -134,6 +135,9 @@ class VerdictPosition:
     exit_reason: str | None = None
     realized_return_pct: float | None = None
     last_marked_date: date | None = None
+    # Frozen at entry for the public board.  `_advance` intentionally continues
+    # to read the active config so changing exit behavior stays out of scope.
+    max_hold_days: int = 25
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,14 +499,15 @@ def _position(row: Sequence[object]) -> VerdictPosition:
         entry_price=float(row[6]),  # type: ignore[arg-type]
         stop_price=None if row[7] is None else float(row[7]),  # type: ignore[arg-type]
         days_held=int(row[8]),  # type: ignore[call-overload]
-        status=str(row[9]),
-        exit_date=row[10],  # type: ignore[arg-type]
-        exit_price=None if row[11] is None else float(row[11]),  # type: ignore[arg-type]
-        exit_reason=None if row[12] is None else str(row[12]),
+        max_hold_days=int(row[9]),  # type: ignore[call-overload]
+        status=str(row[10]),
+        exit_date=row[11],  # type: ignore[arg-type]
+        exit_price=None if row[12] is None else float(row[12]),  # type: ignore[arg-type]
+        exit_reason=None if row[13] is None else str(row[13]),
         realized_return_pct=(
-            None if row[13] is None else float(row[13])  # type: ignore[arg-type]
+            None if row[14] is None else float(row[14])  # type: ignore[arg-type]
         ),
-        last_marked_date=row[14],  # type: ignore[arg-type]
+        last_marked_date=row[15],  # type: ignore[arg-type]
     )
 
 
@@ -544,6 +549,7 @@ def upsert_verdict_position(
                 position.entry_price,
                 position.stop_price,
                 position.days_held,
+                position.max_hold_days,
                 position.status,
                 position.exit_date,
                 position.exit_price,

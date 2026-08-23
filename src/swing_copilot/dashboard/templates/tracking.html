@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}追跡中 · swing-copilot{% endblock %}
+
+{% block main %}
+<section class="panel">
+  {{ m.sec("追跡中の推奨", "v_tracked_positions") }}
+  {% if view.rows %}
+  <div class="table-scroll">
+    <table class="grid">
+      <thead><tr><th>銘柄</th><th>推奨日</th><th class="num">推奨時終値</th><th class="num">現在値</th><th class="num">損益</th><th class="num">本日の逆指値</th><th>状態</th><th class="num">残り営業日</th></tr></thead>
+      <tbody>
+        {% for row in view.rows %}
+        <tr>
+          <th scope="row"><a class="ticker mono" href="/runs/{{ row.run_id }}/symbols/{{ row.symbol }}">{{ row.symbol }}</a></th>
+          <td class="mono">{{ m.cell(row.entry_date) }}</td>
+          <td class="num">{{ m.cell(row.entry_price) }}</td>
+          <td class="num">{{ m.cell(row.last_close) }}</td>
+          <td class="num">{{ m.cell(row.unrealized_return) }}</td>
+          <td class="num">{{ m.cell(row.stop_price) }}</td>
+          <td>{{ m.badge(row.status) }}</td>
+          <td class="num">{{ m.cell(row.days_remaining) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">公開対象の推奨はない。</p>
+  {% endif %}
+</section>
+{% endblock %}

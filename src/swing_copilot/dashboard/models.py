@@ -257,3 +257,27 @@ class HistoryView:
     closed_summaries: tuple[ClosedSummary, ...]
     ledger_hint: Hint
     legend: tuple[NullToken, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingRow:
+    """One proceed recommendation on the published tracking page."""
+
+    symbol: str
+    run_id: str
+    recommendation: Badge
+    entry_date: Cell
+    entry_price: Cell
+    last_close: Cell
+    unrealized_return: Cell
+    stop_price: Cell
+    status: Badge
+    days_remaining: Cell
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingView:
+    """Everything `/tracking` renders."""
+
+    rows: tuple[TrackingRow, ...]
+    retention_business_days: int

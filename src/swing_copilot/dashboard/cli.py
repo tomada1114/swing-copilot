@@ -18,6 +18,7 @@ from swing_copilot.dashboard import queries
 from swing_copilot.dashboard.app import create_app
 from swing_copilot.research import ResearchError
 from swing_copilot.storage.database import DEFAULT_DB_PATH
+from swing_copilot.tracking.board import DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
 
 DEFAULT_REPORTS_DIR = Path("reports")
 DEFAULT_HOST = "127.0.0.1"
@@ -57,6 +58,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_PORT,
         help=f"待ち受けポート（既定: {DEFAULT_PORT}）",
     )
+    parser.add_argument(
+        "--tracking-retention-days",
+        type=int,
+        default=DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS,
+        help=(
+            "終了した推奨を追跡ページへ残す営業日数 "
+            f"（既定: {DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS}）"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -69,7 +79,11 @@ def _serve(args: argparse.Namespace) -> None:
     `research`, so it takes and releases the file lock in milliseconds.
     """
     queries.runs(args.db)
-    app = create_app(db_path=args.db, reports_root=args.reports_dir)
+    app = create_app(
+        db_path=args.db,
+        reports_root=args.reports_dir,
+        tracking_retention_business_days=args.tracking_retention_days,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

@@ -361,6 +361,9 @@ def _seed_position(
         days_held=0,
         status=OPEN,
         last_marked_date=candidate.as_of,
+        # This is a display snapshot of the plan at entry.  `_advance` keeps
+        # reading `config.max_hold_days` so this does not change exit logic.
+        max_hold_days=config.max_hold_days,
     )
     seed_mark = VerdictPositionMark(
         run_id=candidate.run_id,

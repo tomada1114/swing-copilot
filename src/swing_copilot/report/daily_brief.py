@@ -277,6 +277,24 @@ class SignalPerformanceRow:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefTrackedRow:
+    """One published proceed recommendation and its latest ledger mark."""
+
+    symbol: str
+    run_id: UUID
+    entry_date: date
+    entry_price: float
+    last_close: float | None
+    unrealized_return_pct: float | None
+    stop_price: float | None
+    status: str
+    exit_date: date | None
+    exit_reason: str | None
+    days_held: int
+    days_remaining: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class DailyBrief:
     """One run's presentation-neutral decision-support result."""
 
@@ -298,6 +316,7 @@ class DailyBrief:
     no_trade_reason: str | None = None
     provider_name: str = "yfinance"
     data_tier: str = "prototype"
+    tracked: tuple[BriefTrackedRow, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +345,7 @@ class DailyBriefContext:
     ftd_snapshot: FtdSnapshot | None = None
     provider_name: str = "yfinance"
     data_tier: str = "prototype"
+    tracked: tuple[BriefTrackedRow, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +390,7 @@ def build_daily_brief(
         ),
         provider_name=context.provider_name,
         data_tier=context.data_tier,
+        tracked=context.tracked,
     )
 
 

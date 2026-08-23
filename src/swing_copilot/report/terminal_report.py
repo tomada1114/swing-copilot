@@ -25,7 +25,11 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from swing_copilot.models import DataTier, RunStatus
-    from swing_copilot.report.daily_brief import BriefCandidate, DailyBrief
+    from swing_copilot.report.daily_brief import (
+        BriefCandidate,
+        BriefTrackedRow,
+        DailyBrief,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +165,7 @@ def render_terminal(
 
     for candidate in brief.candidates:
         _render_candidate_details(console, candidate)
+    _render_tracking(console, brief.tracked)
 
     if brief.notices:
         console.print("\n[bold]Warnings[/bold]")
@@ -231,6 +236,52 @@ def _render_candidate_details(console: Console, candidate: BriefCandidate) -> No
             f"  Filing [{filing.filing_type} {filing.filed_at.isoformat()}]: "
             f"{filing.interpretation[0] if filing.interpretation else '-'}"
         )
+
+
+def _render_tracking(console: Console, rows: tuple[BriefTrackedRow, ...]) -> None:
+    """Render the proceed-only public tracking board."""
+    console.print("\n[bold]追跡中の推奨[/bold]")
+    if not rows:
+        console.print("  該当なし")
+        return
+    table = Table(show_header=True, header_style="bold", box=box.SIMPLE)
+    for column in (
+        "銘柄",
+        "推奨日",
+        "推奨時終値",
+        "現在値",
+        "損益",
+        "本日の逆指値",
+        "状態",
+        "残り営業日",
+    ):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            row.symbol,
+            row.entry_date.isoformat(),
+            _money(row.entry_price),
+            _money(row.last_close),
+            _tracking_return(row.unrealized_return_pct),
+            _money(row.stop_price),
+            _tracking_status(row),
+            "—" if row.days_remaining is None else str(row.days_remaining),
+        )
+    console.print(table)
+
+
+def _tracking_return(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}%"
+
+
+def _tracking_status(row: BriefTrackedRow) -> str:
+    if row.status != "closed":
+        return "追跡中"
+    labels = {"stop": "ストップ到達で終了", "max_hold": "時間切れで終了"}
+    label = labels.get(row.exit_reason or "", "終了")
+    if row.exit_date is None:
+        return label
+    return f"{label}（{row.exit_date.month}/{row.exit_date.day}）"
 
 
 def _bucket_symbols(candidates: tuple[BriefCandidate, ...], bucket: str) -> str:

@@ -21,6 +21,7 @@ from swing_copilot.dashboard import queries, templating, viewmodels
 from swing_copilot.dashboard.templating import STATIC_DIR, Chrome
 from swing_copilot.dashboard.viewmodels import common
 from swing_copilot.research import ResearchError
+from swing_copilot.tracking.board import DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,13 +38,21 @@ _MISSING_VIEWS_NOTE = (
 )
 
 
-def create_app(db_path: Path, reports_root: Path) -> FastAPI:
+def create_app(
+    db_path: Path,
+    reports_root: Path,
+    *,
+    tracking_retention_business_days: int = DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS,
+) -> FastAPI:
     """Build the dashboard application.
 
     Args:
         db_path: The DuckDB file to read. Never opened read-write.
         reports_root: The daily pipeline's output directory, read only to
             detect runs whose analysis phase never finished.
+        tracking_retention_business_days: How long closed recommendations stay
+            visible on `/tracking`; passed in as a plain value so the
+            dashboard remains independent of settings files.
 
     Returns:
         A FastAPI application with no write route of any kind.
@@ -179,6 +188,19 @@ def create_app(db_path: Path, reports_root: Path) -> FastAPI:
         return page(
             "history.html",
             {"chrome": chrome(None, "history"), "view": view},
+        )
+
+    @app.get("/tracking", response_class=HTMLResponse)
+    def tracking_page() -> Response:
+        view = viewmodels.build_tracking(
+            viewmodels.TrackingSources(
+                positions=queries.tracked_positions(db_path),
+                retention_business_days=tracking_retention_business_days,
+            )
+        )
+        return page(
+            "tracking.html",
+            {"chrome": chrome(None, "tracking"), "view": view},
         )
 
     return app

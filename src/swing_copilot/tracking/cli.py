@@ -57,6 +57,10 @@ from swing_copilot.storage.market_store import (
 )
 from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.tracking_records import CLOSED, OPEN, PROCEED, SKIP
+from swing_copilot.tracking.board import (
+    build_board,
+    position_records,
+)
 from swing_copilot.tracking.update import update_tracking
 
 if TYPE_CHECKING:
@@ -122,9 +126,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     list_parser = subparsers.add_parser("list", help="追跡中・手仕舞い済みを一覧する")
     list_parser.add_argument(
-        "--status", choices=("open", "closed", "all"), default="all"
+        "--status", choices=("published", "open", "closed", "all"), default="published"
     )
     _add_recommendation_argument(list_parser)
+    list_parser.add_argument("--as-of", type=date.fromisoformat)
     list_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     list_parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
 
@@ -147,7 +152,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     stats_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if (
+        args.command == "list"
+        and args.status == "published"
+        and args.recommendation == SKIP
+    ):
+        parser.error("--status published は --recommendation proceed と組み合わせる")
+    return args
 
 
 def _load_settings(path: str) -> Settings:
@@ -237,8 +249,11 @@ def _run_list(
     state_store: StateStore, args: argparse.Namespace, console: Console
 ) -> None:
     settings = _load_settings(args.settings)
-    max_hold_days = settings.trade_plan.max_hold_days
-    status = None if args.status == "all" else args.status
+    if args.status == "published" and args.recommendation != ALL_RECOMMENDATIONS:
+        _run_published_list(state_store, args, settings, console)
+        return
+
+    status = None if args.status in ("all", "published") else args.status
     positions = state_store.get_verdict_positions(
         status, _selected_recommendations(args.recommendation)
     )
@@ -281,14 +296,73 @@ def _run_list(
             _fmt_pct(
                 None if mark is None or not is_open else mark.unrealized_return_pct
             ),
-            f"{position.days_held}/{max_hold_days}",
+            f"{position.days_held}/{position.max_hold_days}",
             (
-                str(max(max_hold_days - position.days_held, 0))
+                str(max(position.max_hold_days - position.days_held, 0))
                 if is_open
                 else _NOT_AVAILABLE
             ),
             _fmt_date(position.exit_date),
             position.exit_reason or _NOT_AVAILABLE,
+            _fmt_pct(position.realized_return_pct),
+        )
+    console.print(table)
+
+
+def _run_published_list(
+    state_store: StateStore,
+    args: argparse.Namespace,
+    settings: Settings,
+    console: Console,
+) -> None:
+    """Render the shared proceed-only board with the configured retention."""
+    positions = state_store.get_verdict_positions()
+    latest_marks = state_store.get_latest_verdict_position_marks()
+    rows = build_board(
+        position_records(positions, latest_marks),
+        as_of=_resolve_as_of(args.as_of),
+        retention_business_days=(settings.tracking.published_retention_business_days),
+    )
+    if not rows:
+        console.print("追跡中の仮想ポジションはない")
+        return
+    position_by_key = {
+        (position.run_id, position.symbol): position for position in positions
+    }
+    table = Table(title="verdict 追跡台帳（公開一覧）")
+    for column in (
+        "symbol",
+        "区分",
+        "⚠",
+        "run_id",
+        "entry_date",
+        "entry",
+        "stop",
+        "last close",
+        "含み損益",
+        "保有/上限",
+        "残",
+        "exit_date",
+        "理由",
+        "確定損益",
+    ):
+        table.add_column(column)
+    for row in rows:
+        position = position_by_key[(row.run_id, row.symbol)]
+        table.add_row(
+            row.symbol,
+            position.recommendation,
+            "no_trade" if position.no_trade else "",
+            str(row.run_id),
+            row.entry_date.isoformat(),
+            _fmt_price(row.entry_price),
+            _fmt_price(row.stop_price),
+            _fmt_price(row.last_close),
+            _fmt_pct(row.unrealized_return_pct),
+            f"{row.days_held}/{position.max_hold_days}",
+            _NOT_AVAILABLE if row.days_remaining is None else str(row.days_remaining),
+            _fmt_date(row.exit_date),
+            row.exit_reason or _NOT_AVAILABLE,
             _fmt_pct(position.realized_return_pct),
         )
     console.print(table)

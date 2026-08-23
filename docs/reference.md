@@ -447,11 +447,13 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 ## `copilot-track`とverdict追跡台帳
 
 `tracking/cli.py`（`copilot-track`）は、verdictの出た銘柄を「そのrunの
-終値で仮想的に買った」とみなして日次追跡する台帳のCLIである。手仕舞いルールは
-`backtest/exits.py`の純関数（ATRトレーリングストップ + 最大保有日数）を
-**バックテストと共有**しており、台帳が示す「いくらになったら手仕舞いか」は
-シミュレータの挙動とずれない。ネットワークには接続せず、設定・コード・
-決定論的なスクリーニング／サイジング値を書き換える経路も持たない。
+終値で**無条件に**仮想的に買った」とみなして日次追跡する台帳のCLIである。この台帳が
+測るのは**判断の当否**であり、実際に買えたか・約定したか・いくら儲かったかという
+執行実績ではない（決定 #327）。手仕舞いルールは`backtest/exits.py`の純関数（ATR
+トレーリングストップ + 最大保有日数）を**バックテストと共有**しており、台帳が示す
+「いくらになったら手仕舞いか」はシミュレータの挙動とずれない。ネットワークには
+接続せず、設定・コード・決定論的なスクリーニング／サイジング値を書き換える経路も
+持たない。
 
 ```bash
 copilot-track update --as-of 2027-03-21          # 建玉と日次前進
@@ -462,12 +464,13 @@ copilot-track stats                              # 勝率・PF・期待値をver
 copilot-track stats --recommendation skip        # 1区分だけ
 ```
 
-`update`は台帳の唯一の書き込みで、`backtest/exits.py`の手仕舞いルールを
-そのままリプレイした結果しか書かない。このCLIがかつて受け付けていた人間の
-判断メモ（`note`）と手動クローズ（`close`）は、実売買記録機能一式の撤去
-（2026-08）に伴い削除された——台帳を機械的なものに保ち、そのまま公開できる
-記録にするためである。撤去前に記録された`exit_reason='manual'`の行は
-移行データとしてそのまま表示され続ける。
+`update`は台帳の唯一の書き込みで、run日の基準終値へ無条件に建玉し、
+`backtest/exits.py`の手仕舞いルールをそのままリプレイした結果しか書かない
+——この台帳が測るのは判断の当否であり、執行実績ではない（決定 #327）。
+このCLIがかつて受け付けていた人間の判断メモ（`note`）と手動クローズ（`close`）は、
+実売買記録機能一式の撤去（2026-08）に伴い削除された——台帳を機械的なものに保ち、
+そのまま公開できる記録にするためである。撤去前に記録された`exit_reason='manual'`の
+行は移行データとしてそのまま表示され続ける。
 
 `update`は`verdicts`の`proceed`と`skip`のうち未追跡のものを建玉し、
 保有中を`--as-of`まで1取引日ずつ前進させる。`no_trade`（そのrun全体が当日
@@ -475,10 +478,15 @@ copilot-track stats --recommendation skip        # 1区分だけ
 `CASH_PRIORITY`のrunで全verdictが`no_trade=true`になることがあり、除外すると
 台帳が空になって定性判断の質を測る材料が集まらないため、`verdicts.no_trade`を
 そのまま`verdict_positions.no_trade`へ引き継いで建玉する。エントリー価格は
-`risk_assessments.entry_price`（= run日終値）を使い、これは計画指値とは別の仮想台帳用基準値である。計画指値は
-`risk_assessments.limit_price`、初期stopは同`stop_price`で、いずれも
-NULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
+`risk_assessments.entry_price`（= run日終値）を使い、**約定ゲートは意図的に置かない**
+——`risk_assessments.limit_price`（計画指値）は参照せず、指値に刺さったかどうかに
+関わらず基準終値で無条件に建玉する（決定 #327）。台帳が測るのは判断の当否であって
+執行実績ではないため、計画指値とは別の基準値を使う。初期stopは`stop_price`で、
+いずれもNULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
 代替する（ATR期間はバックテストと同じ`settings.trade_plan.exit_atr_period`）。
+なおバックテストの指値約定ゲート（#326、`entry_limit_atr_multiple`）は「`k`をいくつに
+するか」という別の問いに答えるものであり、`k > 0`のときバックテストの数値と本台帳の
+数値は直接比較できない。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
 前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
@@ -531,8 +539,8 @@ R倍数はエントリー日のマークに残る**当時の**stopから計算�
 
 日次前進はバックテストと同じ順序を守る: その日の手仕舞い判定は**前日までの**stopで
 行い、生き残った日の終値で初めてstopをラチェット更新する（翌日から有効）。
-ギャップダウンは寄り付き約定、日中安値タッチはstop価格約定、同日にstopと
-最大保有日数の両方が成立したときは常にstopが優先される。`last_marked_date`が
+ギャップダウンは寄り付き価格、日中安値タッチはstop価格で手仕舞いを確定し、同日に
+stopと最大保有日数の両方が成立したときは常にstopが優先される。`last_marked_date`が
 再開位置なので、同じ`--as-of`での再実行は何も変えない。
 
 `update`は`copilot-daily`のfail-softステップ`track_update`としても

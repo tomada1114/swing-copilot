@@ -18,12 +18,14 @@ morning review that suddenly listed every rejected candidate as a position
 would read as a suggestion to buy them.
 
 `update` is the only write here, and it writes exactly what replaying the
-backtest's exit rules produces. The human judgement memos and manual closes
-this CLI once accepted were removed in 2026-08: the ledger is mechanical, so
-that the record it holds can be published. Existing `exit_reason = 'manual'`
-rows predate that removal and are still displayed. Nothing in this CLI
-rewrites configuration, code, or any deterministic screening/sizing value,
-and none of it reaches the network.
+backtest's exit rules produces against an unconditional entry at the run
+day's reference close -- this ledger measures whether a judgement was right,
+not what actually got traded (design decision #327). The human judgement
+memos and manual closes this CLI once accepted were removed in 2026-08: the
+ledger is mechanical, so that the record it holds can be published. Existing
+`exit_reason = 'manual'` rows predate that removal and are still displayed.
+Nothing in this CLI rewrites configuration, code, or any deterministic
+screening/sizing value, and none of it reaches the network.
 """
 
 from __future__ import annotations

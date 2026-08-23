@@ -63,8 +63,10 @@ class RiskAssessment:
 
     symbol: str
     status: str  # "approved" | "rejected" | "not_calculable"
-    # Reference close from the run day. Tracking deliberately uses this value
-    # as its virtual-ledger entry until the entry basis is revisited in #327.
+    # Reference close from the run day. Tracking deliberately enters here,
+    # unconditionally, rather than gating on `limit_price`: the ledger
+    # measures whether the *judgement* was right, not whether an order would
+    # have filled (design decision #327).
     entry_price: float | None
     # Maximum planned fill price. A planned limit is not proof of a fill.
     limit_price: float | None

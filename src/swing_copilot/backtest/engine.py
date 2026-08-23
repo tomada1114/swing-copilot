@@ -37,7 +37,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from swing_copilot.backtest import metrics
-from swing_copilot.backtest.entries import entry_limit_price, evaluate_entry_fill
+from swing_copilot.backtest.entries import (
+    entry_limit_price,
+    evaluate_entry_fill,
+    initial_stop_price,
+)
 from swing_copilot.backtest.exits import evaluate_exit, next_trailing_stop
 from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_ALREADY_HELD,
@@ -206,6 +210,15 @@ class _FillContext:
     #: day's other candidates happened to fill first.
     equity_basis: float
     state: _SimState
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryExecution:
+    """Signal-day bases and the actual price for one filled entry."""
+
+    signal_close: float
+    limit_price: float
+    execution_price: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,20 +549,22 @@ class BacktestEngine:
         if decision is not None and not decision.is_allowed:
             return decision.reject_reason or ENTRY_BLOCK_NOT_CALCULABLE
 
-        entry_price = self._entry_execution_price(bar, signal_bar, atr14)
-        if entry_price is None:
+        execution = self._entry_execution_price(bar, signal_bar, atr14)
+        if execution is None:
             return ENTRY_BLOCK_LIMIT_NOT_REACHED
         return self._commit_entry(
-            context, candidate, entry_price, atr14, self._max_trade_risk_pct
+            context, candidate, execution, atr14, self._max_trade_risk_pct
         )
 
     def _entry_execution_price(
         self, bar: dict[str, float], signal_bar: dict[str, float], atr14: float
-    ) -> float | None:
-        """Resolve one candidate's raw price under the configured entry mode."""
+    ) -> _EntryExecution | None:
+        """Resolve signal bases and the raw price under the configured mode."""
+        signal_close = signal_bar["close"]
         limit_price = entry_limit_price(
-            signal_bar["close"], atr14, self._trade_plan.entry_limit_atr_multiple
+            signal_close, atr14, self._trade_plan.entry_limit_atr_multiple
         )
+        execution_price: float | None
         if (
             self._backtest_config.entry == "next_open"
             and self._trade_plan.entry_limit_atr_multiple == 0.0
@@ -557,29 +572,39 @@ class BacktestEngine:
             # Zero is the compatibility/default arm: it measures the
             # historical next-open model, while a positive multiple opts into
             # the Day-limit gate and its not-reached instrumentation.
-            return bar["open"] * (1 + self._slippage_pct)
-        return evaluate_entry_fill(
-            open_price=bar["open"],
-            low=bar["low"],
+            execution_price = bar["open"] * (1 + self._slippage_pct)
+        else:
+            execution_price = evaluate_entry_fill(
+                open_price=bar["open"],
+                low=bar["low"],
+                limit_price=limit_price,
+                slippage_pct=self._slippage_pct,
+            )
+        if execution_price is None:
+            return None
+        return _EntryExecution(
+            signal_close=signal_close,
             limit_price=limit_price,
-            slippage_pct=self._slippage_pct,
+            execution_price=execution_price,
         )
 
     def _commit_entry(
         self,
         context: _FillContext,
         candidate: Candidate,
-        entry_price: float,
+        execution: _EntryExecution,
         atr14: float,
         risk_pct: float,
     ) -> str | None:
         """Size and commit a resolved entry, returning mechanical blocks."""
         state = context.state
-        stop_price = entry_price - self._trade_plan.exit_atr_multiple * atr14
+        stop_price = initial_stop_price(
+            execution.signal_close, atr14, self._trade_plan.exit_atr_multiple
+        )
         try:
             shares = calc_position_size(
                 context.equity_basis,
-                entry_price,
+                execution.limit_price,
                 stop_price,
                 self._max_position_pct,
                 risk_pct,
@@ -589,7 +614,7 @@ class BacktestEngine:
         if shares <= 0:
             return ENTRY_BLOCK_ZERO_SHARES
 
-        entry_notional = shares * entry_price
+        entry_notional = shares * execution.execution_price
         entry_commission = entry_notional * self._backtest_config.commission_pct
         cost = entry_notional + entry_commission
         if cost > state.cash:
@@ -599,7 +624,7 @@ class BacktestEngine:
         state.open_positions[candidate.symbol] = _OpenPosition(
             symbol=candidate.symbol,
             entry_date=context.day,
-            entry_price=entry_price,
+            entry_price=execution.execution_price,
             shares=shares,
             stop_price=stop_price,
             initial_stop_price=stop_price,

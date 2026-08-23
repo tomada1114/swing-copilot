@@ -9,6 +9,32 @@ intraday bars are outside this application's data contract.
 
 from __future__ import annotations
 
+from swing_copilot.backtest.exits import next_trailing_stop
+
+
+def initial_stop_price(close: float, atr: float, exit_atr_multiple: float) -> float:
+    """Return the initial stop anchored to the signal-day closing price.
+
+    The operating plan pre-orders a stop derived from the close the reader
+    saw, so its anchor is the close rather than the eventual execution price.
+    Delegating to the zero-day trailing-stop calculation keeps that rule in
+    one place for production, tracking, and simulation.
+
+    Args:
+        close: Signal-day closing price used as the stop anchor.
+        atr: ATR available on the signal day.
+        exit_atr_multiple: ATR multiple below the close.
+
+    Returns:
+        The initial stop price.
+    """
+    return next_trailing_stop(
+        current_stop=None,
+        close=close,
+        atr=atr,
+        exit_atr_multiple=exit_atr_multiple,
+    )
+
 
 def entry_limit_price(close: float, atr14: float, multiple: float) -> float:
     """Return the planned buy-limit price from a signal-day close and ATR.

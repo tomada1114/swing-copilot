@@ -20,6 +20,8 @@
 | FR-08 | スキル結果の run identity 不一致はレポートを書き換えない | 別 run の `analysis_result.json` を取り込む | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report` |
 | FR-09 | 日次 run はローカル Markdown と 8 つの可視 step を残す | 通知成功後にレポートが作られない | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_eight_steps_complete_and_produce_a_markdown_brief` |
 | FR-10 | 売買コストをエントリー・決済の両方に適用する | 決済時のスリッページを損益から漏らす | `tests/backtest/test_engine.py::TestBenchmarkAndReproducibility::test_final_equity_includes_exit_slippage_and_commission` |
+| FR-10a | 初期逆指値は本番・台帳・バックテストで同一の終値アンカーである | `k > 0`や寄付約定でバックテストだけが約定価格を逆指値の基準にする | `tests/backtest/test_engine.py::TestStopAnchorParity::test_risk_checker_and_backtest_use_the_same_signal_close_anchor`、`tests/backtest/test_engine.py::TestStopAnchorParity::test_fill_paths_keep_the_initial_stop_anchored_to_signal_close` |
+| FR-10b | 約定日に自分の逆指値を割り込むギャップは同一セッションでstop決済され、最終現金が手計算値と一致する | 約定後の出口評価を翌日に遅らせる、または片側のコストを落とす | `tests/backtest/test_engine.py::TestGapStop::test_gap_below_initial_stop_on_fill_day_settles_with_both_side_costs` |
 | FR-11 | **廃止(2026-08-19)**: 公開トラックレコード化に伴い実売買記録機能を撤去した。不変条件も対応テストも無い | — | — |
 | FR-12 | required step の失敗は後続 step を実行せず failed で終える | 価格取得失敗後も分析入力を出力する | `tests/pipeline/test_daily_core.py::TestFatalStepFailure::test_price_fetch_failure_marks_run_failed_and_stops` |
 | NFR-01 | Python プロセスはモデル API を呼ばない | API キーや従量課金クライアントを production dependency に追加する | 手動確認: `pyproject.toml` と依存グラフにモデル SDK がなく、分析は Claude Code スキル境界だけで行うことをレビューする。 |

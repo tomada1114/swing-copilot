@@ -1249,7 +1249,8 @@ def run_backtest(
 **約定規則（設定値と既定値）**:
 
 - `backtest.entry`は候補を翌営業日に評価するモードで、`next_open`は`k=0.0`の互換動作を持ち、`next_limit`は常にDay指値を適用する。`entry_limit_atr_multiple=0.0`（`next_open`の互換アーム）では買い約定単価=`raw_entry * (1 + slippage_pct)`、買いcash減少=`shares * entry_execution * (1 + commission_pct)`とする。正の`k`では共有純関数`backtest/entries.py::entry_limit_price(close, atr14, k)`の指値を使い、始値が指値以下なら始値（既存のslippage適用）、始値が指値を超えても日中安値が指値以下なら指値ちょうど、安値も指値を超えるなら`limit_not_reached`として当日限り不約定にする。指値が刺さったかの判定は日足OHLCの近似であり、未約定注文は翌日へ持ち越さない。
-- 初期ストップはエントリー価格−`trade_plan.exit_atr_multiple`×`trade_plan.exit_atr_period`期間ATR（既定2.5×ATR14）。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定する。逆指値を本番の終値アンカーへ変更すると`k=0.0`の既存バックテスト数値が動くため、アンカー統一は本Issueでは行わず、現行の約定価格アンカーを維持する。
+- 初期逆指値はシグナル日終値をアンカーに、`initial_stop_price(close, atr14, exit_atr_multiple)`（既定は終値−2.5×ATR14）で算出し、本番・仮想台帳・バックテストでこの基準を共有する。バックテストの株数は最悪ケースの`limit_price`を基準にサイジングする一方、現金・手数料・損益の約定単価は実際の約定価格を使う。寄付が有効ストップ以下へギャップした日は寄付で、日中安値だけがストップへ到達した日はストップ価格で約定し、約定日にギャップダウンしても同じ日次ループ内で`days_held=0`のstop決済になる。
+<!-- ISSUE-341-MEASUREMENT-PLACEHOLDER -->
 - トレーリングストップは当日引け後に`max(従来値, close−trade_plan.exit_atr_multiple×ATR)`へ更新し、翌営業日から有効とする。`trade_plan.max_hold_days`（既定25）営業日目の引けで強制決済する。同日にstopとmax-holdが成立する場合はstopを優先する。
 - 同日に資金を超える候補がある場合はCandidate順位順。バックテストは`backtest.sim_position_cap_pct`（既定10%）、`backtest.sim_trade_risk_pct`（既定1%）、`backtest.max_concurrent_positions`（既定10建玉）を使う。これらは本番`risk`設定ではない。将来データ、提出前財務、同日終値での約定は禁止する。
 - **サイジング基底はequity（Issue #184で変更）**: 1建玉のサイジングは`cash`ではなく`equity = cash + 建玉時価`を基底とする。時価はシグナル日（＝候補生成日）の終値で評価し、約定日当日の終値は使わない。同一日の全約定は同じ基底を共有する。これはバックテスト内部だけの名目資金計算であり、本番/公開分析には接続しない。

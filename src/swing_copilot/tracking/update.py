@@ -37,6 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from swing_copilot.backtest.entries import initial_stop_price
 from swing_copilot.backtest.exits import (
     atr_as_of,
     atr_by_date,
@@ -346,7 +347,7 @@ def _seed_position(
                 "（最大保有日数のみで手仕舞い判定）"
             )
         else:
-            stop_price = entry_price - config.exit_atr_multiple * atr
+            stop_price = initial_stop_price(entry_price, atr, config.exit_atr_multiple)
 
     position = VerdictPosition(
         run_id=candidate.run_id,

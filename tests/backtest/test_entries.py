@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import pytest
 
-from swing_copilot.backtest.entries import entry_limit_price, evaluate_entry_fill
+from swing_copilot.backtest.entries import (
+    entry_limit_price,
+    evaluate_entry_fill,
+    initial_stop_price,
+)
+from swing_copilot.backtest.exits import next_trailing_stop
 
 
 def test_entry_limit_price_is_close_plus_atr_multiple() -> None:
     assert entry_limit_price(100.0, 2.0, 0.5) == pytest.approx(101.0)
+
+
+def test_initial_stop_price_matches_a_zero_day_trailing_stop() -> None:
+    actual = initial_stop_price(100.0, 2.0, 2.5)
+
+    assert actual == pytest.approx(95.0)
+    assert actual == pytest.approx(
+        next_trailing_stop(
+            current_stop=None,
+            close=100.0,
+            atr=2.0,
+            exit_atr_multiple=2.5,
+        )
+    )
 
 
 @pytest.mark.parametrize(

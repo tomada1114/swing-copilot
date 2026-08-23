@@ -484,9 +484,10 @@ copilot-track stats --recommendation skip        # 1区分だけ
 執行実績ではないため、計画指値とは別の基準値を使う。初期stopは`stop_price`で、
 いずれもNULLなら保存済みバーの終値・`entry − exit_atr_multiple × ATR(exit_atr_period)`で
 代替する（ATR期間はバックテストと同じ`settings.trade_plan.exit_atr_period`）。
-なおバックテストの指値約定ゲート（#326、`entry_limit_atr_multiple`）は「`k`をいくつに
-するか」という別の問いに答えるものであり、`k > 0`のときバックテストの数値と本台帳の
-数値は直接比較できない。
+バックテストも初期逆指値の終値アンカーは本番・台帳と統一されている。ただしバックテスト
+の指値約定ゲート（#326、`entry_limit_atr_multiple`）は「`k`をいくつにするか」という
+別の問いに答えるものであり、`k > 0`では約定価格そのものが台帳の無条件な終値エントリー
+と異なるため、バックテストの数値と本台帳の数値は直接比較できない。
 どちらも解決できない銘柄は建玉せず理由をnoteに出し、次回`update`で再試行する
 （fail-soft）。保存済みバーが1本も無いポジション（上場廃止・ユニバース離脱など）は
 前進も手仕舞い判定もできないため、毎回のupdateでその旨をnoteに出し続ける——
@@ -850,8 +851,10 @@ entry slippageを適用し、始値が上でも安値`<= limit`なら指値ち�
 感応度を測る場合は
 `backtest.sensitivity.entry_limit_grid_values()`の絶対ATR倍率
 `0.0/0.5/1.0/1.5/2.0`を`BacktestCostOverrides(entry_limit_atr_multiple=...)`へ
-順に渡す。`k=0.0`で既存の数値を再現する必要があるため、このIssueではバックテスト
-の初期逆指値アンカー（約定価格）を本番の終値アンカーへ変更していない。
+順に渡す。バックテストの初期逆指値は本番・台帳と同じくシグナル日終値をアンカーとし、
+株数サイジングは`limit_price`を基準にする。約定日に寄付が逆指値を下回る場合も、その日の
+出口評価で寄付価格のstop決済（`days_held=0`）になる。
+<!-- ISSUE-341-MEASUREMENT-PLACEHOLDER -->
 
 ## 決算ゲートの決算日はどこから来るか（`--policy regime+earnings`）
 

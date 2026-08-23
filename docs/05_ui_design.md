@@ -46,8 +46,12 @@ MarketStore / StateStore / Pipeline values
 - リスク判定、指値、逆指値、1R、理由、warnings
 - 定性分析の結論、facts、risk flags、source IDとURL
 - 銘柄ごとのverdict（`proceed`／`skip`）とその要約
+- 公開対象の`proceed`推奨の追跡状態（現在値、損益、逆指値、残り営業日）
 - run全体の`no_trade`フラグと理由
 - テキスト・分析・通知の縮退理由（分析未実施、分析対象外、検証不合格を区別する）
+
+追跡一覧は台帳更新後のスナップショットであり、当日runで新しく判定されたverdictは
+翌runの`tracking/update`で建玉されてから掲載対象になる。
 
 すべての市場・財務読み取りは`run_date`を明示的な`as_of`として渡し、境界をinclusiveにする。
 
@@ -60,8 +64,9 @@ MarketStore / StateStore / Pipeline values
 3. 市場レジーム、exposure ceiling、実行バケット。REDUCE_ONLYは警戒見出しと理由を表示し、CASH_PRIORITYは全候補を「見送り（地合い）」に置く
 4. 候補比較テーブル
 5. 候補ごとの定性分析結論、verdict行、リスク警告、source ID
-6. run全体の警告
-7. 詳細レポートパス
+6. 追跡中の推奨一覧
+7. run全体の警告
+8. 詳細レポートパス
 
 候補表は最大10件を前提とし、順位、銘柄、終値、前日比、スコア、1R、ストップ、指値の8列を日本語ヘッダと罫線付きで表示する。指値は翌営業日の計画上限、1Rは指値から逆指値までの距離率である。読者の口座や保有を前提にした株数、Portfolio risk、Circuit Breakerは表示しない。実行状態は実行バケット行で、リスク警告は候補別詳細で表示する。落選サマリはターミナルには表示せず、監査用のMarkdownレポートだけに保持する。出力末尾には詳細レポートのパスと、`analysis_input.json`を書き出した場合はそのパスを表示する。詳細なfactsとURLはMarkdownへ保存し、ターミナルでは結論ファーストにする。
 
@@ -83,7 +88,7 @@ reports/
 
 書き込みは宛先と同じディレクトリの一時ファイルへ全内容を書いた後、`Path.replace()`で原子的に置換する。失敗時は以前の宛先を保ち、一時ファイルを削除する。
 
-Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、免責文を含める。
+Markdown冒頭にはDuckDBが正本であることをコメントで明記する。本文には市場、候補一覧、銘柄別詳細、verdict、追跡中の推奨一覧、定性評価（強み・懸念）、facts、risk flags、開示分析（書類種別と提出日で識別）、source URL、警告、免責文を含める。
 
 各Markdownと同じ`run_id`の監査ファイルは`reports/<run_date>/<run_id>/`に置く。ここには`analysis_input.json`（分析へ渡した入力、schema `analysis-input-v3`。開示ごとのcoverageを含む）、`analysis_result.json`（スキルの回答、schema `analysis-result-v3`）、`report_context.json`（再描画に使ったブリーフのスナップショット、schema `report-context-v4`）を置く。この3ファイルが定性分析の監査証跡であり、`copilot-ingest-analysis`は`run_id`・`as_of`・`strategy_key`・input digestの一致を確認してから同じMarkdownを再生成する（ネットワークアクセスもスクリーニング再計算も行わない）。
 
@@ -105,6 +110,7 @@ Markdown冒頭にはDuckDBが正本であることをコメントで明記する
 - 分析未実施・対象外・検証不合格でverdict行が出ず、「懸念なし」と誤読されない
 - `no_trade`が真のときヘッダ直後に取引なしと理由を表示する
 - `as_of`直前・同時・直後で未来データが表示されない
+- 追跡表示は`proceed`だけを対象とし、建玉中は残り営業日を表示し、手仕舞い済みは設定された営業日数だけ公開する
 - Markdownのrun別保存と`latest.md`置換が原子的である
 - `copilot-ingest-analysis`の再描画が決定論的フィールドを変えず、定性欄だけを差し替える
 - CLI・Markdown・通知にCON-03違反が表示されない
@@ -125,6 +131,7 @@ FastAPI + Jinja2のサーバレンダリングで、JavaScriptのチャートラ
 | `/runs/{run_id}` | run概観 | runヘッダ（run_date・mode・status・config_hash短縮）、レジームパネル、候補と判断のテーブル、分析待ちバナー、落選銘柄（stage → reason_codeでグループ化、既定は折りたたみ） |
 | `/runs/{run_id}/symbols/{symbol}` | 銘柄詳細 | verdictと根拠（`verdict_reasons`をreason_index順、basisタグとsource数併記）、スコア内訳、テクニカル生値、実行バケット、リスク、追跡状況、当否（5日/20日）、GICSセクター |
 | `/history` | 推移 | 判定成績（run_dateごとのHIT/MISS件数をhorizon別・recommendation別の小倍数で）、レジーム変遷（VIX終値の折れ線とドローダウン圧力の帯）、追跡台帳（建玉中一覧と手仕舞い済みの集計） |
+| `/tracking` | 追跡中の推奨 | `proceed`だけの公開一覧（推奨日終値、現在値、損益、本日の逆指値、状態、残り営業日）、手仕舞い済みは設定された営業日数だけ表示 |
 
 全ページ共通ヘッダにrun切替のドロップダウン（run_date・mode・statusバッジ）を置く。
 
@@ -140,7 +147,7 @@ DuckDBのファイルロックは読み書きプロセスと他のすべての�
 
 蓄積データのNULLは列ごとに意味が異なる（未成熟・verdict未取込・計測導入前・未記録・追跡未開始・該当なし）。ダッシュボードはこれらを区別した表示トークンとして描き、ゼロや`UNKNOWN`と読めるようにはしない。各ページの脚注に、そのページが実際に使ったトークンの定義だけを列挙する。
 
-`verdicts`は次のrunの`copilot-retro collect`で取り込まれるため、最新runにverdict行が無いのは正常である。この状態は「verdict未取込」として表示し、`skip`や空欄にしない。また`tracked_positions`はIssue #190以降`skip`も反実仮想として追跡しているため、台帳と集計は必ず`recommendation`で層別する。
+`verdicts`は次のrunの`copilot-retro collect`で取り込まれるため、最新runにverdict行が無いのは正常である。この状態は「verdict未取込」として表示し、`skip`や空欄にしない。また`tracked_positions`はIssue #190以降`skip`も反実仮想として追跡しているため、履歴台帳と集計は必ず`recommendation`で層別する。公開用の`/tracking`と日次ブリーフは`proceed`だけを表示し、`skip`はここへ混ぜない。
 
 ### 8.5 読み方の注記
 
@@ -155,6 +162,7 @@ DuckDBのファイルロックは読み書きプロセスと他のすべての�
 ```bash
 uv run copilot-dashboard
 uv run copilot-dashboard --db data/copilot.duckdb --reports-dir reports --port 8787
+uv run copilot-dashboard --tracking-retention-days 5
 ```
 
 既定で`127.0.0.1:8787`にのみバインドする。認証は持たない——書き込み経路がなく、ローカルファイルのローカルビューアだからであり、公開してよいという意味ではない。起動前にDuckDBを1度だけ読んで可読性を確認し、読めなければサーバを立ち上げずにその場で終了する。

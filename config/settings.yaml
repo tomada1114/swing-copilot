@@ -67,6 +67,10 @@ trade_plan:
   exit_atr_period: 14
   max_hold_days: 25
 
+tracking:
+  # Keep closed recommendations visible for a short post-exit audit window.
+  published_retention_business_days: 5
+
 backtest:
   initial_cash_usd: 100000
   entry: "next_open"  # next_limit でk=0.0でもDay指値ゲートを強制

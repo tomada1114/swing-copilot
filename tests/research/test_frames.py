@@ -240,12 +240,21 @@ class TestTableAccessors:
                 "'open', ?)",
                 [str(run_id), RUN_DATE, date(2027, 2, 4)],
             )
+            conn.execute(
+                "INSERT INTO verdict_position_marks VALUES "
+                "(?, 'AAPL', ?, 200.0, 183.0, 5.2631579)",
+                [str(run_id), date(2027, 2, 4)],
+            )
 
         df = research.tracked_positions(db_path=tmp_path / "copilot.duckdb")
 
         assert len(df) == 1
         assert df.iloc[0]["recommendation"] == "proceed"
         assert df.iloc[0]["entry_price"] == pytest.approx(190.0)
+        assert df.iloc[0]["max_hold_days"] == 25
+        assert df.iloc[0]["last_mark_date"] == pd.Timestamp(date(2027, 2, 4))
+        assert df.iloc[0]["last_close"] == pytest.approx(200.0)
+        assert df.iloc[0]["unrealized_return_pct"] == pytest.approx(5.2631579)
 
 
 def _insert_truncation(store, run_id, symbol="NEAR", strategy_key="default", rank=6):

@@ -15,12 +15,15 @@ from swing_copilot.dashboard.viewmodels.symbol import (
     SymbolSources,
     build_symbol_detail,
 )
+from swing_copilot.dashboard.viewmodels.tracking import TrackingSources, build_tracking
 
 __all__ = [
     "HistorySources",
     "RunSources",
     "SymbolSources",
+    "TrackingSources",
     "build_history",
     "build_run_overview",
     "build_symbol_detail",
+    "build_tracking",
 ]

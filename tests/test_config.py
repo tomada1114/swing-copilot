@@ -20,6 +20,7 @@ from swing_copilot.config import (
     require_secrets,
 )
 from swing_copilot.exceptions import ConfigError
+from swing_copilot.tracking.board import DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
 
 
 class TestLoadSettings:
@@ -611,6 +612,10 @@ def test_trade_plan_defaults_are_shared_across_consumers():
     assert settings.trade_plan.exit_atr_multiple == 2.5
     assert settings.trade_plan.exit_atr_period == 14
     assert settings.trade_plan.max_hold_days == 25
+    assert (
+        settings.tracking.published_retention_business_days
+        == DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
+    )
     assert settings.backtest.sim_trade_risk_pct == 0.01
     assert settings.backtest.sim_position_cap_pct == 0.10
     assert settings.backtest.max_concurrent_positions == 10

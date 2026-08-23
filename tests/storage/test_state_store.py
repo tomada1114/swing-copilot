@@ -337,12 +337,14 @@ class TestInitSchema:
         position = store.get_verdict_position(run_id, "AAPL")
         assert position is not None
         assert position.no_trade is False
+        assert position.max_hold_days == 25
 
         # Idempotent: re-running must not disturb the backfilled row.
         store.init_schema()
         position_again = store.get_verdict_position(run_id, "AAPL")
         assert position_again is not None
         assert position_again.no_trade is False
+        assert position_again.max_hold_days == 25
 
     def test_text_items_has_related_symbols_and_category_columns(self, state_store):
         with state_store._database.connect() as conn:  # noqa: SLF001

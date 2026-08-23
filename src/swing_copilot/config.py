@@ -27,6 +27,7 @@ from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.documents import read_text_document
 from swing_copilot.exceptions import ConfigError
+from swing_copilot.tracking.board import DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -252,6 +253,14 @@ class TradePlanConfig(_StrictModel):
     exit_atr_multiple: float = Field(default=2.5, gt=0.0)
     exit_atr_period: int = Field(default=14, ge=1)
     max_hold_days: int = Field(default=25, ge=1)
+
+
+class TrackingConfig(_StrictModel):
+    """Published tracking-board display settings."""
+
+    published_retention_business_days: int = Field(
+        default=DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS, ge=0
+    )
 
 
 class BacktestConfig(_StrictModel):
@@ -494,6 +503,7 @@ class Settings(_StrictModel):
     fundamental_filters: FundamentalFilterConfig = FundamentalFilterConfig()
     technical_signals: TechnicalSignalConfig = TechnicalSignalConfig()
     trade_plan: TradePlanConfig = TradePlanConfig()
+    tracking: TrackingConfig = TrackingConfig()
     backtest: BacktestConfig = BacktestConfig()
     analysis: AnalysisConfig = AnalysisConfig()
     schedule: ScheduleConfig = ScheduleConfig()
@@ -517,6 +527,7 @@ CONFIG_SNAPSHOT_SECTIONS: Final = (
     "fundamental_filters",
     "technical_signals",
     "trade_plan",
+    "tracking",
     "backtest",
     "analysis",
     "postmortem",

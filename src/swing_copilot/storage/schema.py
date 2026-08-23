@@ -458,6 +458,8 @@ INIT_SCHEMA_STATEMENTS = (
         entry_price         DOUBLE NOT NULL,
         stop_price          DOUBLE,
         days_held           INTEGER NOT NULL,
+        -- Frozen at entry for display; exit replay still reads the active config.
+        max_hold_days       INTEGER NOT NULL DEFAULT 25,
         status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
         exit_date           DATE,
         exit_price          DOUBLE,
@@ -667,6 +669,11 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS recommendation VARCHAR",
     "UPDATE verdict_positions SET recommendation = 'proceed' "
     "WHERE recommendation IS NULL",
+    # Issue #343: retain the entry-time holding plan for display calculations.
+    # The replay deliberately continues to use the current trade-plan config
+    # in `_advance`; this value is not an exit-rule override.
+    "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS max_hold_days INTEGER",
+    "UPDATE verdict_positions SET max_hold_days = 25 WHERE max_hold_days IS NULL",
     # Issue #190: the benchmark's return over each classification's own span,
     # for the excess-return separation metric. Explicitly *not* backfilled --
     # nothing in an existing row says what the benchmark did over its span, and
@@ -1000,15 +1007,27 @@ ANALYSIS_VIEW_STATEMENTS = (
         p.entry_price,
         p.stop_price,
         p.days_held,
+        p.max_hold_days,
         p.status,
         p.exit_date,
         p.exit_price,
         p.exit_reason,
         p.realized_return_pct,
-        p.last_marked_date
+        p.last_marked_date,
+        latest_mark.as_of_date AS last_mark_date,
+        latest_mark.close AS last_close,
+        latest_mark.unrealized_return_pct
     FROM verdict_positions p
     JOIN runs r ON r.run_id = p.run_id
     LEFT JOIN verdicts v ON v.run_id = p.run_id AND v.symbol = p.symbol
+    LEFT JOIN (
+        SELECT run_id, symbol, as_of_date, close, unrealized_return_pct
+        FROM verdict_position_marks
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY run_id, symbol ORDER BY as_of_date DESC
+        ) = 1
+    ) latest_mark
+      ON latest_mark.run_id = p.run_id AND latest_mark.symbol = p.symbol
     """,
     # One row per (verdict, matured horizon); a verdict with no matured
     # outcome yet keeps a single row with NULL horizon columns, so the view

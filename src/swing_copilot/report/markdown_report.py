@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from swing_copilot.report.daily_brief import (
         BriefCandidate,
         BriefNewsSupply,
+        BriefTrackedRow,
         DailyBrief,
         SignalPerformanceRow,
     )
@@ -109,6 +110,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 ]
             )
     lines.extend(_candidates_section(brief.candidates))
+    lines.extend(_tracking_section(brief.tracked))
     for candidate in brief.candidates:
         lines.extend(_candidate_section(candidate))
     lines.extend(["", "## 落選サマリ", ""])
@@ -223,6 +225,56 @@ def _candidate_row(candidate: BriefCandidate) -> str:
         )
         + " |"
     )
+
+
+def _tracking_section(rows: tuple[BriefTrackedRow, ...]) -> list[str]:
+    """Render the proceed-only public tracking board."""
+    lines = ["", "## 追跡中の推奨", ""]
+    if not rows:
+        lines.append("該当なし(0件)")
+        return lines
+    lines.extend(
+        [
+            "| 銘柄 | 推奨日 | 推奨時終値 | 現在値 | 損益 | 本日の逆指値 | 状態 | 残り営業日 |",
+            "|---|---|---:|---:|---:|---:|---|---:|",
+        ]
+    )
+    lines.extend(
+        "| "
+        + " | ".join(
+            (
+                row.symbol,
+                row.entry_date.isoformat(),
+                _money(row.entry_price),
+                _money(row.last_close),
+                _tracking_return(row.unrealized_return_pct),
+                _money(row.stop_price),
+                _tracking_status(row),
+                _tracking_days(row.days_remaining),
+            )
+        )
+        + " |"
+        for row in rows
+    )
+    return lines
+
+
+def _tracking_return(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}%"
+
+
+def _tracking_days(value: int | None) -> str:
+    return "—" if value is None else str(value)
+
+
+def _tracking_status(row: BriefTrackedRow) -> str:
+    if row.status != "closed":
+        return "追跡中"
+    labels = {"stop": "ストップ到達で終了", "max_hold": "時間切れで終了"}
+    label = labels.get(row.exit_reason or "", "終了")
+    if row.exit_date is None:
+        return label
+    return f"{label}（{row.exit_date.month}/{row.exit_date.day}）"
 
 
 def _candidate_section(candidate: BriefCandidate) -> list[str]:

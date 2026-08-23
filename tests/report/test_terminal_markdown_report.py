@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from swing_copilot.analysis.safety import check_display_texts
 from swing_copilot.config import ScoreWeights
 from swing_copilot.models import DataTier, RunStatus
 from swing_copilot.report.daily_brief import (
@@ -23,6 +24,7 @@ from swing_copilot.report.daily_brief import (
     BriefRejectionCount,
     BriefRisk,
     BriefSource,
+    BriefTrackedRow,
     DailyBrief,
     SignalPerformanceRow,
 )
@@ -654,6 +656,38 @@ def test_terminal_renders_empty_candidate_set_without_error() -> None:
 
     assert "Candidates: 0" in output
     assert "スコア" in output  # header still renders
+
+
+def test_terminal_and_markdown_render_the_published_tracking_board() -> None:
+    brief = replace(
+        _brief(),
+        tracked=(
+            BriefTrackedRow(
+                symbol="NVDA",
+                run_id=RUN_ID,
+                entry_date=date(2026, 7, 21),
+                entry_price=171.20,
+                last_close=175.00,
+                unrealized_return_pct=2.22,
+                stop_price=166.00,
+                status="open",
+                exit_date=None,
+                exit_reason=None,
+                days_held=2,
+                days_remaining=23,
+            ),
+        ),
+    )
+
+    terminal = render_terminal(brief, RunStatus.SUCCESS, width=200)
+    markdown = render_markdown(brief, RunStatus.SUCCESS)
+
+    for output in (terminal, markdown):
+        assert "追跡中の推奨" in output
+        assert "NVDA" in output
+        assert "23" in output
+        assert "株数" not in output
+    check_display_texts((terminal, markdown))
 
 
 def _brief_with_rejections() -> DailyBrief:

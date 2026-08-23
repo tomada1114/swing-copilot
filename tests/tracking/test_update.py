@@ -129,12 +129,37 @@ class TestOpening:
         assert position.entry_price == FLAT_CLOSE
         assert position.stop_price == RISK_STOP
         assert position.days_held == 0
+        assert position.max_hold_days == backtest_config.max_hold_days
         assert position.status == "open"
         assert position.last_marked_date == ENTRY_DATE
         marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
         assert [(mark.as_of_date, mark.unrealized_return_pct) for mark in marks] == [
             (ENTRY_DATE, 0.0)
         ]
+
+    def test_display_plan_stays_at_entry_value_while_exit_uses_active_config(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        entry_config = backtest_config.model_copy(update={"max_hold_days": 5})
+        update_tracking(state_store, market_store, entry_config, as_of=ENTRY_DATE)
+
+        active_config = backtest_config.model_copy(update={"max_hold_days": 1})
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=100.0, high=101.0, low=99.0, close=100.0)],
+        )
+        update_tracking(state_store, market_store, active_config, as_of=DAY_1)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.max_hold_days == 5
+        assert position.exit_reason == "max_hold"
 
     def test_entry_ignores_the_planned_limit_price_and_enters_unconditionally(
         self,

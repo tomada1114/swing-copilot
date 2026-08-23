@@ -33,18 +33,23 @@ research.ensure_views(path)     # ビュー未作成の古い DB を修復
 （`snapshot_date <= run_date` の inclusive 境界）は `v_symbol_sector_asof` に
 一元化されており、分析側で universe_membership を自前 JOIN してはならない。
 
+`v_tracked_positions`は台帳行に加えて、各`(run_id, symbol)`の最新マークから
+`last_mark_date`・`last_close`・`unrealized_return_pct`を返し、建玉時に保存した
+`max_hold_days`も公開表示へ渡す。最新値が無い行は未記録のまま残るため、読み手はゼロと解釈しない。
+
 ::: swing_copilot.research.frames
 
 ## `copilot-dashboard` と閲覧用ダッシュボード
 
 `dashboard/`（`copilot-dashboard`）は、同じ蓄積データをブラウザで俯瞰する
-読み取り専用ビューアである。3画面（run概観・銘柄詳細・推移）とrun切替だけを持ち、
+読み取り専用ビューアである。4画面（run概観・銘柄詳細・推移・公開追跡）とrun切替だけを持ち、
 書き込みルートを一切持たない。画面構成・欠損値の表示規約・起動方法は
 [05. CLI・Markdown・ダッシュボード出力設計](05_ui_design.md)の10節を正とする。
 
 ```bash
 uv run copilot-dashboard                                   # 127.0.0.1:8787
 uv run copilot-dashboard --db data/copilot.duckdb --port 9000
+uv run copilot-dashboard --tracking-retention-days 5
 ```
 
 ```python
@@ -457,12 +462,20 @@ ingestは既存RP-IDを再利用して行を重複させない。台帳が`rejec
 
 ```bash
 copilot-track update --as-of 2027-03-21          # 建玉と日次前進
-copilot-track list --status open                 # 含み損益・stop・残営業日
+copilot-track list                               # 公開対象のproceed（建玉中＋直近手仕舞い）
+copilot-track list --status open                 # proceedの建玉中だけ
+copilot-track list --status all --recommendation all  # retentionを無視した全台帳
 copilot-track list --recommendation all          # skip のシャドウ建玉も含める
 copilot-track show --symbol AAPL                 # verdict理由・日次マーク
 copilot-track stats                              # 勝率・PF・期待値をverdict区分別に
 copilot-track stats --recommendation skip        # 1区分だけ
 ```
+
+`list`の既定表示は公開用の`proceed`ボードで、`tracking.published_retention_business_days`
+(既定5営業日)の範囲にある手仕舞い済みだけを残す。`--status all`はこの保持期間を
+適用しない従来の台帳表示で、`--recommendation all`を併用すると`skip`のシャドウ建玉も含められる。
+公開表示の残り日数は建玉時に保存した`max_hold_days`を使うため、後から設定を変更しても
+過去の推奨の期限表示は変わらない（`update`の出口判定は現在の設定を使って再生する）。
 
 `update`は台帳の唯一の書き込みで、run日の基準終値へ無条件に建玉し、
 `backtest/exits.py`の手仕舞いルールをそのままリプレイした結果しか書かない

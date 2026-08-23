@@ -55,6 +55,7 @@ class TestDefaults:
 
         assert args.reports_dir == Path("reports")
         assert args.db == Path("data/copilot.duckdb")
+        assert args.tracking_retention_days == 5
 
 
 class TestPreflight:

@@ -1,13 +1,17 @@
 # Backtest: 初期逆指値アンカー統一（Issue #341）移行前後の比較
 
 `trade_plan.entry_limit_atr_multiple`（`k`）0.0/0.5/1.0/1.5/2.0 の5点で、
-移行前（HEAD 9a57c10）と移行後（ブランチ 0cae7b0）を同一候補ストリームで比較した。
+移行前（HEAD 9a57c10）と移行後（ブランチ 4666d36）を同一候補ストリームで比較した。
 
 ## Reproduction metadata
 
 - Before commit（移行前）: `9a57c10deeb44ada4f79dbafc76e750a2e3a771a`
-- After commit（移行後）: `0cae7b0d1516d202c23b4aa6488a178021001718`
-  （ブランチ `fix/341-entry-stop-anchor`）
+- After commit（移行後）: `4666d362e136280f61461b98c55b59520da67fcd`
+  （ブランチ `fix/341-entry-stop-anchor`。実装コミット`0cae7b0`＋PRレビュー指摘の
+  修正コミット`4666d36`。サイジング基準を「Day指値アームでは`limit_price`と
+  実約定価格の広い方」へ狭めるレビュー修正が入ったが、この30銘柄サンプルでは
+  条件（始値がslippage分だけ指値未満に接近）が一度も発生せず、下表の数値は
+  レビュー修正の前後でバイト単位で同一であることを再実測で確認済み）
 - Command（`k`ごとに`--settings`だけを差し替えて実行、両commitで共通）:
   ```bash
   uv run copilot-backtest --strategy default --start 2026-01-01 --end 2026-08-21 \

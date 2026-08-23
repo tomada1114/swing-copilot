@@ -1,10 +1,13 @@
 """Replay every tracked verdict forward one trading day at a time.
 
-A verdict is treated as a purchase at that run's closing price, and from then
-on the position is carried with **the backtest's own exit rules**:
-`backtest/exits.py`'s `next_trailing_stop` and `evaluate_exit`, imported rather
-than reimplemented, so the ledger the human reads every morning cannot drift
-away from what the simulator would have done.
+This ledger measures whether a judgement was right, not what actually got
+traded (design decision #327): a verdict is treated as a purchase at that
+run's closing price, unconditionally -- there is no fill simulation and no
+gate on the planned `limit_price`. From then on the position is carried with
+**the backtest's own exit rules**: `backtest/exits.py`'s `next_trailing_stop`
+and `evaluate_exit`, imported rather than reimplemented, so the ledger the
+human reads every morning cannot drift away from what the simulator would
+have done.
 
 This layer is deliberately not `retro/verdict_outcomes` (a two-point 5/20
 session classification of whether the verdict was right). It answers a
@@ -312,13 +315,15 @@ def _seed_position(
     candidate: TrackableVerdict,
     notes: list[str],
 ) -> _Work | None:
-    """Build the entry state for a `proceed` verdict not yet tracked.
+    """Build the entry state for a `proceed`/`skip` verdict not yet tracked.
 
     The entry price is the risk assessment's reference close (the run day's
-    close), not its planned `limit_price`. When that is missing -- a
-    `CASH_PRIORITY` regime or a `not_calculable` assessment leaves it unset --
-    the run day's stored close stands in. With neither, the verdict simply
-    stays untracked and the next update tries again.
+    close), taken unconditionally -- never its planned `limit_price`, and
+    never gated on whether that limit would have filled (design decision
+    #327). When the reference close is missing -- a `CASH_PRIORITY` regime or
+    a `not_calculable` assessment leaves it unset -- the run day's stored
+    close stands in. With neither, the verdict simply stays untracked and the
+    next update tries again.
     """
     bars = _position_bars(all_bars, candidate.symbol, candidate.as_of)
     entry_price = candidate.entry_price

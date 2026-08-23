@@ -157,3 +157,24 @@ def seed_risk(
             """,
             [str(run_id), symbol, entry_price, stop_price],
         )
+
+
+def seed_risk_limit_price(
+    state_store: StateStore,
+    *,
+    run_id: UUID = RUN_ID,
+    symbol: str = SYMBOL,
+    limit_price: float,
+) -> None:
+    """Set the `limit_price` on an already-seeded `risk_assessments` row.
+
+    A separate helper (rather than a `seed_risk` parameter) keeps `seed_risk`
+    within the project's 5-parameter convention; only the one regression test
+    for design decision #327 needs a non-null planned limit distinct from the
+    reference close.
+    """
+    with state_store.database.connect() as conn:
+        conn.execute(
+            "UPDATE risk_assessments SET limit_price = ? WHERE run_id = ? AND symbol = ?",
+            [limit_price, str(run_id), symbol],
+        )

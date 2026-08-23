@@ -31,6 +31,7 @@ from tests.tracking.conftest import (
     flat_prelude,
     plant_broken_bars,
     seed_risk,
+    seed_risk_limit_price,
     seed_verdict,
     write_bars,
 )
@@ -134,6 +135,32 @@ class TestOpening:
         assert [(mark.as_of_date, mark.unrealized_return_pct) for mark in marks] == [
             (ENTRY_DATE, 0.0)
         ]
+
+    def test_entry_ignores_the_planned_limit_price_and_enters_unconditionally(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        """The ledger measures judgement, not execution (design decision #327).
+
+        A planned limit price -- reachable or not -- must never gate or
+        substitute for the reference-close entry: `verdict_positions.entry_price`
+        stays the run day's close even when `risk_assessments.limit_price` is a
+        materially different, non-null value.
+        """
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        seed_risk_limit_price(state_store, limit_price=FLAT_CLOSE + 50.0)
+        write_bars(market_store, flat_prelude())
+
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == FLAT_CLOSE
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.close for mark in marks] == [FLAT_CLOSE]
 
     def test_a_skip_verdict_is_shadow_tracked_under_the_same_rules(
         self,

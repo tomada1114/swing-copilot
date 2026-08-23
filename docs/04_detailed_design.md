@@ -1656,7 +1656,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 | **separation**（最重要） | proceed群とskip群の平均forward returnの差（ホライズン別＋重み合成） | n≥40で≤0が持続すればL3検討トリガー。定性レイヤの存在意義そのものを測る。窓全体のプール平均差なので**地合いと交絡しうる**（下記のペアード版を併読する） |
 | separation（ペアード、Issue #190） | run日ごとにproceed平均−skip平均を取ってから日次差を平均。片群しか無い日は除外し`excluded_day_count`に出す | `metric:separation_paired:*`。その日の共通変動が相殺されるので、proceedが強い日に偏っているだけの見かけの優位が消える |
 | separation（ペアード超過、Issue #190） | 同じペアリングを`forward_return_pct − benchmark_return_pct`で実施 | `metric:separation_paired_excess:*`。`benchmark_return_pct`未計測の行は寄与ゼロではなく除外。3版が一致すればベータ由来でないことの傍証、食い違えばそれ自体が所見 |
-| tracked_performance（Issue #190） | 追跡台帳（3.24）の実現成績を`proceed`/`skip`/`all`で層別。勝率・PF・期待値・平均R・保有日数中央値・手仕舞い理由内訳 | `metric:tracked_performance:{proceed,skip,all}`。全レート値は`backtest/metrics.py`の共通関数を通る。損益は%単位（シャドウ建玉に株数の決定は存在しないため$100 notionalへ正規化）。窓は**exit_dateが窓内**の建玉（`verdict_outcomes`と同じ「この期間に満期を迎えた」規則） |
+| tracked_performance（Issue #190） | 追跡台帳（3.24）の判断当否の集計結果を`proceed`/`skip`/`all`で層別。勝率・PF・期待値・平均R・保有日数中央値・手仕舞い理由内訳 | `metric:tracked_performance:{proceed,skip,all}`。全レート値は`backtest/metrics.py`の共通関数を通る。損益は%単位（シャドウ建玉に株数の決定は存在しないため$100 notionalへ正規化）。窓は**exit_dateが窓内**の建玉（`verdict_outcomes`と同じ「この期間に満期を迎えた」規則） |
 | proceed重大外し率 | proceedのうち`MISS_SEVERE`の割合 | `settings.retro`ではなくコード定数`PROCEED_SEVERE_MISS_WATCH_RATE=0.15`超でフラグ。同runの全候補（skip含む）のベースラインを併記し、ベースラインより悪ければ水準未満でもフラグ |
 | skip的中率 | skipのうち非`NEUTRAL`に占める`HIT` | 絶対閾値ではなく同期間ベースライン比で判定 |
 | ソース貢献 | `(source_type, provider)`別の引用回数とHIT/MISS/NEUTRAL引用数・HIT引用比率 | 観測のみ。引用されないソース・MISSに偏るソースが削減候補になる |
@@ -1751,7 +1751,7 @@ statusライフサイクルは`proposed` → `applied`（PR番号を記録）/ `
 
 ### 3.24 `tracking/` と `copilot-track`（verdict追跡台帳）
 
-verdictの出た銘柄を「そのrunの終値で仮想的に買った」とみなし、**バックテストと同一の手仕舞いルール**で日次追跡する台帳。利用者が毎朝「含み損益 / いくらになったら手仕舞いか / 残り何営業日か / 確定損益」を1画面で見て、当時の判断を振り返るための戦術ループである。定性レイヤの改善材料を集めることが目的であり、発注も推奨もしない。
+verdictの出た銘柄を「そのrunの終値で**無条件に**仮想的に買った」とみなし、**バックテストと同一の手仕舞いルール**で日次追跡する台帳。利用者が毎朝「含み損益 / いくらになったら手仕舞いか / 残り何営業日か / 確定損益」を1画面で見て、当時の判断を振り返るための戦術ループである。この台帳が測るのは**判断の当否**であり、実際に買えたか・約定したか・いくら儲かったかという執行実績ではない（決定 #327）。定性レイヤの改善材料を集めることが目的であり、発注も推奨もしない。
 
 Issue #190以降、`proceed`だけでなく`skip`も**同一の出口ルール**でシャドウ追跡する。「verdictレイヤに価値があるか」という問いは本質的に「proceedだけ買った場合 vs screening通過を全部買った場合」の差であり、片側しか追跡していない台帳ではその反実仮想が作れない。両群を同じルールで運ぶことが比較可能性の条件であり、同時にサンプル母数を採用少数派から候補全体へ広げる。`skip`群はあくまで計測用の母集団なので、`list`/`show`の既定表示は`proceed`のみとし（`--recommendation`で明示的に開く）、日常操作の見え方は変えない。
 
@@ -1784,13 +1784,13 @@ src/swing_copilot/tracking/
 `update_tracking(state_store, market_store, trade_plan, *, as_of)`。すべて明示`as_of`で、`date.today()`は呼ばず、ネットワークにも触れない。バーは日次runの`1_prices`が保存済みのものだけを読む。
 
 1. **建玉**: `verdicts`のうち`recommendation IN ('proceed','skip')`かつ`as_of <= 指定as_of`で、まだ`verdict_positions`に無いものを開く（対象区分は`get_untracked_verdicts(..., recommendations=...)`の引数であり、ハードコードではない）。`no_trade`（runの相場環境が当日エントリー非推奨だった判断）は**除外しない**——実運用ではCASH_PRIORITY等のレジームで当日の全verdictが`no_trade=true`になるrunもあり、除外すると台帳が空になって定性判断の質を測る材料が集まらない。代わりに`verdicts.no_trade`をそのまま`verdict_positions.no_trade`へ引き継ぎ、`list`/`show`が「銘柄単体はproceedだがrun全体は当日エントリー非推奨だった」ことを視覚的に区別して示す（CLIの表示詳細は`docs/reference.md`が正本）。
-   - `entry_price` := `risk_assessments.entry_price`（= run日終値）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
+   - `entry_price` := `risk_assessments.entry_price`（= run日終値）。**約定ゲートは意図的に置かない**——`risk_assessments.limit_price`（計画指値）は参照せず、指値に刺さったかどうかに関わらず基準終値で無条件に建玉する（決定 #327。バックテストの指値約定ゲート#326とは別の問いに答えるもので、`k > 0`のときバックテストの数値と本台帳の数値は直接比較できない）。NULL（`CASH_PRIORITY`レジームや`not_calculable`）ならそのrun日の保存済み終値で代替し、どちらも無ければ**今回は開かず**理由をnoteに残す（次回updateで自然に再試行される）。
    - 初期stop := `risk_assessments.stop_price`。NULLなら`entry − trade_plan.exit_atr_multiple × ATR(entry_date時点, trade_plan.exit_atr_period)`。ATRも算出不能（設定期間未満）ならstopは**NULLのまま**とし、以降は最大保有日数のみで手仕舞いを判定する。
    - `days_held=0`、`last_marked_date=entry_date`で登録し、当日のマーク（含み損益0%）も同時に書く。
    - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
    - **孤児の削除**: 建玉に先立ち、対応する`verdicts`行が**存在しない**`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、分析対象から外れた銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
    - **区分の追随**（Issue #190）: `proceed`↔`skip`の訂正は孤児では**ない**。両側を同一ルールで追跡している以上、建玉日もエントリー価格も出口ルールも変わらないのでリプレイは依然として正しく、削除すれば訂正のたびにskip側の標本が痩せる。`sync_verdict_position_recommendations`が該当行の`recommendation`だけを`verdicts`側へ追随させ、変更をnoteに出す。
-2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って約定することはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。
+2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って手仕舞い判定されることはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。
 3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, trade_plan.max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。

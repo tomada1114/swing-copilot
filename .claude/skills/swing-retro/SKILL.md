@@ -118,7 +118,7 @@ umbrella コマンド。`--as-of` は必須。日付の指定がなければユ�
    根拠に config を動かさない**。重み合成のヘッドラインに区間が無いのは意図であり
    （5 日と 20 日は同じ run を測り直した非独立な 2 窓）、そこを「精度が高い」と
    読んではならない。詳細は `references/proposal-rules.md`
-5d. `tracked_performance` は追跡台帳の実現成績を proceed / skip / all で層別したもの。
+5d. `tracked_performance` は追跡台帳の判断当否の集計結果を proceed / skip / all で層別したもの。
    skip 群は**同一の出口ルールで仮想追跡した反実仮想**であって実際に提案された建玉では
    ない。proceed と skip の差が verdict レイヤの寄与そのものだが、両群の
    `closed_count` を必ず併記して読むこと

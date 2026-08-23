@@ -7,9 +7,12 @@ the proceeds" and "buy every screened candidate" become the same measurement
 taken twice; the skip side is a research population, never a suggestion, so
 the CLI keeps it out of the default view.
 
-Everything here is mechanical: the human judgement memos this repository once
-also held were removed in 2026-08, so the ledger can be published as a track
-record without carrying anyone's personal trading notes.
+This ledger measures whether a judgement was right, not what actually got
+traded: every position enters unconditionally at the run day's reference
+close, with no fill simulation and no gate on the planned limit price
+(design decision #327). Everything here is mechanical: the human judgement
+memos this repository once also held were removed in 2026-08, so the record
+can be published without carrying anyone's personal trading notes.
 
 Write discipline:
 

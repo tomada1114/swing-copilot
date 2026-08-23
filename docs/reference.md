@@ -851,10 +851,19 @@ entry slippageを適用し、始値が上でも安値`<= limit`なら指値ち�
 感応度を測る場合は
 `backtest.sensitivity.entry_limit_grid_values()`の絶対ATR倍率
 `0.0/0.5/1.0/1.5/2.0`を`BacktestCostOverrides(entry_limit_atr_multiple=...)`へ
-順に渡す。バックテストの初期逆指値は本番・台帳と同じくシグナル日終値をアンカーとし、
-株数サイジングは`limit_price`を基準にする。約定日に寄付が逆指値を下回る場合も、その日の
-出口評価で寄付価格のstop決済（`days_held=0`）になる。
-<!-- ISSUE-341-MEASUREMENT-PLACEHOLDER -->
+順に渡す（ただし`entry_limit_grid_values()`自体を呼び出すCLIは未配線——現状は
+`config/settings.yaml`の`trade_plan.entry_limit_atr_multiple`だけを差し替えた
+コピーを都度`copilot-backtest --settings <path>`へ渡す運用になっている。
+`--candidate-cache`は`settings.trade_plan`をキャッシュキーから除外しているため、
+この運用でもスクリーニングは1回で済む）。バックテストの初期逆指値は本番・台帳と
+同じくシグナル日終値をアンカーとし、株数サイジングは`limit_price`を基準にする。
+約定日に寄付が逆指値を下回る場合も、その日の出口評価で寄付価格のstop決済
+（`days_held=0`）になる。**移行前後の実測**
+（`reports/backtests/2026-08-23-issue-341-entry-stop-anchor.md`）: 移行前は
+約定価格アンカーのため`k=1.5/2.0`が`k=0.0`とバイト単位で同一の結果に潰れる
+（`open ≤ limit`が常に成立し`next_open`互換アームと同じ約定価格になるため）
+回帰があった。移行後は`k`の増加に応じて`avg_invested_pct`が単調に縮小し
+（19.61%→16.58%）、`k`の選択が実際に指標へ反映されるようになった。
 
 ## 決算ゲートの決算日はどこから来るか（`--policy regime+earnings`）
 

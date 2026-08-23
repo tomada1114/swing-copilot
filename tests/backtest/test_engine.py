@@ -18,6 +18,7 @@ from swing_copilot.backtest.metrics import (
     ENTRY_BLOCK_REGIME,
 )
 from swing_copilot.backtest.policy import EntryDecision, EntryPolicyRequest
+from swing_copilot.risk.checks import RiskChecker
 from swing_copilot.risk.position_sizing import calc_position_size
 from swing_copilot.screening.base import Candidate
 from tests.backtest.conftest import (
@@ -152,12 +153,11 @@ class TestEntryFill:
         )
 
         expected_entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
-        expected_stop = (
-            expected_entry_price - settings.trade_plan.exit_atr_multiple * 2.0
-        )
+        expected_limit_price = 100.0
+        expected_stop = 100.0 - settings.trade_plan.exit_atr_multiple * 2.0
         expected_shares = calc_position_size(
             INITIAL_CASH,
-            expected_entry_price,
+            expected_limit_price,
             expected_stop,
             settings.backtest.sim_position_cap_pct,
             settings.backtest.sim_trade_risk_pct,
@@ -270,12 +270,11 @@ class TestDuplicateBars:
         )
 
         expected_entry_price = 100.0 * (1 + settings.backtest.slippage_pct)
-        expected_stop = (
-            expected_entry_price - settings.trade_plan.exit_atr_multiple * 2.0
-        )
+        expected_limit_price = 100.0
+        expected_stop = 100.0 - settings.trade_plan.exit_atr_multiple * 2.0
         expected_shares = calc_position_size(
             INITIAL_CASH,
-            expected_entry_price,
+            expected_limit_price,
             expected_stop,
             settings.backtest.sim_position_cap_pct,
             settings.backtest.sim_trade_risk_pct,
@@ -292,6 +291,177 @@ class TestDuplicateBars:
         assert dict(result.equity_curve)[days[2]] == pytest.approx(
             INITIAL_CASH - cost + expected_shares * 202.0
         )
+
+
+class TestStopAnchorParity:
+    def test_risk_checker_and_backtest_use_the_same_signal_close_anchor(self, settings):
+        days = TRADING_DAYS[:4]
+        close = 100.0
+        atr14 = 2.0
+        candidate = Candidate(
+            symbol="AAA",
+            as_of=days[1],
+            signal_names=("trend_sma",),
+            metrics={"close": close, "atr14": atr14},
+            rank=1,
+        )
+        risk_assessment = RiskChecker(settings).check([candidate])[0]
+        result = BacktestEngine(settings).run(
+            days,
+            bars_frame(
+                [
+                    *_spy_bars(days),
+                    bar_row("AAA", days[0], (100.0, 101.0, 99.0, 100.0)),
+                    bar_row("AAA", days[1], (100.0, 101.0, 99.0, close)),
+                    bar_row("AAA", days[2], (100.0, 101.0, 99.0, 100.0)),
+                    bar_row("AAA", days[3], (100.0, 101.0, 99.0, 100.0)),
+                ]
+            ),
+            lambda day: [candidate] if day == days[1] else [],
+            INITIAL_CASH,
+        )
+
+        assert risk_assessment.stop_price == pytest.approx(
+            result.trades[0].initial_stop_price
+        )
+        assert risk_assessment.stop_price == pytest.approx(
+            close - settings.trade_plan.exit_atr_multiple * atr14
+        )
+
+    @pytest.mark.parametrize(
+        ("entry_mode", "entry_limit_multiple", "fill_ohlc", "expected_entry"),
+        [
+            pytest.param(
+                "next_limit",
+                0.5,
+                (100.5, 102.0, 99.5, 101.0),
+                100.5 * (1 + 0.001),
+                id="gap-up-open-fill",
+            ),
+            pytest.param(
+                "next_limit",
+                0.5,
+                (105.0, 106.0, 100.0, 104.0),
+                101.0,
+                id="intraday-limit-touch",
+            ),
+            pytest.param(
+                "next_open",
+                0.0,
+                (105.0, 106.0, 104.0, 105.0),
+                105.0 * (1 + 0.001),
+                id="zero-k-next-open-compatibility",
+            ),
+        ],
+    )
+    def test_fill_paths_keep_the_initial_stop_anchored_to_signal_close(
+        self, settings, entry_mode, entry_limit_multiple, fill_ohlc, expected_entry
+    ):
+        # Signal-day close (100.0) and ATR14 (2.0) are fixed by the bars/candidate
+        # below; the worst-case limit for sizing is derived the same way
+        # `entry_limit_price` does, without importing it just for this literal.
+        expected_limit = 100.0 + entry_limit_multiple * 2.0
+        days = TRADING_DAYS[:4]
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(update={"entry": entry_mode}),
+                "trade_plan": settings.trade_plan.model_copy(
+                    update={"entry_limit_atr_multiple": entry_limit_multiple}
+                ),
+            }
+        )
+        result = BacktestEngine(custom_settings).run(
+            days,
+            bars_frame(
+                [
+                    *_spy_bars(days),
+                    *flat_bars("AAA", days[:2], 100.0),
+                    bar_row("AAA", days[2], fill_ohlc),
+                    bar_row("AAA", days[3], (100.0, 101.0, 99.0, 100.0)),
+                ]
+            ),
+            lambda day: (
+                [_candidate("AAA", atr14=2.0, as_of=days[1])] if day == days[1] else []
+            ),
+            INITIAL_CASH,
+        )
+
+        assert result.trades[0].entry_price == pytest.approx(expected_entry)
+        assert result.trades[0].initial_stop_price == pytest.approx(95.0)
+        # Sizing must key off the worst-case `limit_price`, not the actual
+        # fill: a regression that sized from `entry_price` instead would pass
+        # every other assertion here while breaking acceptance criterion 2.
+        expected_shares = calc_position_size(
+            INITIAL_CASH,
+            expected_limit,
+            95.0,
+            custom_settings.backtest.sim_position_cap_pct,
+            custom_settings.backtest.sim_trade_risk_pct,
+        ).shares
+        assert result.trades[0].shares == expected_shares
+
+    def test_sizing_widens_past_the_limit_when_the_fills_own_slippage_exceeds_it(
+        self, settings
+    ):
+        # The open sits exactly at the limit (101.0), so `evaluate_entry_fill`
+        # takes the open-with-slippage arm and the execution price
+        # (101.101) ends up fractionally above the limit it was gated by.
+        custom_settings = settings.model_copy(
+            update={
+                "backtest": settings.backtest.model_copy(
+                    update={"entry": "next_limit"}
+                ),
+                "trade_plan": settings.trade_plan.model_copy(
+                    update={"entry_limit_atr_multiple": 0.5}
+                ),
+            }
+        )
+        days = TRADING_DAYS[:4]
+        result = BacktestEngine(custom_settings).run(
+            days,
+            bars_frame(
+                [
+                    *_spy_bars(days),
+                    *flat_bars("AAA", days[:2], 100.0),
+                    bar_row("AAA", days[2], (101.0, 102.0, 99.0, 100.5)),
+                    bar_row("AAA", days[3], (100.0, 101.0, 99.0, 100.0)),
+                ]
+            ),
+            lambda day: (
+                [_candidate("AAA", atr14=2.0, as_of=days[1])] if day == days[1] else []
+            ),
+            INITIAL_CASH,
+        )
+
+        execution_price = 101.0 * (1 + custom_settings.backtest.slippage_pct)
+        assert result.trades[0].entry_price == pytest.approx(execution_price)
+        # A regression that sized off the bare `limit_price` (101.0) would
+        # produce 99 shares here instead of 98.
+        expected_shares = calc_position_size(
+            INITIAL_CASH,
+            execution_price,
+            95.0,
+            custom_settings.backtest.sim_position_cap_pct,
+            custom_settings.backtest.sim_trade_risk_pct,
+        ).shares
+        assert result.trades[0].shares == expected_shares
+
+    def test_nonpositive_fill_is_rejected_as_an_invalid_stop(self, engine):
+        days = TRADING_DAYS[:3]
+        rows = [
+            *_spy_bars(days),
+            *flat_bars("AAA", days[:1], 100.0),
+            bar_row("AAA", days[1], (100.0, 101.0, 99.0, 100.0)),
+            bar_row("AAA", days[2], (0.0, 1.0, 0.0, 0.5)),
+        ]
+        candidates_by_day = {days[1]: [_candidate("AAA", atr14=2.0, as_of=days[1])]}
+
+        result = engine.run(
+            days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
+        )
+
+        assert result.trades == ()
+        assert dict(result.entry_block_counts)[ENTRY_BLOCK_INVALID_STOP] == 1
 
 
 def _naive_equity(bars, cash, positions, day):
@@ -386,6 +556,62 @@ class TestGapStop:
         assert stop_trades[0].exit_price == pytest.approx(80.0 * (1 - 0.001))
         assert stop_trades[0].exit_date == days[3]
 
+    def test_gap_below_initial_stop_on_fill_day_settles_with_both_side_costs(
+        self, settings, engine
+    ):
+        days = TRADING_DAYS[:4]
+        fill_open = 95.0
+        signal_close = 100.0
+        atr14 = 1.0
+        rows = [
+            *_spy_bars(days),
+            bar_row("AAA", days[0], (100.0, 101.0, 99.0, 100.0)),
+            bar_row("AAA", days[1], (100.0, 101.0, 99.0, signal_close)),
+            bar_row("AAA", days[2], (fill_open, 96.0, 94.0, 95.0)),
+            bar_row("AAA", days[3], (95.0, 96.0, 94.0, 95.0)),
+        ]
+        result = engine.run(
+            days,
+            bars_frame(rows),
+            lambda day: (
+                [_candidate("AAA", atr14=atr14, as_of=days[1])]
+                if day == days[1]
+                else []
+            ),
+            INITIAL_CASH,
+        )
+
+        limit_price = signal_close
+        stop_price = signal_close - settings.trade_plan.exit_atr_multiple * atr14
+        shares = calc_position_size(
+            INITIAL_CASH,
+            limit_price,
+            stop_price,
+            settings.backtest.sim_position_cap_pct,
+            settings.backtest.sim_trade_risk_pct,
+        ).shares
+        slippage = settings.backtest.slippage_pct
+        commission = settings.backtest.commission_pct
+        entry_execution = fill_open * (1 + slippage)
+        exit_execution = fill_open * (1 - slippage)
+        entry_cost = shares * entry_execution * (1 + commission)
+        exit_proceeds = shares * exit_execution * (1 - commission)
+
+        assert result.final_equity == pytest.approx(
+            INITIAL_CASH - entry_cost + exit_proceeds
+        )
+        assert result.trades[0].days_held == 0
+        assert result.trades[0].exit_reason == "stop"
+        assert result.trades[0].exit_date == days[2]
+        # This anchor unification is what first makes `entry_price <
+        # initial_stop_price` possible (the fill gapped straight through a
+        # stop anchored to the *signal* close, not to the fill itself), and
+        # `trade_r_multiple` (backtest/metrics.py) treats a non-positive
+        # entry-to-stop distance as unrepresentable and omits the trade from
+        # `avg_r_multiple` rather than computing a nonsensical negative-risk
+        # ratio. Pinned here so the omission reads as known, not missed.
+        assert result.avg_r_multiple is None
+
     def test_intraday_touch_fills_at_stop_price_not_low(self, engine):
         days = TRADING_DAYS[:5]
         rows = [
@@ -409,7 +635,7 @@ class TestGapStop:
 
         stop_trades = [t for t in result.trades if t.exit_reason == "stop"]
         assert len(stop_trades) == 1
-        raw_stop = 100.0 * 1.001 - 2.5 * 1.0
+        raw_stop = 100.0 - 2.5 * 1.0
         assert stop_trades[0].exit_price == pytest.approx(raw_stop * (1 - 0.001))
         assert stop_trades[0].exit_date == days[3]
 
@@ -584,15 +810,16 @@ class TestBenchmarkAndReproducibility:
             INITIAL_CASH,
         )
 
-        entry = 100.0 * (1 + settings.backtest.slippage_pct)
-        stop = entry - settings.trade_plan.exit_atr_multiple
+        limit = 100.0
+        stop = 100.0 - settings.trade_plan.exit_atr_multiple
         shares = calc_position_size(
             INITIAL_CASH,
-            entry,
+            limit,
             stop,
             settings.backtest.sim_position_cap_pct,
             settings.backtest.sim_trade_risk_pct,
         ).shares
+        entry = 100.0 * (1 + settings.backtest.slippage_pct)
         entry_cost = shares * entry * (1 + settings.backtest.commission_pct)
         exit_price = 100.0 * (1 - settings.backtest.slippage_pct)
         exit_proceeds = shares * exit_price * (1 - settings.backtest.commission_pct)
@@ -893,11 +1120,11 @@ class _RecordingPolicy:
 def _sized(
     settings: Settings, equity: float, *, price: float = 100.0, atr14: float = 2.0
 ) -> int:
-    entry_price = price * (1 + settings.backtest.slippage_pct)
-    stop_price = entry_price - settings.trade_plan.exit_atr_multiple * atr14
+    limit_price = price + settings.trade_plan.entry_limit_atr_multiple * atr14
+    stop_price = price - settings.trade_plan.exit_atr_multiple * atr14
     return calc_position_size(
         equity,
-        entry_price,
+        limit_price,
         stop_price,
         settings.backtest.sim_position_cap_pct,
         settings.backtest.sim_trade_risk_pct,
@@ -1036,11 +1263,11 @@ class TestEntryPolicyInjection:
             days, bars_frame(rows), lambda d: candidates_by_day.get(d, []), INITIAL_CASH
         )
 
-        entry_price = 100.0 * (1 + custom_settings.backtest.slippage_pct)
-        stop_price = entry_price - custom_settings.trade_plan.exit_atr_multiple * 20.0
+        limit_price = 100.0
+        stop_price = 100.0 - custom_settings.trade_plan.exit_atr_multiple * 20.0
         expected = calc_position_size(
             INITIAL_CASH,
-            entry_price,
+            limit_price,
             stop_price,
             custom_settings.backtest.sim_position_cap_pct,
             sim_risk_pct,
@@ -1240,7 +1467,7 @@ class TestExitAtrPeriod:
         slippage = settings.backtest.slippage_pct
         commission = settings.backtest.commission_pct
         entry_price = 108.0 * (1 + slippage)
-        shares = _sized(settings, INITIAL_CASH, price=108.0)
+        shares = _sized(settings, INITIAL_CASH, price=107.5)
         cash = INITIAL_CASH - shares * entry_price * (1 + commission)
         exit_price = 105.2 * (1 - slippage)
 
@@ -1251,8 +1478,8 @@ class TestExitAtrPeriod:
         )
 
     def test_default_period_keeps_holding_and_liquidates_at_the_end(self, settings):
-        # ATR(14) on session 20 = 2 + (0.4 - 2) / 14 = 1.8857... -> stop
-        # 104.7857..., below session 21's low (105.00): exactly the
+        # ATR(14) on session 20 = 2 + (0.4 - 2) / 14 = 1.8857... -> trailing
+        # stop 104.7857..., below session 21's low (105.00): exactly the
         # pre-Issue-#194 hardcoded-14 behaviour, pinned as the baseline.
         assert settings.trade_plan.exit_atr_period == 14
 
@@ -1261,7 +1488,7 @@ class TestExitAtrPeriod:
         slippage = settings.backtest.slippage_pct
         commission = settings.backtest.commission_pct
         entry_price = 108.0 * (1 + slippage)
-        shares = _sized(settings, INITIAL_CASH, price=108.0)
+        shares = _sized(settings, INITIAL_CASH, price=107.5)
         cash = INITIAL_CASH - shares * entry_price * (1 + commission)
         exit_price = 105.1 * (1 - slippage)
 

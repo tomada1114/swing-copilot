@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from swing_copilot.backtest.entries import entry_limit_price
+from swing_copilot.backtest.entries import entry_limit_price, initial_stop_price
 from swing_copilot.risk.earnings import business_days_since, evaluate_earnings_proximity
 
 if TYPE_CHECKING:
@@ -152,7 +152,7 @@ class RiskChecker:
         limit_price = entry_limit_price(
             entry_price, atr14, self._entry_limit_atr_multiple
         )
-        stop_price = entry_price - self._stop_atr_multiple * atr14
+        stop_price = initial_stop_price(entry_price, atr14, self._stop_atr_multiple)
         if (
             not all(math.isfinite(value) for value in (limit_price, stop_price, atr14))
             or limit_price <= 0.0

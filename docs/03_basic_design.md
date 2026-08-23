@@ -138,7 +138,7 @@ flowchart TD
 | 市場レジーム | `regime/gate.py`, `regime/distribution.py`, `regime/ftd.py` | SPY/QQQ/^VIXの`as_of`までのOHLCVからSMA200主軸の市場ゲート・Distribution Day・FTD再参入状態を決定論的に算出し、データ不足時はUNKNOWNへ安全側に倒す | P3-13, P3-16 |
 | RiskChecker | `risk/` | 読者の口座・保有を参照せず、run日終値、計画指値、終値アンカーの逆指値、ATR14、1R、決算/wide-stop警告、市場状態による判定を銘柄単位で返す。CASH_PRIORITYは候補を保持して地合い理由で見送り、REDUCE_ONLYは候補を保持した警戒ラベルだけとする | FR-06, P3-14 |
 | 決算カレンダー | `data/earnings.py`, `data/earnings_finnhub.py` | Finnhubの決算予定を明示タイムアウト・有界リトライ・全試行レート制限で取得し、候補の2/5営業日block/warn判定へ渡す。キー未設定・取得失敗はfail-softで明示する。明示`--as-of`では当時の公表状態を復元できない現在値APIを呼ばず、予定不明へ縮退する | P4-18 |
-| バックテストシミュレーション | `backtest/engine.py`, `config.py` | 名目資金・サイジング・同時保有数をバックテスト専用設定で評価する。金額は投資助言値ではなく、ポートフォリオ熱量・セクター・相関・サーキットブレーカーをエントリー境界で判定しない | FR-10 |
+| バックテストシミュレーション | `backtest/engine.py`, `config.py` | 名目資金・サイジング・同時保有数をバックテスト専用設定で評価する。初期逆指値はシグナル日終値をアンカーにし、株数は`limit_price`を基準にする。金額は投資助言値ではなく、ポートフォリオ熱量・セクター・相関・サーキットブレーカーをエントリー境界で判定しない | FR-10 |
 | テキスト収集 | `text/` | ニュース（Finnhub）・適時開示（EDGAR 8-K/10-Q）・経済カレンダー（FRED）の収集 | FR-07 |
 | 分析スキーマ | `analysis/schemas.py` | `analysis_input.json`/`analysis_result.json`双方のstrict pydanticスキーマ（`extra="forbid"`）。`SourcedFact.source_ids`は1件以上必須、`SourcedFact.evidence_quote`は自身が引用する`source_ids`の本文からの逐語引用が必須 | FR-08, CON-03 |
 | 分析文脈整形 | `analysis/context.py` | コード計算済みのスコア内訳・リスク制約・市場レジーム・実績サマリ・過去判断を、上書き不可の明示付きで不活性テキストへ整形する純関数群 | FR-08, P2-12, P3-15 |

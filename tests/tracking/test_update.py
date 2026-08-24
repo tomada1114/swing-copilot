@@ -16,6 +16,7 @@ import pytest
 
 from swing_copilot.storage.tracking_records import VerdictPosition, VerdictPositionMark
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
+from swing_copilot.tracking.board import build_board, position_records
 from swing_copilot.tracking.update import update_tracking
 from tests.tracking.conftest import (
     DAY_1,
@@ -24,6 +25,7 @@ from tests.tracking.conftest import (
     EXIT_ATR_MULTIPLE,
     FLAT_ATR,
     FLAT_CLOSE,
+    OTHER_RUN_ID,
     RISK_STOP,
     RUN_ID,
     SYMBOL,
@@ -92,7 +94,7 @@ def backtest_config(settings: Settings) -> TradePlanConfig:
     return settings.trade_plan
 
 
-def _rise(session_date: date, close: float) -> dict[str, Any]:
+def _rise(session_date: date, close: float, *, symbol: str = SYMBOL) -> dict[str, Any]:
     """A quiet up day: two-wide range whose low sits one above the prior close."""
     return bar(
         session_date,
@@ -100,7 +102,16 @@ def _rise(session_date: date, close: float) -> dict[str, Any]:
         high=close + 1.0,
         low=close - 1.0,
         close=close,
+        symbol=symbol,
     )
+
+
+def _flat_sessions(days: int, *, symbol: str = SYMBOL) -> list[dict[str, Any]]:
+    """Flat post-entry sessions that never trigger the trailing stop."""
+    return [
+        _rise(ENTRY_DATE + timedelta(days=offset), FLAT_CLOSE, symbol=symbol)
+        for offset in range(1, days + 1)
+    ]
 
 
 class TestOpening:
@@ -137,7 +148,7 @@ class TestOpening:
             (ENTRY_DATE, 0.0)
         ]
 
-    def test_display_plan_stays_at_entry_value_while_exit_uses_active_config(
+    def test_entry_max_hold_controls_replay_and_board_after_config_shrinks(
         self,
         state_store: StateStore,
         market_store: MarketStore,
@@ -146,20 +157,93 @@ class TestOpening:
         seed_verdict(state_store)
         seed_risk(state_store)
         write_bars(market_store, flat_prelude())
-        entry_config = backtest_config.model_copy(update={"max_hold_days": 5})
+        entry_config = backtest_config.model_copy(update={"max_hold_days": 25})
         update_tracking(state_store, market_store, entry_config, as_of=ENTRY_DATE)
 
-        active_config = backtest_config.model_copy(update={"max_hold_days": 1})
-        write_bars(
-            market_store,
-            [bar(DAY_1, open_price=100.0, high=101.0, low=99.0, close=100.0)],
-        )
-        update_tracking(state_store, market_store, active_config, as_of=DAY_1)
+        active_config = backtest_config.model_copy(update={"max_hold_days": 3})
+        exit_date = ENTRY_DATE + timedelta(days=25)
+        board_date = ENTRY_DATE + timedelta(days=3)
+        write_bars(market_store, _flat_sessions(25))
+        update_tracking(state_store, market_store, active_config, as_of=board_date)
 
         position = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert position is not None
-        assert position.max_hold_days == 5
+        assert position.max_hold_days == 25
+        assert position.status == "open"
+        latest_mark = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)[-1]
+        (row,) = build_board(
+            position_records((position,), {(RUN_ID, SYMBOL): latest_mark}),
+            as_of=board_date,
+            retention_business_days=5,
+        )
+        assert row.days_remaining == 22
+
+        update_tracking(state_store, market_store, active_config, as_of=exit_date)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.exit_date == exit_date
         assert position.exit_reason == "max_hold"
+
+    def test_entry_max_hold_controls_replay_after_config_grows(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        entry_config = backtest_config.model_copy(update={"max_hold_days": 3})
+        update_tracking(state_store, market_store, entry_config, as_of=ENTRY_DATE)
+
+        active_config = backtest_config.model_copy(update={"max_hold_days": 25})
+        exit_date = ENTRY_DATE + timedelta(days=3)
+        write_bars(market_store, _flat_sessions(3))
+        update_tracking(state_store, market_store, active_config, as_of=exit_date)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.max_hold_days == 3
+        assert position.exit_date == exit_date
+        assert position.exit_reason == "max_hold"
+
+    def test_new_entries_snapshot_the_changed_max_hold_value(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        seed_verdict(
+            state_store,
+            run_id=OTHER_RUN_ID,
+            symbol="BBB",
+            as_of=DAY_1,
+        )
+        seed_risk(state_store, run_id=OTHER_RUN_ID, symbol="BBB")
+        write_bars(
+            market_store,
+            flat_prelude()
+            + flat_prelude(symbol="BBB")
+            + [
+                _rise(DAY_1, FLAT_CLOSE),
+                _rise(DAY_1, FLAT_CLOSE, symbol="BBB"),
+            ],
+        )
+
+        entry_config = backtest_config.model_copy(update={"max_hold_days": 3})
+        update_tracking(state_store, market_store, entry_config, as_of=ENTRY_DATE)
+        active_config = backtest_config.model_copy(update={"max_hold_days": 25})
+        update_tracking(state_store, market_store, active_config, as_of=DAY_1)
+
+        old_position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        new_position = state_store.get_verdict_position(OTHER_RUN_ID, "BBB")
+        assert old_position is not None
+        assert new_position is not None
+        assert old_position.max_hold_days == 3
+        assert new_position.max_hold_days == 25
 
     def test_entry_ignores_the_planned_limit_price_and_enters_unconditionally(
         self,

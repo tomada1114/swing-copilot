@@ -135,8 +135,8 @@ class VerdictPosition:
     exit_reason: str | None = None
     realized_return_pct: float | None = None
     last_marked_date: date | None = None
-    # Frozen at entry for the public board.  `_advance` intentionally continues
-    # to read the active config so changing exit behavior stays out of scope.
+    # Frozen at entry as the position's holding rule and public-board value.
+    # Replay uses this stored value, so config changes apply only to new entries.
     max_hold_days: int = 25
 
 

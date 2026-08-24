@@ -458,7 +458,7 @@ INIT_SCHEMA_STATEMENTS = (
         entry_price         DOUBLE NOT NULL,
         stop_price          DOUBLE,
         days_held           INTEGER NOT NULL,
-        -- Frozen at entry for display; exit replay still reads the active config.
+        -- Frozen at entry as the position's holding rule and display value.
         max_hold_days       INTEGER NOT NULL DEFAULT 25,
         status              VARCHAR NOT NULL CHECK (status IN ('open', 'closed')),
         exit_date           DATE,
@@ -669,9 +669,8 @@ ALTER_SCHEMA_STATEMENTS = (
     "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS recommendation VARCHAR",
     "UPDATE verdict_positions SET recommendation = 'proceed' "
     "WHERE recommendation IS NULL",
-    # Issue #343: retain the entry-time holding plan for display calculations.
-    # The replay deliberately continues to use the current trade-plan config
-    # in `_advance`; this value is not an exit-rule override.
+    # Issue #343: retain the entry-time holding plan for display and replay.
+    # Config changes apply only to positions opened after the change.
     "ALTER TABLE verdict_positions ADD COLUMN IF NOT EXISTS max_hold_days INTEGER",
     "UPDATE verdict_positions SET max_hold_days = 25 WHERE max_hold_days IS NULL",
     # Issue #190: the benchmark's return over each classification's own span,

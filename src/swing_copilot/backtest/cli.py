@@ -6,7 +6,8 @@ written markdown report, promoting the backtester from tests-only to a daily
 tool (diagnosis D5's execution side). `--pessimistic` (P2-09) additionally runs
 a higher-slippage scenario and renders a normal-vs-pessimistic comparison. The
 `grid` subcommand (P2-10) runs a 25-cell ATR-stop x max-hold sensitivity grid
-and classifies it as spike/plateau/inconclusive.
+and classifies it as spike/plateau/inconclusive. `entry-grid` (Issue #357)
+runs the fixed entry-limit ATR-multiple sensitivity values.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
     MAX_HOLD_PCT_GRID,
     GridCell,
+    entry_limit_grid_values,
     grid_param_values,
     is_gray_cell,
     judge_grid,
@@ -159,6 +161,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "grid", help="パラメータ感応度グリッド（ATRストップ倍率 x 最大保有日数）"
     )
     _add_common_args(grid_parser, is_subcommand=True)
+    entry_grid_parser = subparsers.add_parser(
+        "entry-grid", help="指値エントリー倍率（k）の感応度グリッド"
+    )
+    _add_common_args(entry_grid_parser, is_subcommand=True)
     parser.set_defaults(command="run")
 
     return parser.parse_args(argv)
@@ -219,6 +225,16 @@ def _reject_grid_policy(args: argparse.Namespace) -> None:
         raise BacktestCliError(msg)
 
 
+def _reject_entry_grid_policy(args: argparse.Namespace) -> None:
+    """Refuse entry-grid with a non-default policy instead of ignoring it."""
+    if _policy_arms(args) != (EntryPolicyArm.NONE,):
+        msg = (
+            "entry-grid サブコマンドは --policy に対応していません"
+            f"（--policy {_DEFAULT_POLICY} のみ）。"
+        )
+        raise BacktestCliError(msg)
+
+
 def _output_path(args: argparse.Namespace) -> Path:
     output: Path | None = args.output
     if output is not None:
@@ -231,6 +247,13 @@ def _grid_output_path(args: argparse.Namespace) -> Path:
     if output is not None:
         return output
     return _DEFAULT_OUTPUT_DIR / f"{args.end.isoformat()}-{args.strategy}-grid.md"
+
+
+def _entry_grid_output_path(args: argparse.Namespace) -> Path:
+    output: Path | None = args.output
+    if output is not None:
+        return output
+    return _DEFAULT_OUTPUT_DIR / f"{args.end.isoformat()}-{args.strategy}-entry-grid.md"
 
 
 def _missing_data_symbols(
@@ -295,6 +318,13 @@ _MONEY_FIELDS = frozenset(
     {"expectancy_per_trade", "final_equity", "benchmark_final_equity"}
 )
 _INT_FIELDS = frozenset({"trade_count", "max_concurrent_reached"})
+_ENTRY_GRID_METRIC_ROWS: tuple[tuple[str, str], ...] = (
+    ("trade_count", "trade_count"),
+    ("expectancy_per_trade", "expectancy_per_trade"),
+    ("avg_r_multiple", "avg_r_multiple"),
+    ("avg_invested_pct", "avg_invested_pct"),
+    ("final_equity", "final_equity"),
+)
 
 
 def _metric_value(result: BacktestResult, field: str) -> str:
@@ -944,6 +974,93 @@ def render_grid_markdown(
     return "\n".join(lines)
 
 
+def render_entry_grid_terminal(
+    results: Sequence[tuple[float, BacktestResult]], meta: ReportMeta
+) -> str:
+    """Render the entry-limit ATR-multiple sensitivity results."""
+    buffer = StringIO()
+    console = Console(file=buffer, width=_CONSOLE_WIDTH)
+    console.print(
+        f"[bold]copilot-backtest entry-grid[/bold] strategy={meta.strategy} "
+        f"{meta.start.isoformat()}..{meta.end.isoformat()}"
+    )
+    for line in _universe_console_lines(meta):
+        console.print(line)
+    console.print("k = entry_limit_atr_multiple (ATR multiple)")
+
+    table = Table(title="Entry-limit sensitivity grid")
+    table.add_column("k", justify="right")
+    for label, _field in _ENTRY_GRID_METRIC_ROWS:
+        table.add_column(label, justify="right")
+    for k_value, result in results:
+        table.add_row(
+            f"{k_value:.1f}",
+            *[
+                _metric_value(result, field)
+                for _label, field in _ENTRY_GRID_METRIC_ROWS
+            ],
+        )
+    console.print(table)
+
+    missing_symbols = ", ".join(meta.missing_data_symbols)
+    if meta.missing_data_symbols:
+        console.print(f"[yellow]データ不足のためスキップ: {missing_symbols}[/yellow]")
+    for k_value, result in results:
+        for warning in result.warnings:
+            console.print(f"[yellow]k={k_value:.1f}: {warning}[/yellow]")
+    console.print(f"[dim]{results[0][1].survivorship_bias_note}[/dim]")
+    return buffer.getvalue()
+
+
+def render_entry_grid_markdown(
+    results: Sequence[tuple[float, BacktestResult]], meta: ReportMeta
+) -> str:
+    """Render the entry-limit ATR-multiple sensitivity results as markdown."""
+    header = (
+        "| k (ATR multiple) | "
+        + " | ".join(label for label, _field in _ENTRY_GRID_METRIC_ROWS)
+        + " |"
+    )
+    separator = "|---:|" + "---:|" * len(_ENTRY_GRID_METRIC_ROWS)
+    rows = [
+        f"| {k_value:.1f} | "
+        + " | ".join(
+            _metric_value(result, field) for _label, field in _ENTRY_GRID_METRIC_ROWS
+        )
+        + " |"
+        for k_value, result in results
+    ]
+    missing_symbols = ", ".join(meta.missing_data_symbols)
+    lines = [
+        f"# Backtest entry-limit sensitivity grid: {meta.strategy} "
+        f"({meta.start.isoformat()} .. {meta.end.isoformat()})",
+        "",
+        *_universe_markdown_lines(meta),
+        "k = entry_limit_atr_multiple (ATR multiple)",
+        "",
+        header,
+        separator,
+        *rows,
+        "",
+    ]
+    if meta.missing_data_symbols:
+        lines += [
+            "## Data quality",
+            "",
+            f"データ不足のためスキップ: {missing_symbols}",
+            "",
+        ]
+    warning_lines = [
+        f"- k={k_value:.1f}: {warning}"
+        for k_value, result in results
+        for warning in result.warnings
+    ]
+    if warning_lines:
+        lines += ["## Warnings", "", *warning_lines, ""]
+    lines += ["## Survivorship bias", "", results[0][1].survivorship_bias_note, ""]
+    return "\n".join(lines)
+
+
 #: What a bars-root-less backtest produced instead of failing (Issue #217).
 _MISSING_BARS_CONSEQUENCE = (
     "このまま実行すると全銘柄がデータ不足となり、取引ゼロのレポートを"
@@ -1273,6 +1390,58 @@ def _run_grid_command(
     sys.stdout.write(f"\nReport written to {output_path}\n")
 
 
+def _run_entry_grid_command(
+    args: argparse.Namespace, settings: Settings, strategies: StrategiesConfig
+) -> None:
+    try:
+        _validate_args(args, strategies)
+        _reject_entry_grid_policy(args)
+        deps, sample, missing_data_symbols = _compose_dependencies(
+            args, settings, strategies
+        )
+        request = BacktestRequest(
+            symbols=list(sample.symbols),
+            start=args.start,
+            end=args.end,
+            initial_cash=settings.backtest.initial_cash_usd,
+            strategy_key=args.strategy,
+        )
+        # The entry-limit multiplier is an engine-only input, so one frame and
+        # one candidate stream serve every k value (Issue #357).
+        frame = load_market_frame(request, deps)
+        stream = _resolve_candidate_stream(request, deps, frame, args.candidate_cache)
+    except (BacktestCliError, CandidateStreamError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    results = [
+        (
+            k_value,
+            run_backtest(
+                request,
+                deps,
+                BacktestCostOverrides(entry_limit_atr_multiple=k_value),
+                candidate_stream=stream,
+                market_frame=frame,
+            ),
+        )
+        for k_value in entry_limit_grid_values()
+    ]
+
+    meta = ReportMeta(
+        strategy=args.strategy,
+        start=args.start,
+        end=args.end,
+        missing_data_symbols=missing_data_symbols,
+        universe_sample=sample,
+    )
+    sys.stdout.write(render_entry_grid_terminal(results, meta))
+
+    output_path = _entry_grid_output_path(args)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(output_path, render_entry_grid_markdown(results, meta))
+    sys.stdout.write(f"\nReport written to {output_path}\n")
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse args, run the backtest or grid, print + write the report."""
     args = _parse_args(argv)
@@ -1281,6 +1450,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "grid":
         _run_grid_command(args, settings, strategies)
+    elif args.command == "entry-grid":
+        _run_entry_grid_command(args, settings, strategies)
     else:
         _run_backtest_command(args, settings, strategies)
 

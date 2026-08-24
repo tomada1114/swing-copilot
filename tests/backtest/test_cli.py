@@ -21,6 +21,7 @@ from swing_copilot.backtest.cli import (
     ReportMeta,
     _atomic_write,
     _compose_dependencies,
+    _entry_grid_output_path,
     _grid_output_path,
     _missing_data_symbols,
     _output_path,
@@ -28,6 +29,8 @@ from swing_copilot.backtest.cli import (
     _resolve_parquet_root,
     _validate_args,
     main,
+    render_entry_grid_markdown,
+    render_entry_grid_terminal,
     render_grid_markdown,
     render_grid_terminal,
     render_markdown,
@@ -49,11 +52,13 @@ from swing_copilot.backtest.policy import EntryPolicyArm, build_entry_policy
 from swing_copilot.backtest.runner import run_backtest
 from swing_copilot.backtest.sensitivity import (
     ATR_MULTIPLIER_PCT_GRID,
+    ENTRY_LIMIT_ATR_MULTIPLE_GRID,
     MAX_HOLD_PCT_GRID,
     PLATEAU,
     SPIKE,
     GridCell,
     SensitivityGridResult,
+    entry_limit_grid_values,
 )
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
 from swing_copilot.risk.checks import EarningsGuardInput
@@ -172,6 +177,21 @@ class TestParseArgs:
         assert args.command == "grid"
         assert args.strategy == "default"
 
+    def test_entry_grid_subcommand_sets_command(self):
+        args = _parse_args(
+            [
+                "entry-grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+        assert args.command == "entry-grid"
+        assert args.strategy == "default"
+
     def test_no_subcommand_defaults_to_run(self):
         args = _parse_args(
             ["--strategy", "default", "--start", "2025-01-01", "--end", "2026-06-30"]
@@ -280,6 +300,22 @@ class TestOutputPath:
         )
         assert _grid_output_path(args) == Path(
             "reports/backtests/2026-06-30-default-grid.md"
+        )
+
+    def test_default_entry_grid_output_uses_entry_grid_suffix(self):
+        args = _parse_args(
+            [
+                "entry-grid",
+                "--strategy",
+                "default",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2026-06-30",
+            ]
+        )
+        assert _entry_grid_output_path(args) == Path(
+            "reports/backtests/2026-06-30-default-entry-grid.md"
         )
 
 
@@ -530,6 +566,50 @@ class TestRenderGrid:
         assert "## Data quality" not in text
 
 
+def _entry_grid_results(
+    *, warnings: tuple[str, ...] = ()
+) -> list[tuple[float, BacktestResult]]:
+    return [
+        (k_value, _result(warnings=warnings))
+        for k_value in ENTRY_LIMIT_ATR_MULTIPLE_GRID
+    ]
+
+
+class TestRenderEntryGrid:
+    def test_terminal_shows_k_values_and_data_quality_warning(self):
+        text = render_entry_grid_terminal(
+            _entry_grid_results(warnings=("entry warning",)),
+            _meta(missing_data_symbols=["ZZZ"]),
+        )
+
+        assert "copilot-backtest entry-grid" in text
+        assert "entry_limit_atr_multiple" in text
+        assert "0.0" in text
+        assert "2.0" in text
+        assert "entry warning" in text
+        assert "データ不足のためスキップ: ZZZ" in text
+
+    def test_markdown_shows_all_k_values_and_warnings(self):
+        text = render_entry_grid_markdown(
+            _entry_grid_results(warnings=("entry warning",)),
+            _meta(missing_data_symbols=["ZZZ"]),
+        )
+
+        assert "# Backtest entry-limit sensitivity grid: default" in text
+        assert "| k (ATR multiple) |" in text
+        assert "| 0.0 |" in text
+        assert "| 2.0 |" in text
+        assert "## Warnings" in text
+        assert "entry warning" in text
+        assert "データ不足のためスキップ: ZZZ" in text
+
+    def test_markdown_without_warnings_or_missing_data_omits_optional_sections(self):
+        text = render_entry_grid_markdown(_entry_grid_results(), _meta())
+
+        assert "## Warnings" not in text
+        assert "## Data quality" not in text
+
+
 class TestUniverseSamplingIsRendered:
     """Issue #194: no report may present a `--limit` sample as a full run."""
 
@@ -551,6 +631,8 @@ class TestUniverseSamplingIsRendered:
             render_policy_comparison_markdown([("none", _result())], meta),
             render_grid_terminal(_grid_result(), meta, gray_threshold=30),
             render_grid_markdown(_grid_result(), meta, gray_threshold=30),
+            render_entry_grid_terminal(_entry_grid_results(), meta),
+            render_entry_grid_markdown(_entry_grid_results(), meta),
         ]
 
     def test_every_report_states_the_method_and_the_composition(self):
@@ -855,6 +937,37 @@ class TestMainEndToEnd:
         report_text = output_path.read_text(encoding="utf-8")
         assert "normal vs pessimistic" in report_text
         assert "| Metric | Normal (x1.0) | Pessimistic |" in report_text
+
+    def test_entry_grid_subcommand_completes_and_writes_k_report(
+        self, seeded_db, tmp_path, capsys
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "entry-grid.md"
+
+        main(
+            [
+                "entry-grid",
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "copilot-backtest entry-grid" in captured.out
+        assert "entry_limit_atr_multiple" in captured.out
+        assert output_path.exists()
+        report_text = output_path.read_text(encoding="utf-8")
+        assert "# Backtest entry-limit sensitivity grid: default" in report_text
+        assert "| k (ATR multiple) |" in report_text
+        assert "| 2.0 |" in report_text
 
     def test_start_after_end_exits_without_running(self, seeded_db, tmp_path):
         db_path, days = seeded_db
@@ -1525,6 +1638,48 @@ class TestCandidateCache:
         assert len(screenings) == 1
         assert len(engine_runs) == len(ATR_MULTIPLIER_PCT_GRID) * len(MAX_HOLD_PCT_GRID)
 
+    def test_entry_grid_screens_once_and_runs_every_k_value(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        screenings: list[int] = []
+        engine_runs: list[int] = []
+        entry_values: list[float | None] = []
+        original_generate = generate_candidate_stream
+        original_run = run_backtest
+
+        def counting_generate(*args, **kwargs):
+            screenings.append(1)
+            return original_generate(*args, **kwargs)
+
+        def counting_run(*args, **kwargs):
+            engine_runs.append(1)
+            entry_values.append(args[2].entry_limit_atr_multiple)
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "generate_candidate_stream", counting_generate)
+        monkeypatch.setattr(cli_module, "run_backtest", counting_run)
+
+        main(
+            [
+                "entry-grid",
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(tmp_path / "entry-grid.md"),
+            ]
+        )
+
+        assert len(screenings) == 1
+        assert len(engine_runs) == len(entry_limit_grid_values())
+        assert entry_values == list(entry_limit_grid_values())
+
     def test_pessimistic_shares_one_screening_pass_across_both_scenarios(
         self, seeded_db, tmp_path, monkeypatch
     ):
@@ -1864,6 +2019,30 @@ class TestPolicyEndToEnd:
                     str(db_path),
                     "--output",
                     str(tmp_path / "grid.md"),
+                ]
+            )
+
+    def test_entry_grid_refuses_a_policy_instead_of_ignoring_it(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+
+        with pytest.raises(SystemExit, match=r"entry-grid サブコマンドは --policy"):
+            main(
+                [
+                    "--policy",
+                    "regime",
+                    "entry-grid",
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "entry-grid.md"),
                 ]
             )
 

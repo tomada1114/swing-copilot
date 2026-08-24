@@ -107,6 +107,13 @@ sensitivity grid:
 uv run copilot-backtest grid --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30
 ```
 
+Measure the five fixed entry-limit ATR-multiple values with the same candidate
+stream:
+
+```bash
+uv run copilot-backtest entry-grid --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30
+```
+
 Diagnose configured thresholds read-only, without touching `settings.yaml`.
 `copilot-filter-matrix` applies each screening filter/signal independently to
 the whole universe; `copilot-dd-forward` replays the stored history and reports

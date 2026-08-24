@@ -14,6 +14,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import duckdb
+
+from swing_copilot.exceptions import StorageSchemaError
 from swing_copilot.storage import (
     audit_records,
     config_records,
@@ -109,6 +112,19 @@ class StateStore:
         `_database` attribute from outside the class.
         """
         return self._database
+
+    def validate_read_only_schema(self) -> None:
+        """Verify the state table needed by read-only universe selection.
+
+        Raises:
+            StorageSchemaError: The database does not contain the state schema.
+        """
+        with self._database.connect() as conn:
+            try:
+                conn.execute("SELECT 1 FROM universe_membership LIMIT 0")
+            except duckdb.CatalogException as exc:
+                msg = "required table 'universe_membership' is missing"
+                raise StorageSchemaError(msg) from exc
 
     def init_schema(self) -> None:
         """Create every table this store owns (idempotent).

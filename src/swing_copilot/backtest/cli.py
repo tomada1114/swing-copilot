@@ -57,7 +57,7 @@ from swing_copilot.backtest.sensitivity import (
 )
 from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
-from swing_copilot.exceptions import ConfigError, SwingCopilotError
+from swing_copilot.exceptions import ConfigError, StorageSchemaError, SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
     MarketStore,
@@ -979,10 +979,27 @@ def _compose_dependencies(
 ) -> tuple[BacktestDependencies, UniverseSample, list[str]]:
     """Wire real collaborators (composition root); returns deps, sample, missing data."""
     parquet_root = _resolve_parquet_root(Path(args.db))
-    database = Database(args.db)
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        msg = (
+            f"バックテスト用DuckDBが見つかりません: {db_path}。"
+            "先に data-pull またはデータ収集を実行して、初期化済みのDBを用意してください。"
+        )
+        raise BacktestCliError(msg)
+
+    database = Database(args.db, read_only=True)
     market_store = MarketStore(database, parquet_root=parquet_root)
     state_store = StateStore(database)
-    state_store.init_schema()
+    try:
+        state_store.validate_read_only_schema()
+        market_store.validate_read_only_schema()
+    except StorageSchemaError as exc:
+        msg = (
+            f"バックテスト用DuckDBのスキーマが未初期化です: {db_path}。"
+            f"{exc}。書き込み可能な実行（data-pull またはデータ収集）で"
+            "スキーマを初期化してから再実行してください。"
+        )
+        raise BacktestCliError(msg) from exc
     universe_options = UniverseFetchOptions(
         snapshot_path=settings.universe.snapshot_path,
         manual_include=settings.universe.manual_include,

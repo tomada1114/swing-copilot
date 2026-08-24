@@ -827,6 +827,12 @@ copilot-backtest --strategy default --start 2020-01-02 --end 2026-07-30 \
     `--db`を元の場所へ向けること。「数銘柄だけバーが無い」は従来どおり警告
     のみで完走する（fail-soft）。
 
+!!! note "バックテストはDuckDBを読み取り専用で開く（Issue #358）"
+
+    `copilot-backtest`は既存のDuckDBスキーマを検証するだけで、実行中に
+    `init_schema()`や永続ビュー作成を行わない。`--db`が未作成または未初期化なら
+    終了コード1で止まるため、先に`data-pull`またはデータ収集を実行すること。
+
 `run`のレポート（`--pessimistic`の通常vs悲観比較を含む）には`Exit breakdown`
 セクションが出る。決済理由の内訳（`stop` /
 `max_hold` / `end_of_backtest`、発火0件の理由も0として必ず表示）、

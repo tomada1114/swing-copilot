@@ -21,6 +21,10 @@ class ConfigError(SwingCopilotError):
     """Raised when settings or secrets fail validation."""
 
 
+class StorageSchemaError(SwingCopilotError):
+    """Raised when a read-only command cannot find its required schema."""
+
+
 class PreflightAbort(SwingCopilotError):  # noqa: N818 - named "Abort" per P8-117's design
     """Raised to intentionally abort a run before any state is recorded.
 

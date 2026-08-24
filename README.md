@@ -82,6 +82,9 @@ Add `--pessimistic` to also run a higher-slippage scenario (1.75x) and print a
 normal-vs-pessimistic comparison, checking the strategy doesn't rely on
 unrealistically favorable fills.
 
+`copilot-backtest` opens the existing DuckDB read-only; initialize or pull the
+database first when using a new `--db` path.
+
 Backtest sizing uses `backtest.sim_trade_risk_pct`,
 `backtest.sim_position_cap_pct`, and `backtest.max_concurrent_positions` as
 nominal simulation values. They are not production account settings or

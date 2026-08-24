@@ -590,7 +590,8 @@ def two_symbol_universe(monkeypatch):
 @pytest.fixture
 def seeded_db(tmp_path):
     db_path = tmp_path / "copilot.duckdb"
-    store = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+    database = Database(db_path)
+    store = MarketStore(database, parquet_root=tmp_path / "bars")
     days = [date(2027, 1, 1 + i) for i in range(10)]
     rows = [
         *flat_bars("SPY", days, 400.0),
@@ -603,6 +604,9 @@ def seeded_db(tmp_path):
         # BBB intentionally has no bars -- exercises the missing-data warning.
     ]
     store.write_bars(bars_frame(_with_provider_columns(rows)))
+    StateStore(database).init_schema()
+    with store.get_connection():
+        pass
     return db_path, days
 
 
@@ -765,6 +769,83 @@ class TestMissingBarsRootFailsFast:
 
         assert "データ不足のためスキップ: BBB" in capsys.readouterr().out
         assert output_path.exists()
+
+
+@pytest.mark.usefixtures("two_symbol_universe")
+class TestReadOnlyDatabase:
+    """The backtest must never migrate or rewrite the operator's database."""
+
+    def test_run_preserves_initialized_database_bytes_and_mtime(
+        self, seeded_db, tmp_path
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "report.md"
+        before_bytes = db_path.read_bytes()
+        before_mtime_ns = db_path.stat().st_mtime_ns
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+        assert db_path.read_bytes() == before_bytes
+        assert db_path.stat().st_mtime_ns == before_mtime_ns
+
+    def test_existing_uninitialized_database_fails_explicitly(self, tmp_path):
+        db_path = tmp_path / "uninitialized.duckdb"
+        bars_root = tmp_path / "bars"
+        bars_root.mkdir()
+        Database(db_path).connect().close()
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    "2027-01-01",
+                    "--end",
+                    "2027-01-10",
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(tmp_path / "report.md"),
+                ]
+            )
+
+        assert "未初期化" in str(excinfo.value)
+        assert "universe_membership" in str(excinfo.value)
+
+    def test_missing_database_fails_without_creating_it(self, tmp_path):
+        db_path = tmp_path / "missing.duckdb"
+        (tmp_path / "bars").mkdir()
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    "2027-01-01",
+                    "--end",
+                    "2027-01-10",
+                    "--db",
+                    str(db_path),
+                ]
+            )
+
+        assert "見つかりません" in str(excinfo.value)
+        assert not db_path.exists()
 
 
 @pytest.mark.usefixtures("two_symbol_universe")
@@ -1791,7 +1872,8 @@ class TestPolicyEndToEnd:
         self, tmp_path, monkeypatch
     ):
         db_path = tmp_path / "copilot.duckdb"
-        store = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+        database = Database(db_path)
+        store = MarketStore(database, parquet_root=tmp_path / "bars")
         days = [date(2027, 1, 1 + i) for i in range(10)]
         store.write_bars(
             bars_frame(
@@ -1800,6 +1882,9 @@ class TestPolicyEndToEnd:
                 )
             )
         )
+        StateStore(database).init_schema()
+        with store.get_connection():
+            pass
         monkeypatch.setattr(
             cli_module,
             "get_sp500_universe",

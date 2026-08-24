@@ -20,15 +20,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import duckdb
 import pandas as pd
 
-from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.exceptions import StorageSchemaError, SwingCopilotError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date, datetime
-
-    import duckdb
 
     from swing_copilot.storage.database import Database
 
@@ -380,25 +379,41 @@ class MarketStore:
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """Return a DuckDB connection ready to query fundamentals and bars.
 
-        `fundamentals` and `fundamentals_fetch_log` are always ensured; the
+        Write connections ensure `fundamentals` and `fundamentals_fetch_log`;
+        read-only connections require those tables to already exist. The
         `bars` view is (re)created only when at least one bar partition file
-        exists.
+        exists, and is temporary for read-only connections.
 
         Returns:
             A connection usable as a context manager.
         """
         conn = self._database.connect()
-        conn.execute(_CREATE_FUNDAMENTALS_TABLE)
-        conn.execute(_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE)
-        for statement in _ALTER_FUNDAMENTALS_FETCH_LOG_STATEMENTS:
-            conn.execute(statement)
+        if not self._database.read_only:
+            conn.execute(_CREATE_FUNDAMENTALS_TABLE)
+            conn.execute(_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE)
+            for statement in _ALTER_FUNDAMENTALS_FETCH_LOG_STATEMENTS:
+                conn.execute(statement)
         if self._has_partition_files():
             glob = str(self.parquet_root / "year=*" / "*.parquet")
+            view_kind = "TEMP " if self._database.read_only else ""
             conn.execute(
-                f"CREATE OR REPLACE VIEW bars AS "  # noqa: S608 - glob is a local path, not user input
+                f"CREATE OR REPLACE {view_kind}VIEW bars AS "  # noqa: S608 - glob is a local path, not user input
                 f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true)"
             )
         return conn
+
+    def validate_read_only_schema(self) -> None:
+        """Verify the fundamentals table without running migrations.
+
+        Raises:
+            StorageSchemaError: The database does not contain fundamentals.
+        """
+        with self._database.connect() as conn:
+            try:
+                conn.execute("SELECT 1 FROM fundamentals LIMIT 0")
+            except duckdb.CatalogException as exc:
+                msg = "required table 'fundamentals' is missing"
+                raise StorageSchemaError(msg) from exc
 
     def write_bars(self, df: pd.DataFrame) -> None:
         """Upsert daily OHLCV rows, partitioned by year, `(symbol, date)`-keyed.

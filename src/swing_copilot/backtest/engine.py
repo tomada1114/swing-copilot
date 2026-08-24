@@ -89,8 +89,8 @@ class Trade:
     shares: int
     exit_reason: str  # "stop" | "max_hold" | "end_of_backtest"
     # Stop price at entry fill time, before any later trailing-stop update
-    # (P2-07's R-multiple is against the risk actually taken at entry, not
-    # today's trailed stop). None only if never recorded.
+    # (P2-07's R-multiple is against the planned risk basis committed at
+    # entry, not today's trailed stop). None only if never recorded.
     initial_stop_price: float | None = None
     # Total round-trip commission in USD. Slippage is already reflected in
     # entry_price/exit_price; commission is tracked separately so every
@@ -101,6 +101,10 @@ class Trade:
     # that only exercise P&L metrics need not restate it; the engine itself
     # always passes the real count.
     days_held: int = 0
+    # Planned price used by position sizing; unlike entry_price, this remains
+    # stable when the fill gaps through the signal-day stop. Appended after
+    # the existing defaults to preserve positional fixture compatibility.
+    risk_basis_price: float | None = None
 
     @property
     def pnl(self) -> float:
@@ -153,6 +157,7 @@ class _OpenPosition:
     shares: int
     stop_price: float
     initial_stop_price: float
+    risk_basis_price: float
     entry_commission_usd: float
     days_held: int = 0
 
@@ -650,6 +655,7 @@ class BacktestEngine:
             shares=shares,
             stop_price=stop_price,
             initial_stop_price=stop_price,
+            risk_basis_price=execution.sizing_price,
             entry_commission_usd=entry_commission,
         )
         return None
@@ -698,6 +704,7 @@ class BacktestEngine:
                 shares=position.shares,
                 exit_reason=exit_reason,
                 initial_stop_price=position.initial_stop_price,
+                risk_basis_price=position.risk_basis_price,
                 commission_usd=position.entry_commission_usd + exit_commission,
                 days_held=position.days_held,
             )

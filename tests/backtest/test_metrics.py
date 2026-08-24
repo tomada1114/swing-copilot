@@ -43,6 +43,7 @@ def _trade(
     shares: int = 10,
     initial_stop_price: float | None = 90.0,
     entry_price: float = 100.0,
+    risk_basis_price: float | None = None,
 ) -> Trade:
     exit_price = entry_price + pnl / shares
     return Trade(
@@ -54,6 +55,7 @@ def _trade(
         shares=shares,
         exit_reason="stop",
         initial_stop_price=initial_stop_price,
+        risk_basis_price=risk_basis_price,
     )
 
 
@@ -159,6 +161,20 @@ class TestAvgRMultiple:
     def test_stop_at_or_above_entry_is_omitted(self):
         trade = _trade(pnl=100.0, entry_price=100.0, initial_stop_price=100.0)
         assert compute_avg_r_multiple((trade,)) is None
+
+    def test_uses_the_planned_risk_basis_instead_of_the_fill_price(self):
+        trade = _trade(
+            pnl=-120.0,
+            shares=10,
+            entry_price=95.0,
+            initial_stop_price=90.0,
+            risk_basis_price=100.0,
+        )
+
+        # The fill is $95, but sizing used $100 against the $90 stop:
+        # -120 / ((100 - 90) * 10) = -1.2R.
+        assert trade_r_multiple(trade) == pytest.approx(-1.2)
+        assert compute_avg_r_multiple((trade,)) == pytest.approx(-1.2)
 
     def test_no_trades_is_none(self):
         assert compute_avg_r_multiple(()) is None
@@ -375,6 +391,7 @@ class _ForeignTrade:
     pnl: float
     initial_stop_price: float | None
     exit_reason: str
+    risk_basis_price: float | None
     entry_date: date = _D0
     exit_date: date = _D1
     entry_price: float = 100.0
@@ -386,8 +403,18 @@ class _ForeignTrade:
 class TestClosedTradeProtocol:
     def test_a_foreign_ledgers_row_is_measured_without_becoming_a_trade(self):
         trades = (
-            _ForeignTrade(pnl=12.0, initial_stop_price=90.0, exit_reason="manual"),
-            _ForeignTrade(pnl=-4.0, initial_stop_price=90.0, exit_reason="stop"),
+            _ForeignTrade(
+                pnl=12.0,
+                initial_stop_price=90.0,
+                exit_reason="manual",
+                risk_basis_price=None,
+            ),
+            _ForeignTrade(
+                pnl=-4.0,
+                initial_stop_price=90.0,
+                exit_reason="stop",
+                risk_basis_price=None,
+            ),
         )
 
         assert compute_win_rate(trades) == 0.5
@@ -399,20 +426,35 @@ class TestClosedTradeProtocol:
     def test_a_single_trades_r_multiple_is_available_for_omission_counting(self):
         assert (
             trade_r_multiple(
-                _ForeignTrade(pnl=12.0, initial_stop_price=None, exit_reason="stop")
+                _ForeignTrade(
+                    pnl=12.0,
+                    initial_stop_price=None,
+                    exit_reason="stop",
+                    risk_basis_price=None,
+                )
             )
             is None
         )
         assert (
             trade_r_multiple(
-                _ForeignTrade(pnl=12.0, initial_stop_price=100.0, exit_reason="stop")
+                _ForeignTrade(
+                    pnl=12.0,
+                    initial_stop_price=100.0,
+                    exit_reason="stop",
+                    risk_basis_price=None,
+                )
             )
             is None
         )
 
     def test_a_ledgers_own_exit_vocabulary_replaces_the_simulators(self):
         trades = (
-            _ForeignTrade(pnl=1.0, initial_stop_price=None, exit_reason="manual"),
+            _ForeignTrade(
+                pnl=1.0,
+                initial_stop_price=None,
+                exit_reason="manual",
+                risk_basis_price=None,
+            ),
         )
 
         assert exit_reason_breakdown(trades, ("stop", "max_hold", "manual")) == {

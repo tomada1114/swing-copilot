@@ -603,14 +603,15 @@ class TestGapStop:
         assert result.trades[0].days_held == 0
         assert result.trades[0].exit_reason == "stop"
         assert result.trades[0].exit_date == days[2]
-        # This anchor unification is what first makes `entry_price <
-        # initial_stop_price` possible (the fill gapped straight through a
-        # stop anchored to the *signal* close, not to the fill itself), and
-        # `trade_r_multiple` (backtest/metrics.py) treats a non-positive
-        # entry-to-stop distance as unrepresentable and omits the trade from
-        # `avg_r_multiple` rather than computing a nonsensical negative-risk
-        # ratio. Pinned here so the omission reads as known, not missed.
-        assert result.avg_r_multiple is None
+        assert result.trades[0].risk_basis_price == pytest.approx(limit_price)
+        # The planned risk remains limit_price - stop_price even though the
+        # fill gapped below the signal-day stop; pnl still reflects both-side
+        # slippage and commission, so this hand calculation is -0.152R.
+        expected_r_multiple = (exit_proceeds - entry_cost) / (
+            (limit_price - stop_price) * shares
+        )
+        assert expected_r_multiple == pytest.approx(-0.152)
+        assert result.avg_r_multiple == pytest.approx(expected_r_multiple)
 
     def test_intraday_touch_fills_at_stop_price_not_low(self, engine):
         days = TRADING_DAYS[:5]
@@ -982,6 +983,7 @@ class TestRiskAdjustedMetricsWiring:
         assert len(result.trades) == 1
         assert result.trades[0].initial_stop_price is not None
         assert result.trades[0].initial_stop_price < result.trades[0].entry_price
+        assert result.trades[0].risk_basis_price == pytest.approx(100.0)
 
     def test_no_trades_reports_insufficient_sample_warning_and_none_metrics(
         self, engine

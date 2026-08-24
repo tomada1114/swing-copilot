@@ -29,6 +29,7 @@ from swing_copilot.retro.aggregate import (
     compute_source_contribution,
     compute_tracked_performance,
     compute_verdict_mix,
+    shadow_trade,
     wilson_interval,
 )
 from swing_copilot.storage.tracking_records import (
@@ -977,9 +978,13 @@ class TestTrackedPerformance:
         # The position row's own stop_price has since ratcheted to 95, which
         # would report +2.0 and overstate the edge.
         position = _tracked("A", "proceed", exit_price=110.0)
+        marks = _entry_marks(position)
+        trade = shadow_trade(position, marks[(position.run_id, position.symbol)])
+        assert trade is not None
+        assert trade.risk_basis_price is None
         rows = {
             row.recommendation: row
-            for row in compute_tracked_performance((position,), _entry_marks(position))
+            for row in compute_tracked_performance((position,), marks)
         }
 
         assert rows["proceed"].avg_r_multiple == pytest.approx(1.0)

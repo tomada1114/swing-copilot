@@ -270,6 +270,7 @@ class ShadowTrade:
     exit_price: float
     shares: float
     initial_stop_price: float | None
+    risk_basis_price: float | None
     exit_reason: str
     days_held: int
 
@@ -783,6 +784,7 @@ def shadow_trade(
         exit_price=position.exit_price,
         shares=_SHADOW_NOTIONAL_USD / position.entry_price,
         initial_stop_price=None if initial_mark is None else initial_mark.stop_price,
+        risk_basis_price=None,
         exit_reason=position.exit_reason,
         days_held=position.days_held,
     )

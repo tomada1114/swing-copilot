@@ -38,10 +38,13 @@ class ClosedTrade(Protocol):
     days). Deriving them here would silently strip commission out of every
     backtest metric.
 
-    `initial_stop_price` is the stop *at entry*, before any trailing update:
-    an R-multiple measures the risk actually taken when the position was put
-    on. `None` means it was never recorded, which excludes the trade from the
-    R-multiple average rather than counting it as zero risk.
+    `risk_basis_price` is the planned price used to size the position, or
+    `None` when the ledger has no planned-risk basis and `entry_price` is used
+    as the compatibility fallback. `initial_stop_price` is the stop *at
+    entry*, before any trailing update: an R-multiple measures the planned
+    risk that was used when the position was put on. `None` means it was never
+    recorded, which excludes the trade from the R-multiple average rather
+    than counting it as zero risk.
     """
 
     @property
@@ -52,6 +55,11 @@ class ClosedTrade(Protocol):
     @property
     def entry_price(self) -> float:
         """Entry fill price, slippage included where the ledger models it."""
+        ...  # pragma: no cover
+
+    @property
+    def risk_basis_price(self) -> float | None:
+        """Planned price used for sizing, or `None` without planned risk."""
         ...  # pragma: no cover
 
     @property
@@ -215,20 +223,20 @@ def trade_r_multiple(trade: ClosedTrade) -> float | None:
 
     Returns:
         `pnl / (risk_per_share * shares)`, or `None` when the initial stop
-        was never recorded or sits at/above the entry. Since Issue #341
-        anchored `initial_stop_price` to the signal-day close rather than the
-        fill, this is no longer only a data anomaly: a fill that gaps straight
-        through its own stop on the same session it opened (see
-        `TestGapStop::test_gap_below_initial_stop_on_fill_day_settles_with_both_side_costs`)
-        legitimately has entry <= initial_stop, and is likewise omitted rather
-        than reported as a nonsensical negative-risk ratio. Public so callers
-        that must *report* how many trades were omitted -- `paper/journal.py`'s
-        `r_multiple_omitted_count` -- can count them without re-deriving the
-        rule.
+        was never recorded or the planned risk basis sits at/above the
+        initial stop. Backtest trades use the sizing price as the basis, so
+        entry slippage changes `pnl` without changing the planned-risk
+        denominator; a fill that gaps below its signal-day stop is therefore
+        measured as a negative R-multiple rather than omitted for its fill
+        price. Ledgers without a planned-risk basis fall back to
+        `entry_price` so their existing accounting remains unchanged.
     """
     if trade.initial_stop_price is None:
         return None
-    risk_per_share = trade.entry_price - trade.initial_stop_price
+    risk_basis_price = trade.risk_basis_price
+    if risk_basis_price is None:
+        risk_basis_price = trade.entry_price
+    risk_per_share = risk_basis_price - trade.initial_stop_price
     if risk_per_share <= 0:
         return None
     return trade.pnl / (risk_per_share * trade.shares)

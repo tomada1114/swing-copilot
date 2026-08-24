@@ -379,9 +379,10 @@ class MarketStore:
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """Return a DuckDB connection ready to query fundamentals and bars.
 
-        `fundamentals` and `fundamentals_fetch_log` are always ensured; the
+        Write connections ensure `fundamentals` and `fundamentals_fetch_log`;
+        read-only connections require those tables to already exist. The
         `bars` view is (re)created only when at least one bar partition file
-        exists.
+        exists, and is temporary for read-only connections.
 
         Returns:
             A connection usable as a context manager.

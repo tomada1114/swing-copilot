@@ -361,8 +361,7 @@ def _seed_position(
         days_held=0,
         status=OPEN,
         last_marked_date=candidate.as_of,
-        # This is a display snapshot of the plan at entry.  `_advance` keeps
-        # reading `config.max_hold_days` so this does not change exit logic.
+        # Freeze the holding rule at entry for both replay and public display.
         max_hold_days=config.max_hold_days,
     )
     seed_mark = VerdictPositionMark(
@@ -423,7 +422,7 @@ def _advance(
             close=close,
             stop_price=position.stop_price,
             days_held=position.days_held,
-            max_hold_days=config.max_hold_days,
+            max_hold_days=position.max_hold_days,
         )
         if decision is not None:
             position = replace(

@@ -21,7 +21,11 @@ from swing_copilot.analysis.export import (
     write_json_atomically,
 )
 from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION_ITEMS
-from swing_copilot.analysis.schemas import AnalysisInput
+from swing_copilot.analysis.schemas import (
+    AnalysisContextBlocks,
+    AnalysisInput,
+    CandidateInput,
+)
 from swing_copilot.regime.distribution import (
     DataQuality,
     DistributionLevel,
@@ -644,6 +648,32 @@ class TestAtomicWrite:
         write_json_atomically(destination, {"generation": 2})
 
         assert json.loads(destination.read_text(encoding="utf-8")) == {"generation": 2}
+
+
+class TestRetiredFieldsAreReadOnly:
+    """Issue #374: the retirement registry (`_RETIRED_FIELDS`) never writes."""
+
+    def test_export_never_writes_a_field_retired_from_analysis_input(self, tmp_path):
+        """The registry is read-only: nothing on it reaches a written archive.
+
+        `CandidateInput`/`AnalysisContextBlocks` drop their retired keys on
+        *read* only, so archives written before Issue #324 removed them keep
+        parsing. This runs the real write path (`build_analysis_input` ->
+        `write_analysis_input`) and checks the raw bytes of the file it
+        produces for every name the registry knows about, so a future
+        re-introduction of either field on the write side would be caught even
+        if nobody thought to grep for it by name.
+        """
+        path = write_analysis_input(build_analysis_input(_request()), tmp_path)
+        raw_text = path.read_text(encoding="utf-8")
+
+        retired_fields = (
+            CandidateInput._RETIRED_FIELDS  # noqa: SLF001
+            | AnalysisContextBlocks._RETIRED_FIELDS  # noqa: SLF001
+        )
+        assert retired_fields, "the registry must not go empty while this test exists"
+        for retired_field in retired_fields:
+            assert retired_field not in raw_text
 
 
 class TestPriorVerdictsExport:

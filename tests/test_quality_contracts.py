@@ -7,31 +7,12 @@ import json
 import re
 import subprocess
 import tomllib
-from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import uuid4
 
 import duckdb
 import pytest
 
-from swing_copilot.analysis.export import (
-    ExportCandidate,
-    ExportRequest,
-    TextExportLimits,
-    build_analysis_input,
-    write_analysis_input,
-)
-from swing_copilot.analysis.schemas import AnalysisContextBlocks, CandidateInput
 from swing_copilot.pipeline import daily, daily_composition, daily_runner
-from swing_copilot.regime.distribution import (
-    DataQuality,
-    DistributionLevel,
-    DistributionResult,
-)
-from swing_copilot.regime.exposure import ExposureDecision, ExposureVerdict
-from swing_copilot.regime.gate import GateVerdict, MarketGate, RegimeSnapshot
-from swing_copilot.risk.checks import RiskAssessment
-from swing_copilot.screening.base import Candidate
 from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.storage.market_store import DEFAULT_PARQUET_ROOT
 from tests.conftest import _REPO_DATA_DIR, _guard_repo_directory
@@ -248,89 +229,6 @@ def test_no_package_reaches_into_analysis_for_atomic_writes():
         "import the atomic writers from swing_copilot.io_atomic: "
         + ", ".join(violations)
     )
-
-
-def test_export_never_writes_a_field_retired_from_analysis_input(tmp_path):
-    """Issue #374: the retirement registry (`_RETIRED_FIELDS`) is read-only.
-
-    `CandidateInput`/`AnalysisContextBlocks` drop `decision_history` /
-    `performance_summary` on *read* only, so archives written before Issue
-    #324 removed them keep parsing. This runs the real write path
-    (`build_analysis_input` -> `write_analysis_input`) and checks the raw
-    bytes of the file it produces for every name the registry knows about, so
-    a future re-introduction of either field on the write side would be
-    caught even if nobody thought to grep for it by name.
-    """
-    as_of = date(2027, 3, 1)
-    distribution = DistributionResult(
-        d25=1.0,
-        d15=0.0,
-        d5=0.0,
-        level=DistributionLevel.NORMAL,
-        data_quality=DataQuality.OK,
-    )
-    request = ExportRequest(
-        as_of=as_of,
-        run_id=uuid4(),
-        strategy_key="default",
-        generated_at=datetime(2027, 3, 1, 12, tzinfo=UTC),
-        regime_snapshot=RegimeSnapshot(
-            as_of=as_of,
-            gate=MarketGate(GateVerdict.BULL, 100.0, 95.0, 15.0),
-            spy_distribution=distribution,
-            qqq_distribution=distribution,
-            dd_level=DistributionLevel.NORMAL,
-            data_quality=DataQuality.OK,
-        ),
-        exposure_decision=ExposureDecision(
-            verdict=ExposureVerdict.NEW_ENTRY_ALLOWED,
-            gate=GateVerdict.BULL,
-            dd_level=DistributionLevel.NORMAL,
-            data_quality=DataQuality.OK,
-            is_conservatively_downgraded=False,
-        ),
-        candidates=(
-            ExportCandidate(
-                candidate=Candidate(
-                    symbol="AAPL",
-                    as_of=as_of,
-                    signal_names=("trend_sma",),
-                    metrics={"score": 0.5},
-                    rank=1,
-                ),
-                risk_assessment=RiskAssessment(
-                    symbol="AAPL",
-                    status="approved",
-                    entry_price=100.0,
-                    limit_price=101.0,
-                    stop_price=95.0,
-                    atr14=2.0,
-                    stop_distance_pct=(101.0 - 95.0) / 101.0,
-                    reasons=(),
-                ),
-                text_items=(),
-            ),
-        ),
-        limits=TextExportLimits(
-            max_news_items=2,
-            max_news_chars=20,
-            max_filing_chars=15,
-            max_filing_chars_per_symbol=30,
-            max_calendar_events=2,
-            max_calendar_chars=20,
-        ),
-    )
-
-    written_path = write_analysis_input(build_analysis_input(request), tmp_path)
-    raw_text = written_path.read_text(encoding="utf-8")
-
-    retired_fields = (
-        CandidateInput._RETIRED_FIELDS  # noqa: SLF001
-        | AnalysisContextBlocks._RETIRED_FIELDS  # noqa: SLF001
-    )
-    assert retired_fields, "the registry must not go empty while this test exists"
-    for retired_field in retired_fields:
-        assert retired_field not in raw_text
 
 
 def test_repo_data_guard_rejects_a_duckdb_connection_under_the_repo_data_dir():

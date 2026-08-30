@@ -155,9 +155,7 @@ class _ArchiveReadableModel(_StrictModel):
             model's retired keys; otherwise a shallow copy with those keys
             removed.
         """
-        if not isinstance(value, dict) or not cls._RETIRED_FIELDS:
-            return value
-        if not cls._RETIRED_FIELDS & value.keys():
+        if not isinstance(value, dict) or not cls._RETIRED_FIELDS & value.keys():
             return value
         return {k: v for k, v in value.items() if k not in cls._RETIRED_FIELDS}
 

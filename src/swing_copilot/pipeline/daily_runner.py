@@ -423,8 +423,15 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
             )
         except Exception as exc:
+            # Issue #376: distinct from `no_trading_day` below. This is not
+            # "the market has not closed yet" -- it is a data-provider outage
+            # that made the closed-session judgment impossible to make at
+            # all, and both `.claude/skills/swing-daily/SKILL.md` and
+            # `scripts/check_daily_complete.py` must treat it as a failure
+            # (non-actionable-but-clean and actually-broken must not share a
+            # reason, or a transient outage silently turns the CI job green).
             msg = f"preflight abort: 価格データの取得に失敗した ({exc})。引けた取引日を判定できない。"
-            raise PreflightAbort(msg, reason="no_trading_day") from exc
+            raise PreflightAbort(msg, reason="price_fetch_failed") from exc
         run_date = _resolve_closed_run_date(prefetched_prices.bars, deps.clock.now())
 
     if not options.allow_same_day_rerun:

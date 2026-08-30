@@ -296,10 +296,18 @@ substitute for `as_of`」への違反）、成功時も「取得できた最新�
 
 修正後は、取得できたバーのうち**米国東部時間 16:00 を過ぎて引けたセッション**
 の最新日だけを `run_date` に採る。条件を満たす日付が1つも無ければ（空
-プリフェッチ・プリフェッチ例外・全バーが未引けのいずれでも）、新しい abort
-理由 `PREFLIGHT_ABORT[no_trading_day]` で `start_run()` より前に中止し、
-`runs` へは何も書かない。`--as-of` 明示時はこの判定を経由せず、従来どおり
-指定日を無条件に採用する。
+プリフェッチ・全バーが未引けのいずれでも）、abort 理由
+`PREFLIGHT_ABORT[no_trading_day]` で `start_run()` より前に中止し、`runs`
+へは何も書かない。`--as-of` 明示時はこの判定を経由せず、従来どおり指定日を
+無条件に採用する。
+
+プリフェッチ自体が例外を送出した場合は別の abort 理由
+`PREFLIGHT_ABORT[price_fetch_failed]` を使う（Issue #376）。空プリフェッチ・
+全バー未引けは「セッションがまだ引けていない」という正当な停止だが、
+プリフェッチ例外はデータプロバイダ障害等の真の失敗であり、引けた取引日を
+判定すること自体ができなかった、という別の事実を表す。同じ理由に丸めると
+一時的なネットワーク障害が「取引日が無い」という正常終了として見逃され、
+`scripts/check_daily_complete.py` がジョブを緑にしてしまう。
 
 この機能の主目的は「`copilot-daily` が一度も起動していない」ことと「正当に
 `preflight abort` した」ことを事後に区別できるようにすることでもある。
@@ -308,18 +316,24 @@ substitute for `as_of`」への違反）、成功時も「取得できた最新�
 の外にある1つのJSON（`--outcome-file`、既定は `COPILOT_DAILY_OUTCOME_FILE`
 環境変数）へ、preflight abort を含む全終了経路で書く。
 `scripts/check_daily_complete.py` はこのファイルが渡されたとき、無ければ
-即失敗、`outcome=="preflight_abort"` なら即合格とし、それ以外は従来どおり
-候補数と `analysis_result.json` の有無で判定する。
+即失敗、`outcome=="preflight_abort"` かつ `reason` が正当な停止のホワイト
+リスト（`same_day_rerun`・`no_trading_day`）に載っていれば即合格とし、
+それ以外（`price_fetch_failed` や未知・欠落の `reason` を含む）は即失敗、
+`outcome` がそのいずれでもなければ従来どおり候補数と `analysis_result.json`
+の有無で判定する（Issue #376）。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |
-| `pipeline/daily_runner.py` | `--as-of` 未指定でプリフェッチが空/例外のとき `run_date` が壁時計にならず `PreflightAbort(reason="no_trading_day")` で止まる | 空プリフェッチ時に `run_date` を `deps.clock.today()` のまま残し、まだ引けていない当日で run を開始する | `tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_empty_prefetch_aborts_with_no_trading_day_and_writes_no_run`、`tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_prefetch_exception_aborts_with_no_trading_day` |
+| `pipeline/daily_runner.py` | `--as-of` 未指定でプリフェッチが空のとき `run_date` が壁時計にならず `PreflightAbort(reason="no_trading_day")` で止まる | 空プリフェッチ時に `run_date` を `deps.clock.today()` のまま残し、まだ引けていない当日で run を開始する | `tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_empty_prefetch_aborts_with_no_trading_day_and_writes_no_run` |
+| `pipeline/daily_runner.py` | `--as-of` 未指定でプリフェッチが例外を送出したとき `PreflightAbort(reason="price_fetch_failed")` で止まり、`no_trading_day` とは区別される | プリフェッチ例外を `no_trading_day` に丸め、データ取得障害を「取引日が無い」という正常終了として見逃す | `tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_prefetch_exception_aborts_with_price_fetch_failed_and_writes_no_run` |
 | `pipeline/daily_runner.py` | `run_date` は米国東部時間 16:00 を過ぎて引けたセッションの最新日であり、境界は 16:00 ET を含む | 最新 bar が当日かつ 16:00 ET 前でもその日を `run_date` として採用する | `tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_latest_bar_still_mid_session_falls_back_to_the_prior_close`、`tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_latest_bar_exactly_at_the_close_boundary_is_used`、`tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_latest_bar_just_after_the_close_is_used` |
 | `pipeline/daily_runner.py` | 土曜の壁時計でも、最新の引けたセッションが金曜なら `run_date` は金曜になる | 壁時計の「今日」（土曜）をそのまま `run_date` にしてしまう | `tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions::test_saturday_wall_clock_with_fridays_bar_resolves_to_friday` |
 | `pipeline/daily_runner.py` | `--as-of` 明示時は閉じたセッション判定を経由せず、指定日をそのまま採用する | `--as-of` でもプリフェッチ・16:00 ET 判定を通し、壁時計次第で結果が変わる | `tests/pipeline/test_daily_core.py::TestAsOfDefaulting::test_explicit_as_of_bypasses_the_closed_session_check` |
 | `pipeline/daily_composition.py` | `--outcome-file`（またはその環境変数フォールバック）を与えたとき、preflight abort を含む全終了経路で終了状態 JSON を書く | preflight abort 経路だけ outcome ファイルが書かれず、その日の起動有無が事後に判別できない | `tests/pipeline/test_cli.py::TestOutcomeFile::test_every_terminal_status_writes_the_outcome_file`、`tests/pipeline/test_cli.py::TestOutcomeFile::test_preflight_abort_writes_the_outcome_file` |
+| `pipeline/daily_composition.py` | `PREFLIGHT_ABORT[<reason>]:` の `reason` は `PreflightAbort.reason` をそのまま反映し、`price_fetch_failed` を含むどの理由でも stderr とoutcome ファイルの両方に伝わる | 新しい理由を追加してもタグ生成ロジックが `no_trading_day`/`same_day_rerun` だけをハードコードして無視する | `tests/pipeline/test_cli.py::TestPreflightAbortStderrContract::test_the_first_stderr_line_carries_the_tagged_reason`（`price_fetch_failed` を含む3値で parametrize） |
 | `pipeline/daily_composition.py` | `--outcome-file` 未指定なら何も書かず、既存呼び出しの挙動を変えない | 既定を「常に書く」に倒し、outcome ファイルが無い前提の既存運用を壊す | `tests/pipeline/test_cli.py::TestOutcomeFile::test_no_outcome_file_flag_writes_nothing` |
 | `pipeline/daily_composition.py` | `COPILOT_DAILY_OUTCOME_FILE` 環境変数はフォールバックであり、`--outcome-file` が優先される | 環境変数を無視する、または優先順位が逆になり CI の設定が効かない | `tests/pipeline/test_cli.py::TestOutcomeFileEnvironmentFallback::test_environment_variable_is_used_when_the_flag_is_absent`、`tests/pipeline/test_cli.py::TestOutcomeFileEnvironmentFallback::test_explicit_flag_overrides_the_environment_variable` |
 | `scripts/check_daily_complete.py` | outcome ファイルが渡され、かつ存在しなければ DB の内容によらず即失敗する | 前日以前の run が DB に残っているせいで、`copilot-daily` が一度も起動していない日を合格にしてしまう | `tests/test_check_daily_complete.py::TestOutcomeFile::test_missing_outcome_file_fails_even_with_no_started_after` |
-| `scripts/check_daily_complete.py` | outcome ファイルの `outcome` が `preflight_abort` なら DB を参照せず合格にする | 正当な preflight abort を「未完了」として誤って失敗させる | `tests/test_check_daily_complete.py::TestOutcomeFile::test_preflight_abort_outcome_passes_without_consulting_the_db` |
+| `scripts/check_daily_complete.py` | outcome ファイルの `outcome` が `preflight_abort` かつ `reason` がホワイトリスト（`same_day_rerun`・`no_trading_day`）に載っていれば DB を参照せず合格にする | 正当な preflight abort を「未完了」として誤って失敗させる | `tests/test_check_daily_complete.py::TestOutcomeFile::test_preflight_abort_outcome_passes_without_consulting_the_db` |
+| `scripts/check_daily_complete.py` | `outcome=="preflight_abort"` でも `reason` がホワイトリスト外（`price_fetch_failed`・未知の理由・`reason` 欠落）なら DB を参照せず失敗にする（fail-closed） | 「`outcome=="preflight_abort"` ならどんな `reason` でも合格」に緩め、価格取得失敗という真の失敗を正当な停止として見逃しジョブを緑にする | `tests/test_check_daily_complete.py::TestOutcomeFile::test_price_fetch_failed_reason_fails_the_check`、`tests/test_check_daily_complete.py::TestOutcomeFile::test_unknown_reason_fails_the_check`、`tests/test_check_daily_complete.py::TestOutcomeFile::test_missing_reason_fails_the_check` |
 | `.github/workflows/swing-daily.yml` | job の `env:` が `COPILOT_DAILY_OUTCOME_FILE` を定義し、`Claude` の実行ログ（`execution_file`）を `if: always()` で artifact アップロードする | 環境変数がステップ限定になりセッションの挙動次第で効かなくなる、または失敗時に事後診断できる材料が残らない | `tests/test_quality_contracts.py::test_daily_workflow_wires_the_outcome_file_and_uploads_the_execution_log` |

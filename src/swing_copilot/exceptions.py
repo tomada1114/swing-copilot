@@ -7,11 +7,14 @@ from typing import Literal
 #: Why a run was intentionally aborted before any state was written. A closed
 #: vocabulary, kept as a `Literal`, because the unattended `swing-daily` skill
 #: branches on the tag rather than on prose: today a `same_day_rerun` is
-#: summarized as "already analyzed today", and a `no_trading_day` (Issue #372)
-#: as "no trading day to analyze yet". The `account_equity_unset` cause went
-#: with the real-trade record removal (2026-08) -- no daily run has realized
-#: P&L to halt over any more.
-PreflightAbortReason = Literal["same_day_rerun", "no_trading_day"]
+#: summarized as "already analyzed today", a `no_trading_day` (Issue #372) as
+#: "no trading day to analyze yet", and a `price_fetch_failed` (Issue #376) as
+#: a genuine failure that must be reported, not summarized as a clean day --
+#: unlike the other two, this one means the price prefetch itself raised, so
+#: whether a session has even closed could not be determined at all. The
+#: `account_equity_unset` cause went with the real-trade record removal
+#: (2026-08) -- no daily run has realized P&L to halt over any more.
+PreflightAbortReason = Literal["same_day_rerun", "no_trading_day", "price_fetch_failed"]
 
 
 class SwingCopilotError(Exception):

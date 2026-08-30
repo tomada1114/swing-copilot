@@ -637,7 +637,9 @@ class TestPreflightAbortStderrContract:
         )
         monkeypatch.setattr(daily_module, "run_daily", lambda *_args, **_kwargs: None)
 
-    @pytest.mark.parametrize("reason", ["same_day_rerun", "no_trading_day"])
+    @pytest.mark.parametrize(
+        "reason", ["same_day_rerun", "no_trading_day", "price_fetch_failed"]
+    )
     def test_the_first_stderr_line_carries_the_tagged_reason(
         self, monkeypatch, capsys, reason
     ):
@@ -767,13 +769,24 @@ class TestOutcomeFile:
             "finished_at": self._FINISHED_AT.isoformat(),
         }
 
-    def test_preflight_abort_writes_the_outcome_file(self, monkeypatch, tmp_path):
-        """The whole point of #372: the abort path must not go unrecorded."""
+    @pytest.mark.parametrize(
+        "reason", ["no_trading_day", "price_fetch_failed", "same_day_rerun"]
+    )
+    def test_preflight_abort_writes_the_outcome_file(
+        self, monkeypatch, tmp_path, reason
+    ):
+        """The whole point of #372: the abort path must not go unrecorded.
+
+        Parametrized over every `PreflightAbortReason` (Issue #376 added
+        `price_fetch_failed`): the outcome file must faithfully record
+        whichever reason fired, since `scripts/check_daily_complete.py`'s
+        legitimate-stop whitelist depends on that exact value surviving here.
+        """
         outcome_file = tmp_path / "outcome.json"
 
         def _abort(*_args, **_kwargs):
-            message = "引けた取引日が無い"
-            raise PreflightAbort(message, reason="no_trading_day")
+            message = "中止した"
+            raise PreflightAbort(message, reason=reason)
 
         self._stub(monkeypatch, run_daily=_abort)
 
@@ -784,7 +797,7 @@ class TestOutcomeFile:
         payload = json.loads(outcome_file.read_text(encoding="utf-8"))
         assert payload == {
             "outcome": "preflight_abort",
-            "reason": "no_trading_day",
+            "reason": reason,
             "run_id": None,
             "run_date": None,
             "candidates": None,

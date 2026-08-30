@@ -644,7 +644,18 @@ class TestRunDateResolvesOnlyClosedSessions:
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)
 
-    def test_prefetch_exception_aborts_with_no_trading_day(self, deps):
+    def test_prefetch_exception_aborts_with_price_fetch_failed_and_writes_no_run(
+        self, deps, state_store
+    ):
+        """Issue #376: distinct from `no_trading_day` -- this is a real failure.
+
+        An empty/all-still-open prefetch is a legitimate "no session has
+        closed yet" stop; a prefetch that *raises* means the closed-session
+        judgment could not even be attempted, e.g. a data-provider outage.
+        Conflating the two let a transient network failure exit clean and
+        leave the CI job green (`scripts/check_daily_complete.py`'s
+        legitimate-stop whitelist depends on this distinction).
+        """
         broken_deps = replace(
             deps, data_provider=_RaisingDataProvider(RuntimeError("network boom"))
         )
@@ -652,8 +663,11 @@ class TestRunDateResolvesOnlyClosedSessions:
         with pytest.raises(PreflightAbort) as exc_info:
             run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
 
-        assert exc_info.value.reason == "no_trading_day"
+        assert exc_info.value.reason == "price_fetch_failed"
         assert "network boom" in str(exc_info.value)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM runs").fetchone()
+        assert count == (0,)
 
     def test_every_fetched_bar_is_still_mid_session_aborts_with_no_trading_day(
         self, deps

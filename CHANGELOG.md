@@ -72,7 +72,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `steps.claude.outputs.execution_file` を artifact としてアップロードする
   ステップ（`if: always()`、14日保持）を追加し、セッションの挙動を事後確認
   できなかったこと自体の欠陥にも対処した。自動リトライは入れない
-  （AGENTS.md「Nothing is retried automatically」を維持）
+  （AGENTS.md「Nothing is retried automatically」を維持）。
+  **追補（Issue #376）**: 上記の実装は、プリフェッチが**例外**を送出した
+  場合を`no_trading_day`（「セッションがまだ引けていない」という正当な停止）
+  に丸めてしまい、`scripts/check_daily_complete.py`が`outcome=="preflight_abort"`
+  なら理由を問わず合格にしていたため、データプロバイダの一時障害が「取引日
+  なし」として正常終了し、`runs`行も分析も無いままジョブが緑になる問題が
+  再発していた。プリフェッチ例外は新しい理由`PREFLIGHT_ABORT[price_fetch_failed]`
+  に分離し（空プリフェッチ・全バー未引けは引き続き`no_trading_day`）、
+  `scripts/check_daily_complete.py`の合格判定を`outcome=="preflight_abort"`
+  というだけの判定から、`reason`が正当な停止のホワイトリスト
+  （`same_day_rerun`・`no_trading_day`）に載っているときだけ合格とする
+  fail-closed な判定に変更した——`price_fetch_failed`・未知の理由・`reason`
+  欠落はいずれも失敗として扱う。`.claude/skills/swing-daily/SKILL.md`にも
+  `PREFLIGHT_ABORT[price_fetch_failed]`を「失敗であり分析対象なしではない」
+  として明記した
 
 - `copilot-retro collect` が、Issue #324 の実売買記録機能撤去（`analysis_input.json`
   から `decision_history`/`performance_summary` を削除）より前に書かれた

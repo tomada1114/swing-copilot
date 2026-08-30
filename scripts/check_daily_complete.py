@@ -34,8 +34,15 @@ job (see `check()`).
 exit, `PreflightAbort` included (`pipeline/daily_composition.py`). When it is
 given, a missing file means `copilot-daily` never even ran -- independent of
 whatever the DB happens to hold from a previous day -- and an `outcome` of
-`"preflight_abort"` (e.g. `PREFLIGHT_ABORT[no_trading_day]`, the closed-session
-`run_date` guard) is a legitimate stop, not an incomplete day.
+`"preflight_abort"` is a legitimate stop, not an incomplete day, only when its
+`reason` is on the `_LEGITIMATE_STOP_REASONS` whitelist (`same_day_rerun`,
+`no_trading_day`). That is deliberately a whitelist rather than "any
+preflight_abort passes": Issue #376 found a `price_fetch_failed` reason (a
+data-provider outage during the closed-session `run_date` check) sharing the
+same `outcome` value, and treating every `preflight_abort` as legitimate would
+have turned that failure into a silently green job. A reason outside the
+whitelist -- including `price_fetch_failed`, an unrecognized future reason, or
+a missing/`null` reason -- fails this check instead of passing it.
 """
 
 from __future__ import annotations
@@ -54,6 +61,14 @@ DEFAULT_REPORTS_DIR = REPO_ROOT / "reports"
 
 class IncompleteRunError(Exception):
     """The most recent run owes a qualitative analysis that is not there."""
+
+
+#: Abort reasons that mean "this day legitimately has no analysis to produce".
+#: Deliberately a whitelist, not `outcome == "preflight_abort"`: a new abort
+#: reason must be classified on purpose, and an unrecognized one is treated as
+#: an incomplete day rather than silently turning the job green (Issue #372,
+#: hardened by #376).
+_LEGITIMATE_STOP_REASONS = frozenset({"same_day_rerun", "no_trading_day"})
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -95,13 +110,16 @@ def _candidate_count(run_id: str, db_path: Path | None) -> int:
 def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
     """Whether `outcome_file` says this day was legitimately not analyzed.
 
-    Implements the table from Issue #372: a missing file means
-    `copilot-daily` never started at all (fails loudly here, independent of
-    whatever the DB holds from an earlier day); an `outcome` of
-    `"preflight_abort"` means it started and stopped for a documented,
-    non-actionable reason (e.g. no closed trading day yet); anything else
-    falls through to the existing candidate-count / `analysis_result.json`
-    check below, unchanged.
+    Implements the table from Issue #372, hardened by #376: a missing file
+    means `copilot-daily` never started at all (fails loudly here, independent
+    of whatever the DB holds from an earlier day); an `outcome` of
+    `"preflight_abort"` whose `reason` is in `_LEGITIMATE_STOP_REASONS` means
+    it started and stopped for a documented, non-actionable reason (e.g. no
+    closed trading day yet); anything else -- including a `preflight_abort`
+    with an unrecognized or missing `reason` (`price_fetch_failed` included)
+    -- fails this check outright rather than falling through to the
+    candidate-count / `analysis_result.json` check below, since a `run_date`
+    was never even resolved for this day to look up.
 
     Args:
         outcome_file: Path `copilot-daily` was told to write its terminal
@@ -111,7 +129,9 @@ def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
         Whether `check()` should pass without consulting the database.
 
     Raises:
-        IncompleteRunError: The file is missing, or unreadable as JSON.
+        IncompleteRunError: The file is missing, unreadable as JSON, or
+            records a `preflight_abort` whose `reason` is not a legitimate
+            stop.
     """
     if not outcome_file.exists():
         message = (
@@ -128,6 +148,12 @@ def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
     if outcome != "preflight_abort":
         return False
     reason = payload.get("reason")
+    if reason not in _LEGITIMATE_STOP_REASONS:
+        message = (
+            f"copilot-daily は preflight abort したが reason={reason!r} は"
+            "正当な中止として認められていない。その日は分析されていない。"
+        )
+        raise IncompleteRunError(message)
     print(f"copilot-daily は preflight abort で正常終了 (reason={reason})。OK")
     return True
 
@@ -149,9 +175,11 @@ def check(
             could vouch for a day this job never actually ran.
         outcome_file: When given, `copilot-daily`'s own terminal-outcome file
             (Issue #372). Its absence fails immediately; an `outcome` of
-            `"preflight_abort"` passes immediately; anything else falls
-            through to the checks below, unchanged. Omitting it (the
-            default) leaves existing callers' behavior untouched.
+            `"preflight_abort"` passes immediately only when `reason` is on
+            the `_LEGITIMATE_STOP_REASONS` whitelist, and fails immediately
+            otherwise (Issue #376); any other `outcome` falls through to the
+            checks below, unchanged. Omitting it (the default) leaves
+            existing callers' behavior untouched.
     """
     if outcome_file is not None and _outcome_file_is_a_legitimate_stop(outcome_file):
         return

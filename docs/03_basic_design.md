@@ -343,7 +343,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 `run_date`は壁時計からは決めない（Issue #372）。既定（`--as-of`未指定）では、
 取得できた価格バーのうち**米国東部時間16:00を過ぎて引けたセッション**の最新日を
 採用する（`pipeline/daily_runner.py::_resolve_closed_run_date`）。プリフェッチが
-空・例外・または最新バーがまだ引けていないセッションのものであれば、
+**空**、または**最新バーがまだ引けていないセッションのものであれば**、
 `PREFLIGHT_ABORT[no_trading_day]`で`start_run()`より前に中止し、`runs`へは
 何も書かない。定刻cron（`17 1 * * 2-6`、UTC 01:17 = 米国セッションクローズの
 数時間後）はこの16:00判定に常に間に合うため、通常運用でこの分岐が効くことは
@@ -352,6 +352,17 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 最新バー」をそのまま`run_date`に採っていたため、まだ確定していないセッションを
 先食いし、翌日の同日再実行ガードがその日の分析を失わせていた
 （2026-08-29の事象）。自動リトライは行わない。
+
+プリフェッチ自体が**例外**を送出した場合は別の理由
+`PREFLIGHT_ABORT[price_fetch_failed]`で同じく`start_run()`より前に中止する
+（Issue #376）。見た目は同じ「abortで終了コード2」だが意味は異なる——
+`no_trading_day`は「セッションがまだ引けていない」という正常な状態で、
+`price_fetch_failed`はデータプロバイダ障害等の**真の失敗**であり、引けた
+取引日を判定すること自体ができなかったことを表す。両者を同じ理由に
+まとめると、一時的なネットワーク障害が「本日は取引日が無い」として
+黙って正常終了扱いになり、`scripts/check_daily_complete.py`がジョブを
+緑にしてしまう（後述）。`same_day_rerun`・`no_trading_day`は正当な停止、
+`price_fetch_failed`は失敗——という三分法がPREFLIGHT_ABORTの理由の全体像である。
 
 ### 8.2 永続化
 
@@ -374,13 +385,18 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
   `--outcome-file`（既定は`COPILOT_DAILY_OUTCOME_FILE`環境変数、CLIオプションが
   優先）で指定したときだけ書き、`reports/<run_date>/<run_id>/`の**外**に置く
   ——同期対象アーカイブと監査証跡を汚さないためである。preflight abort
-  （`PREFLIGHT_ABORT[no_trading_day]`を含む）の経路でも必ず書く。
+  （`PREFLIGHT_ABORT[no_trading_day]`・`PREFLIGHT_ABORT[price_fetch_failed]`を
+  含む）の経路でも必ず書く。
   `scripts/check_daily_complete.py`は`--outcome-file`を渡されたとき、
-  ファイルが無ければ「`copilot-daily`が一度も起動していない」として即失敗、
-  `outcome=="preflight_abort"`なら即合格とし、それ以外は従来どおり
-  候補数と`analysis_result.json`の有無で判定する。自動リトライはこれでも
-  入れない——検知できるようにするだけで、再実行は従来どおり手動dispatchに
-  委ねる
+  ファイルが無ければ「`copilot-daily`が一度も起動していない」として即失敗する。
+  `outcome=="preflight_abort"`のときは、`reason`が正当な停止のホワイトリスト
+  （`same_day_rerun`・`no_trading_day`）に載っているときだけ即合格とし、
+  それ以外（`price_fetch_failed`を含む未知・欠落のreason）は即失敗とする
+  （Issue #376。`outcome=="preflight_abort"`というだけで合格にすると、
+  データ取得障害による`price_fetch_failed`まで正当な停止として見逃してしまう）。
+  `outcome`がそのいずれでもなければ従来どおり候補数と`analysis_result.json`の
+  有無で判定する。自動リトライはこれでも入れない——検知できるようにするだけで、
+  再実行は従来どおり手動dispatchに委ねる
 
 ### 8.3 実行時間
 

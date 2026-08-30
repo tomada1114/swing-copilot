@@ -255,7 +255,7 @@ assume exit 2 means "already ran":
   does. This is also a legitimate stop: the job stays green.
 - `PREFLIGHT_ABORT[price_fetch_failed]:` — the price prefetch itself raised
   (e.g. a data-provider outage), so whether any session had closed could not
-  even be determined (Issue #376). Unlike the two reasons above, this is a
+  even be determined (Issue #372). Unlike the two reasons above, this is a
   genuine failure, not a clean day with nothing to analyze, and it must not
   be reported as one: `scripts/check_daily_complete.py` fails the job on this
   reason (its legitimate-stop check is a whitelist of exactly

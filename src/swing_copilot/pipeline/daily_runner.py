@@ -423,7 +423,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
             )
         except Exception as exc:
-            # Issue #376: distinct from `no_trading_day` below. This is not
+            # Issue #372: distinct from `no_trading_day` below. This is not
             # "the market has not closed yet" -- it is a data-provider outage
             # that made the closed-session judgment impossible to make at
             # all, and both `.claude/skills/swing-daily/SKILL.md` and

@@ -340,7 +340,7 @@ class TestOutcomeFile:
         check_daily_complete.check(reports_dir, outcome_file=outcome_file)
 
     def test_price_fetch_failed_reason_fails_the_check(self, tmp_path: Path) -> None:
-        """Issue #376: a data-provider outage must not pass as a clean day."""
+        """Issue #372: a data-provider outage must not pass as a clean day."""
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         outcome_file = tmp_path / "outcome.json"
@@ -453,7 +453,7 @@ class TestMainOutcomeFile:
     def test_preflight_abort_reason_whitelist_decides_the_exit_code(
         self, tmp_path: Path, outcome_json: str, expected_exit: int
     ) -> None:
-        """Issue #376: only a whitelisted reason may leave the job green."""
+        """Issue #372: only a whitelisted reason may leave the job green."""
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         outcome_file = tmp_path / "outcome.json"

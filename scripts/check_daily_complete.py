@@ -37,7 +37,7 @@ whatever the DB happens to hold from a previous day -- and an `outcome` of
 `"preflight_abort"` is a legitimate stop, not an incomplete day, only when its
 `reason` is on the `_LEGITIMATE_STOP_REASONS` whitelist (`same_day_rerun`,
 `no_trading_day`). That is deliberately a whitelist rather than "any
-preflight_abort passes": Issue #376 found a `price_fetch_failed` reason (a
+preflight_abort passes": Issue #372 found a `price_fetch_failed` reason (a
 data-provider outage during the closed-session `run_date` check) sharing the
 same `outcome` value, and treating every `preflight_abort` as legitimate would
 have turned that failure into a silently green job. A reason outside the
@@ -67,7 +67,7 @@ class IncompleteRunError(Exception):
 #: Deliberately a whitelist, not `outcome == "preflight_abort"`: a new abort
 #: reason must be classified on purpose, and an unrecognized one is treated as
 #: an incomplete day rather than silently turning the job green (Issue #372,
-#: hardened by #376).
+#: same issue's design review).
 _LEGITIMATE_STOP_REASONS = frozenset({"same_day_rerun", "no_trading_day"})
 
 
@@ -110,7 +110,7 @@ def _candidate_count(run_id: str, db_path: Path | None) -> int:
 def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
     """Whether `outcome_file` says this day was legitimately not analyzed.
 
-    Implements the table from Issue #372, hardened by #376: a missing file
+    Implements the table from Issue #372: a missing file
     means `copilot-daily` never started at all (fails loudly here, independent
     of whatever the DB holds from an earlier day); an `outcome` of
     `"preflight_abort"` whose `reason` is in `_LEGITIMATE_STOP_REASONS` means
@@ -177,7 +177,7 @@ def check(
             (Issue #372). Its absence fails immediately; an `outcome` of
             `"preflight_abort"` passes immediately only when `reason` is on
             the `_LEGITIMATE_STOP_REASONS` whitelist, and fails immediately
-            otherwise (Issue #376); any other `outcome` falls through to the
+            otherwise (Issue #372); any other `outcome` falls through to the
             checks below, unchanged. Omitting it (the default) leaves
             existing callers' behavior untouched.
     """

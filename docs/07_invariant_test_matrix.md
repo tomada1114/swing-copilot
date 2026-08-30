@@ -302,7 +302,7 @@ substitute for `as_of`」への違反）、成功時も「取得できた最新�
 無条件に採用する。
 
 プリフェッチ自体が例外を送出した場合は別の abort 理由
-`PREFLIGHT_ABORT[price_fetch_failed]` を使う（Issue #376）。空プリフェッチ・
+`PREFLIGHT_ABORT[price_fetch_failed]` を使う（Issue #372）。空プリフェッチ・
 全バー未引けは「セッションがまだ引けていない」という正当な停止だが、
 プリフェッチ例外はデータプロバイダ障害等の真の失敗であり、引けた取引日を
 判定すること自体ができなかった、という別の事実を表す。同じ理由に丸めると
@@ -320,7 +320,7 @@ substitute for `as_of`」への違反）、成功時も「取得できた最新�
 リスト（`same_day_rerun`・`no_trading_day`）に載っていれば即合格とし、
 それ以外（`price_fetch_failed` や未知・欠落の `reason` を含む）は即失敗、
 `outcome` がそのいずれでもなければ従来どおり候補数と `analysis_result.json`
-の有無で判定する（Issue #376）。
+の有無で判定する（Issue #372）。
 
 | 対象 | 不変条件 | 代表的な反例 | 検証 |
 | --- | --- | --- | --- |

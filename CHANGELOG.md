@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ステップ（`if: always()`、14日保持）を追加し、セッションの挙動を事後確認
   できなかったこと自体の欠陥にも対処した。自動リトライは入れない
   （AGENTS.md「Nothing is retried automatically」を維持）。
-  **追補（Issue #376）**: 上記の実装は、プリフェッチが**例外**を送出した
+  **追補**: 上記の実装は、プリフェッチが**例外**を送出した
   場合を`no_trading_day`（「セッションがまだ引けていない」という正当な停止）
   に丸めてしまい、`scripts/check_daily_complete.py`が`outcome=="preflight_abort"`
   なら理由を問わず合格にしていたため、データプロバイダの一時障害が「取引日

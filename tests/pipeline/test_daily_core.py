@@ -647,7 +647,7 @@ class TestRunDateResolvesOnlyClosedSessions:
     def test_prefetch_exception_aborts_with_price_fetch_failed_and_writes_no_run(
         self, deps, state_store
     ):
-        """Issue #376: distinct from `no_trading_day` -- this is a real failure.
+        """Issue #372: distinct from `no_trading_day` -- this is a real failure.
 
         An empty/all-still-open prefetch is a legitimate "no session has
         closed yet" stop; a prefetch that *raises* means the closed-session

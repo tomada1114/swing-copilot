@@ -355,7 +355,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 プリフェッチ自体が**例外**を送出した場合は別の理由
 `PREFLIGHT_ABORT[price_fetch_failed]`で同じく`start_run()`より前に中止する
-（Issue #376）。見た目は同じ「abortで終了コード2」だが意味は異なる——
+（Issue #372）。見た目は同じ「abortで終了コード2」だが意味は異なる——
 `no_trading_day`は「セッションがまだ引けていない」という正常な状態で、
 `price_fetch_failed`はデータプロバイダ障害等の**真の失敗**であり、引けた
 取引日を判定すること自体ができなかったことを表す。両者を同じ理由に
@@ -392,7 +392,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
   `outcome=="preflight_abort"`のときは、`reason`が正当な停止のホワイトリスト
   （`same_day_rerun`・`no_trading_day`）に載っているときだけ即合格とし、
   それ以外（`price_fetch_failed`を含む未知・欠落のreason）は即失敗とする
-  （Issue #376。`outcome=="preflight_abort"`というだけで合格にすると、
+  （Issue #372。`outcome=="preflight_abort"`というだけで合格にすると、
   データ取得障害による`price_fetch_failed`まで正当な停止として見逃してしまう）。
   `outcome`がそのいずれでもなければ従来どおり候補数と`analysis_result.json`の
   有無で判定する。自動リトライはこれでも入れない——検知できるようにするだけで、

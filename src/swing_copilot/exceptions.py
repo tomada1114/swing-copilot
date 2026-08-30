@@ -8,7 +8,7 @@ from typing import Literal
 #: vocabulary, kept as a `Literal`, because the unattended `swing-daily` skill
 #: branches on the tag rather than on prose: today a `same_day_rerun` is
 #: summarized as "already analyzed today", a `no_trading_day` (Issue #372) as
-#: "no trading day to analyze yet", and a `price_fetch_failed` (Issue #376) as
+#: "no trading day to analyze yet", and a `price_fetch_failed` (Issue #372) as
 #: a genuine failure that must be reported, not summarized as a clean day --
 #: unlike the other two, this one means the price prefetch itself raised, so
 #: whether a session has even closed could not be determined at all. The

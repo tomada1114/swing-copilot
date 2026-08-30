@@ -777,7 +777,7 @@ class TestOutcomeFile:
     ):
         """The whole point of #372: the abort path must not go unrecorded.
 
-        Parametrized over every `PreflightAbortReason` (Issue #376 added
+        Parametrized over every `PreflightAbortReason` (Issue #372 added
         `price_fetch_failed`): the outcome file must faithfully record
         whichever reason fired, since `scripts/check_daily_complete.py`'s
         legitimate-stop whitelist depends on that exact value surviving here.

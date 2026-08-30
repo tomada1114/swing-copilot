@@ -842,11 +842,55 @@ def _guard_against_emptying_a_populated_root(
             raise DataSyncError(msg)
 
 
+def _guard_append_only(
+    prefixes: tuple[str, ...],
+    remote_files: Mapping[str, FileEntry],
+    local: Mapping[str, FileEntry],
+) -> None:
+    """Refuse a push that rewrites or drops an already-published object.
+
+    Used by the unattended daily job for `reports/`. That job's analysis
+    session reads untrusted news and filing text and is allowed to Write/Edit
+    under `reports/`, which was harmless while `reports/` held only the run in
+    progress. Now that the tree is the R2-canonical archive and is pulled in
+    full before the session starts, a prompt injection could rewrite a
+    *historical* `analysis_result.json`; `copilot-retro collect` re-parses any
+    archive whose digest changed, and the push would then make the rewritten
+    verdicts permanent.
+
+    So in CI the tree is append-only: new run directories may appear, existing
+    objects may not change or vanish. Interactive use does not pass this --
+    correcting an archive and re-collecting it is a supported operator
+    workflow, and the digest-based scan exists to serve it.
+
+    Raises:
+        DataSyncError: When a key the remote already publishes under one of
+            `prefixes` is missing locally or has different content.
+    """
+    for key, remote_entry in sorted(remote_files.items()):
+        if not any(key.startswith(prefix) for prefix in prefixes):
+            continue
+        local_entry = local.get(key)
+        if local_entry is None:
+            msg = (
+                f"append-only 違反: 既にリモートにある {key} がローカルに無い。"
+                "無人実行は既存のアーカイブを削除できない"
+            )
+            raise DataSyncError(msg)
+        if local_entry.sha256 != remote_entry.sha256:
+            msg = (
+                f"append-only 違反: 既にリモートにある {key} の内容が書き換わっている。"
+                "無人実行は既存のアーカイブを変更できない"
+            )
+            raise DataSyncError(msg)
+
+
 def push(
     store: ObjectStore,
     roots: tuple[SyncRoot, ...],
     *,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    append_only_prefixes: tuple[str, ...] = (),
 ) -> PushReport:
     """Publish the local `data/` and `reports/` trees as the next generation.
 
@@ -854,10 +898,19 @@ def push(
     second -- that write is the commit point -- and only then are the objects
     the new generation no longer references deleted (see the module docstring).
 
+    Args:
+        store: The remote object store.
+        roots: The local trees to publish.
+        now: Clock for the manifest's `updated_at`.
+        append_only_prefixes: Prefixes under which already-published objects
+            may not be modified or removed by this push. The unattended daily
+            job passes `reports/` -- see `_guard_append_only`.
+
     Raises:
         DataSyncError: When the optimistic-lock precondition is unmet, the
-            local tree holds nothing to sync at all, or one root would be
-            emptied on the remote while the other still has local content.
+            local tree holds nothing to sync at all, one root would be emptied
+            on the remote while the other still has local content, or an
+            append-only prefix's published object changed.
         ConcurrentWriteError: When the remote advanced since the recorded pull.
     """
     remote = read_remote_manifest(store)
@@ -875,6 +928,8 @@ def push(
 
     remote_files: Mapping[str, FileEntry] = remote.files if remote else {}
     _guard_against_emptying_a_populated_root(roots, remote_files, local)
+    if append_only_prefixes:
+        _guard_append_only(append_only_prefixes, remote_files, local)
 
     uploaded: list[str] = []
     unchanged: list[str] = []
@@ -935,9 +990,11 @@ class SyncStatus(Enum):
 class StatusReport:
     """A read-only comparison of the local trees against the remote manifest.
 
-    `added`/`removed`/`modified` hold object keys across *both* roots; each
-    key's own `data/` or `reports/` prefix is what identifies its root, and
-    `render()` groups by that prefix so both roots are visible on their own.
+    `added`/`removed`/`modified` hold object keys across *every* root; each
+    key's own prefix is what identifies its root, and `render()` groups by
+    `prefixes` so each root is visible on its own. `prefixes` is carried
+    rather than hardcoded so a root added to `build_roots` cannot end up
+    counted in the totals but missing from the listing.
     """
 
     status: SyncStatus
@@ -949,6 +1006,7 @@ class StatusReport:
     added: tuple[str, ...]
     removed: tuple[str, ...]
     modified: tuple[str, ...]
+    prefixes: tuple[str, ...]
 
     def render(self) -> str:
         """Human-readable summary, broken out by root."""
@@ -974,7 +1032,7 @@ class StatusReport:
             f"追加={len(self.added)} 欠落={len(self.removed)} "
             f"変更={len(self.modified)}",
         ]
-        for prefix in (DATA_PREFIX, REPORTS_PREFIX):
+        for prefix in self.prefixes:
             lines.append(f"  [{prefix}]")
             lines.extend(f"  + {key}" for key in self.added if key.startswith(prefix))
             lines.extend(f"  - {key}" for key in self.removed if key.startswith(prefix))
@@ -1015,6 +1073,7 @@ def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
             added=tuple(sorted(local)),
             removed=(),
             modified=(),
+            prefixes=tuple(root.prefix for root in roots),
         )
 
     added = tuple(key for key in sorted(local) if key not in manifest.files)
@@ -1036,6 +1095,7 @@ def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
         added=added,
         removed=removed,
         modified=modified,
+        prefixes=tuple(root.prefix for root in roots),
     )
 
 
@@ -1044,13 +1104,20 @@ def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
 # --------------------------------------------------------------------------- #
 
 
-def run(command: str, store: ObjectStore, roots: tuple[SyncRoot, ...]) -> int:
+def run(
+    command: str,
+    store: ObjectStore,
+    roots: tuple[SyncRoot, ...],
+    *,
+    reports_append_only: bool = False,
+) -> int:
     """Execute one subcommand against an injected store and print its report."""
     match command:
         case "pull":
             print(pull(store, roots).render())
         case "push":
-            print(push(store, roots).render())
+            prefixes = (REPORTS_PREFIX,) if reports_append_only else ()
+            print(push(store, roots, append_only_prefixes=prefixes).render())
         case "status":
             print(status(store, roots).render())
         case _:  # pragma: no cover - argparse rejects unknown subcommands
@@ -1069,7 +1136,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("pull", help="リモート正本をローカルへ取得する")
-    subparsers.add_parser("push", help="ローカルを次世代としてリモートへ公開する")
+    push_parser = subparsers.add_parser(
+        "push", help="ローカルを次世代としてリモートへ公開する"
+    )
+    push_parser.add_argument(
+        "--reports-append-only",
+        action="store_true",
+        help=(
+            "既にリモートにある reports/ 配下のオブジェクトの変更・削除を拒否する"
+            " (信頼できないテキストを読む無人実行専用。ローカルでの"
+            "アーカイブ訂正・再取り込みは通常どおり行えるよう既定では無効)"
+        ),
+    )
     subparsers.add_parser("status", help="ローカルとリモートの差分を表示する")
     return parser
 
@@ -1079,7 +1157,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         store = build_object_store(R2Settings().require())
-        return run(str(args.command), store, DEFAULT_ROOTS)
+        return run(
+            str(args.command),
+            store,
+            DEFAULT_ROOTS,
+            reports_append_only=bool(getattr(args, "reports_append_only", False)),
+        )
     except DataSyncError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

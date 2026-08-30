@@ -477,6 +477,108 @@ def test_push_gc_deletes_unreferenced_keys_under_both_prefixes_and_leaves_manife
 # --------------------------------------------------------------------------- #
 
 
+def test_append_only_push_rejects_a_rewritten_published_report(tmp_path):
+    """The unattended job must not be able to republish a rewritten archive.
+
+    The analysis session reads untrusted news/filing text and can Write/Edit
+    under `reports/`, which now holds the whole canonical history. Rewriting a
+    historical `analysis_result.json` would be re-collected (the scan is
+    digest-based) and then made permanent by the push.
+    """
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").write_bytes(
+        b"result-rewritten-by-injection"
+    )
+
+    with pytest.raises(data_sync.DataSyncError, match="append-only"):
+        data_sync.push(
+            store,
+            _roots(workspace),
+            now=lambda: FIXED_NOW,
+            append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+        )
+
+    assert store.objects[REPORT_RESULT_KEY] == b"result-v1"
+    assert read_manifest(store)["generation"] == 1
+
+
+def test_append_only_push_rejects_a_deleted_published_report(tmp_path):
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").unlink()
+
+    with pytest.raises(data_sync.DataSyncError, match="append-only"):
+        data_sync.push(
+            store,
+            _roots(workspace),
+            now=lambda: FIXED_NOW,
+            append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+        )
+
+    assert REPORT_RESULT_KEY in store.objects
+
+
+def test_append_only_push_still_admits_a_new_run_directory(tmp_path):
+    """Append-only blocks rewrites, not the day's own new archive."""
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    new_run = "44444444-4444-4444-8444-444444444444"
+    _write(reports / "2026-08-20" / new_run / "analysis_result.json", b"today")
+
+    report = data_sync.push(
+        store,
+        _roots(workspace),
+        now=lambda: FIXED_NOW,
+        append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+    )
+
+    assert f"reports/2026-08-20/{new_run}/analysis_result.json" in report.uploaded
+    assert store.objects[REPORT_RESULT_KEY] == b"result-v1"
+
+
+def test_push_without_append_only_still_allows_correcting_an_archive(tmp_path):
+    """Interactive correction and re-collection stays supported (design D2)."""
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").write_bytes(
+        b"result-corrected"
+    )
+
+    report = push(store, workspace)
+
+    assert REPORT_RESULT_KEY in report.uploaded
+    assert store.objects[REPORT_RESULT_KEY] == b"result-corrected"
+
+
+def test_status_render_lists_every_root_it_was_built_from(tmp_path):
+    """`render()` groups by the roots' own prefixes, not a hardcoded pair."""
+    workspace = make_workspace(tmp_path)
+    make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+
+    rendered = status(store, workspace).render()
+
+    assert rendered.count(f"[{data_sync.DATA_PREFIX}]") == 1
+    assert rendered.count(f"[{data_sync.REPORTS_PREFIX}]") == 1
+    assert status(store, workspace).prefixes == (
+        data_sync.DATA_PREFIX,
+        data_sync.REPORTS_PREFIX,
+    )
+
+
 def test_pull_from_an_empty_bucket_reports_that_the_remote_is_empty(tmp_path):
     data_dir = make_workspace(tmp_path)
     store = FakeObjectStore()

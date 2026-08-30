@@ -66,7 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest がまだ1件もキーを持たないルートについてはローカルファイルを削除せず
   温存する（`reports/` を同期対象に加えた直後の初回 `pull` が、リモートへ載せる
   前のローカル日次アーカイブを「上流で削除された」と読み違えて消してしまうため。
-  一度 push すればこの温存は解消し、以後は通常どおりミラー削除される）
+  一度 push すればこの温存は解消し、以後は通常どおりミラー削除される。
+  そのため `reports/` の初期投入 push は、次の定時実行より前に運用者側から
+  一度だけ行う必要がある）。無人実行の push は `--reports-append-only` を付け、
+  既存アーカイブの変更・削除を拒否する（信頼できないテキストを読むセッションが
+  `reports/` へ書き込めるため、同期対象化で過去アーカイブが書き換え可能に
+  なったことへの対処）。`copilot-retro collect` ステップは `continue-on-error`
+  とし、取り込み失敗でその日の価格・ファンダメンタルズ・台帳の push まで
+  道連れにしない（取り込みは後から回せるが、データ喪失は取り返せない）
 - `retro_input.json` の `input_digest` 再検証を、その文書自身が持っていたキー集合
   （`model_dump(exclude_unset=True)`）に対して行うようにした（Issue #276）。
   読み込み時の素の `model_dump()` が既定値を実体化するため、Issue #157 で足した

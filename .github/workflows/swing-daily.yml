@@ -236,19 +236,39 @@ jobs:
       # 生成した run の verdict がランナー破棄と同時に失われていた
       # (Issue #370)。R2 への push 前にここで一度だけ実行し、今日の verdict を
       # data/copilot.duckdb に取り込んでから push に載せる。
+      #
+      # continue-on-error: この工程の失敗でその日の価格・ファンダメンタルズ・
+      # 台帳まで道連れにしない。push は success() ゲートなので、ここで落ちると
+      # R2 への書き戻し自体が飛び、収集済みデータがランナーごと消える
+      # (この工程を入れるまで、分析と push の間に落ちうるステップは無かった)。
+      # reports/ が R2 同期対象になった今、取り込みそこねた日は後から
+      # `copilot-retro collect` を回せば拾い直せる = 遅延は可逆・データ喪失は不可逆。
       - name: Collect verdicts into the database
         if: ${{ success() && (inputs.mode || 'live') == 'live' }}
+        continue-on-error: true
         run: uv run copilot-retro collect
 
       # 失敗した日は push しない = リモート正本は前日のまま。
       # dry-run はライブ DB を触らないので push する対象が無い。
+      #
+      # --reports-append-only: 分析セッションは reports/ 配下に Write/Edit でき、
+      # かつニュース・開示という信頼できないテキストを読む。reports/ が同期対象に
+      # なったことで、そのセッションのワークスペースには過去日のアーカイブ全体が
+      # 載るようになった = injection で過去の analysis_result.json を書き換えられ、
+      # digest ベースの collect がそれを再取り込みし、push で R2 に固定される、
+      # という経路が新たに生まれる。無人実行では「新しい run ディレクトリの追加は
+      # 許すが、既存オブジェクトの変更・削除は許さない」に絞ってこれを塞ぐ。
+      # ローカルからの手動 push には付けない (アーカイブを訂正して再取り込みする
+      # のは設計上サポートされた運用であり、collect の digest 走査はそのためにある)。
       - name: Push data to R2
         if: ${{ success() && (inputs.mode || 'live') == 'live' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: uv run --group ops python scripts/data_sync.py push
+        run: >-
+          uv run --group ops python scripts/data_sync.py push
+          --reports-append-only
 
       # 分析セッションはほとんど何も書かないまま "success" で終わることがある。
       # データを先に push してから落とすので、その日の価格・ファンダメンタルズ・

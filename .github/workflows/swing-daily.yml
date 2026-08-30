@@ -70,13 +70,21 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --group ops
 
-      # R2 が data/ の正本。分析より先に引く。
+      # R2 が data/・reports/ の正本。分析より先に引く。
       - name: Pull data from R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: uv run --group ops python scripts/data_sync.py pull
+
+      # reports/ を R2 から引いた直後は、過去日の analysis_result.json も
+      # ワークスペースに存在する。check_daily_complete.py の --started-after が
+      # 「このジョブ自身の run」だけを検証対象にできるよう、ここで開始時刻を
+      # 記録しておく (Issue #370、Part 3)。
+      - name: Record job start time
+        id: job_start
+        run: echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       # 最小権限: 分析セッションには R2 の資格情報を渡さない。
       # API キーはステップの env: で渡す (settings JSON への secrets 埋め込みは
@@ -221,22 +229,63 @@ jobs:
               print(f"permission_denials[{category}]={count}")
           PY
 
+      # 設計判断 D2 (docs/goal-prompts/swing-copilot-retrospective/decisions.md)
+      # により copilot-ingest-analysis は DB に触れない。verdicts/verdict_sources
+      # への書き込みは copilot-retro collect が reports/ を走査して行う唯一の経路
+      # だが、無人実行経路でこれを実際に走らせる場所がこれまで存在せず、CI で
+      # 生成した run の verdict がランナー破棄と同時に失われていた
+      # (Issue #370)。R2 への push 前にここで一度だけ実行し、今日の verdict を
+      # data/copilot.duckdb に取り込んでから push に載せる。
+      #
+      # continue-on-error: この工程の失敗でその日の価格・ファンダメンタルズ・
+      # 台帳まで道連れにしない。push は success() ゲートなので、ここで落ちると
+      # R2 への書き戻し自体が飛び、収集済みデータがランナーごと消える
+      # (この工程を入れるまで、分析と push の間に落ちうるステップは無かった)。
+      # reports/ が R2 同期対象になった今、取り込みそこねた日は後から
+      # `copilot-retro collect` を回せば拾い直せる = 遅延は可逆・データ喪失は不可逆。
+      - name: Collect verdicts into the database
+        if: ${{ success() && (inputs.mode || 'live') == 'live' }}
+        continue-on-error: true
+        run: uv run copilot-retro collect
+
       # 失敗した日は push しない = リモート正本は前日のまま。
       # dry-run はライブ DB を触らないので push する対象が無い。
+      #
+      # --reports-append-only: 分析セッションは reports/ 配下に Write/Edit でき、
+      # かつニュース・開示という信頼できないテキストを読む。reports/ が同期対象に
+      # なったことで、そのセッションのワークスペースには過去日のアーカイブ全体が
+      # 載るようになった = injection で過去の analysis_result.json を書き換えられ、
+      # digest ベースの collect がそれを再取り込みし、push で R2 に固定される、
+      # という経路が新たに生まれる。無人実行では「新しい run ディレクトリの追加は
+      # 許すが、既存オブジェクトの変更・削除は許さない」に絞ってこれを塞ぐ。
+      # ローカルからの手動 push には付けない (アーカイブを訂正して再取り込みする
+      # のは設計上サポートされた運用であり、collect の digest 走査はそのためにある)。
       - name: Push data to R2
         if: ${{ success() && (inputs.mode || 'live') == 'live' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: uv run --group ops python scripts/data_sync.py push
+        run: >-
+          uv run --group ops python scripts/data_sync.py push
+          --reports-append-only
 
       # 分析セッションはほとんど何も書かないまま "success" で終わることがある。
       # データを先に push してから落とすので、その日の価格・ファンダメンタルズ・
       # 台帳は残る。定性分析の実行経路はこの GitHub Actions job だけとする。
+      # reports/ も R2 から同期されるようになった (Issue #370) ため、過去日の
+      # analysis_result.json がワークスペースに残っていて「このジョブは何も
+      # 走らせていないのに前日分で緑になる」誤検知を防ぐには、--started-after で
+      # このジョブ自身の run に絞り込む必要がある。
       - name: Verify the analysis completed
         if: ${{ success() && (inputs.mode || 'live') == 'live' }}
-        run: uv run python scripts/check_daily_complete.py
+        env:
+          # Routed through env: rather than interpolated straight into the
+          # run: script, so this step output can never expand into shell code.
+          STARTED_AFTER: ${{ steps.job_start.outputs.started_at }}
+        run: >-
+          uv run python scripts/check_daily_complete.py
+          --started-after "$STARTED_AFTER"
 
       # 失敗した日ほどレポートを見たいので always()。
       - name: Upload reports

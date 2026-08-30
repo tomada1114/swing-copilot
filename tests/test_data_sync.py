@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,11 @@ FIXED_NOW = datetime(2026, 8, 19, 23, 0, tzinfo=UTC)
 DUCKDB_KEY = "data/copilot.duckdb"
 BARS_2024_KEY = "data/bars/year=2024/data.parquet"
 BARS_2025_KEY = "data/bars/year=2025/data.parquet"
+
+REPORT_RUN_ID = "33333333-3333-4333-8333-333333333333"
+REPORT_RUN_DATE = "2026-08-19"
+REPORT_MD_KEY = f"reports/{REPORT_RUN_DATE}/{REPORT_RUN_ID}.md"
+REPORT_RESULT_KEY = f"reports/{REPORT_RUN_DATE}/{REPORT_RUN_ID}/analysis_result.json"
 
 
 class UploadFailedError(RuntimeError):
@@ -104,9 +110,37 @@ def make_workspace(root: Path, name: str = "workspace") -> Path:
     return data_dir
 
 
+def make_reports_workspace(root: Path, name: str = "workspace") -> Path:
+    """Create an isolated `reports/` tree holding one daily run archive."""
+    reports_dir = root / name / "reports"
+    _write(reports_dir / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md", b"report-md-v1")
+    _write(
+        reports_dir / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json",
+        b"result-v1",
+    )
+    return reports_dir
+
+
+def _roots(data_dir: Path) -> Any:
+    """Build both sync roots for a workspace, given only its `data/` path.
+
+    `data_dir` is always `<workspace>/data` (see `make_workspace`), so its
+    sibling `reports/` is derived rather than threaded through every call.
+    """
+    return data_sync.build_roots(data_dir, data_dir.parent / "reports")
+
+
 # `data_sync` is spec-loaded, so everything it returns is dynamically typed.
 def push(store: FakeObjectStore, data_dir: Path) -> Any:
-    return data_sync.push(store, data_dir, now=lambda: FIXED_NOW)
+    return data_sync.push(store, _roots(data_dir), now=lambda: FIXED_NOW)
+
+
+def pull(store: FakeObjectStore, data_dir: Path) -> Any:
+    return data_sync.pull(store, _roots(data_dir))
+
+
+def status(store: FakeObjectStore, data_dir: Path) -> Any:
+    return data_sync.status(store, _roots(data_dir))
 
 
 def read_manifest(store: FakeObjectStore) -> Any:
@@ -159,12 +193,12 @@ def test_pull_then_push_round_trip_uploads_only_the_changed_file(tmp_path):
 
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    pull_report = data_sync.pull(store, mirror)
+    pull_report = pull(store, mirror)
 
     assert pull_report.generation == 1
     assert set(pull_report.downloaded) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
     assert (mirror / "copilot.duckdb").read_bytes() == b"duckdb-v1"
-    assert data_sync.status(store, mirror).status is data_sync.SyncStatus.IN_SYNC
+    assert status(store, mirror).status is data_sync.SyncStatus.IN_SYNC
 
     (mirror / "copilot.duckdb").write_bytes(b"duckdb-v2")
     store.uploaded.clear()
@@ -184,7 +218,7 @@ def test_pull_reuses_local_files_whose_sha256_already_matches(tmp_path):
     push(store, origin)
 
     mirror = make_workspace(tmp_path, "mirror")
-    report = data_sync.pull(store, mirror)
+    report = pull(store, mirror)
 
     assert report.downloaded == ()
     assert set(report.skipped) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
@@ -202,12 +236,12 @@ def test_push_rejects_when_remote_generation_moved_ahead_and_uploads_nothing(tmp
 
     stale = tmp_path / "stale" / "data"
     stale.mkdir(parents=True)
-    data_sync.pull(store, stale)
+    pull(store, stale)
 
     # Somebody else pulls, works, and pushes generation 2 in the meantime.
     other = tmp_path / "other" / "data"
     other.mkdir(parents=True)
-    data_sync.pull(store, other)
+    pull(store, other)
     (other / "copilot.duckdb").write_bytes(b"duckdb-from-elsewhere")
     push(store, other)
 
@@ -251,7 +285,7 @@ def test_push_refuses_an_empty_local_tree_rather_than_emptying_the_remote(tmp_pa
 
     empty = tmp_path / "empty" / "data"
     empty.mkdir(parents=True)
-    data_sync.pull(store, empty)
+    pull(store, empty)
     for path in [*empty.rglob("*.parquet"), empty / "copilot.duckdb"]:
         path.unlink()
     store.deleted.clear()
@@ -283,7 +317,7 @@ def test_local_only_files_are_never_uploaded_nor_mirror_deleted(tmp_path):
     assert set(report.uploaded) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
     assert not [key for key in store.objects if "bak-" in key or "dry_run" in key]
 
-    pull_report = data_sync.pull(store, data_dir)
+    pull_report = pull(store, data_dir)
 
     assert pull_report.deleted == ()
     assert dry_run.read_bytes() == b"dry-run"
@@ -302,8 +336,247 @@ def test_sync_state_file_is_not_part_of_the_synced_set(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+#  reports/ shape predicate
+# --------------------------------------------------------------------------- #
+
+
+def test_reports_shape_predicate_includes_only_the_run_archive(tmp_path):
+    reports_dir = tmp_path / "workspace" / "reports"
+    included = {
+        reports_dir / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md",
+        reports_dir / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json",
+        reports_dir / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_work" / "news-1.json",
+    }
+    excluded = {
+        reports_dir / "backtests" / "2026-08-17-strategy-comparison.md",
+        reports_dir / "dry_run" / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md",
+        reports_dir / "assets" / "style.css",
+        reports_dir / "retro" / REPORT_RUN_DATE / "retro_result.json",
+        reports_dir / "latest.md",
+        reports_dir / REPORT_RUN_DATE / "not-a-uuid.md",
+        reports_dir / "not-a-date" / f"{REPORT_RUN_ID}.md",
+    }
+    for path in included | excluded:
+        _write(path, b"x")
+
+    roots = data_sync.build_roots(tmp_path / "workspace" / "data", reports_dir)
+    scanned = data_sync.scan_local(roots)
+
+    expected_keys = {
+        f"reports/{path.relative_to(reports_dir).as_posix()}" for path in included
+    }
+    assert set(scanned) == expected_keys
+
+
+# --------------------------------------------------------------------------- #
+#  push/pull: both roots together, one shared generation
+# --------------------------------------------------------------------------- #
+
+
+def test_pull_then_push_round_trip_covers_both_roots_with_one_generation(tmp_path):
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+
+    report = push(store, origin)
+
+    assert report.generation == 1
+    manifest = read_manifest(store)
+    assert manifest["generation"] == 1
+    assert {
+        DUCKDB_KEY,
+        BARS_2024_KEY,
+        BARS_2025_KEY,
+        REPORT_MD_KEY,
+        REPORT_RESULT_KEY,
+    } <= set(manifest["files"])
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    pull_report = pull(store, mirror)
+
+    assert pull_report.generation == 1
+    assert {REPORT_MD_KEY, REPORT_RESULT_KEY} <= set(pull_report.downloaded)
+    mirror_reports = tmp_path / "mirror" / "reports"
+    assert (
+        mirror_reports / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md"
+    ).read_bytes() == b"report-md-v1"
+    assert (
+        mirror_reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json"
+    ).read_bytes() == b"result-v1"
+
+    # Editing only a `reports/` file still advances the single shared
+    # generation counter -- there is no separate reports-side counter.
+    (mirror_reports / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").write_bytes(
+        b"report-md-v2"
+    )
+    push_report = push(store, mirror)
+
+    assert push_report.generation == 2
+    assert push_report.uploaded == (REPORT_MD_KEY,)
+    assert data_sync.read_state(mirror).generation == 2
+    assert read_manifest(store)["generation"] == 2
+
+
+def test_push_refuses_to_empty_the_remote_reports_tree_when_reports_dir_is_missing(
+    tmp_path,
+):
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    # A checkout that pulled but then lost its `reports/` tree entirely (or
+    # was never given one) must not be allowed to publish a manifest with
+    # zero `reports/` keys -- the GC step would then delete the remote
+    # `reports/` history.
+    stale = tmp_path / "stale" / "data"
+    stale.mkdir(parents=True)
+    pull(store, stale)
+    shutil.rmtree(tmp_path / "stale" / "reports")
+    store.deleted.clear()
+    store.uploaded.clear()
+
+    with pytest.raises(data_sync.DataSyncError, match=r"reports/ 配下"):
+        push(store, stale)
+
+    assert store.deleted == []
+    assert store.uploaded == []
+    assert read_manifest(store)["generation"] == 1
+
+
+def test_push_gc_deletes_unreferenced_keys_under_both_prefixes_and_leaves_manifest_alone(
+    tmp_path,
+):
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    (origin / "bars" / "year=2024" / "data.parquet").unlink()
+    (
+        origin.parent
+        / "reports"
+        / REPORT_RUN_DATE
+        / REPORT_RUN_ID
+        / "analysis_result.json"
+    ).unlink()
+
+    report = push(store, origin)
+
+    assert set(report.deleted) == {BARS_2024_KEY, REPORT_RESULT_KEY}
+    assert BARS_2024_KEY not in store.objects
+    assert REPORT_RESULT_KEY not in store.objects
+    assert REPORT_MD_KEY in store.objects  # still referenced, untouched
+    assert data_sync.MANIFEST_KEY in store.objects
+    assert read_manifest(store)["generation"] == 2
+
+
+# --------------------------------------------------------------------------- #
 #  pull: verification, mirroring, atomic replacement
 # --------------------------------------------------------------------------- #
+
+
+def test_append_only_push_rejects_a_rewritten_published_report(tmp_path):
+    """The unattended job must not be able to republish a rewritten archive.
+
+    The analysis session reads untrusted news/filing text and can Write/Edit
+    under `reports/`, which now holds the whole canonical history. Rewriting a
+    historical `analysis_result.json` would be re-collected (the scan is
+    digest-based) and then made permanent by the push.
+    """
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").write_bytes(
+        b"result-rewritten-by-injection"
+    )
+
+    with pytest.raises(data_sync.DataSyncError, match="append-only"):
+        data_sync.push(
+            store,
+            _roots(workspace),
+            now=lambda: FIXED_NOW,
+            append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+        )
+
+    assert store.objects[REPORT_RESULT_KEY] == b"result-v1"
+    assert read_manifest(store)["generation"] == 1
+
+
+def test_append_only_push_rejects_a_deleted_published_report(tmp_path):
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").unlink()
+
+    with pytest.raises(data_sync.DataSyncError, match="append-only"):
+        data_sync.push(
+            store,
+            _roots(workspace),
+            now=lambda: FIXED_NOW,
+            append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+        )
+
+    assert REPORT_RESULT_KEY in store.objects
+
+
+def test_append_only_push_still_admits_a_new_run_directory(tmp_path):
+    """Append-only blocks rewrites, not the day's own new archive."""
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    new_run = "44444444-4444-4444-8444-444444444444"
+    _write(reports / "2026-08-20" / new_run / "analysis_result.json", b"today")
+
+    report = data_sync.push(
+        store,
+        _roots(workspace),
+        now=lambda: FIXED_NOW,
+        append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+    )
+
+    assert f"reports/2026-08-20/{new_run}/analysis_result.json" in report.uploaded
+    assert store.objects[REPORT_RESULT_KEY] == b"result-v1"
+
+
+def test_push_without_append_only_still_allows_correcting_an_archive(tmp_path):
+    """Interactive correction and re-collection stays supported (design D2)."""
+    workspace = make_workspace(tmp_path)
+    reports = make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+    push(store, workspace)
+
+    (reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json").write_bytes(
+        b"result-corrected"
+    )
+
+    report = push(store, workspace)
+
+    assert REPORT_RESULT_KEY in report.uploaded
+    assert store.objects[REPORT_RESULT_KEY] == b"result-corrected"
+
+
+def test_status_render_lists_every_root_it_was_built_from(tmp_path):
+    """`render()` groups by the roots' own prefixes, not a hardcoded pair."""
+    workspace = make_workspace(tmp_path)
+    make_reports_workspace(tmp_path)
+    store = FakeObjectStore()
+
+    rendered = status(store, workspace).render()
+
+    assert rendered.count(f"[{data_sync.DATA_PREFIX}]") == 1
+    assert rendered.count(f"[{data_sync.REPORTS_PREFIX}]") == 1
+    assert status(store, workspace).prefixes == (
+        data_sync.DATA_PREFIX,
+        data_sync.REPORTS_PREFIX,
+    )
 
 
 def test_pull_from_an_empty_bucket_reports_that_the_remote_is_empty(tmp_path):
@@ -311,7 +584,7 @@ def test_pull_from_an_empty_bucket_reports_that_the_remote_is_empty(tmp_path):
     store = FakeObjectStore()
 
     with pytest.raises(data_sync.DataSyncError, match=r"リモートバケットが空"):
-        data_sync.pull(store, data_dir)
+        pull(store, data_dir)
 
 
 def test_a_push_interrupted_before_its_manifest_leaves_the_old_generation_readable(
@@ -335,7 +608,7 @@ def test_a_push_interrupted_before_its_manifest_leaves_the_old_generation_readab
 
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    report = data_sync.pull(store, mirror)
+    report = pull(store, mirror)
 
     assert report.generation == 1
     assert set(report.downloaded) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
@@ -366,7 +639,7 @@ def test_a_push_interrupted_before_its_manifest_fails_loudly_on_an_overwritten_k
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
     with pytest.raises(data_sync.DataSyncError, match=r"manifest と一致しない"):
-        data_sync.pull(store, mirror)
+        pull(store, mirror)
 
     assert data_sync.read_state(mirror) is None
     assert not list(mirror.glob("*.tmp"))
@@ -394,7 +667,7 @@ def test_a_push_interrupted_after_its_manifest_leaves_the_new_generation_consist
 
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    report = data_sync.pull(store, mirror)
+    report = pull(store, mirror)
 
     assert report.generation == 2
     assert set(report.downloaded) == {DUCKDB_KEY, BARS_2024_KEY}
@@ -416,17 +689,74 @@ def test_pull_deletes_local_files_the_manifest_no_longer_lists(tmp_path):
     push(store, origin)
 
     mirror = make_workspace(tmp_path, "mirror")
-    data_sync.pull(store, mirror)
+    pull(store, mirror)
 
     (origin / "bars" / "year=2025" / "data.parquet").unlink()
     push(store, origin)
 
-    report = data_sync.pull(store, mirror)
+    report = pull(store, mirror)
 
     assert report.deleted == (BARS_2025_KEY,)
     assert not (mirror / "bars" / "year=2025" / "data.parquet").exists()
     assert (mirror / "bars" / "year=2024" / "data.parquet").is_file()
     assert BARS_2025_KEY not in store.objects
+
+
+def test_pull_retains_a_local_root_the_remote_has_never_published(tmp_path):
+    """Issue #370's migration hazard: adding a root must not wipe it locally.
+
+    The bucket has only ever carried `data/`. A checkout that already holds a
+    `reports/` archive pulls for the first time after `reports/` becomes a
+    synced root -- mirroring would read the manifest's silence as "deleted
+    upstream" and destroy the only copy, which is also the copy that would
+    have seeded the remote.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+    assert not any(key.startswith("reports/") for key in read_manifest(store)["files"])
+
+    mirror = make_workspace(tmp_path, "mirror")
+    archive = make_reports_workspace(tmp_path, "mirror")
+
+    report = pull(store, mirror)
+
+    assert report.deleted == ()
+    assert report.retained == (REPORT_MD_KEY, REPORT_RESULT_KEY)
+    assert (archive / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").is_file()
+    assert (
+        archive / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json"
+    ).is_file()
+    assert "温存=2" in report.render()
+
+
+def test_pull_mirror_deletes_within_a_root_the_remote_already_publishes(tmp_path):
+    """The retention guard is self-limiting: it lifts once the root exists.
+
+    Once one push has published `reports/`, a file genuinely removed upstream
+    must be mirrored away locally exactly as a `data/` file is -- otherwise the
+    guard would have turned mirroring off for that root permanently.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = make_workspace(tmp_path, "mirror")
+    mirror_reports = make_reports_workspace(tmp_path, "mirror")
+    pull(store, mirror)
+
+    (origin.parent / "reports" / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").unlink()
+    push(store, origin)
+
+    report = pull(store, mirror)
+
+    assert report.deleted == (REPORT_MD_KEY,)
+    assert report.retained == ()
+    assert not (mirror_reports / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").exists()
+    assert (
+        mirror_reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json"
+    ).is_file()
 
 
 def test_pull_keeps_the_previous_local_file_when_verification_fails(tmp_path):
@@ -442,7 +772,7 @@ def test_pull_keeps_the_previous_local_file_when_verification_fails(tmp_path):
     store.objects[DUCKDB_KEY] = b"corrupted-remote-bytes"
 
     with pytest.raises(data_sync.DataSyncError, match=r"manifest と一致しない"):
-        data_sync.pull(store, mirror)
+        pull(store, mirror)
 
     assert destination.read_bytes() == b"previous-local-content"
     assert sorted(path.name for path in mirror.iterdir() if path.is_file()) == [
@@ -462,7 +792,37 @@ def test_pull_rejects_a_manifest_key_that_escapes_the_data_directory(tmp_path):
     ).encode("utf-8")
 
     with pytest.raises(data_sync.DataSyncError, match=r"不正なオブジェクトキー"):
-        data_sync.pull(store, data_dir)
+        pull(store, data_dir)
+
+
+def test_pull_rejects_a_manifest_key_that_escapes_the_reports_directory(tmp_path):
+    data_dir = make_workspace(tmp_path)
+    store = FakeObjectStore()
+    store.objects[data_sync.MANIFEST_KEY] = json.dumps(
+        {
+            "generation": 1,
+            "updated_at": FIXED_NOW.isoformat(),
+            "files": {"reports/../../escaped.md": {"sha256": "0" * 64, "size": 1}},
+        }
+    ).encode("utf-8")
+
+    with pytest.raises(data_sync.DataSyncError, match=r"不正なオブジェクトキー"):
+        pull(store, data_dir)
+
+
+def test_pull_rejects_a_manifest_key_under_no_known_prefix(tmp_path):
+    data_dir = make_workspace(tmp_path)
+    store = FakeObjectStore()
+    store.objects[data_sync.MANIFEST_KEY] = json.dumps(
+        {
+            "generation": 1,
+            "updated_at": FIXED_NOW.isoformat(),
+            "files": {"backups/copilot.duckdb": {"sha256": "0" * 64, "size": 1}},
+        }
+    ).encode("utf-8")
+
+    with pytest.raises(data_sync.DataSyncError, match=r"同期対象外のオブジェクトキー"):
+        pull(store, data_dir)
 
 
 def test_read_remote_manifest_rejects_an_unparsable_manifest():
@@ -500,7 +860,7 @@ def test_status_reports_an_empty_remote_without_writing_anything(tmp_path):
     data_dir = make_workspace(tmp_path)
     store = FakeObjectStore()
 
-    report = data_sync.status(store, data_dir)
+    report = status(store, data_dir)
 
     assert report.status is data_sync.SyncStatus.REMOTE_EMPTY
     assert report.remote_generation is None
@@ -517,9 +877,9 @@ def test_status_reports_in_sync_after_a_pull(tmp_path):
     push(store, origin)
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    data_sync.pull(store, mirror)
+    pull(store, mirror)
 
-    report = data_sync.status(store, mirror)
+    report = status(store, mirror)
 
     assert report.status is data_sync.SyncStatus.IN_SYNC
     assert report.remote_generation == 1
@@ -532,13 +892,26 @@ def test_status_reports_in_sync_after_a_pull(tmp_path):
     assert "status: in-sync" in report.render()
 
 
+def test_status_report_breaks_added_files_out_by_root(tmp_path):
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+
+    report = status(FakeObjectStore(), origin)
+    rendered = report.render()
+
+    assert f"  [{data_sync.DATA_PREFIX}]" in rendered
+    assert f"  [{data_sync.REPORTS_PREFIX}]" in rendered
+    assert f"  + {DUCKDB_KEY}" in rendered
+    assert f"  + {REPORT_MD_KEY}" in rendered
+
+
 def test_status_reports_local_changed_when_only_the_local_tree_moved(tmp_path):
     origin = make_workspace(tmp_path, "origin")
     store = FakeObjectStore()
     push(store, origin)
 
     (origin / "copilot.duckdb").write_bytes(b"duckdb-edited")
-    report = data_sync.status(store, origin)
+    report = status(store, origin)
 
     assert report.status is data_sync.SyncStatus.LOCAL_CHANGED
     assert report.modified == (DUCKDB_KEY,)
@@ -550,14 +923,14 @@ def test_status_reports_remote_ahead_when_only_the_remote_moved(tmp_path):
     push(store, origin)
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    data_sync.pull(store, mirror)
+    pull(store, mirror)
 
     (origin / "copilot.duckdb").write_bytes(b"duckdb-v2")
     push(store, origin)
     # The mirror is one generation behind but has no edits of its own.
     (mirror / "copilot.duckdb").write_bytes(b"duckdb-v2")
 
-    report = data_sync.status(store, mirror)
+    report = status(store, mirror)
 
     assert report.status is data_sync.SyncStatus.REMOTE_AHEAD
     assert (report.remote_generation, report.local_generation) == (2, 1)
@@ -569,13 +942,13 @@ def test_status_reports_diverged_when_both_sides_moved(tmp_path):
     push(store, origin)
     mirror = tmp_path / "mirror" / "data"
     mirror.mkdir(parents=True)
-    data_sync.pull(store, mirror)
+    pull(store, mirror)
 
     (origin / "copilot.duckdb").write_bytes(b"duckdb-remote-edit")
     push(store, origin)
     (mirror / "copilot.duckdb").write_bytes(b"duckdb-local-edit")
 
-    report = data_sync.status(store, mirror)
+    report = status(store, mirror)
 
     assert report.status is data_sync.SyncStatus.DIVERGED
     assert report.modified == (DUCKDB_KEY,)
@@ -588,7 +961,7 @@ def test_status_reports_no_local_state_before_the_first_pull(tmp_path):
     push(store, origin)
     fresh = make_workspace(tmp_path, "fresh")
 
-    report = data_sync.status(store, fresh)
+    report = status(store, fresh)
 
     assert report.status is data_sync.SyncStatus.NO_LOCAL_STATE
     assert report.local_generation is None
@@ -642,7 +1015,7 @@ def test_run_prints_the_status_report(tmp_path, capsys):
     data_dir = make_workspace(tmp_path)
     store = FakeObjectStore()
 
-    assert data_sync.run("status", store, data_dir) == 0
+    assert data_sync.run("status", store, _roots(data_dir)) == 0
 
     assert "status: remote-empty" in capsys.readouterr().out
 

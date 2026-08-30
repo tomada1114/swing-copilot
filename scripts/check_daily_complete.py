@@ -14,16 +14,27 @@ the job is failed afterwards, loudly.
 
 The signal is `analysis_result.json`: the skill's only contracted artifact, and
 the file `copilot-ingest-analysis` needs in order to render the qualitative
-layer at all. The `verdicts` table cannot serve here -- it is filled later by
-`copilot-retro collect` scanning `reports/`, so it lags the run that produced
-it. A run with no candidates owes no analysis, which is what the candidate
-count decides.
+layer at all. It stays the signal even now that `reports/` is synced through
+R2 and `copilot-retro collect` runs inside the same job (Issue #370): the
+`verdicts` table would work as a signal in principle, but `analysis_result.json`
+is the simpler one already sitting on the contract boundary, so there is no
+reason to switch. A run with no candidates owes no analysis, which is what the
+candidate count decides.
+
+Because `reports/` is now pulled from R2 at job start, the workspace can hold
+*previous* days' `analysis_result.json` files too. Left unscoped, that would
+turn this check into a false negative on a day the pipeline never ran at all:
+it would find yesterday's report, call the (nonexistent) run of today
+complete, and the day would look green having analyzed nothing. `--started-after`
+closes that gap by requiring the latest run to have actually started in this
+job (see `check()`).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from swing_copilot import research
@@ -36,8 +47,18 @@ class IncompleteRunError(Exception):
     """The most recent run owes a qualitative analysis that is not there."""
 
 
-def _latest_run(db_path: Path | None) -> tuple[str, str]:
-    """Return `(run_id, run_date)` of the most recently started run."""
+def _as_aware_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive `datetime`; leave an already-aware one alone.
+
+    `runs.started_at` is a DuckDB `TIMESTAMPTZ` and always comes back as an
+    aware `pandas.Timestamp` (verified against `research.runs()`), but this
+    keeps a naive/aware mismatch from ever raising on comparison regardless.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _latest_run(db_path: Path | None) -> tuple[str, str, datetime]:
+    """Return `(run_id, run_date, started_at)` of the most recently started run."""
     runs = research.runs(db_path=db_path) if db_path else research.runs()
     if runs.empty:
         message = "runs テーブルが空である (パイプラインが走っていない)"
@@ -46,7 +67,8 @@ def _latest_run(db_path: Path | None) -> tuple[str, str]:
     # `run_date` arrives as a pandas Timestamp; the reports tree is keyed by the
     # bare ISO date, so drop the time component rather than stringifying it.
     run_date = str(latest["run_date"])[:10]
-    return str(latest["run_id"]), run_date
+    started_at = latest["started_at"].to_pydatetime()
+    return str(latest["run_id"]), run_date, started_at
 
 
 def _candidate_count(run_id: str, db_path: Path | None) -> int:
@@ -61,9 +83,32 @@ def _candidate_count(run_id: str, db_path: Path | None) -> int:
     return int(frame.iloc[0]["candidates"])
 
 
-def check(reports_dir: Path, db_path: Path | None = None) -> None:
-    """Raise `IncompleteRunError` unless the latest run produced its analysis."""
-    run_id, run_date = _latest_run(db_path)
+def check(
+    reports_dir: Path,
+    db_path: Path | None = None,
+    started_after: datetime | None = None,
+) -> None:
+    """Raise `IncompleteRunError` unless the latest run produced its analysis.
+
+    Args:
+        reports_dir: Where the daily run archive lives.
+        db_path: DuckDB file to read (default: the operator's live database).
+        started_after: When given, the latest run must have started at or
+            after this (aware) timestamp. Without it, a previous day's run --
+            visible in the workspace now that `reports/` is pulled from R2 --
+            could vouch for a day this job never actually ran.
+    """
+    run_id, run_date, started_at = _latest_run(db_path)
+    if started_after is not None and _as_aware_utc(started_at) < _as_aware_utc(
+        started_after
+    ):
+        message = (
+            f"最新の run {run_id} ({run_date}) の開始時刻 {started_at.isoformat()} が"
+            f" このジョブの開始時刻 {started_after.isoformat()} より前。"
+            " このジョブ自身の run が無い (copilot-daily が走っていない)。"
+        )
+        raise IncompleteRunError(message)
+
     candidates = _candidate_count(run_id, db_path)
     result_path = reports_dir / run_date / run_id / "analysis_result.json"
 
@@ -85,6 +130,16 @@ def check(reports_dir: Path, db_path: Path | None = None) -> None:
     raise IncompleteRunError(message)
 
 
+def _parse_started_after(value: str) -> datetime:
+    """Parse `--started-after` into an aware UTC `datetime`.
+
+    Raises:
+        ValueError: When `value` does not parse as ISO-8601 -- argparse turns
+            this into a normal CLI usage error.
+    """
+    return _as_aware_utc(datetime.fromisoformat(value))
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns 1 when the run is missing its analysis."""
     parser = argparse.ArgumentParser(
@@ -98,9 +153,18 @@ def main(argv: list[str] | None = None) -> int:
         help="レポートの出力先 (既定: リポジトリの reports/)",
     )
     parser.add_argument("--db", type=Path, default=None, help="DuckDB ファイルのパス")
+    parser.add_argument(
+        "--started-after",
+        type=_parse_started_after,
+        default=None,
+        help=(
+            "この時刻 (ISO-8601, UTC 推奨) より前に開始した run は、"
+            "このジョブ自身の run とは認めない (既定: 制限なし)"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        check(args.reports_dir, args.db)
+        check(args.reports_dir, args.db, args.started_after)
     except IncompleteRunError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

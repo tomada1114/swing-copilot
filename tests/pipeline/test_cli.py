@@ -30,6 +30,8 @@ from swing_copilot.pipeline.daily_composition import (
     _parse_args,
     _required_features,
     _run_daily_and_record_outcome,
+    _RunOutcome,
+    _write_outcome_file,
     main,
 )
 from swing_copilot.storage.database import DEFAULT_DB_PATH
@@ -667,6 +669,32 @@ class _FixedClock:
 
     def today(self):
         return self._instant.date()
+
+
+class TestWriteOutcomeFileNoop:
+    """`_write_outcome_file(None, ...)` is a deliberate no-op (Issue #372).
+
+    Kept even though every current caller already guards on
+    `options.outcome_file is not None` before calling in: the guard exists to
+    avoid touching `deps.clock` needlessly, not to be the only place this
+    contract is enforced, so the function's own `None` branch stays covered
+    directly.
+    """
+
+    def test_none_outcome_file_writes_nothing(self, tmp_path):
+        outcome = _RunOutcome(
+            outcome="success",
+            reason=None,
+            run_id="r1",
+            run_date="2027-03-01",
+            candidates=0,
+            started_at=datetime(2027, 3, 1, tzinfo=UTC),
+            finished_at=datetime(2027, 3, 1, tzinfo=UTC),
+        )
+
+        _write_outcome_file(None, outcome)
+
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestOutcomeFile:

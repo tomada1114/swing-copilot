@@ -655,6 +655,46 @@ class TestRunDateResolvesOnlyClosedSessions:
         assert exc_info.value.reason == "no_trading_day"
         assert "network boom" in str(exc_info.value)
 
+    def test_every_fetched_bar_is_still_mid_session_aborts_with_no_trading_day(
+        self, deps
+    ):
+        """Not just the newest date is open -- every fetched date is.
+
+        Distinct from the "falls back to the prior close" case below: here
+        there is no earlier closed session to fall back to at all (a single
+        day's worth of bars, e.g. a symbol's very first session), so the
+        closed-session set is empty and the run must abort.
+        """
+        session_date = date(2027, 3, 1)
+        close_at = datetime.combine(
+            session_date, time(16, 0), tzinfo=ZoneInfo("America/New_York")
+        )
+        still_open = close_at - timedelta(hours=1)
+        only_todays_bars = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "date": session_date,
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 2_000_000,
+                }
+                for symbol in ("AAPL", "MSFT")
+            ]
+        )
+        broken_deps = replace(
+            deps,
+            data_provider=FakeDataProvider(only_todays_bars),
+            clock=_FixedNowClock(still_open),
+        )
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
+
+        assert exc_info.value.reason == "no_trading_day"
+
     def test_latest_bar_still_mid_session_falls_back_to_the_prior_close(self, deps):
         """The newest fetched bar's session has not closed yet (16:00 ET)."""
         session_date = date(2027, 3, 1)

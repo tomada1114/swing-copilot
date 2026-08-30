@@ -15,6 +15,7 @@ from swing_copilot.analysis.schemas import (
     AnalysisInput,
     AnalysisResult,
     CalendarEventInput,
+    CandidateInput,
     NewsSupply,
     SourcedFact,
     SymbolAnalysis,
@@ -272,6 +273,39 @@ class TestUnknownFieldsAreRejected:
         with pytest.raises(ValidationError, match="operator"):
             AnalysisInput.model_validate(input_payload(operator="tomada"))
 
+    def test_a_candidate_field_outside_the_retired_registry_is_still_rejected(self):
+        """Issue #374 relaxes exactly two named keys, never `extra="forbid"` itself."""
+        payload = input_payload()
+        payload["candidates"][0]["unexpected_field"] = "x"
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+
+        with pytest.raises(ValidationError, match="unexpected_field"):
+            AnalysisInput.model_validate(payload)
+
+    def test_a_context_field_outside_the_retired_registry_is_still_rejected(self):
+        payload = input_payload()
+        payload["context"]["unexpected_field"] = "x"
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+
+        with pytest.raises(ValidationError, match="unexpected_field"):
+            AnalysisInput.model_validate(payload)
+
+    def test_a_retired_input_field_name_is_still_rejected_on_the_result_side(self):
+        """`AnalysisResult`/`SymbolAnalysis` never gained `_ArchiveReadableModel`.
+
+        The retirement registry is scoped to the models the pipeline itself
+        writes; a key retired only from `analysis_input.json` must still be
+        rejected wherever the skill's `analysis_result.json` is concerned.
+        """
+        payload = result_payload(symbols=[symbol_payload(decision_history=None)])
+
+        with pytest.raises(ValidationError, match="decision_history"):
+            AnalysisResult.model_validate(payload)
+
 
 class TestProvenanceShape:
     def test_a_fact_without_source_ids_is_rejected(self):
@@ -440,3 +474,73 @@ class TestCalendarEventsContext:
                     "unexpected": "field",
                 }
             )
+
+
+class TestRetiredArchiveFields:
+    """Issue #374: pre-#324 archives kept `decision_history`/`performance_summary`.
+
+    Their `analysis_input.json` was written before that removal and is still
+    R2-synced -- P8 collect must be able to read it. The registry has to sit
+    on `CandidateInput`/`AnalysisContextBlocks`, not on `AnalysisInput`
+    itself, or `_verify_input_digest` would compute its digest over a document
+    it had already trimmed. These tests lock that ordering: the digest below
+    is computed over the *raw* payload, retired keys included, and validation
+    must still pass.
+    """
+
+    def test_a_v2_archive_with_both_retired_fields_parses_and_its_digest_verifies(
+        self,
+    ):
+        payload = input_payload()
+        payload["schema_version"] = "analysis-input-v2"
+        payload["candidates"][0]["filings"][0].pop("coverage")
+        payload["candidates"][0]["decision_history"] = None
+        payload["context"]["performance_summary"] = None
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+
+        parsed = AnalysisInput.model_validate(payload)
+
+        assert parsed.schema_version == "analysis-input-v2"
+        assert parsed.candidates[0].symbol == "AAPL"
+        assert parsed.context.market_regime is not None
+        assert parsed.input_digest == payload["input_digest"]
+
+    def test_a_non_null_decision_history_value_is_also_dropped(self):
+        """The registry drops the key regardless of value shape.
+
+        The real archives that motivated this issue happened to carry `null`.
+        """
+        payload = input_payload()
+        payload["candidates"][0]["decision_history"] = {
+            "trades": [{"symbol": "AAPL", "outcome": "win"}]
+        }
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+
+        parsed = AnalysisInput.model_validate(payload)
+
+        assert parsed.candidates[0].symbol == "AAPL"
+
+    def test_a_v3_archive_without_any_retired_field_still_parses(self):
+        """The common case: nothing retired was ever present, nothing is dropped."""
+        payload = input_payload()
+
+        parsed = AnalysisInput.model_validate(payload)
+
+        assert parsed.schema_version == INPUT_SCHEMA_VERSION
+        assert parsed.candidates[0].symbol == "AAPL"
+
+    def test_candidate_input_drops_decision_history_in_isolation(self):
+        candidate = CandidateInput.model_validate(
+            {**input_payload()["candidates"][0], "decision_history": None}
+        )
+        assert candidate.symbol == "AAPL"
+
+    def test_context_blocks_drops_performance_summary_in_isolation(self):
+        context = AnalysisContextBlocks.model_validate(
+            {**input_payload()["context"], "performance_summary": None}
+        )
+        assert context.market_regime is not None

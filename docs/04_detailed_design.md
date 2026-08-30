@@ -829,6 +829,17 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _ArchiveReadableModel(_StrictModel):
+    """`AnalysisInput`側の子モデル専用: 退役フィールドだけを読み出し時に落とす。"""
+
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_fields(cls, value: object) -> object:
+        """`_RETIRED_FIELDS`に載る鍵だけを除去する（他の未知鍵は従来どおり拒否）。"""
+
+
 # --- 入力（copilot-daily が書く） ---
 
 class NewsInput(_StrictModel):
@@ -837,7 +848,9 @@ class NewsInput(_StrictModel):
 class FilingInput(_StrictModel):
     """source_id / form_type / filed_at / text / url / coverage"""
 
-class CandidateInput(_StrictModel):
+class CandidateInput(_ArchiveReadableModel):
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset({"decision_history"})  # Issue #324で撤去
+
     symbol: str
     score_breakdown: str          # analysis/context.py が整形したコード計算済みの値
     risk_constraints: str
@@ -849,8 +862,10 @@ class CandidateInput(_StrictModel):
 class CalendarEventInput(_StrictModel):
     """source_id / published_at / title / summary / url / provider（symbolを持たない）"""
 
-class AnalysisContextBlocks(_StrictModel):
+class AnalysisContextBlocks(_ArchiveReadableModel):
     """run単位の文脈: market_regime / calendar_events"""
+
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset({"performance_summary"})  # Issue #324で撤去
 
 class AnalysisInput(_StrictModel):
     schema_version: Literal["analysis-input-v2", "analysis-input-v3"]
@@ -907,6 +922,16 @@ class AnalysisResult(_StrictModel):
 
 （上のクラス本体は責務を示すdocstringに省略している。フィールドの最終正本は
 `src/swing_copilot/analysis/schemas.py`。）
+
+**退役フィールド登録簿（`_ArchiveReadableModel`、Issue #374）**: `extra="forbid"`が守る不変条件は方向によって意味が違う。`analysis_result.json`は**スキルの出力**であり、そこでの未知フィールドは常に絶対拒否——緩めない。一方`analysis_input.json`は**このコードベース自身が書いたアーカイブ**であり、`input_digest`で自己署名されている。Issue #324の実売買記録機能撤去で`decision_history`（`CandidateInput`）／`performance_summary`（`AnalysisContextBlocks`）を削除したところ、それ以前に書かれ今もR2同期対象のアーカイブ（21件中17件）が`copilot-retro collect`で一切パースできなくなった——書き込み時の厳格さと読み出し時の厳格さを同じスキーマで兼ねていたことが原因である。
+
+対処は「かつてこのコードが書き、今は書かないキー」だけを読み出し時に落とす閉じた登録簿であり、**`extra="forbid"`自体を緩めるものではない**。登録簿に載らない未知キーは従来どおり拒否される。`_ArchiveReadableModel`は`CandidateInput`/`AnalysisContextBlocks`だけに適用し、`AnalysisResult`系（`SourcedFact`・`SymbolAnalysis`等、スキルが書く側）と`retro/schemas.py`には**継承させない**。
+
+登録簿は`AnalysisInput`自身ではなく**子モデル側**（`CandidateInput`/`AnalysisContextBlocks`）に置く。`AnalysisInput._verify_input_digest`は`mode="before"`で生ペイロード全体を対象にダイジェストを照合するため、除去を`AnalysisInput`側で行うとダイジェストが「除去後の文書」に対して計算され、アーカイブが書かれた時点の生JSONに対する署名と一致しなくなる。pydanticは親の`mode="before"`を先に実行してから子モデルを構築するため、子側に登録簿を置けば (1) 親の digest 検証が無傷の生JSONに対して行われ、(2) その後で子が自分の退役キーだけを落として構築される、の順序が保たれる。この順序は`tests/analysis/test_schemas.py::TestRetiredArchiveFields`が、退役フィールドを含む生JSONに対して計算した digest がそのまま検証を通ることで固定している。
+
+**運用規約**: 今後`analysis_input.json`からフィールドを削除する変更は、同じコミットで対応する`_RETIRED_FIELDS`への追加を必須とする。追加を怠ると、その変更より前に書かれた既存アーカイブが次の`copilot-retro collect`で一括して読めなくなる。
+
+`copilot-retro collect`は依然としてrun単位fail-softを維持するが（1件の破損アーカイブが他を道連れにしてはならない）、読めなかったrunがあっても`collect`自体は終了コード0のまま成功する。これだけでは取り込み漏れが「verdictの欠落」としてしか観測できないため、`retro/cli.py::_run_collect`は解析不能なrunが1件以上あるとき`COLLECT_UNREADABLE[<件数>]:`という機械可読タグを標準エラー出力へ書く（`pipeline/daily_composition.py`の`PREFLIGHT_ABORT[<reason>]:`、`pipeline/daily_runner.py`の`ANALYSIS_GAP[<reason>]:`と同じ、生の行として書きロギングを経由しない慣習）。**終了コードは変えない**——CIの`push`ステップは`success()`ゲートなので、ここで失敗にすると当日の価格・ファンダメンタルズの同期まで道連れになる（`.github/workflows/swing-daily.yml`の`collect`ステップは`continue-on-error: true`）。取り込み漏れたrunは`verdict_collections`にdigest行を持たないため、次回の`collect`が無条件に拾い直す——手動の再収集フラグは不要である。
 
 `FilingAnalysis`が書類種別・提出日を持たないのは意図的である。これらはコードが所有する`TextItem`のメタデータであり、スキルに正確にエコーバックさせるのではなく`analysis/validate.py`が`analysis_input.json`から解決する。`VerdictReason.source_ids`だけが空を許すのは、スコアやサイジング制約のようにコード自身が計算した決定論的入力にのみ基づく理由には、引用すべきニュース/開示ソースが存在しないためである。
 

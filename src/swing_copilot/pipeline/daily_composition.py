@@ -131,7 +131,12 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     parser.add_argument(
         "--outcome-file",
         type=Path,
-        default=os.environ.get(_OUTCOME_FILE_ENV_VAR),
+        # `or None`: an env var exported but left empty means "unset" here.
+        # Without it argparse would convert the `""` default to `Path(".")`,
+        # and `write_json_atomically` would raise `ValueError` on a path with
+        # no name -- an unwritten diagnostics file taking a real run down with
+        # it, which `_write_outcome_file`'s fail-soft contract forbids.
+        default=os.environ.get(_OUTCOME_FILE_ENV_VAR) or None,
         help=(
             "write this run's terminal outcome (success/degraded/failed/"
             "preflight_abort) as JSON to this path, outside reports/; falls "
@@ -347,10 +352,14 @@ def _write_outcome_file(outcome_file: Path | None, outcome: _RunOutcome) -> None
     is neither. Its only job is letting a later boundary -- a CI step, not
     the headless analysis session -- tell "`copilot-daily` never even
     started" apart from "it started and legitimately aborted". It is written
-    on every terminal path, `PreflightAbort` included, which is the point:
-    the 2026-08-29 incident this issue traces to was invisible precisely
-    because nothing recorded a preflight abort as anything but "no run
-    happened at all".
+    on every *documented* terminal path -- `PreflightAbort` included, which
+    is the point: the 2026-08-29 incident this issue traces to was invisible
+    precisely because nothing recorded a preflight abort as anything but "no
+    run happened at all". An undocumented crash (an unexpected exception out
+    of `run_daily`, or a failure before it in `main()`) deliberately writes
+    nothing: the checker then reports the file as missing, which fails the
+    day -- the right verdict, if a blunter diagnosis than the traceback the
+    job log already carries.
 
     A `None` `outcome_file` (no `--outcome-file` and no environment fallback)
     writes nothing -- this must not change what an existing invocation does.

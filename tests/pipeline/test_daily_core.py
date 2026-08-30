@@ -603,6 +603,13 @@ class _FixedNowClock:
         return self._now.date()
 
 
+def _empty_bars() -> pd.DataFrame:
+    """A bar frame with the right columns and no rows."""
+    return pd.DataFrame(
+        columns=["symbol", "date", "open", "high", "low", "close", "volume"]
+    )
+
+
 class _RaisingDataProvider:
     """A `DataProvider` whose price fetch always raises."""
 
@@ -631,15 +638,43 @@ class TestRunDateResolvesOnlyClosedSessions:
     def test_empty_prefetch_aborts_with_no_trading_day_and_writes_no_run(
         self, deps, state_store
     ):
-        empty_bars = pd.DataFrame(
-            columns=["symbol", "date", "open", "high", "low", "close", "volume"]
-        )
-        broken_deps = replace(deps, data_provider=FakeDataProvider(empty_bars))
+        """A clean empty answer -- no `failures` -- is the legitimate stop."""
+        broken_deps = replace(deps, data_provider=FakeDataProvider(_empty_bars()))
 
         with pytest.raises(PreflightAbort) as exc_info:
             run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
 
         assert exc_info.value.reason == "no_trading_day"
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM runs").fetchone()
+        assert count == (0,)
+
+    def test_empty_prefetch_with_failures_is_price_fetch_failed_not_no_trading_day(
+        self, deps, state_store
+    ):
+        """The shape a real provider outage actually arrives in.
+
+        `YFinanceProvider.get_daily_bars` never raises: a download exception
+        and an empty provider response are both folded into an empty frame
+        plus per-symbol `FetchFailure`s. Classifying that as `no_trading_day`
+        would put it on `check_daily_complete.py`'s legitimate-stop
+        whitelist, so a provider outage would leave the unattended job green
+        with nothing analyzed -- the exact hole the `price_fetch_failed`
+        split exists to close.
+        """
+        failures = tuple(
+            FetchFailure(symbol=symbol, reason="no data returned", retryable=True)
+            for symbol in ("AAPL", "MSFT")
+        )
+        broken_deps = replace(
+            deps, data_provider=FakeDataProvider(_empty_bars(), failures)
+        )
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
+
+        assert exc_info.value.reason == "price_fetch_failed"
+        assert "no data returned" in str(exc_info.value)
         with state_store._database.connect() as conn:  # noqa: SLF001
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)

@@ -129,9 +129,9 @@ def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
         Whether `check()` should pass without consulting the database.
 
     Raises:
-        IncompleteRunError: The file is missing, unreadable as JSON, or
-            records a `preflight_abort` whose `reason` is not a legitimate
-            stop.
+        IncompleteRunError: The file is missing, unreadable as JSON, not a
+            JSON object, or records a `preflight_abort` whose `reason` is not
+            a legitimate stop.
     """
     if not outcome_file.exists():
         message = (
@@ -144,6 +144,12 @@ def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
     except (OSError, json.JSONDecodeError) as error:
         message = f"outcome ファイル {outcome_file} を読み込めない: {error}"
         raise IncompleteRunError(message) from error
+    if not isinstance(payload, dict):
+        message = (
+            f"outcome ファイル {outcome_file} が JSON オブジェクトではない "
+            f"({type(payload).__name__})。"
+        )
+        raise IncompleteRunError(message)
     outcome = payload.get("outcome")
     if outcome != "preflight_abort":
         return False

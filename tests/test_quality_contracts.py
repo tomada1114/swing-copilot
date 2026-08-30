@@ -505,7 +505,11 @@ def test_daily_workflow_wires_the_outcome_file_and_uploads_the_execution_log():
     assert '--outcome-file "$COPILOT_DAILY_OUTCOME_FILE"' in verify_step["run"]
 
     upload_step = steps["Upload Claude execution log"]
-    assert upload_step["if"] == "always()"
+    # `always()` plus the non-empty guard: `path` is a *required* input of
+    # upload-artifact, so an empty `execution_file` (the claude step skipped)
+    # is an input error, not something `if-no-files-found: ignore` absorbs.
+    assert "always()" in upload_step["if"]
+    assert "steps.claude.outputs.execution_file != ''" in upload_step["if"]
     assert upload_step["uses"].startswith("actions/upload-artifact@")
     assert upload_step["with"]["path"] == "${{ steps.claude.outputs.execution_file }}"
     assert upload_step["with"]["retention-days"] == 14

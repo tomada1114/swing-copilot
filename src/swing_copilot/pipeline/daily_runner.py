@@ -142,6 +142,43 @@ def _session_has_closed(session_date: date, now: datetime) -> bool:
     return now >= close_at
 
 
+def _reject_a_failed_prefetch(prefetched: BarFetchResult) -> None:
+    """Abort when the prefetch delivered nothing *and* reported failures.
+
+    `raise` is not how the production provider signals an outage:
+    `YFinanceProvider.get_daily_bars` catches every download exception and
+    `_normalize` turns an empty response into per-symbol `FetchFailure`s, so
+    a rate limit, a DNS failure, or a provider-side outage arrives here as
+    "empty frame plus failures" rather than through the `except` clause in
+    `run_daily`. Letting that fall through to `_resolve_closed_run_date`
+    would classify it as `no_trading_day`, which
+    `scripts/check_daily_complete.py` accepts as a legitimate stop -- i.e.
+    the outage would turn the unattended job green with nothing analyzed,
+    the exact failure mode #372's `price_fetch_failed` split exists to
+    prevent. Same principle as `docs/04_detailed_design.md`'s "an empty
+    response that contradicts what we already hold is a failure".
+
+    An empty frame with *no* failures stays `no_trading_day`
+    (`_resolve_closed_run_date`'s concern): the provider answered, it simply
+    had nothing to give.
+
+    Args:
+        prefetched: What `DataProvider.get_daily_bars` returned.
+
+    Raises:
+        PreflightAbort: Reason `price_fetch_failed`.
+    """
+    if not prefetched.bars.empty or not prefetched.failures:
+        return
+    reasons = sorted({failure.reason for failure in prefetched.failures})
+    msg = (
+        "preflight abort: 価格データの取得が全銘柄で失敗した "
+        f"({len(prefetched.failures)} 銘柄: {'; '.join(reasons)})。"
+        "引けた取引日を判定できない。"
+    )
+    raise PreflightAbort(msg, reason="price_fetch_failed")
+
+
 def _resolve_closed_run_date(bars: pd.DataFrame, now: datetime) -> date:
     """Pick the latest fetched session whose regular close has passed.
 
@@ -163,13 +200,24 @@ def _resolve_closed_run_date(bars: pd.DataFrame, now: datetime) -> date:
     Raises:
         PreflightAbort: No fetched bar's session has closed yet -- an empty
             prefetch, or every fetched date is still mid-session (reason
-            `no_trading_day`).
+            `no_trading_day`). An empty prefetch that *reported failures* was
+            already rejected as `price_fetch_failed` by
+            `_reject_a_failed_prefetch`, so reaching here empty means the
+            provider answered cleanly with nothing.
     """
     if bars.empty:
         msg = "preflight abort: 価格データが空で、確定した取引日が無い。"
         raise PreflightAbort(msg, reason="no_trading_day")
-    bar_dates = {_bar_date(value) for value in bars["date"]}
-    closed_dates = [d for d in bar_dates if _session_has_closed(d, now)]
+    # `drop_duplicates()` dedups inside pandas (and, unlike `.unique()`, keeps
+    # a Series, so iteration still boxes datetime64 cells into `Timestamp`).
+    # The prefetch spans months of history across the whole universe plus the
+    # market strip, so a Python-level pass over every row is six figures of
+    # interpreter work for what is one column's distinct dates.
+    closed_dates = [
+        bar_date
+        for bar_date in (_bar_date(value) for value in bars["date"].drop_duplicates())
+        if _session_has_closed(bar_date, now)
+    ]
     if not closed_dates:
         msg = (
             "preflight abort: 取得できた価格データの中に、米国東部時間 16:00 を"
@@ -432,6 +480,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
             # reason, or a transient outage silently turns the CI job green).
             msg = f"preflight abort: 価格データの取得に失敗した ({exc})。引けた取引日を判定できない。"
             raise PreflightAbort(msg, reason="price_fetch_failed") from exc
+        _reject_a_failed_prefetch(prefetched_prices)
         run_date = _resolve_closed_run_date(prefetched_prices.bars, deps.clock.now())
 
     if not options.allow_same_day_rerun:

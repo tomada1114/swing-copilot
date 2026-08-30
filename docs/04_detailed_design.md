@@ -1383,15 +1383,24 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 以下を通る。
 
 1. `deps.data_provider.get_daily_bars(...)`でプリフェッチする。**例外は
-   その場で`PreflightAbort(reason="no_trading_day")`に変換する**——以前は
+   その場で`PreflightAbort(reason="price_fetch_failed")`に変換する**——以前は
    `prefetch_error`という文字列に握り潰して`run_date`を`deps.clock.today()`
    （壁時計）のまま残し、ステップ1で改めて失敗させていたが、これは
    AGENTS.md「wall time is metadata, never a substitute for `as_of`」への
    直接の違反だった。
-2. プリフェッチが空でも同じ`no_trading_day`で中止する（以前と同じ結論だが、
+2. プリフェッチが**空でかつ`failures`を伴う**場合も同じ`price_fetch_failed`
+   で中止する（`_reject_a_failed_prefetch()`）。`YFinanceProvider`は
+   `get_daily_bars`から例外を送出しない——ダウンロード時の例外も空応答も
+   `_normalize()`が銘柄ごとの`FetchFailure`に畳んで空フレームで返す——ので、
+   本番のプロバイダ障害は1.のexceptではなくこの経路で到着する。これを
+   `no_trading_day`に分類すると`check_daily_complete.py`の正当停止
+   ホワイトリストに載り、障害の日が「分析なしで緑」になる。11.5節の
+   「矛盾する空応答は失敗として扱う」と同じ原則である。
+3. `failures`を伴わない空プリフェッチは`no_trading_day`で中止する
+   （プロバイダは正常に応答し、渡すものが無かった。以前と同じ結論だが、
    経路が「壁時計のrun_dateでstart_runした後にステップ1で失敗」から
    「start_run前のpreflight abort」に変わった——`runs`に行が残らない）。
-3. プリフェッチが空でなければ、取得できたbarの日付ごとに
+4. プリフェッチが空でなければ、取得できたbarの日付ごとに
    `_session_has_closed(session_date, now)`（`datetime.combine(session_date,
    time(16, 0), tzinfo=MARKET_TIMEZONE) <= now`、`MARKET_TIMEZONE`は
    `clock.py`が公開する`ZoneInfo("America/New_York")`で`risk/circuit_breaker.py`

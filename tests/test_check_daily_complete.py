@@ -315,6 +315,20 @@ class TestOutcomeFile:
                 tmp_path / "reports", db_path, outcome_file=outcome_file
             )
 
+    def test_non_object_outcome_file_raises_the_domain_error(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """Valid JSON that is not an object must not surface as AttributeError."""
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text("[]", encoding="utf-8")
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError, match="JSON オブジェクトではない"
+        ):
+            check_daily_complete.check(
+                tmp_path / "reports", db_path, outcome_file=outcome_file
+            )
+
     def test_omitting_it_preserves_existing_behavior(
         self, db_path: Path, tmp_path: Path
     ) -> None:

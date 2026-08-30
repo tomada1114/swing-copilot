@@ -126,6 +126,61 @@ class TestCheck:
             check_daily_complete.check(reports_dir, db_path)
 
 
+class TestStartedAfter:
+    """`--started-after` scopes the check to this job's own run (Issue #370)."""
+
+    def test_passes_when_the_latest_run_started_at_or_after_it(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 10)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+
+        # Exactly equal counts as "at or after" -- not strictly before.
+        check_daily_complete.check(
+            reports_dir,
+            db_path,
+            started_after=datetime(2026, 8, 19, 23, 50, tzinfo=UTC),
+        )
+
+    def test_raises_when_the_latest_run_started_before_it(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """A previous day's run must not vouch for a day this job never ran.
+
+        Visible now that reports/ is pulled from R2 at job start.
+        """
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError,
+            match="このジョブ自身の run が無い",
+        ):
+            check_daily_complete.check(
+                reports_dir,
+                db_path,
+                started_after=datetime(2026, 8, 20, 0, 0, tzinfo=UTC),
+            )
+
+    def test_omitting_it_preserves_the_candidates_zero_path(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+
+        check_daily_complete.check(reports_dir, db_path)
+
+    def test_omitting_it_preserves_the_analysis_result_present_path(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 10)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+
+        check_daily_complete.check(reports_dir, db_path)
+
+
 class TestMain:
     def test_returns_one_and_reports_on_stderr_when_incomplete(
         self, db_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -152,3 +207,43 @@ class TestMain:
             )
             == 0
         )
+
+    def test_returns_zero_when_started_after_precedes_the_latest_run(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--db",
+                str(db_path),
+                "--started-after",
+                "2026-08-19T00:00:00Z",
+            ]
+        )
+
+        assert exit_code == 0
+
+    def test_returns_one_when_started_after_excludes_the_latest_run(
+        self, db_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--db",
+                str(db_path),
+                "--started-after",
+                "2026-08-20T00:00:00Z",
+            ]
+        )
+
+        assert exit_code == 1
+        assert "このジョブ自身の run が無い" in capsys.readouterr().err

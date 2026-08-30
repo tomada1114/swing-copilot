@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 定性分析の判定が `verdicts` テーブルへ反映されず、直近1か月分の記録が抜けていた
+  問題を修正した（Issue #370）。`verdicts`/`verdict_sources` へ書き込む唯一の経路
+  `copilot-retro collect`（設計判断 D2、`copilot-ingest-analysis` は DB に触れない）
+  は `reports/` を走査するが、`reports/` は R2 同期対象外で GitHub Actions の
+  workflow artifact（14日保持）としてしか残らず、しかも日次 job は
+  `copilot-retro collect` を一度も実行していなかった。CI で走った日の verdict は
+  ランナー破棄と同時に失われていた。`scripts/data_sync.py` を `data/` 単一ルートから
+  `data/`・`reports/` の複数ルート同期へ一般化し（`reports/<date>/<run_id>.md` と
+  `reports/<date>/<run_id>/` 配下の日次runアーカイブだけを対象とし、
+  `backtests/`/`dry_run/`/`assets/`/`retro/` は対象外のまま。manifest／generation／
+  状態ファイルは両ツリーで共有する1組のまま分割しない）、`.github/workflows/swing-daily.yml`
+  へ R2 push 前の `copilot-retro collect` 実行ステップを追加した。あわせて、
+  `scripts/check_daily_complete.py` の誤検知（DB の最新 run を、その日の分しか
+  存在しないワークスペースに対して検証していたため、run が作られなかった日に
+  前日分の run で検証して失敗する）も `--started-after` オプションで修正し、
+  ジョブ自身が開始した後の run だけを判定対象にした
 - `retro_input.json` の `input_digest` 再検証を、その文書自身が持っていたキー集合
   （`model_dump(exclude_unset=True)`）に対して行うようにした（Issue #276）。
   読み込み時の素の `model_dump()` が既定値を実体化するため、Issue #157 で足した

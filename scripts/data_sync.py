@@ -1,9 +1,22 @@
-"""Mirror the operator-owned `data/` tree to and from the Cloudflare R2 bucket.
+"""Mirror the operator-owned `data/` and `reports/` trees to/from R2.
 
-The R2 bucket is the source of truth for `data/copilot.duckdb` and the
-`data/bars/year=YYYY/*.parquet` Hive tree. Both this machine and the GitHub
-Actions runner use the same three verbs: `pull` before working, `push` after.
-The pipeline itself is untouched -- this script only moves bytes.
+The R2 bucket is the source of truth for two local trees, synced together as
+one commit:
+
+- `data/`: `copilot.duckdb` and the `data/bars/year=YYYY/*.parquet` Hive tree.
+- `reports/`: the daily run archive only -- `reports/<date>/<run_id>.md` and
+  everything under `reports/<date>/<run_id>/` (the `analysis_input.json` /
+  `analysis_result.json` pair `copilot-retro collect` needs). Local/derived
+  artifacts such as `reports/backtests/`, `reports/dry_run/`, `reports/assets/`,
+  `reports/retro/`, and `reports/latest.md` are deliberately excluded.
+
+Both this machine and the GitHub Actions runner use the same three verbs:
+`pull` before working, `push` after. The pipeline itself is untouched -- this
+script only moves bytes.
+
+There is exactly **one** manifest, one generation counter, and one local
+state file across both trees -- see `SyncRoot` below. Splitting either would
+break the optimistic-lock invariant they exist to enforce.
 
 Two invariants make that safe:
 
@@ -47,8 +60,9 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
@@ -70,10 +84,12 @@ if TYPE_CHECKING:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
+DEFAULT_REPORTS_DIR = REPO_ROOT / "reports"
 
 BUCKET_NAME = "swing-copilot-data-duckdb"
 MANIFEST_KEY = "manifest.json"
 DATA_PREFIX = "data/"
+REPORTS_PREFIX = "reports/"
 STATE_FILE_NAME = ".r2_sync_state.json"
 BARS_DIR_NAME = "bars"
 
@@ -85,6 +101,7 @@ EXCLUDED_COMPONENT_GLOB = "*.bak-*"
 _HASH_CHUNK_BYTES = 1 << 20
 _MISSING_OBJECT_CODES = frozenset({"NoSuchKey", "NotFound", "404"})
 _CREDENTIAL_FIELDS = ("r2_account_id", "r2_access_key_id", "r2_secret_access_key")
+_REPORTS_RUN_MD_PARTS = 2  # "<date>/<run_id>.md"
 
 
 class DataSyncError(RuntimeError):
@@ -320,12 +337,114 @@ def build_object_store(credentials: R2Credentials) -> R2ObjectStore:
 
 
 # --------------------------------------------------------------------------- #
+#  Sync roots
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class SyncRoot:
+    """One local tree synced under its own bucket-key prefix.
+
+    All roots share the single `manifest.json` / `generation` / state file --
+    see the module docstring. A root only contributes its own key prefix, its
+    own local directory, and its own shape predicate.
+    """
+
+    name: str
+    prefix: str
+    local_dir: Path
+    is_synced_shape: Callable[[PurePosixPath], bool]
+
+
+def _is_iso_date(value: str) -> bool:
+    """Whether `value` parses as a bare ISO-8601 date (`YYYY-MM-DD`)."""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_uuid(value: str) -> bool:
+    """Whether `value` parses as a UUID (a run id)."""
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_data_sync_shape(relative: PurePosixPath) -> bool:
+    """Whether a `data/`-relative path is one of the two synced artifacts."""
+    parts = relative.parts
+    if len(parts) == 1:
+        return relative.suffix == ".duckdb"
+    return parts[0] == BARS_DIR_NAME and relative.suffix == ".parquet"
+
+
+def _has_reports_sync_shape(relative: PurePosixPath) -> bool:
+    """Whether a `reports/`-relative path belongs to the daily run archive.
+
+    Only `<date>/<run_id>.md` and anything under `<date>/<run_id>/` (any
+    depth) qualifies, where `<date>` parses with `date.fromisoformat` and
+    `<run_id>` parses as a UUID. This deliberately excludes
+    `reports/backtests/`, `reports/dry_run/`, `reports/assets/`,
+    `reports/retro/`, and any top-level file such as `reports/latest.md` --
+    they are local/derived artifacts, not the run archive `copilot-retro
+    collect` needs.
+    """
+    parts = relative.parts
+    if len(parts) < _REPORTS_RUN_MD_PARTS or not _is_iso_date(parts[0]):
+        return False
+    if len(parts) == _REPORTS_RUN_MD_PARTS:
+        candidate = PurePosixPath(parts[1])
+        return candidate.suffix == ".md" and _is_uuid(candidate.stem)
+    return _is_uuid(parts[1])
+
+
+def build_roots(data_dir: Path, reports_dir: Path) -> tuple[SyncRoot, ...]:
+    """Build the `data/` and `reports/` sync roots for a given local pair."""
+    return (
+        SyncRoot(
+            name="data",
+            prefix=DATA_PREFIX,
+            local_dir=data_dir,
+            is_synced_shape=_has_data_sync_shape,
+        ),
+        SyncRoot(
+            name="reports",
+            prefix=REPORTS_PREFIX,
+            local_dir=reports_dir,
+            is_synced_shape=_has_reports_sync_shape,
+        ),
+    )
+
+
+DEFAULT_ROOTS = build_roots(DEFAULT_DATA_DIR, DEFAULT_REPORTS_DIR)
+
+
+def _data_root(roots: tuple[SyncRoot, ...]) -> SyncRoot:
+    """The root holding the single shared state file (`data/`, by prefix).
+
+    Raises:
+        DataSyncError: When no root in `roots` carries `DATA_PREFIX`. Cannot
+            happen through the CLI or `build_roots`; guards against a
+            hand-built `roots` tuple omitting the state-holding root.
+    """
+    for root in roots:
+        if root.prefix == DATA_PREFIX:
+            return root
+    msg = f"{DATA_PREFIX} を持つルートが roots に無い (状態ファイルを置けない)"
+    raise DataSyncError(msg)
+
+
+# --------------------------------------------------------------------------- #
 #  Local tree
 # --------------------------------------------------------------------------- #
 
 
 def _is_excluded(relative: PurePosixPath) -> bool:
-    """Whether a `data/`-relative path is local-only and must never sync.
+    """Whether a root-relative path is local-only and must never sync.
 
     Checked per path component, so a backed-up *directory*
     (`bars/year=2024.bak-20260811/data.parquet`) is skipped just like a
@@ -340,50 +459,54 @@ def _is_excluded(relative: PurePosixPath) -> bool:
     )
 
 
-def _has_sync_shape(relative: PurePosixPath) -> bool:
-    """Whether a `data/`-relative path is one of the two synced artifacts."""
-    parts = relative.parts
-    if len(parts) == 1:
-        return relative.suffix == ".duckdb"
-    return parts[0] == BARS_DIR_NAME and relative.suffix == ".parquet"
-
-
-def iter_sync_paths(data_dir: Path) -> Iterator[Path]:
-    """Yield every local file belonging to the synced set, in key order."""
-    if not data_dir.is_dir():
+def iter_sync_paths(root: SyncRoot) -> Iterator[Path]:
+    """Yield every local file under `root` belonging to its synced set."""
+    if not root.local_dir.is_dir():
         return
-    for path in sorted(data_dir.rglob("*")):
+    for path in sorted(root.local_dir.rglob("*")):
         if not path.is_file():
             continue
-        relative = PurePosixPath(path.relative_to(data_dir).as_posix())
-        if _is_excluded(relative) or not _has_sync_shape(relative):
+        relative = PurePosixPath(path.relative_to(root.local_dir).as_posix())
+        if _is_excluded(relative) or not root.is_synced_shape(relative):
             continue
         yield path
 
 
-def _object_key(data_dir: Path, path: Path) -> str:
-    """Object key for a local path: the repo-relative path, verbatim."""
-    return f"{DATA_PREFIX}{path.relative_to(data_dir).as_posix()}"
+def _object_key(root: SyncRoot, path: Path) -> str:
+    """Object key for a local path: the root-relative path, prefixed."""
+    return f"{root.prefix}{path.relative_to(root.local_dir).as_posix()}"
 
 
-def _local_path(data_dir: Path, key: str) -> Path:
-    """Resolve an object key back to a local path inside `data_dir`.
+def _find_root(roots: tuple[SyncRoot, ...], key: str) -> SyncRoot:
+    """Pick the root whose prefix owns `key`.
 
     Raises:
-        DataSyncError: When the key is outside `data/`, or escapes `data_dir`
-            through `..` or an absolute component. A manifest is remote input,
-            so it is treated as untrusted for path purposes.
+        DataSyncError: When no known root's prefix matches.
     """
-    if not key.startswith(DATA_PREFIX):
-        msg = f"同期対象外のオブジェクトキー: {key!r}"
-        raise DataSyncError(msg)
-    relative = PurePosixPath(key[len(DATA_PREFIX) :])
+    for root in roots:
+        if key.startswith(root.prefix):
+            return root
+    msg = f"同期対象外のオブジェクトキー: {key!r}"
+    raise DataSyncError(msg)
+
+
+def _local_path(roots: tuple[SyncRoot, ...], key: str) -> Path:
+    """Resolve an object key back to a local path inside its owning root.
+
+    Raises:
+        DataSyncError: When the key matches no known root's prefix, or
+            escapes that root's local directory through `..` or an absolute
+            component. A manifest is remote input, so it is treated as
+            untrusted for path purposes.
+    """
+    root = _find_root(roots, key)
+    relative = PurePosixPath(key[len(root.prefix) :])
     if relative.is_absolute() or not relative.parts or ".." in relative.parts:
         msg = f"不正なオブジェクトキー: {key!r}"
         raise DataSyncError(msg)
-    candidate = data_dir / Path(*relative.parts)
-    if data_dir.resolve() not in candidate.resolve().parents:
-        msg = f"data/ の外を指すオブジェクトキー: {key!r}"
+    candidate = root.local_dir / Path(*relative.parts)
+    if root.local_dir.resolve() not in candidate.resolve().parents:
+        msg = f"{root.prefix} の外を指すオブジェクトキー: {key!r}"
         raise DataSyncError(msg)
     return candidate
 
@@ -397,13 +520,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def scan_local(data_dir: Path) -> dict[str, FileEntry]:
+def scan_local(roots: tuple[SyncRoot, ...]) -> dict[str, FileEntry]:
     """Fingerprint every local file in the synced set, keyed by object key."""
     return {
-        _object_key(data_dir, path): FileEntry(
+        _object_key(root, path): FileEntry(
             sha256=_sha256(path), size=path.stat().st_size
         )
-        for path in iter_sync_paths(data_dir)
+        for root in roots
+        for path in iter_sync_paths(root)
     }
 
 
@@ -544,13 +668,13 @@ def _download_verified(
         temporary.unlink(missing_ok=True)
 
 
-def pull(store: ObjectStore, data_dir: Path) -> PullReport:
-    """Make the local `data/` tree match the remote manifest exactly.
+def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
+    """Make the local `data/` and `reports/` trees match the remote manifest.
 
     Files whose sha256 already matches are left alone; everything else is
-    downloaded and verified. Local files in the synced set that the manifest
-    no longer lists are deleted, so the local tree mirrors the remote instead
-    of accumulating.
+    downloaded and verified. Local files in either root's synced set that the
+    manifest no longer lists are deleted, so each tree mirrors the remote
+    instead of accumulating.
 
     Raises:
         DataSyncError: When the bucket has no manifest, or a downloaded object
@@ -564,7 +688,7 @@ def pull(store: ObjectStore, data_dir: Path) -> PullReport:
         )
         raise DataSyncError(msg)
 
-    local = scan_local(data_dir)
+    local = scan_local(roots)
     downloaded: list[str] = []
     skipped: list[str] = []
     for key, entry in sorted(manifest.files.items()):
@@ -572,14 +696,14 @@ def pull(store: ObjectStore, data_dir: Path) -> PullReport:
         if current is not None and current.sha256 == entry.sha256:
             skipped.append(key)
             continue
-        _download_verified(store, key, _local_path(data_dir, key), entry)
+        _download_verified(store, key, _local_path(roots, key), entry)
         downloaded.append(key)
 
     deleted = [key for key in sorted(local) if key not in manifest.files]
     for key in deleted:
-        _local_path(data_dir, key).unlink()
+        _local_path(roots, key).unlink()
 
-    write_state(data_dir, manifest.generation)
+    write_state(_data_root(roots).local_dir, manifest.generation)
     return PullReport(
         generation=manifest.generation,
         downloaded=tuple(downloaded),
@@ -641,35 +765,69 @@ def _next_generation(remote: Manifest | None, state: SyncState | None) -> int:
     return remote.generation + 1
 
 
+def _guard_against_emptying_a_populated_root(
+    roots: tuple[SyncRoot, ...],
+    remote_files: Mapping[str, FileEntry],
+    local: Mapping[str, FileEntry],
+) -> None:
+    """Refuse a push that would empty a root the remote still has content in.
+
+    The whole-tree "nothing to sync" guard below is not enough once there are
+    two roots: a checkout with `data/` but no `reports/` still has *something*
+    to sync, so that guard alone would let a push publish a manifest with zero
+    `reports/` keys -- and the garbage collector would then delete the entire
+    remote `reports/` history.
+
+    Raises:
+        DataSyncError: When a root has at least one key in the remote manifest
+            but the local scan found none under that root.
+    """
+    for root in roots:
+        remote_has_root_keys = any(key.startswith(root.prefix) for key in remote_files)
+        local_has_root_keys = any(key.startswith(root.prefix) for key in local)
+        if remote_has_root_keys and not local_has_root_keys:
+            msg = (
+                f"リモートには {root.prefix} 配下のオブジェクトがあるのに、"
+                f"ローカル {root.local_dir} には同期対象のファイルが 1 件もない。"
+                "このまま push するとリモートの当該ツリーを丸ごと空にしてしまうため中止する"
+            )
+            raise DataSyncError(msg)
+
+
 def push(
     store: ObjectStore,
-    data_dir: Path,
+    roots: tuple[SyncRoot, ...],
     *,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> PushReport:
-    """Publish the local `data/` tree as the next remote generation.
+    """Publish the local `data/` and `reports/` trees as the next generation.
 
     Order matters: changed objects go up first, `manifest.json` is written
     second -- that write is the commit point -- and only then are the objects
     the new generation no longer references deleted (see the module docstring).
 
     Raises:
-        DataSyncError: When the optimistic-lock precondition is unmet, or the
-            local tree holds nothing to sync.
+        DataSyncError: When the optimistic-lock precondition is unmet, the
+            local tree holds nothing to sync at all, or one root would be
+            emptied on the remote while the other still has local content.
         ConcurrentWriteError: When the remote advanced since the recorded pull.
     """
     remote = read_remote_manifest(store)
-    generation = _next_generation(remote, read_state(data_dir))
+    state_dir = _data_root(roots).local_dir
+    generation = _next_generation(remote, read_state(state_dir))
 
-    local = scan_local(data_dir)
+    local = scan_local(roots)
     if not local:
+        directories = ", ".join(str(root.local_dir) for root in roots)
         msg = (
-            f"{data_dir} に同期対象のファイルが 1 件もない。"
+            f"{directories} に同期対象のファイルが 1 件もない。"
             "リモート正本を空にしないため push を中止する"
         )
         raise DataSyncError(msg)
 
     remote_files: Mapping[str, FileEntry] = remote.files if remote else {}
+    _guard_against_emptying_a_populated_root(roots, remote_files, local)
+
     uploaded: list[str] = []
     unchanged: list[str] = []
     for key, entry in sorted(local.items()):
@@ -677,7 +835,7 @@ def push(
         if previous is not None and previous.sha256 == entry.sha256:
             unchanged.append(key)
             continue
-        store.upload(key, _local_path(data_dir, key))
+        store.upload(key, _local_path(roots, key))
         uploaded.append(key)
 
     # The commit point. Everything above only added objects the old manifest
@@ -686,11 +844,18 @@ def push(
     _write_remote_manifest(
         store, Manifest(generation=generation, updated_at=now(), files=local)
     )
-    write_state(data_dir, generation)
+    write_state(state_dir, generation)
 
-    # Garbage collection, listed live rather than read from the manifest so
-    # that objects orphaned by an earlier interrupted push are collected too.
-    deleted = [key for key in sorted(store.list_keys(DATA_PREFIX)) if key not in local]
+    # Garbage collection, listed live per root rather than read from the
+    # manifest so that objects orphaned by an earlier interrupted push are
+    # collected too. `manifest.json` itself sits outside every root's prefix
+    # and is never touched here.
+    deleted = sorted(
+        key
+        for root in roots
+        for key in store.list_keys(root.prefix)
+        if key not in local
+    )
     for key in deleted:
         store.delete(key)
 
@@ -720,7 +885,12 @@ class SyncStatus(Enum):
 
 @dataclass(frozen=True, slots=True)
 class StatusReport:
-    """A read-only comparison of the local tree against the remote manifest."""
+    """A read-only comparison of the local trees against the remote manifest.
+
+    `added`/`removed`/`modified` hold object keys across *both* roots; each
+    key's own `data/` or `reports/` prefix is what identifies its root, and
+    `render()` groups by that prefix so both roots are visible on their own.
+    """
 
     status: SyncStatus
     remote_generation: int | None
@@ -733,7 +903,7 @@ class StatusReport:
     modified: tuple[str, ...]
 
     def render(self) -> str:
-        """Human-readable summary."""
+        """Human-readable summary, broken out by root."""
         if self.remote_generation is None:
             remote = f"remote: 空 ({MANIFEST_KEY} なし)"
         else:
@@ -756,9 +926,13 @@ class StatusReport:
             f"追加={len(self.added)} 欠落={len(self.removed)} "
             f"変更={len(self.modified)}",
         ]
-        lines.extend(f"  + {key}" for key in self.added)
-        lines.extend(f"  - {key}" for key in self.removed)
-        lines.extend(f"  M {key}" for key in self.modified)
+        for prefix in (DATA_PREFIX, REPORTS_PREFIX):
+            lines.append(f"  [{prefix}]")
+            lines.extend(f"  + {key}" for key in self.added if key.startswith(prefix))
+            lines.extend(f"  - {key}" for key in self.removed if key.startswith(prefix))
+            lines.extend(
+                f"  M {key}" for key in self.modified if key.startswith(prefix)
+            )
         return "\n".join(lines)
 
 
@@ -775,11 +949,11 @@ def _classify(
     return SyncStatus.DIVERGED
 
 
-def status(store: ObjectStore, data_dir: Path) -> StatusReport:
+def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
     """Compare local and remote without writing anything on either side."""
     manifest = read_remote_manifest(store)
-    state = read_state(data_dir)
-    local = scan_local(data_dir)
+    state = read_state(_data_root(roots).local_dir)
+    local = scan_local(roots)
     local_generation = state.generation if state else None
 
     if manifest is None:
@@ -822,15 +996,15 @@ def status(store: ObjectStore, data_dir: Path) -> StatusReport:
 # --------------------------------------------------------------------------- #
 
 
-def run(command: str, store: ObjectStore, data_dir: Path) -> int:
+def run(command: str, store: ObjectStore, roots: tuple[SyncRoot, ...]) -> int:
     """Execute one subcommand against an injected store and print its report."""
     match command:
         case "pull":
-            print(pull(store, data_dir).render())
+            print(pull(store, roots).render())
         case "push":
-            print(push(store, data_dir).render())
+            print(push(store, roots).render())
         case "status":
-            print(status(store, data_dir).render())
+            print(status(store, roots).render())
         case _:  # pragma: no cover - argparse rejects unknown subcommands
             msg = f"未知のサブコマンド: {command!r}"
             raise DataSyncError(msg)
@@ -841,7 +1015,9 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the `pull` / `push` / `status` subcommand parser."""
     parser = argparse.ArgumentParser(
         prog="data_sync",
-        description=f"Cloudflare R2 バケット {BUCKET_NAME} と data/ を同期する",
+        description=(
+            f"Cloudflare R2 バケット {BUCKET_NAME} と data/・reports/ を同期する"
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("pull", help="リモート正本をローカルへ取得する")
@@ -855,7 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         store = build_object_store(R2Settings().require())
-        return run(str(args.command), store, DEFAULT_DATA_DIR)
+        return run(str(args.command), store, DEFAULT_ROOTS)
     except DataSyncError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

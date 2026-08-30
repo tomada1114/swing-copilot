@@ -116,7 +116,7 @@ flowchart TD
     BT -.-> DUCKDB
 ```
 
-日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本はCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。`reports/`（生成Markdown）は実行環境に残る成果物である。記録済みのrun・候補・落選を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。実売買記録機能（旧`copilot-decision`、旧`performance`サブコマンド）は2026-08に公開トラックレコード化に伴い撤去した。
+日次実行は平日1回、GitHub Actions上で`uv run copilot-daily`を無人起動する（ローカルからの手動実行も同じコマンド。8.1節）。`data/`（Parquet/DuckDB）の正本と、`reports/<run_date>/<run_id>/`配下の日次run成果物の正本はいずれもCloudflare R2にあり、実行の前後で取得・書き戻す（8.2節）。記録済みのrun・候補・落選を後から閲覧する読み出し専用CLIとして`uv run copilot-history`がある（roadmap P1-05、`docs/04_detailed_design.md` 3.22節）。実売買記録機能（旧`copilot-decision`、旧`performance`サブコマンド）は2026-08に公開トラックレコード化に伴い撤去した。
 
 ---
 
@@ -334,7 +334,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 | 環境 | 用途 | 実行方法 |
 |---|---|---|
-| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `17 1 * * 2-6`（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と`workflow_dispatch`のみで起動し、R2から`data/`を取得 → `copilot-daily` → CI専用の`swing-daily`定性分析 → 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
+| GitHub Actions | 平日の日次実行（本番） | `.github/workflows/swing-daily.yml`。cron `17 1 * * 2-6`（UTC、= JST 火〜土 10:17。米国セッションの翌UTC日に走るため曜日は火〜土）と`workflow_dispatch`のみで起動し、R2から`data/`と`reports/`を取得 → `copilot-daily` → CI専用の`swing-daily`定性分析 → `copilot-retro collect`でverdictをDBへ取り込み → 成功時のみR2へ書き戻す。環境変数はGitHub Secrets |
 | ローカルマシン | 決定論的パイプラインの開発・デバッグ・随時の手動実行 | `just data-pull`で`data/`を取得してから`uv run copilot-daily`等を実行し、書き込んだら`just data-push`で戻す（`.env`から環境変数をロード）。`swing-daily`定性分析はローカルでは実行しない |
 
 決定論的なパイプラインは両環境で同じコードを動かす。定性分析だけは GitHub Actions
@@ -342,10 +342,13 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 
 ### 8.2 永続化
 
-データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。
+データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`・`reports/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。`manifest.json`・`generation`・同期状態ファイルはいずれも`data/`と`reports/`で共有する1組であり、2つのツリーは常に1回のpushで一緒にコミットされる（Issue #370）。
 
-- 同期対象（R2が正本）: `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない
-- 同期対象外（ローカル／ランナー限り）: `reports/<run_date>/<run_id>.md`（run別生成Markdown）、`reports/latest.md`（最新runの便宜コピー）。GitHub Actions上の実行はこれをworkflow artifactとして保存する
+- 同期対象（R2が正本）:
+    - `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない
+    - `reports/<run_date>/<run_id>.md`（run別生成Markdown）と`reports/<run_date>/<run_id>/`配下（`analysis_input.json`・`analysis_result.json`・`report_context.json`等、`copilot-retro collect`がverdict取り込みに読む日次runアーカイブ一式）
+- 同期対象外（ローカル／ランナー限り）: `reports/latest.md`（最新runの便宜コピー）、`reports/backtests/`・`reports/dry_run/`・`reports/assets/`・`reports/retro/`（バックテスト・dry-run・静的アセット・retroの成果物で、日次runアーカイブではない）。GitHub Actions上の実行は`reports/`全体をworkflow artifactとしても保存する（14日保持）
+- 定性分析でverdictsテーブルを埋める`copilot-retro collect`（設計判断D2、`docs/goal-prompts/swing-copilot-retrospective/decisions.md`）は、日次job内でR2への書き戻し直前に一度実行する。無人実行経路でこれを走らせる場所が存在しなかったことが、直近1か月分のverdict欠落（Issue #370）の原因だった
 - 並行書き込みガードは`manifest.json`の単調増加`generation`による楽観ロックだけである。`push`はリモートのgenerationが`pull`時点と一致するときにのみ成功するので、**書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない**
 - 実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する
 

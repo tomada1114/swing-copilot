@@ -60,15 +60,17 @@ verify: lint docs-check smoke test
 # boto3 lives in the optional `ops` group, so these three ask for it explicitly
 # rather than making every `uv run` install it.
 
-# Fetch the R2 copy of data/ (copilot.duckdb + bars/) into this checkout
+# Fetch the R2 copy of data/ (copilot.duckdb + bars/) and reports/ (the daily
+# run archive: <date>/<run_id>.md and <date>/<run_id>/) into this checkout
 data-pull:
     uv run --group ops python scripts/data_sync.py pull
 
-# Publish this checkout's data/ as the next R2 generation (pull first, then push)
+# Publish this checkout's data/ and reports/ as the next R2 generation
+# (pull first, then push; one shared manifest/generation for both trees)
 data-push:
     uv run --group ops python scripts/data_sync.py push
 
-# Show how this checkout's data/ compares with the R2 copy (read-only)
+# Show how this checkout's data/ and reports/ compare with the R2 copy (read-only)
 data-status:
     uv run --group ops python scripts/data_sync.py status
 

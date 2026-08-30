@@ -200,9 +200,18 @@ Nothing is retried automatically: a failed or skipped day is re-dispatched by
 hand, and the pipeline's preflight check makes the gap visible in the next
 run.
 
-The canonical `data/` lives in a private object-storage bucket, not in any
-working copy. The scheduled run pulls it before analysis and pushes it back
+The canonical `data/` — and, since Issue #370, the canonical daily run archive
+under `reports/<run_date>/<run_id>/` (and `<run_id>.md`) — lives in a private
+object-storage bucket, not in any working copy. Both trees share one manifest,
+one `generation`, and one push/pull commit; there is no separate reports-side
+counter. `reports/latest.md` and everything under `reports/backtests/`,
+`reports/dry_run/`, `reports/assets/`, and `reports/retro/` stay local/derived
+and are never synced. The scheduled run pulls before analysis and pushes back
 only on success, so a failed day leaves the remote on the previous generation.
+`copilot-retro collect` — the only path that fills `verdicts` (design decision
+D2: `copilot-ingest-analysis` never touches the DB) — now runs inside that
+same CI job, after the analysis and before the push, so a day's verdicts ride
+out with everything else instead of being lost when the runner is discarded.
 
 ### Working with the data locally
 
@@ -211,18 +220,19 @@ only on success, so a failed day leaves the remote on the previous generation.
   still matches the remote.
 - Anything that writes (a retrospective run, a live daily run): pull → work →
   push, in one sitting. The optimistic lock is a monotonic `generation` field
-  in the data manifest — the only concurrent-write guard — so do not leave a
-  pulled copy unpushed, and do not start a local write while the scheduled run
-  holds the generation.
+  in the shared manifest — the only concurrent-write guard, covering `data/`
+  and `reports/` together — so do not leave a pulled copy unpushed, and do not
+  start a local write while the scheduled run holds the generation.
 - Never open the shared DuckDB file as a read-write connection for
   exploration, and never hold any connection across think-time. The file lock
   is exclusive between a read-write process and everything else, so a held
   handle fails the next pull/push. Sync always moves the file as bytes, never
   through DuckDB.
-- A fresh worktree has no `data/`, `.env`, or virtualenv of its own. Install
-  dependencies there, copy `.env` in by hand (it holds credentials and is
-  untracked), and pull the data history fresh — never by copying or
-  symlinking another checkout's `data/`.
+- A fresh worktree has no `data/`, `reports/`, `.env`, or virtualenv of its
+  own. Install dependencies there, copy `.env` in by hand (it holds
+  credentials and is untracked), and pull the data and report-archive history
+  fresh — never by copying or symlinking another checkout's `data/` or
+  `reports/`.
 
 The daily pipeline's entry point exits `2` on a preflight abort, and stderr's
 first line carries a machine-readable tag that the caller branches on — never

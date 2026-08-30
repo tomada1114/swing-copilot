@@ -622,14 +622,48 @@ class PullReport:
     downloaded: tuple[str, ...]
     skipped: tuple[str, ...]
     deleted: tuple[str, ...]
+    retained: tuple[str, ...]
 
     def render(self) -> str:
         """Human-readable summary."""
-        return (
+        summary = (
             f"pull 完了: generation={self.generation} "
             f"取得={len(self.downloaded)} 既存流用={len(self.skipped)} "
             f"削除={len(self.deleted)}"
         )
+        if not self.retained:
+            return summary
+        return (
+            f"{summary} 温存={len(self.retained)}\n"
+            "  リモートがまだ一度も持っていないツリーのローカルファイルを"
+            "削除せずに残した。push すればこの温存は解消する"
+        )
+
+
+def _retainable_prefixes(
+    roots: tuple[SyncRoot, ...], manifest_files: Mapping[str, FileEntry]
+) -> frozenset[str]:
+    """Prefixes of roots the remote manifest holds no key for at all.
+
+    `pull` mirrors, so a local file the manifest does not list is normally
+    deleted. That inference only holds for a root the bucket actually tracks.
+    When a root was just added to this script (Issue #370 added `reports/` to
+    a bucket that had only ever carried `data/`), the remote legitimately has
+    nothing under it yet, and mirroring would read that emptiness as "deleted
+    upstream" and wipe the operator's local archive on the very first pull --
+    silently, and exactly the copy needed to seed the remote.
+
+    So a root with zero keys in the manifest is left alone entirely. The guard
+    is self-limiting: one successful `push` publishes the root and it never
+    applies to that root again. It cannot mask a genuine upstream deletion of
+    everything under a tracked root either -- `push` refuses to publish that
+    manifest in the first place (`_guard_against_emptying_a_populated_root`).
+    """
+    return frozenset(
+        root.prefix
+        for root in roots
+        if not any(key.startswith(root.prefix) for key in manifest_files)
+    )
 
 
 def _download_verified(
@@ -674,7 +708,11 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
     Files whose sha256 already matches are left alone; everything else is
     downloaded and verified. Local files in either root's synced set that the
     manifest no longer lists are deleted, so each tree mirrors the remote
-    instead of accumulating.
+    instead of accumulating -- with one exception, `_retainable_prefixes`: a
+    root the remote has never carried a single key for is not mirrored down to
+    empty, because "the bucket has not adopted this root yet" and "the root's
+    contents were deleted upstream" are indistinguishable from the manifest
+    alone, and only one of them justifies deleting the operator's local copy.
 
     Raises:
         DataSyncError: When the bucket has no manifest, or a downloaded object
@@ -699,7 +737,16 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
         _download_verified(store, key, _local_path(roots, key), entry)
         downloaded.append(key)
 
-    deleted = [key for key in sorted(local) if key not in manifest.files]
+    retainable = _retainable_prefixes(roots, manifest.files)
+    deleted: list[str] = []
+    retained: list[str] = []
+    for key in sorted(local):
+        if key in manifest.files:
+            continue
+        if any(key.startswith(prefix) for prefix in retainable):
+            retained.append(key)
+            continue
+        deleted.append(key)
     for key in deleted:
         _local_path(roots, key).unlink()
 
@@ -709,6 +756,7 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
         downloaded=tuple(downloaded),
         skipped=tuple(skipped),
         deleted=tuple(deleted),
+        retained=tuple(retained),
     )
 
 

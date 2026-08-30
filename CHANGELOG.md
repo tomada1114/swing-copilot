@@ -62,7 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/check_daily_complete.py` の誤検知（DB の最新 run を、その日の分しか
   存在しないワークスペースに対して検証していたため、run が作られなかった日に
   前日分の run で検証して失敗する）も `--started-after` オプションで修正し、
-  ジョブ自身が開始した後の run だけを判定対象にした
+  ジョブ自身が開始した後の run だけを判定対象にした。`pull` は、リモートの
+  manifest がまだ1件もキーを持たないルートについてはローカルファイルを削除せず
+  温存する（`reports/` を同期対象に加えた直後の初回 `pull` が、リモートへ載せる
+  前のローカル日次アーカイブを「上流で削除された」と読み違えて消してしまうため。
+  一度 push すればこの温存は解消し、以後は通常どおりミラー削除される）
 - `retro_input.json` の `input_digest` 再検証を、その文書自身が持っていたキー集合
   （`model_dump(exclude_unset=True)`）に対して行うようにした（Issue #276）。
   読み込み時の素の `model_dump()` が既定値を実体化するため、Issue #157 で足した

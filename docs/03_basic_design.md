@@ -349,6 +349,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
     - `reports/<run_date>/<run_id>.md`（run別生成Markdown）と`reports/<run_date>/<run_id>/`配下（`analysis_input.json`・`analysis_result.json`・`report_context.json`等、`copilot-retro collect`がverdict取り込みに読む日次runアーカイブ一式）
 - 同期対象外（ローカル／ランナー限り）: `reports/latest.md`（最新runの便宜コピー）、`reports/backtests/`・`reports/dry_run/`・`reports/assets/`・`reports/retro/`（バックテスト・dry-run・静的アセット・retroの成果物で、日次runアーカイブではない）。GitHub Actions上の実行は`reports/`全体をworkflow artifactとしても保存する（14日保持）
 - 定性分析でverdictsテーブルを埋める`copilot-retro collect`（設計判断D2、`docs/goal-prompts/swing-copilot-retrospective/decisions.md`）は、日次job内でR2への書き戻し直前に一度実行する。無人実行経路でこれを走らせる場所が存在しなかったことが、直近1か月分のverdict欠落（Issue #370）の原因だった
+- `pull`は両ツリーをリモートにミラーする（manifestに無いローカルファイルは削除する）が、**リモートのmanifestがまだ1件もキーを持たないルートは例外として温存する**。同期対象にルートを追加した直後は、リモートが空であることと「上流で削除された」ことがmanifestからは区別できず、ミラーすると初回`pull`が――リモートへ載せる前の――ローカル日次アーカイブを黙って消してしまうためである。一度pushすれば温存は解消し、以後は通常どおりミラー削除される。追跡済みルートを丸ごと空にするpush自体は`push`側のガードが拒否する
 - 並行書き込みガードは`manifest.json`の単調増加`generation`による楽観ロックだけである。`push`はリモートのgenerationが`pull`時点と一致するときにのみ成功するので、**書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない**
 - 実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する
 

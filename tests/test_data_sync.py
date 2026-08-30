@@ -600,6 +600,63 @@ def test_pull_deletes_local_files_the_manifest_no_longer_lists(tmp_path):
     assert BARS_2025_KEY not in store.objects
 
 
+def test_pull_retains_a_local_root_the_remote_has_never_published(tmp_path):
+    """Issue #370's migration hazard: adding a root must not wipe it locally.
+
+    The bucket has only ever carried `data/`. A checkout that already holds a
+    `reports/` archive pulls for the first time after `reports/` becomes a
+    synced root -- mirroring would read the manifest's silence as "deleted
+    upstream" and destroy the only copy, which is also the copy that would
+    have seeded the remote.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+    assert not any(key.startswith("reports/") for key in read_manifest(store)["files"])
+
+    mirror = make_workspace(tmp_path, "mirror")
+    archive = make_reports_workspace(tmp_path, "mirror")
+
+    report = pull(store, mirror)
+
+    assert report.deleted == ()
+    assert report.retained == (REPORT_MD_KEY, REPORT_RESULT_KEY)
+    assert (archive / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").is_file()
+    assert (
+        archive / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json"
+    ).is_file()
+    assert "温存=2" in report.render()
+
+
+def test_pull_mirror_deletes_within_a_root_the_remote_already_publishes(tmp_path):
+    """The retention guard is self-limiting: it lifts once the root exists.
+
+    Once one push has published `reports/`, a file genuinely removed upstream
+    must be mirrored away locally exactly as a `data/` file is -- otherwise the
+    guard would have turned mirroring off for that root permanently.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    make_reports_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = make_workspace(tmp_path, "mirror")
+    mirror_reports = make_reports_workspace(tmp_path, "mirror")
+    pull(store, mirror)
+
+    (origin.parent / "reports" / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").unlink()
+    push(store, origin)
+
+    report = pull(store, mirror)
+
+    assert report.deleted == (REPORT_MD_KEY,)
+    assert report.retained == ()
+    assert not (mirror_reports / REPORT_RUN_DATE / f"{REPORT_RUN_ID}.md").exists()
+    assert (
+        mirror_reports / REPORT_RUN_DATE / REPORT_RUN_ID / "analysis_result.json"
+    ).is_file()
+
+
 def test_pull_keeps_the_previous_local_file_when_verification_fails(tmp_path):
     origin = make_workspace(tmp_path, "origin")
     store = FakeObjectStore()

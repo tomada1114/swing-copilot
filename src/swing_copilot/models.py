@@ -91,6 +91,11 @@ class DailyRunOptions:
     # P8-118: bypasses the same-day rerun guard (a prior `status='success'`
     # run already exists for the resolved `run_date`).
     allow_same_day_rerun: bool = False
+    # Issue #372: where `main()` writes this run's terminal outcome (JSON,
+    # outside `reports/<run_date>/<run_id>/`) so `scripts/check_daily_complete.py`
+    # can tell "the pipeline never started" from "it started and legitimately
+    # aborted". `None` (the default) writes nothing.
+    outcome_file: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

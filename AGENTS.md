@@ -242,7 +242,34 @@ assume exit 2 means "already ran":
   resolved run date (the schedule fires once per weekday, but a manual
   dispatch or a re-run of a completed day would otherwise write a second
   verdict set). It exits before creating a run record or report directory. An
-  explicit override flag bypasses the guard for an intentional re-run.
+  explicit override flag bypasses the guard for an intentional re-run. This is
+  a legitimate stop: `scripts/check_daily_complete.py` passes and the job
+  stays green.
+- `PREFLIGHT_ABORT[no_trading_day]:` — the price prefetch succeeded, but no
+  fetched bar belongs to a session that has actually closed (16:00
+  America/New_York): either the prefetch came back empty, or the newest bar
+  is still mid-session because the scheduled job started late — `run_date` is
+  never the wall clock and never merely "the newest bar fetched", either of
+  which would book a day before it closed (Issue #372). No retry follows
+  automatically; the next scheduled run resolves it, or a manual dispatch
+  does. This is also a legitimate stop: the job stays green.
+- `PREFLIGHT_ABORT[price_fetch_failed]:` — the price prefetch itself raised
+  (e.g. a data-provider outage), so whether any session had closed could not
+  even be determined (Issue #372). Unlike the two reasons above, this is a
+  genuine failure, not a clean day with nothing to analyze, and it must not
+  be reported as one: `scripts/check_daily_complete.py` fails the job on this
+  reason (its legitimate-stop check is a whitelist of exactly
+  `same_day_rerun` and `no_trading_day`, so an unrecognized or missing reason
+  fails closed the same way). No retry follows automatically.
+
+`copilot-daily` also writes its own terminal outcome (`success`/`degraded`/
+`failed`/`preflight_abort`, plus the abort reason when applicable) to a JSON
+file outside `reports/<run_date>/<run_id>/`, whenever `--outcome-file` (or its
+`COPILOT_DAILY_OUTCOME_FILE` environment fallback, which CI always sets) is
+configured. This is what lets `scripts/check_daily_complete.py` tell "the
+pipeline never even started" apart from "it started and legitimately found no
+trading day yet", without relying on the headless analysis session to
+self-report anything.
 
 ## Reading the Accumulated Data
 

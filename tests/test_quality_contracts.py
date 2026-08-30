@@ -11,6 +11,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+import yaml
 
 from swing_copilot.pipeline import daily, daily_composition, daily_runner
 from swing_copilot.storage.database import DEFAULT_DB_PATH
@@ -481,6 +482,38 @@ def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
         "Edit(.github/**)",
     ):
         assert blocked in workflow
+
+
+def test_daily_workflow_wires_the_outcome_file_and_uploads_the_execution_log():
+    """Issue #372: outcome-file plumbing must not depend on the prompt.
+
+    The env var lives in the job's `env:` (not a per-step `env:`) so it
+    reaches `copilot-daily` regardless of what the headless session actually
+    runs, and the execution log is uploaded (`if: always()`) so a session's
+    behavior can be inspected after the fact -- not knowing that was itself
+    the defect this issue traces to.
+    """
+    workflow = yaml.safe_load(DAILY_WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["daily"]
+
+    assert job["env"]["COPILOT_DAILY_OUTCOME_FILE"] == (
+        "${{ runner.temp }}/copilot-daily-outcome.json"
+    )
+
+    steps = {step["name"]: step for step in job["steps"] if "name" in step}
+    verify_step = steps["Verify the analysis completed"]
+    assert '--outcome-file "$COPILOT_DAILY_OUTCOME_FILE"' in verify_step["run"]
+
+    upload_step = steps["Upload Claude execution log"]
+    # `always()` plus the non-empty guard: `path` is a *required* input of
+    # upload-artifact, so an empty `execution_file` (the claude step skipped)
+    # is an input error, not something `if-no-files-found: ignore` absorbs.
+    assert "always()" in upload_step["if"]
+    assert "steps.claude.outputs.execution_file != ''" in upload_step["if"]
+    assert upload_step["uses"].startswith("actions/upload-artifact@")
+    assert upload_step["with"]["path"] == "${{ steps.claude.outputs.execution_file }}"
+    assert upload_step["with"]["retention-days"] == 14
+    assert upload_step["with"]["if-no-files-found"] == "ignore"
 
 
 def test_headless_daily_run_uses_tool_reads_and_exact_bash_shapes():

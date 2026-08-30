@@ -1374,7 +1374,53 @@ schema版とともに`runs`へ保存する。固定8ステップのうちステ�
 
 **Issue #117のpreflight更新**: 口座評価額の設定と警告は本番経路から撤去した。`PreflightAbort`と終了コード2の枠組みは残り、#118の同日重複起動ガード（次項）が唯一の送出元になる。
 
-**P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`run_date = latest.date()`）ため、同日重複起動の判定は**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`run_daily()`を`ExitPolicy`（`cli_support.py::run_cli()`）へ通し、終了コード2と`PREFLIGHT_ABORT[<reason>]:`行へ変換する。中止メッセージには既存runの`run_id`とレポートパスを含める。`failed`/`running`/`degraded`は「成功済み」に数えず、`--allow-same-day-rerun`指定時だけ判定をスキップする。明示`--as-of`にも同じ判定を適用する。
+**P8-118実装時追記（Issue #118）**: `run_date`は最新bar由来でプリフェッチ後にしか確定しない（`daily_runner.py`の`_resolve_closed_run_date()`。#372で「引けたセッション」の判定へ更新——次項）ため、同日重複起動の判定は**`run_daily()`内、`run_date`確定の直後・`start_run()`の直前**で行う。同一`run_date`に`status='success'`のrunが既に存在すれば（`StateStore.get_successful_run(run_date)`、`storage/history_queries.py`の読み出し専用クエリ）、#117が定義した`PreflightAbort`を再送出する。`main()`は`run_daily()`を`ExitPolicy`（`cli_support.py::run_cli()`）へ通し、終了コード2と`PREFLIGHT_ABORT[<reason>]:`行へ変換する。中止メッセージには既存runの`run_id`とレポートパスを含める。`failed`/`running`/`degraded`は「成功済み」に数えず、`--allow-same-day-rerun`指定時だけ判定をスキップする。明示`--as-of`にも同じ判定を適用する。
+
+**P8-372実装時追記（Issue #118改訂、Issue #372）**: `run_date`解決の契約は
+「取得できた最新のbar」から「**引けたセッションのうち最新のもの**」へ変わった。
+`options.as_of`が明示されていれば従来どおりその日付を無条件に採用し、
+プリフェッチ自体を行わない（この分岐は不変）。明示が無いライブrunだけが
+以下を通る。
+
+1. `deps.data_provider.get_daily_bars(...)`でプリフェッチする。**例外は
+   その場で`PreflightAbort(reason="price_fetch_failed")`に変換する**——以前は
+   `prefetch_error`という文字列に握り潰して`run_date`を`deps.clock.today()`
+   （壁時計）のまま残し、ステップ1で改めて失敗させていたが、これは
+   AGENTS.md「wall time is metadata, never a substitute for `as_of`」への
+   直接の違反だった。
+2. プリフェッチが**空でかつ`failures`を伴う**場合も同じ`price_fetch_failed`
+   で中止する（`_reject_a_failed_prefetch()`）。`YFinanceProvider`は
+   `get_daily_bars`から例外を送出しない——ダウンロード時の例外も空応答も
+   `_normalize()`が銘柄ごとの`FetchFailure`に畳んで空フレームで返す——ので、
+   本番のプロバイダ障害は1.のexceptではなくこの経路で到着する。これを
+   `no_trading_day`に分類すると`check_daily_complete.py`の正当停止
+   ホワイトリストに載り、障害の日が「分析なしで緑」になる。11.5節の
+   「矛盾する空応答は失敗として扱う」と同じ原則である。
+3. `failures`を伴わない空プリフェッチは`no_trading_day`で中止する
+   （プロバイダは正常に応答し、渡すものが無かった。以前と同じ結論だが、
+   経路が「壁時計のrun_dateでstart_runした後にステップ1で失敗」から
+   「start_run前のpreflight abort」に変わった——`runs`に行が残らない）。
+4. プリフェッチが空でなければ、取得できたbarの日付ごとに
+   `_session_has_closed(session_date, now)`（`datetime.combine(session_date,
+   time(16, 0), tzinfo=MARKET_TIMEZONE) <= now`、`MARKET_TIMEZONE`は
+   `clock.py`が公開する`ZoneInfo("America/New_York")`で`risk/circuit_breaker.py`
+   の`_ET`と共用）を評価し、条件を満たす日付の最大値を`run_date`とする。
+   1件も満たさなければ同じ`no_trading_day`で中止する。`now`は必ず
+   `deps.clock.now()`（tz-aware UTC）から取り、`datetime.now()`を直接
+   呼ばない。
+
+16:00 ETは正規の引け時刻であり、短縮取引日（13:00 ET引け）はこれより早く
+引けるため、「すべてのセッションは16:00 ETより前には引けない」という
+判定は短縮日を見誤らない側にしか外れない。定刻cron（`17 1 * * 2-6`、
+UTC 01:17 = 米国セッションクローズ数時間後の21:17 ET前日）は常にこの
+判定に間に合うため、通常運用でこの分岐が効くことは無い。GitHub Actionsの
+共有cronキューが遅延して翌セッションの寄前（プレマーケット）に発火した
+ときだけ意味を持つ。2026-08-29の事象（前日08-28の遅延jobが13:30 UTC寄付
+より前の12:56 UTCに発火し、`run_date=2026-08-28`をまだ引けていないうちに
+確定させた）はこの分岐が実装される前の欠陥そのものである。回帰は
+`tests/pipeline/test_daily_core.py::TestRunDateResolvesOnlyClosedSessions`
+（空プリフェッチ、プリフェッチ例外、16:00 ET直前/丁度/直後の境界、土曜の
+壁時計＋金曜の最新bar、`--as-of`明示時の非該当）が押さえる。
 
 **P2-254実装時追記（Issue #254）**: `copilot-daily`（決定論的パイプライン）の成功と、その後スキル側が行う定性分析フェーズ（`analysis_result.json`の書き出し→`copilot-ingest-analysis`）の完了は別ライフサイクルであり、後者が未完のまま終わっても`runs`には何も残らなかった。過去日の欠落が観測可能になる最初の瞬間は**翌runのプリフライト**なので、#118の同日重複ガードの直後（`run_date`確定後・`start_run()`の直前）に`_prior_analysis_gaps(deps, run_date, *, mode, is_historical)`を置く。**走査そのものは#129の`report/incomplete_runs.py::find_incomplete_runs`を再利用する**——同関数の`since=`引数はまさにこのプリフライト用に設計されており、独自クエリで直近1件だけを引く実装は、同一`run_date`に2つのrunディレクトリがあり分析が**古い方の兄弟**にあるケースを誤検知する。`find_incomplete_runs`はこれを`SAME_DAY_SUPERSEDED`（どちらが先に始まったかに関係なく、その日の分析は失われていない）として既に分類している。プリフライトが報告するのは`ANALYSIS_MISSING`だけで（`dashboard/queries.py`と同じ絞り込み）、`PIPELINE_UNFINISHED`は`runs.status`で既に見えており、`RUN_ROW_MISSING`はDBとアーカイブの乖離なので`copilot-history incomplete`の領分である。`since`は`run_date - 7日`——週末＋祝日を跨いでも前営業日を見落とさず、かつ誰も埋め戻さなかった古い欠落を永久に再報告し続けないための境界である。加えて`run_date`**より厳密に前**の日付だけを対象とする（当日の`--allow-same-day-rerun`兄弟はまだ分析の期限が来ていない）。
 

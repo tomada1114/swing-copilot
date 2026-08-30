@@ -7,8 +7,9 @@ developer's local `.env` (never read directly in this suite).
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -22,11 +23,15 @@ from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
 from swing_copilot.pipeline import daily_composition as daily_module
 from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
+    _OUTCOME_FILE_ENV_VAR,
     _compose_dependencies,
     _configure_logging,
     _finnhub_clients,
     _parse_args,
     _required_features,
+    _run_daily_and_record_outcome,
+    _RunOutcome,
+    _write_outcome_file,
     main,
 )
 from swing_copilot.storage.database import DEFAULT_DB_PATH
@@ -632,7 +637,9 @@ class TestPreflightAbortStderrContract:
         )
         monkeypatch.setattr(daily_module, "run_daily", lambda *_args, **_kwargs: None)
 
-    @pytest.mark.parametrize("reason", ["same_day_rerun"])
+    @pytest.mark.parametrize(
+        "reason", ["same_day_rerun", "no_trading_day", "price_fetch_failed"]
+    )
     def test_the_first_stderr_line_carries_the_tagged_reason(
         self, monkeypatch, capsys, reason
     ):
@@ -651,3 +658,253 @@ class TestPreflightAbortStderrContract:
         assert exc_info.value.code == 2
         first_line = capsys.readouterr().err.splitlines()[0]
         assert first_line == f"PREFLIGHT_ABORT[{reason}]: 中止した理由の説明"
+
+
+class _FixedClock:
+    """A minimal `Clock` stand-in: a fixed `now()`/`today()`, nothing else."""
+
+    def __init__(self, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self) -> datetime:
+        return self._instant
+
+    def today(self):
+        return self._instant.date()
+
+
+class TestWriteOutcomeFileNoop:
+    """`_write_outcome_file(None, ...)` is a deliberate no-op (Issue #372).
+
+    Kept even though every current caller already guards on
+    `options.outcome_file is not None` before calling in: the guard exists to
+    avoid touching `deps.clock` needlessly, not to be the only place this
+    contract is enforced, so the function's own `None` branch stays covered
+    directly.
+    """
+
+    def test_none_outcome_file_writes_nothing(self, tmp_path):
+        outcome = _RunOutcome(
+            outcome="success",
+            reason=None,
+            run_id="r1",
+            run_date="2027-03-01",
+            candidates=0,
+            started_at=datetime(2027, 3, 1, tzinfo=UTC),
+            finished_at=datetime(2027, 3, 1, tzinfo=UTC),
+        )
+
+        _write_outcome_file(None, outcome)
+
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestOutcomeFile:
+    """Issue #372: `copilot-daily` records its terminal state on every exit.
+
+    `main()` is driven end-to-end with `load_secrets`/`load_settings`/
+    `load_strategies`/`_compose_dependencies`/`run_daily` stubbed, mirroring
+    `TestPreflightAbortStderrContract`. `brief=None` on every fake result
+    keeps `render_terminal` (the real one; unmocked here) out of the picture,
+    since only the outcome file is under test.
+    """
+
+    _STARTED_AT = datetime(2027, 3, 2, 11, 0, tzinfo=UTC)
+    _FINISHED_AT = datetime(2027, 3, 2, 12, 0, tzinfo=UTC)
+
+    def _stub(self, monkeypatch, *, run_daily):
+        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
+        monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
+        monkeypatch.setattr(
+            daily_module, "SystemClock", lambda: _FixedClock(self._STARTED_AT)
+        )
+        monkeypatch.setattr(
+            daily_module,
+            "_compose_dependencies",
+            lambda *_args: SimpleNamespace(clock=_FixedClock(self._FINISHED_AT)),
+        )
+        monkeypatch.setattr(daily_module, "run_daily", run_daily)
+
+    def _fake_result(self, status):
+        # `brief=None` keeps the real (unmocked) `render_terminal` out of the
+        # picture in these tests -- it needs a genuine `DailyBrief`, and only
+        # the outcome file is under test here. `candidates` in the outcome
+        # file is therefore `None`; `TestOutcomeCandidateCount` below covers
+        # the counting logic directly.
+        return SimpleNamespace(
+            exit_code=0 if status is not RunStatus.FAILED else 1,
+            brief=None,
+            status=status,
+            run_id=uuid4(),
+            run_date=date(2027, 3, 1),
+            report_path=None,
+            analysis_input_path=None,
+            provider_name="yfinance",
+            data_tier=DataTier.PROTOTYPE,
+            missing_sources=(),
+        )
+
+    @pytest.mark.parametrize(
+        "status", [RunStatus.SUCCESS, RunStatus.DEGRADED, RunStatus.FAILED]
+    )
+    def test_every_terminal_status_writes_the_outcome_file(
+        self, monkeypatch, tmp_path, status
+    ):
+        outcome_file = tmp_path / "outcome.json"
+        result = self._fake_result(status)
+        self._stub(monkeypatch, run_daily=lambda *_a, **_k: result)
+
+        with pytest.raises(SystemExit):
+            main(["--outcome-file", str(outcome_file)])
+
+        payload = json.loads(outcome_file.read_text(encoding="utf-8"))
+        assert payload == {
+            "outcome": status.value,
+            "reason": None,
+            "run_id": str(result.run_id),
+            "run_date": "2027-03-01",
+            "candidates": None,
+            "started_at": self._STARTED_AT.isoformat(),
+            "finished_at": self._FINISHED_AT.isoformat(),
+        }
+
+    @pytest.mark.parametrize(
+        "reason", ["no_trading_day", "price_fetch_failed", "same_day_rerun"]
+    )
+    def test_preflight_abort_writes_the_outcome_file(
+        self, monkeypatch, tmp_path, reason
+    ):
+        """The whole point of #372: the abort path must not go unrecorded.
+
+        Parametrized over every `PreflightAbortReason` (Issue #372 added
+        `price_fetch_failed`): the outcome file must faithfully record
+        whichever reason fired, since `scripts/check_daily_complete.py`'s
+        legitimate-stop whitelist depends on that exact value surviving here.
+        """
+        outcome_file = tmp_path / "outcome.json"
+
+        def _abort(*_args, **_kwargs):
+            message = "中止した"
+            raise PreflightAbort(message, reason=reason)
+
+        self._stub(monkeypatch, run_daily=_abort)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--outcome-file", str(outcome_file)])
+
+        assert exc_info.value.code == 2
+        payload = json.loads(outcome_file.read_text(encoding="utf-8"))
+        assert payload == {
+            "outcome": "preflight_abort",
+            "reason": reason,
+            "run_id": None,
+            "run_date": None,
+            "candidates": None,
+            "started_at": self._STARTED_AT.isoformat(),
+            "finished_at": self._FINISHED_AT.isoformat(),
+        }
+
+    def test_no_outcome_file_flag_writes_nothing(self, monkeypatch, tmp_path):
+        result = self._fake_result(RunStatus.SUCCESS)
+        self._stub(monkeypatch, run_daily=lambda *_a, **_k: result)
+        monkeypatch.delenv(_OUTCOME_FILE_ENV_VAR, raising=False)
+
+        with pytest.raises(SystemExit):
+            main([])
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_write_failure_is_fail_soft(self, monkeypatch, tmp_path, caplog):
+        """A missing destination directory must not crash a real run."""
+        outcome_file = tmp_path / "missing-dir" / "outcome.json"
+        result = self._fake_result(RunStatus.SUCCESS)
+        self._stub(monkeypatch, run_daily=lambda *_a, **_k: result)
+
+        with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc_info:
+            main(["--outcome-file", str(outcome_file)])
+
+        assert exc_info.value.code == 0
+        assert not outcome_file.exists()
+        assert "outcome file" in caplog.text
+
+
+class TestOutcomeCandidateCount:
+    """`candidates` in the outcome file counts `result.brief.candidates`.
+
+    Calls `_run_daily_and_record_outcome` directly (bypassing `main()`'s
+    terminal rendering, which needs a genuine `DailyBrief`) since only the
+    counting logic is under test here.
+    """
+
+    def test_candidates_is_the_brief_candidate_count(self, monkeypatch, tmp_path):
+        outcome_file = tmp_path / "outcome.json"
+        result = SimpleNamespace(
+            status=RunStatus.SUCCESS,
+            run_id=uuid4(),
+            run_date=date(2027, 3, 1),
+            brief=SimpleNamespace(candidates=(object(), object(), object())),
+        )
+        deps = SimpleNamespace(clock=_FixedClock(datetime(2027, 3, 2, tzinfo=UTC)))
+        monkeypatch.setattr(daily_module, "run_daily", lambda *_a, **_k: result)
+
+        _run_daily_and_record_outcome(
+            DailyRunOptions(outcome_file=outcome_file),
+            deps,  # type: ignore[arg-type]
+            datetime(2027, 3, 2, tzinfo=UTC),
+        )
+
+        payload = json.loads(outcome_file.read_text(encoding="utf-8"))
+        assert payload["candidates"] == 3
+
+    def test_no_brief_leaves_candidates_null(self, monkeypatch, tmp_path):
+        outcome_file = tmp_path / "outcome.json"
+        result = SimpleNamespace(
+            status=RunStatus.FAILED,
+            run_id=uuid4(),
+            run_date=date(2027, 3, 1),
+            brief=None,
+        )
+        deps = SimpleNamespace(clock=_FixedClock(datetime(2027, 3, 2, tzinfo=UTC)))
+        monkeypatch.setattr(daily_module, "run_daily", lambda *_a, **_k: result)
+
+        _run_daily_and_record_outcome(
+            DailyRunOptions(outcome_file=outcome_file),
+            deps,  # type: ignore[arg-type]
+            datetime(2027, 3, 2, tzinfo=UTC),
+        )
+
+        payload = json.loads(outcome_file.read_text(encoding="utf-8"))
+        assert payload["candidates"] is None
+
+
+class TestOutcomeFileEnvironmentFallback:
+    """`--outcome-file` wins; `COPILOT_DAILY_OUTCOME_FILE` is only a fallback."""
+
+    def test_environment_variable_is_used_when_the_flag_is_absent(
+        self, monkeypatch, tmp_path
+    ):
+        env_path = tmp_path / "from-env" / "outcome.json"
+        monkeypatch.setenv(_OUTCOME_FILE_ENV_VAR, str(env_path))
+
+        options = _parse_args([])
+
+        assert options.outcome_file == env_path
+
+    def test_explicit_flag_overrides_the_environment_variable(
+        self, monkeypatch, tmp_path
+    ):
+        env_path = tmp_path / "from-env" / "outcome.json"
+        flag_path = tmp_path / "from-flag" / "outcome.json"
+        monkeypatch.setenv(_OUTCOME_FILE_ENV_VAR, str(env_path))
+
+        options = _parse_args(["--outcome-file", str(flag_path)])
+
+        assert options.outcome_file == flag_path
+
+    def test_neither_set_writes_nothing(self, monkeypatch):
+        monkeypatch.delenv(_OUTCOME_FILE_ENV_VAR, raising=False)
+
+        options = _parse_args([])
+
+        assert options.outcome_file is None

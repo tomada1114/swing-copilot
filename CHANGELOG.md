@@ -47,6 +47,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 定時実行のセッションが `copilot-daily` を呼ばずに早期終了することで、その日の
+  分析が丸ごと失われる問題を修正した（Issue #372）。2026-08-29 の事象は、前日
+  08-28 分の job が米国株の寄付前に遅延発火して `run_date=2026-08-28` を先食い
+  し、翌 08-29（土）の job から見た最新取引日が既に `status='success'` で
+  埋まっていたため `PREFLIGHT_ABORT[same_day_rerun]` で正しく中止しただけ
+  だった。原因は `pipeline/daily_runner.py` の `run_date` 解決にあり、
+  プリフェッチが空・例外のとき壁時計 `deps.clock.today()` へフォールバック
+  していた（AGENTS.md「wall time is metadata, never a substitute for
+  `as_of`」への違反）うえ、成功時も「取得できた最新の bar」を無条件に採用
+  していた（引けたセッションとは限らない）。壁時計フォールバックを廃止し、
+  取得できたバーのうち米国東部時間 16:00 を過ぎて引けたセッションの最新日
+  だけを `run_date` に採るようにし、条件を満たす日付が無ければ新しい abort
+  理由 `PREFLIGHT_ABORT[no_trading_day]` で `start_run()` より前に中止する
+  （`--as-of` 明示時の挙動は変えない）。あわせて `copilot-daily` が終了時の
+  状態（`outcome`/`reason`/`run_id`/`run_date`/`candidates`/`started_at`/
+  `finished_at`）を `reports/<run_date>/<run_id>/` の外にある1つのJSON
+  （`--outcome-file`、既定は `COPILOT_DAILY_OUTCOME_FILE` 環境変数、CI の job
+  `env:` から供給しプロンプト指示に依存しない）へ、preflight abort を含む
+  全終了経路で書くようにした。`scripts/check_daily_complete.py` は
+  `--outcome-file` を渡されたとき、ファイルが無ければ「一度も起動していない」
+  として即失敗、`outcome=="preflight_abort"` なら即合格とする
+  （従来は誤って赤になっていた）。`.github/workflows/swing-daily.yml` には
+  `steps.claude.outputs.execution_file` を artifact としてアップロードする
+  ステップ（`if: always()`、14日保持）を追加し、セッションの挙動を事後確認
+  できなかったこと自体の欠陥にも対処した。自動リトライは入れない
+  （AGENTS.md「Nothing is retried automatically」を維持）。
+  **追補**: 上記の実装は、プリフェッチが**例外**を送出した
+  場合を`no_trading_day`（「セッションがまだ引けていない」という正当な停止）
+  に丸めてしまい、`scripts/check_daily_complete.py`が`outcome=="preflight_abort"`
+  なら理由を問わず合格にしていたため、データプロバイダの一時障害が「取引日
+  なし」として正常終了し、`runs`行も分析も無いままジョブが緑になる問題が
+  再発していた。プリフェッチ例外は新しい理由`PREFLIGHT_ABORT[price_fetch_failed]`
+  に分離し（空プリフェッチ・全バー未引けは引き続き`no_trading_day`）、
+  `scripts/check_daily_complete.py`の合格判定を`outcome=="preflight_abort"`
+  というだけの判定から、`reason`が正当な停止のホワイトリスト
+  （`same_day_rerun`・`no_trading_day`）に載っているときだけ合格とする
+  fail-closed な判定に変更した——`price_fetch_failed`・未知の理由・`reason`
+  欠落はいずれも失敗として扱う。`.claude/skills/swing-daily/SKILL.md`にも
+  `PREFLIGHT_ABORT[price_fetch_failed]`を「失敗であり分析対象なしではない」
+  として明記した
+
 - `copilot-retro collect` が、Issue #324 の実売買記録機能撤去（`analysis_input.json`
   から `decision_history`/`performance_summary` を削除）より前に書かれた
   `analysis_input.json` を一切パースできず、R2 同期対象21アーカイブのうち17件が

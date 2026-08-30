@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 import traceback
+from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from rich.console import Console
@@ -24,7 +27,8 @@ from swing_copilot.data.earnings_finnhub import FinnhubEarningsClient
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.data.yfinance_provider import YFinanceProvider
 from swing_copilot.exceptions import ConfigError, PreflightAbort
-from swing_copilot.models import DailyRunOptions
+from swing_copilot.io_atomic import write_json_atomically
+from swing_copilot.models import DailyRunOptions, DailyRunResult
 from swing_copilot.pipeline.daily import (
     _LOG_LEVELS,
     DailyDependencies,
@@ -57,10 +61,18 @@ from swing_copilot.universe import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from datetime import datetime
 
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
 
 logger = logging.getLogger(__name__)
+
+#: `--outcome-file`'s environment fallback (Issue #372). CI sets this in the
+#: job's `env:` rather than relying on the headless analysis session to pass
+#: `--outcome-file` itself -- a prompt instruction is not a guarantee, and
+#: this is the mechanism that makes the outcome file get written regardless
+#: of what that session does. An explicit `--outcome-file` still wins.
+_OUTCOME_FILE_ENV_VAR = "COPILOT_DAILY_OUTCOME_FILE"
 
 
 def _preflight_abort_message(exc: Exception) -> str:
@@ -78,8 +90,9 @@ def _preflight_abort_message(exc: Exception) -> str:
 #: The universe cannot be resolved: the argparse convention (message as the
 #: exit status, stderr, exit 1).
 _UNIVERSE_EXIT = ExitPolicy(errors=(UniverseError,))
-#: `run_daily` raises this for the same-day rerun guard (P8-118), since
-#: `run_date` only resolves after prefetch, deep inside the run.
+#: `run_daily` raises this for the same-day rerun guard (P8-118) and the
+#: no-closed-trading-day guard (#372), since `run_date` only resolves after
+#: prefetch, deep inside the run.
 _PREFLIGHT_EXIT = ExitPolicy(
     errors=(PreflightAbort,), code=2, format_message=_preflight_abort_message
 )
@@ -115,6 +128,22 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
             "run already exists for the resolved run_date"
         ),
     )
+    parser.add_argument(
+        "--outcome-file",
+        type=Path,
+        # `or None`: an env var exported but left empty means "unset" here.
+        # Without it argparse would convert the `""` default to `Path(".")`,
+        # and `write_json_atomically` would raise `ValueError` on a path with
+        # no name -- an unwritten diagnostics file taking a real run down with
+        # it, which `_write_outcome_file`'s fail-soft contract forbids.
+        default=os.environ.get(_OUTCOME_FILE_ENV_VAR) or None,
+        help=(
+            "write this run's terminal outcome (success/degraded/failed/"
+            "preflight_abort) as JSON to this path, outside reports/; falls "
+            f"back to the {_OUTCOME_FILE_ENV_VAR} environment variable; "
+            "unset writes nothing"
+        ),
+    )
     args = parser.parse_args(argv)
     return DailyRunOptions(
         as_of=args.as_of,
@@ -124,6 +153,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         strategy_key=args.strategy,
         log_level=args.log_level,
         allow_same_day_rerun=args.allow_same_day_rerun,
+        outcome_file=args.outcome_file,
     )
 
 
@@ -284,8 +314,132 @@ def _configure_logging(secrets: Secrets, *, level: str | None = None) -> None:
         handler.addFilter(redaction_filter)
 
 
+@dataclass(frozen=True, slots=True)
+class _RunOutcome:
+    """One `copilot-daily` invocation's terminal state, for the outcome file.
+
+    Grouped into one value so `_write_outcome_file` stays under the project's
+    parameter-count convention; see its docstring for what each field means
+    and when it is `None`.
+    """
+
+    outcome: str
+    reason: str | None
+    run_id: str | None
+    run_date: str | None
+    candidates: int | None
+    started_at: datetime
+    finished_at: datetime
+
+    def as_json(self) -> dict[str, object]:
+        """Render as the outcome file's JSON payload."""
+        return {
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "run_id": self.run_id,
+            "run_date": self.run_date,
+            "candidates": self.candidates,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": self.finished_at.isoformat(),
+        }
+
+
+def _write_outcome_file(outcome_file: Path | None, outcome: _RunOutcome) -> None:
+    """Record this run's terminal state for `scripts/check_daily_complete.py`.
+
+    Written outside `reports/<run_date>/<run_id>/` on purpose (Issue #372):
+    that tree is the synced daily-run archive and audit trail, and this file
+    is neither. Its only job is letting a later boundary -- a CI step, not
+    the headless analysis session -- tell "`copilot-daily` never even
+    started" apart from "it started and legitimately aborted". It is written
+    on every *documented* terminal path -- `PreflightAbort` included, which
+    is the point: the 2026-08-29 incident this issue traces to was invisible
+    precisely because nothing recorded a preflight abort as anything but "no
+    run happened at all". An undocumented crash (an unexpected exception out
+    of `run_daily`, or a failure before it in `main()`) deliberately writes
+    nothing: the checker then reports the file as missing, which fails the
+    day -- the right verdict, if a blunter diagnosis than the traceback the
+    job log already carries.
+
+    A `None` `outcome_file` (no `--outcome-file` and no environment fallback)
+    writes nothing -- this must not change what an existing invocation does.
+    A write failure is fail-soft: a missing diagnostics file must never turn
+    an otherwise real success/failure/abort into something else.
+
+    Args:
+        outcome_file: Destination path, or `None` to skip writing.
+        outcome: This invocation's terminal state.
+    """
+    if outcome_file is None:
+        return
+    try:
+        write_json_atomically(outcome_file, outcome.as_json())
+    except OSError:
+        logger.exception(
+            "outcome file %s could not be written (outcome=%s)",
+            outcome_file,
+            outcome.outcome,
+        )
+
+
+def _run_daily_and_record_outcome(
+    options: DailyRunOptions, deps: DailyDependencies, started_at: datetime
+) -> DailyRunResult:
+    """Run the batch and record its terminal outcome, preflight abort included.
+
+    A bare `run_daily()` call under `run_cli()` (as before #372) never gets a
+    chance to observe a `PreflightAbort` -- `run_cli()` converts it straight
+    to `SystemExit(2)` one layer up (`_PREFLIGHT_EXIT`). This wrapper sits
+    between the two, so it can write the outcome file on that path too,
+    before re-raising for `run_cli()`'s existing exit-code/message contract
+    to handle unchanged.
+
+    `deps.clock.now()` (for `finished_at`) is only read when `--outcome-file`
+    is actually configured, so a caller composing `deps` without a real
+    `Clock` (nothing else in this run path needs one) is unaffected.
+    """
+    try:
+        result = run_daily(options, deps)
+    except PreflightAbort as exc:
+        if options.outcome_file is not None:
+            _write_outcome_file(
+                options.outcome_file,
+                _RunOutcome(
+                    outcome="preflight_abort",
+                    reason=exc.reason,
+                    run_id=None,
+                    run_date=None,
+                    candidates=None,
+                    started_at=started_at,
+                    finished_at=deps.clock.now(),
+                ),
+            )
+        raise
+    if options.outcome_file is not None:
+        _write_outcome_file(
+            options.outcome_file,
+            _RunOutcome(
+                outcome=result.status.value,
+                reason=None,
+                run_id=str(result.run_id),
+                run_date=result.run_date.isoformat(),
+                candidates=(
+                    len(result.brief.candidates) if result.brief is not None else None
+                ),
+                started_at=started_at,
+                finished_at=deps.clock.now(),
+            ),
+        )
+    return result
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse options, compose collaborators, then render a terminal summary."""
+    # A dedicated clock, not `deps.clock`: this only feeds the outcome file's
+    # `started_at`, and reading it before `_compose_dependencies` runs (which
+    # can itself fail) marks the start of this whole invocation rather than
+    # just the batch inside it.
+    started_at = SystemClock().now()
     options = _parse_args(argv)
     _configure_logging(load_secrets(), level=options.log_level)
     settings = load_settings()
@@ -293,7 +447,10 @@ def main(argv: list[str] | None = None) -> None:
     deps = run_cli(
         lambda: _compose_dependencies(options, settings, strategies), _UNIVERSE_EXIT
     )
-    result = run_cli(lambda: run_daily(options, deps), _PREFLIGHT_EXIT)
+    result = run_cli(
+        lambda: _run_daily_and_record_outcome(options, deps, started_at),
+        _PREFLIGHT_EXIT,
+    )
     paths = TerminalPaths(
         report=result.report_path,
         analysis_input=result.analysis_input_path,

@@ -11,10 +11,12 @@ import logging
 import sys
 import time
 from datetime import datetime, timedelta
+from datetime import time as time_of_day
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from swing_copilot.analysis.export import HISTORICAL_REPLAY_FILENAME
+from swing_copilot.clock import MARKET_TIMEZONE
 from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.io_atomic import write_json_atomically
@@ -86,12 +88,19 @@ _ANALYSIS_GAP_NOTICE_TEMPLATE = (
     "{run_date} の定性分析が未完了です（analysis_result.json 欠落）。"
     "`--allow-same-day-rerun` を付けて {run_date} 分を再実行すると解消できます。"
 )
+#: The regular-session close, in `MARKET_TIMEZONE` (Issue #372). A shortened
+#: session (e.g. the day after Thanksgiving, 13:00 ET) closes earlier still,
+#: so treating every session as closing no later than 16:00 never mistakes a
+#: still-open session for a closed one -- it can only be conservatively late.
+_SESSION_CLOSE_ET = time_of_day(16, 0)
 
 __all__ = ["DailyDependencies", "run_daily"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import date
+
+    import pandas as pd
 
     from swing_copilot.data.base import BarFetchResult
     from swing_copilot.regime.exposure import ExposureDecision
@@ -105,6 +114,117 @@ if TYPE_CHECKING:
         RejectionRecord,
         TruncatedCandidate,
     )
+
+
+def _bar_date(value: object) -> date:
+    """Normalize one `bars["date"]` cell to a plain `date`.
+
+    The column holds `datetime`-like values for a real fetch and, in some
+    tests, plain `date` objects -- the same normalization the pre-#372 code
+    applied to a single `max()` result.
+    """
+    return value.date() if isinstance(value, datetime) else cast("date", value)
+
+
+def _session_has_closed(session_date: date, now: datetime) -> bool:
+    """Whether `session_date`'s regular session has closed by `now`.
+
+    The scheduled cron (`17 1 * * 2-6`, i.e. 01:17 UTC == 21:17 ET the
+    *previous* day) always fires hours after this check would already pass;
+    it only matters when GitHub Actions delays the job's actual start into
+    the next session's pre-market (Issue #372).
+
+    Args:
+        session_date: The calendar date a fetched bar is stamped with.
+        now: Wall-clock instant (tz-aware) from `Clock.now()`.
+    """
+    close_at = datetime.combine(session_date, _SESSION_CLOSE_ET, tzinfo=MARKET_TIMEZONE)
+    return now >= close_at
+
+
+def _reject_a_failed_prefetch(prefetched: BarFetchResult) -> None:
+    """Abort when the prefetch delivered nothing *and* reported failures.
+
+    `raise` is not how the production provider signals an outage:
+    `YFinanceProvider.get_daily_bars` catches every download exception and
+    `_normalize` turns an empty response into per-symbol `FetchFailure`s, so
+    a rate limit, a DNS failure, or a provider-side outage arrives here as
+    "empty frame plus failures" rather than through the `except` clause in
+    `run_daily`. Letting that fall through to `_resolve_closed_run_date`
+    would classify it as `no_trading_day`, which
+    `scripts/check_daily_complete.py` accepts as a legitimate stop -- i.e.
+    the outage would turn the unattended job green with nothing analyzed,
+    the exact failure mode #372's `price_fetch_failed` split exists to
+    prevent. Same principle as `docs/04_detailed_design.md`'s "an empty
+    response that contradicts what we already hold is a failure".
+
+    An empty frame with *no* failures stays `no_trading_day`
+    (`_resolve_closed_run_date`'s concern): the provider answered, it simply
+    had nothing to give.
+
+    Args:
+        prefetched: What `DataProvider.get_daily_bars` returned.
+
+    Raises:
+        PreflightAbort: Reason `price_fetch_failed`.
+    """
+    if not prefetched.bars.empty or not prefetched.failures:
+        return
+    reasons = sorted({failure.reason for failure in prefetched.failures})
+    msg = (
+        "preflight abort: 価格データの取得が全銘柄で失敗した "
+        f"({len(prefetched.failures)} 銘柄: {'; '.join(reasons)})。"
+        "引けた取引日を判定できない。"
+    )
+    raise PreflightAbort(msg, reason="price_fetch_failed")
+
+
+def _resolve_closed_run_date(bars: pd.DataFrame, now: datetime) -> date:
+    """Pick the latest fetched session whose regular close has passed.
+
+    AGENTS.md: "wall time is metadata, never a substitute for `as_of`." The
+    pre-#372 implementation used `max(bars["date"])` unconditionally --
+    "the newest bar we could fetch" -- which is not the same as "a session
+    that has closed", and fell back to `deps.clock.today()` on an empty or
+    failed prefetch, which is the wall clock outright. When a scheduled job
+    is delayed into the next session's US pre-market, the newest fetched
+    "bar" can be a still-forming session, and the old logic would book that
+    day before it closed -- the same defect that later made the following
+    day's same-day-rerun guard cover for it by discarding a whole day's
+    analysis.
+
+    Args:
+        bars: Prefetched OHLCV rows; may be empty.
+        now: Wall-clock instant (tz-aware) from `Clock.now()`.
+
+    Raises:
+        PreflightAbort: No fetched bar's session has closed yet -- an empty
+            prefetch, or every fetched date is still mid-session (reason
+            `no_trading_day`). An empty prefetch that *reported failures* was
+            already rejected as `price_fetch_failed` by
+            `_reject_a_failed_prefetch`, so reaching here empty means the
+            provider answered cleanly with nothing.
+    """
+    if bars.empty:
+        msg = "preflight abort: 価格データが空で、確定した取引日が無い。"
+        raise PreflightAbort(msg, reason="no_trading_day")
+    # `drop_duplicates()` dedups inside pandas (and, unlike `.unique()`, keeps
+    # a Series, so iteration still boxes datetime64 cells into `Timestamp`).
+    # The prefetch spans months of history across the whole universe plus the
+    # market strip, so a Python-level pass over every row is six figures of
+    # interpreter work for what is one column's distinct dates.
+    closed_dates = [
+        bar_date
+        for bar_date in (_bar_date(value) for value in bars["date"].drop_duplicates())
+        if _session_has_closed(bar_date, now)
+    ]
+    if not closed_dates:
+        msg = (
+            "preflight abort: 取得できた価格データの中に、米国東部時間 16:00 を"
+            "過ぎて引けたセッションが無い。"
+        )
+        raise PreflightAbort(msg, reason="no_trading_day")
+    return max(closed_dates)
 
 
 def _held_symbols(deps: DailyDependencies, *, is_historical: bool) -> set[str]:
@@ -334,19 +454,34 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
 
     prefetched_prices: BarFetchResult | None = None
-    prefetch_error: str | None = None
-    run_date = fetch_cutoff
-    if options.as_of is None:
+    if options.as_of is not None:
+        run_date = options.as_of
+    else:
+        # #372: `run_date` must be a session that has actually closed -- never
+        # the wall clock, and never merely "the newest bar we could fetch".
+        # A prefetch that comes back empty or raises used to leave `run_date`
+        # on `deps.clock.today()` (AGENTS.md: "wall time is metadata, never a
+        # substitute for `as_of`"), and even a successful prefetch could
+        # resolve to a session still in progress if the scheduled job started
+        # late. Both now abort before any state is written rather than
+        # booking a day that has not (yet, or ever) closed.
+        start = fetch_cutoff - timedelta(days=_screening_lookback_days(deps))
         try:
-            start = fetch_cutoff - timedelta(days=_screening_lookback_days(deps))
             prefetched_prices = deps.data_provider.get_daily_bars(
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
             )
-            if not prefetched_prices.bars.empty:
-                latest = max(prefetched_prices.bars["date"])
-                run_date = latest.date() if isinstance(latest, datetime) else latest
         except Exception as exc:
-            prefetch_error = f"unexpected error: {exc}"
+            # Issue #372: distinct from `no_trading_day` below. This is not
+            # "the market has not closed yet" -- it is a data-provider outage
+            # that made the closed-session judgment impossible to make at
+            # all, and both `.claude/skills/swing-daily/SKILL.md` and
+            # `scripts/check_daily_complete.py` must treat it as a failure
+            # (non-actionable-but-clean and actually-broken must not share a
+            # reason, or a transient outage silently turns the CI job green).
+            msg = f"preflight abort: 価格データの取得に失敗した ({exc})。引けた取引日を判定できない。"
+            raise PreflightAbort(msg, reason="price_fetch_failed") from exc
+        _reject_a_failed_prefetch(prefetched_prices)
+        run_date = _resolve_closed_run_date(prefetched_prices.bars, deps.clock.now())
 
     if not options.allow_same_day_rerun:
         existing = deps.state_store.get_successful_run(run_date)
@@ -456,8 +591,8 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         return outcome
 
     def _step_prices() -> _StepOutcome:
-        if prefetch_error is not None:
-            return _StepOutcome(False, prefetch_error)
+        # `prefetched_prices` is guaranteed non-empty for a live run: a failed
+        # or empty prefetch already aborted above, before `start_run()`.
         return _run_step_prices(deps, price_symbols, run_date, prefetched_prices)
 
     fatal_steps: list[tuple[str, Callable[[], _StepOutcome]]] = [

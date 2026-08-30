@@ -247,3 +247,239 @@ class TestMain:
 
         assert exit_code == 1
         assert "このジョブ自身の run が無い" in capsys.readouterr().err
+
+
+class TestOutcomeFile:
+    """Issue #372: `--outcome-file` tells "never started" from "legit abort"."""
+
+    def test_missing_outcome_file_fails_even_with_no_started_after(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """Absent file fails immediately -- independent of what the DB holds."""
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+        outcome_file = tmp_path / "outcome.json"
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError,
+            match="copilot-daily が一度も起動していない",
+        ):
+            check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_preflight_abort_outcome_passes_without_consulting_the_db(
+        self, tmp_path: Path
+    ) -> None:
+        """No DB at all is fine -- the outcome file alone settles this."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "no_trading_day"}',
+            encoding="utf-8",
+        )
+
+        check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+    def test_non_abort_outcome_falls_through_to_the_existing_checks(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text('{"outcome": "success"}', encoding="utf-8")
+
+        check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_non_abort_outcome_still_fails_when_the_analysis_is_missing(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text('{"outcome": "degraded"}', encoding="utf-8")
+
+        with pytest.raises(check_daily_complete.IncompleteRunError, match="3 件"):
+            check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_malformed_outcome_file_raises(self, db_path: Path, tmp_path: Path) -> None:
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text("not json", encoding="utf-8")
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError, match="読み込めない"
+        ):
+            check_daily_complete.check(
+                tmp_path / "reports", db_path, outcome_file=outcome_file
+            )
+
+    def test_non_object_outcome_file_raises_the_domain_error(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """Valid JSON that is not an object must not surface as AttributeError."""
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text("[]", encoding="utf-8")
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError, match="JSON オブジェクトではない"
+        ):
+            check_daily_complete.check(
+                tmp_path / "reports", db_path, outcome_file=outcome_file
+            )
+
+    def test_omitting_it_preserves_existing_behavior(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """The default (`outcome_file=None`) must not change prior behavior."""
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+
+        check_daily_complete.check(reports_dir, db_path)
+
+    def test_same_day_rerun_reason_passes_without_consulting_the_db(
+        self, tmp_path: Path
+    ) -> None:
+        """The other whitelisted reason is also a legitimate stop."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "same_day_rerun"}',
+            encoding="utf-8",
+        )
+
+        check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+    def test_price_fetch_failed_reason_fails_the_check(self, tmp_path: Path) -> None:
+        """Issue #372: a data-provider outage must not pass as a clean day."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "price_fetch_failed"}',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError, match="price_fetch_failed"
+        ):
+            check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+    def test_unknown_reason_fails_the_check(self, tmp_path: Path) -> None:
+        """Fail-closed: an unrecognized reason is never assumed legitimate."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "totally_unknown_reason"}',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(check_daily_complete.IncompleteRunError):
+            check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+    def test_missing_reason_fails_the_check(self, tmp_path: Path) -> None:
+        """A `preflight_abort` outcome with no `reason` key fails closed too."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text('{"outcome": "preflight_abort"}', encoding="utf-8")
+
+        with pytest.raises(check_daily_complete.IncompleteRunError):
+            check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+
+class TestMainOutcomeFile:
+    def test_outcome_file_flag_reaches_check(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "no_trading_day"}',
+            encoding="utf-8",
+        )
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--outcome-file",
+                str(outcome_file),
+            ]
+        )
+
+        assert exit_code == 0
+        assert "preflight abort" in capsys.readouterr().out
+
+    def test_missing_outcome_file_flag_target_returns_one(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--outcome-file",
+                str(tmp_path / "missing-outcome.json"),
+            ]
+        )
+
+        assert exit_code == 1
+        assert "一度も起動していない" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("outcome_json", "expected_exit"),
+        [
+            pytest.param(
+                '{"outcome": "preflight_abort", "reason": "no_trading_day"}',
+                0,
+                id="no_trading_day-legitimate-stop",
+            ),
+            pytest.param(
+                '{"outcome": "preflight_abort", "reason": "same_day_rerun"}',
+                0,
+                id="same_day_rerun-legitimate-stop",
+            ),
+            pytest.param(
+                '{"outcome": "preflight_abort", "reason": "price_fetch_failed"}',
+                1,
+                id="price_fetch_failed-is-a-failure",
+            ),
+            pytest.param(
+                '{"outcome": "preflight_abort", "reason": "some_future_reason"}',
+                1,
+                id="unknown-reason-fails-closed",
+            ),
+            pytest.param(
+                '{"outcome": "preflight_abort"}',
+                1,
+                id="missing-reason-fails-closed",
+            ),
+        ],
+    )
+    def test_preflight_abort_reason_whitelist_decides_the_exit_code(
+        self, tmp_path: Path, outcome_json: str, expected_exit: int
+    ) -> None:
+        """Issue #372: only a whitelisted reason may leave the job green."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(outcome_json, encoding="utf-8")
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--outcome-file",
+                str(outcome_file),
+            ]
+        )
+
+        assert exit_code == expected_exit

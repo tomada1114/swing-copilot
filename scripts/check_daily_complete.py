@@ -28,11 +28,20 @@ it would find yesterday's report, call the (nonexistent) run of today
 complete, and the day would look green having analyzed nothing. `--started-after`
 closes that gap by requiring the latest run to have actually started in this
 job (see `check()`).
+
+`--outcome-file` (Issue #372) closes a related gap from the other direction:
+`copilot-daily` itself now writes its terminal outcome to this path on every
+exit, `PreflightAbort` included (`pipeline/daily_composition.py`). When it is
+given, a missing file means `copilot-daily` never even ran -- independent of
+whatever the DB happens to hold from a previous day -- and an `outcome` of
+`"preflight_abort"` (e.g. `PREFLIGHT_ABORT[no_trading_day]`, the closed-session
+`run_date` guard) is a legitimate stop, not an incomplete day.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -83,10 +92,51 @@ def _candidate_count(run_id: str, db_path: Path | None) -> int:
     return int(frame.iloc[0]["candidates"])
 
 
+def _outcome_file_is_a_legitimate_stop(outcome_file: Path) -> bool:
+    """Whether `outcome_file` says this day was legitimately not analyzed.
+
+    Implements the table from Issue #372: a missing file means
+    `copilot-daily` never started at all (fails loudly here, independent of
+    whatever the DB holds from an earlier day); an `outcome` of
+    `"preflight_abort"` means it started and stopped for a documented,
+    non-actionable reason (e.g. no closed trading day yet); anything else
+    falls through to the existing candidate-count / `analysis_result.json`
+    check below, unchanged.
+
+    Args:
+        outcome_file: Path `copilot-daily` was told to write its terminal
+            outcome to.
+
+    Returns:
+        Whether `check()` should pass without consulting the database.
+
+    Raises:
+        IncompleteRunError: The file is missing, or unreadable as JSON.
+    """
+    if not outcome_file.exists():
+        message = (
+            f"outcome ファイル {outcome_file} が無い。"
+            "copilot-daily が一度も起動していない。"
+        )
+        raise IncompleteRunError(message)
+    try:
+        payload = json.loads(outcome_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        message = f"outcome ファイル {outcome_file} を読み込めない: {error}"
+        raise IncompleteRunError(message) from error
+    outcome = payload.get("outcome")
+    if outcome != "preflight_abort":
+        return False
+    reason = payload.get("reason")
+    print(f"copilot-daily は preflight abort で正常終了 (reason={reason})。OK")
+    return True
+
+
 def check(
     reports_dir: Path,
     db_path: Path | None = None,
     started_after: datetime | None = None,
+    outcome_file: Path | None = None,
 ) -> None:
     """Raise `IncompleteRunError` unless the latest run produced its analysis.
 
@@ -97,7 +147,15 @@ def check(
             after this (aware) timestamp. Without it, a previous day's run --
             visible in the workspace now that `reports/` is pulled from R2 --
             could vouch for a day this job never actually ran.
+        outcome_file: When given, `copilot-daily`'s own terminal-outcome file
+            (Issue #372). Its absence fails immediately; an `outcome` of
+            `"preflight_abort"` passes immediately; anything else falls
+            through to the checks below, unchanged. Omitting it (the
+            default) leaves existing callers' behavior untouched.
     """
+    if outcome_file is not None and _outcome_file_is_a_legitimate_stop(outcome_file):
+        return
+
     run_id, run_date, started_at = _latest_run(db_path)
     if started_after is not None and _as_aware_utc(started_at) < _as_aware_utc(
         started_after
@@ -162,9 +220,18 @@ def main(argv: list[str] | None = None) -> int:
             "このジョブ自身の run とは認めない (既定: 制限なし)"
         ),
     )
+    parser.add_argument(
+        "--outcome-file",
+        type=Path,
+        default=None,
+        help=(
+            "copilot-daily が書いた終了状態 JSON のパス (既定: 未指定=従来どおり)。"
+            "ファイルが無ければ即失敗、outcome=preflight_abort なら即合格とする"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        check(args.reports_dir, args.db, args.started_after)
+        check(args.reports_dir, args.db, args.started_after, args.outcome_file)
     except IncompleteRunError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

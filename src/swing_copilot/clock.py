@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import Protocol
+from zoneinfo import ZoneInfo
+
+#: The US equity market's local timezone. Shared so a session-close check
+#: (`pipeline/daily_runner.py`'s `run_date` resolution, Issue #372) and the
+#: realized-P&L circuit breaker (`risk/circuit_breaker.py`) never define it
+#: twice and drift apart.
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class Clock(Protocol):

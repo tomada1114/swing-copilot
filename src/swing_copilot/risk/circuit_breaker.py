@@ -6,9 +6,8 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
-from zoneinfo import ZoneInfo
 
-_ET = ZoneInfo("America/New_York")
+from swing_copilot.clock import MARKET_TIMEZONE as _ET
 
 
 class CircuitState(Enum):

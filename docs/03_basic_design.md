@@ -340,6 +340,19 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 決定論的なパイプラインは両環境で同じコードを動かす。定性分析だけは GitHub Actions
 に限定し、ローカル実行の分岐をスキルへ持たせない。
 
+`run_date`は壁時計からは決めない（Issue #372）。既定（`--as-of`未指定）では、
+取得できた価格バーのうち**米国東部時間16:00を過ぎて引けたセッション**の最新日を
+採用する（`pipeline/daily_runner.py::_resolve_closed_run_date`）。プリフェッチが
+空・例外・または最新バーがまだ引けていないセッションのものであれば、
+`PREFLIGHT_ABORT[no_trading_day]`で`start_run()`より前に中止し、`runs`へは
+何も書かない。定刻cron（`17 1 * * 2-6`、UTC 01:17 = 米国セッションクローズの
+数時間後）はこの16:00判定に常に間に合うため、通常運用でこの分岐が効くことは
+無い。GitHub Actionsの共有cronキューが遅延して翌セッションの寄付前
+（プレマーケット）に発火したときだけ意味を持つ——遅延前の実装は「取得できた
+最新バー」をそのまま`run_date`に採っていたため、まだ確定していないセッションを
+先食いし、翌日の同日再実行ガードがその日の分析を失わせていた
+（2026-08-29の事象）。自動リトライは行わない。
+
 ### 8.2 永続化
 
 データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`・`reports/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。`manifest.json`・`generation`・同期状態ファイルはいずれも`data/`と`reports/`で共有する1組であり、2つのツリーは常に1回のpushで一緒にコミットされる（Issue #370）。
@@ -354,6 +367,20 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 - 無人実行の`push`は`--reports-append-only`を付ける。分析セッションはニュース・開示という信頼できないテキストを読みながら`reports/`配下へ書き込めるため、同期対象化によってワークスペースに載るようになった過去アーカイブを書き換えられると、digestベースの`collect`がそれを再取り込みしてR2に固定してしまう。無人実行では新規runディレクトリの追加だけを許し、既存オブジェクトの変更・削除を拒否する（手元からの訂正・再取り込みは従来どおり可能）
 - 並行書き込みガードは`manifest.json`の単調増加`generation`による楽観ロックだけである。`push`はリモートのgenerationが`pull`時点と一致するときにのみ成功するので、**書き込みを伴う作業はpull → 作業 → pushを1セットで行い、pullしたまま放置しない**
 - 実行が失敗した日はpushしない。リモートの正本は前日のまま残り、翌runのプリフライトが欠落を検知する
+- `copilot-daily`は終了時に、run の結果を機械可読な1つのJSONへ原子的に書く
+  （outcome file、Issue #372）。内容は`outcome`（`success`／`degraded`／
+  `failed`／`preflight_abort`）・`reason`（abortの場合のタグ、他は`null`）・
+  `run_id`・`run_date`・`candidates`・`started_at`／`finished_at`。
+  `--outcome-file`（既定は`COPILOT_DAILY_OUTCOME_FILE`環境変数、CLIオプションが
+  優先）で指定したときだけ書き、`reports/<run_date>/<run_id>/`の**外**に置く
+  ——同期対象アーカイブと監査証跡を汚さないためである。preflight abort
+  （`PREFLIGHT_ABORT[no_trading_day]`を含む）の経路でも必ず書く。
+  `scripts/check_daily_complete.py`は`--outcome-file`を渡されたとき、
+  ファイルが無ければ「`copilot-daily`が一度も起動していない」として即失敗、
+  `outcome=="preflight_abort"`なら即合格とし、それ以外は従来どおり
+  候補数と`analysis_result.json`の有無で判定する。自動リトライはこれでも
+  入れない——検知できるようにするだけで、再実行は従来どおり手動dispatchに
+  委ねる
 
 ### 8.3 実行時間
 

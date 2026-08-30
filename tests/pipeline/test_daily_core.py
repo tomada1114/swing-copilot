@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -54,6 +55,8 @@ from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 
 AS_OF = date(2027, 3, 1)
+#: `date.weekday()` value for Friday, named for `TestRunDateResolvesOnlyClosedSessions`.
+_FRIDAY = 4
 
 
 class FakeClock:
@@ -550,6 +553,181 @@ class TestAsOfDefaulting:
     def test_missing_as_of_uses_latest_date_in_fetched_bars(self, deps):
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
         assert result.run_date == AS_OF - timedelta(days=1)
+
+    def test_explicit_as_of_bypasses_the_closed_session_check(
+        self, settings, market_store, state_store, tmp_path
+    ):
+        """#372: `--as-of` must not go through prefetch-based run_date resolution.
+
+        `clock.now()` here is hours before 16:00 ET on `AS_OF` -- the closed-
+        session gate would abort a live run at this instant -- but an explicit
+        `--as-of` never prefetches at all (`options.as_of is not None` skips
+        the whole branch in `run_daily()`), so `run_date` is exactly `AS_OF`
+        regardless of the wall clock.
+        """
+        early_utc_morning = datetime(AS_OF.year, AS_OF.month, AS_OF.day, 9, tzinfo=UTC)
+        deps = DailyDependencies(
+            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            market_store=market_store,
+            state_store=state_store,
+            settings=settings,
+            universe=(_member("AAPL"), _member("MSFT")),
+            strategies_config=STRATEGIES_CONFIG,
+            clock=_FixedNowClock(early_utc_morning),
+            edgar_client=None,
+            output_dir=str(tmp_path / "reports"),
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        assert result.run_date == AS_OF
+        assert result.status == RunStatus.SUCCESS
+
+
+class _FixedNowClock:
+    """A `Clock` whose `now()`/`today()` are pinned to one instant.
+
+    `FakeClock` (module-level) pins `now()` to a fixed UTC noon regardless of
+    what it is asked about; the closed-session tests below need `now()` to
+    land at exact minute-level offsets from a session's 16:00 ET close, so
+    they construct this directly instead.
+    """
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def today(self) -> date:
+        return self._now.date()
+
+
+class _RaisingDataProvider:
+    """A `DataProvider` whose price fetch always raises."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def get_daily_bars(self, symbols, start, end):
+        del symbols, start, end
+        raise self._error
+
+    def get_latest_bars(self, symbols, as_of):
+        del symbols, as_of
+        raise self._error
+
+
+class TestRunDateResolvesOnlyClosedSessions:
+    """#372: `run_date` must be a session that has closed, never merely fetched.
+
+    Covers both defects the issue traces to: the wall-clock fallback on an
+    empty/failed prefetch (defect 1), and booking a session before its 16:00
+    ET close just because it is the newest fetched bar (defect 2). Each test
+    starts from the `deps` fixture (bars/universe already wired) and swaps
+    only `data_provider`/`clock` via `dataclasses.replace`.
+    """
+
+    def test_empty_prefetch_aborts_with_no_trading_day_and_writes_no_run(
+        self, deps, state_store
+    ):
+        empty_bars = pd.DataFrame(
+            columns=["symbol", "date", "open", "high", "low", "close", "volume"]
+        )
+        broken_deps = replace(deps, data_provider=FakeDataProvider(empty_bars))
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
+
+        assert exc_info.value.reason == "no_trading_day"
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute("SELECT count(*) FROM runs").fetchone()
+        assert count == (0,)
+
+    def test_prefetch_exception_aborts_with_no_trading_day(self, deps):
+        broken_deps = replace(
+            deps, data_provider=_RaisingDataProvider(RuntimeError("network boom"))
+        )
+
+        with pytest.raises(PreflightAbort) as exc_info:
+            run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
+
+        assert exc_info.value.reason == "no_trading_day"
+        assert "network boom" in str(exc_info.value)
+
+    def test_latest_bar_still_mid_session_falls_back_to_the_prior_close(self, deps):
+        """The newest fetched bar's session has not closed yet (16:00 ET)."""
+        session_date = date(2027, 3, 1)
+        close_at = datetime.combine(
+            session_date, time(16, 0), tzinfo=ZoneInfo("America/New_York")
+        )
+        just_before_close = close_at - timedelta(minutes=1)
+        bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
+        mid_session_deps = replace(
+            deps,
+            data_provider=FakeDataProvider(bars),
+            clock=_FixedNowClock(just_before_close),
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), mid_session_deps)
+
+        assert result.run_date == session_date - timedelta(days=1)
+
+    def test_latest_bar_exactly_at_the_close_boundary_is_used(self, deps):
+        """16:00 ET exactly counts as closed (inclusive boundary)."""
+        session_date = date(2027, 3, 1)
+        close_at = datetime.combine(
+            session_date, time(16, 0), tzinfo=ZoneInfo("America/New_York")
+        )
+        bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
+        at_close_deps = replace(
+            deps, data_provider=FakeDataProvider(bars), clock=_FixedNowClock(close_at)
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), at_close_deps)
+
+        assert result.run_date == session_date
+
+    def test_latest_bar_just_after_the_close_is_used(self, deps):
+        session_date = date(2027, 3, 1)
+        close_at = datetime.combine(
+            session_date, time(16, 0), tzinfo=ZoneInfo("America/New_York")
+        )
+        just_after_close = close_at + timedelta(minutes=1)
+        bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
+        after_close_deps = replace(
+            deps,
+            data_provider=FakeDataProvider(bars),
+            clock=_FixedNowClock(just_after_close),
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), after_close_deps)
+
+        assert result.run_date == session_date
+
+    def test_saturday_wall_clock_with_fridays_bar_resolves_to_friday(self, deps):
+        """A delayed Saturday firing must not book Saturday.
+
+        `today()` would say Saturday, but the newest *closed* session is
+        Friday's -- the case the 2026-08-29 incident traces to.
+        """
+        friday = date(2027, 2, 26)
+        assert friday.weekday() == _FRIDAY
+        saturday_evening_et = datetime.combine(
+            friday + timedelta(days=1),
+            time(10, 0),
+            tzinfo=ZoneInfo("America/New_York"),
+        )
+        bars = _bars_for(["AAPL", "MSFT"], friday + timedelta(days=1))
+        saturday_deps = replace(
+            deps,
+            data_provider=FakeDataProvider(bars),
+            clock=_FixedNowClock(saturday_evening_et),
+        )
+
+        result = run_daily(DailyRunOptions(is_dry_run=True), saturday_deps)
+
+        assert result.run_date == friday
 
 
 class TestSymbolLimit:

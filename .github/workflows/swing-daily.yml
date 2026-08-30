@@ -56,6 +56,13 @@ jobs:
     # swing-daily スキル内部の全体上限が 45 分。データ取得・ingest・
     # R2 の pull/push を足した余裕として 90 分を取る。
     timeout-minutes: 90
+    env:
+      # copilot-daily 自身がこの環境変数をフォールバックとして読む
+      # (`--outcome-file` が渡ればそちらを優先。pipeline/daily_composition.py)。
+      # job の env: に置くことで、分析セッションが素で `uv run copilot-daily` を
+      # 叩いても、preflight abort を含む全終了経路で outcome ファイルが書かれる
+      # (Issue #372。プロンプト指示への依存を避けるための設計)。
+      COPILOT_DAILY_OUTCOME_FILE: ${{ runner.temp }}/copilot-daily-outcome.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -229,6 +236,21 @@ jobs:
               print(f"permission_denials[{category}]={count}")
           PY
 
+      # 2026-08-29 の欠落 (Issue #372) は、事後にセッションの挙動を確認する
+      # 手段が無かったこと自体が診断を遅らせた欠陥だった。execution_file には
+      # ニュース・開示という信頼できないテキストや秘密情報が含まれ得るため、
+      # 上のサマリと違って中身は公開ログへ出さず、artifact としてのみ残す
+      # (14日保持、他の workflow artifact と揃える)。always(): 落ちた日ほど
+      # 診断に要る。
+      - name: Upload Claude execution log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: swing-daily-execution-${{ inputs.mode || 'live' }}
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 14
+
       # 設計判断 D2 (docs/goal-prompts/swing-copilot-retrospective/decisions.md)
       # により copilot-ingest-analysis は DB に触れない。verdicts/verdict_sources
       # への書き込みは copilot-retro collect が reports/ を走査して行う唯一の経路
@@ -286,6 +308,7 @@ jobs:
         run: >-
           uv run python scripts/check_daily_complete.py
           --started-after "$STARTED_AFTER"
+          --outcome-file "$COPILOT_DAILY_OUTCOME_FILE"
 
       # 失敗した日ほどレポートを見たいので always()。
       - name: Upload reports

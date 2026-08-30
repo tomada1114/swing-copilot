@@ -243,6 +243,22 @@ assume exit 2 means "already ran":
   dispatch or a re-run of a completed day would otherwise write a second
   verdict set). It exits before creating a run record or report directory. An
   explicit override flag bypasses the guard for an intentional re-run.
+- `PREFLIGHT_ABORT[no_trading_day]:` — no fetched price bar belongs to a
+  session that has actually closed (16:00 America/New_York). Either the
+  prefetch came back empty or raised, or the newest bar is still mid-session
+  because the scheduled job started late — `run_date` is never the wall clock
+  and never merely "the newest bar fetched", either of which would book a day
+  before it closed (Issue #372). No retry follows automatically; the next
+  scheduled run resolves it, or a manual dispatch does.
+
+`copilot-daily` also writes its own terminal outcome (`success`/`degraded`/
+`failed`/`preflight_abort`, plus the abort reason when applicable) to a JSON
+file outside `reports/<run_date>/<run_id>/`, whenever `--outcome-file` (or its
+`COPILOT_DAILY_OUTCOME_FILE` environment fallback, which CI always sets) is
+configured. This is what lets `scripts/check_daily_complete.py` tell "the
+pipeline never even started" apart from "it started and legitimately found no
+trading day yet", without relying on the headless analysis session to
+self-report anything.
 
 ## Reading the Accumulated Data
 

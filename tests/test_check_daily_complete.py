@@ -247,3 +247,123 @@ class TestMain:
 
         assert exit_code == 1
         assert "このジョブ自身の run が無い" in capsys.readouterr().err
+
+
+class TestOutcomeFile:
+    """Issue #372: `--outcome-file` tells "never started" from "legit abort"."""
+
+    def test_missing_outcome_file_fails_even_with_no_started_after(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """Absent file fails immediately -- independent of what the DB holds."""
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+        outcome_file = tmp_path / "outcome.json"
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError,
+            match="copilot-daily が一度も起動していない",
+        ):
+            check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_preflight_abort_outcome_passes_without_consulting_the_db(
+        self, tmp_path: Path
+    ) -> None:
+        """No DB at all is fine -- the outcome file alone settles this."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "no_trading_day"}',
+            encoding="utf-8",
+        )
+
+        check_daily_complete.check(reports_dir, outcome_file=outcome_file)
+
+    def test_non_abort_outcome_falls_through_to_the_existing_checks(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text('{"outcome": "success"}', encoding="utf-8")
+
+        check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_non_abort_outcome_still_fails_when_the_analysis_is_missing(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text('{"outcome": "degraded"}', encoding="utf-8")
+
+        with pytest.raises(check_daily_complete.IncompleteRunError, match="3 件"):
+            check_daily_complete.check(reports_dir, db_path, outcome_file=outcome_file)
+
+    def test_malformed_outcome_file_raises(self, db_path: Path, tmp_path: Path) -> None:
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text("not json", encoding="utf-8")
+
+        with pytest.raises(
+            check_daily_complete.IncompleteRunError, match="読み込めない"
+        ):
+            check_daily_complete.check(
+                tmp_path / "reports", db_path, outcome_file=outcome_file
+            )
+
+    def test_omitting_it_preserves_existing_behavior(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """The default (`outcome_file=None`) must not change prior behavior."""
+        _insert_candidates(Database(db_path), RUN_ID, 3)
+        reports_dir = tmp_path / "reports"
+        _write_result(reports_dir)
+
+        check_daily_complete.check(reports_dir, db_path)
+
+
+class TestMainOutcomeFile:
+    def test_outcome_file_flag_reaches_check(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        outcome_file = tmp_path / "outcome.json"
+        outcome_file.write_text(
+            '{"outcome": "preflight_abort", "reason": "no_trading_day"}',
+            encoding="utf-8",
+        )
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--outcome-file",
+                str(outcome_file),
+            ]
+        )
+
+        assert exit_code == 0
+        assert "preflight abort" in capsys.readouterr().out
+
+    def test_missing_outcome_file_flag_target_returns_one(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+
+        exit_code = check_daily_complete.main(
+            [
+                "--reports-dir",
+                str(reports_dir),
+                "--outcome-file",
+                str(tmp_path / "missing-outcome.json"),
+            ]
+        )
+
+        assert exit_code == 1
+        assert "一度も起動していない" in capsys.readouterr().err

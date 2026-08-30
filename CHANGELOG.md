@@ -47,6 +47,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `copilot-retro collect` が、Issue #324 の実売買記録機能撤去（`analysis_input.json`
+  から `decision_history`/`performance_summary` を削除）より前に書かれた
+  `analysis_input.json` を一切パースできず、R2 同期対象21アーカイブのうち17件が
+  取り込めなかった問題を修正した（Issue #374）。`_StrictModel` の
+  `extra="forbid"` は書き込み時の厳格さと読み出し時の厳格さを同じスキーマで
+  兼ねており、既存アーカイブが持つ退役済みキーを黙って拒否していた。
+  `analysis/schemas.py` に `_ArchiveReadableModel`（`_RETIRED_FIELDS` 登録簿）を
+  追加し、`CandidateInput`（`decision_history`）/`AnalysisContextBlocks`
+  （`performance_summary`）だけに適用した。登録簿は `AnalysisInput` 自身ではなく
+  子モデル側に置く必要がある——`AnalysisInput._verify_input_digest` は
+  `mode="before"` で生ペイロード全体に対して digest を検証するため、親側で
+  除去すると「除去後の文書」に対して digest を計算してしまい、アーカイブ当時の
+  署名と一致しなくなる。`AnalysisResult` 系（スキルが書く出力）と
+  `retro/schemas.py` には継承させず、`extra="forbid"` 自体は緩めていない。
+  あわせて `copilot-retro collect` は run 単位 fail-soft を維持したまま、解析
+  不能な run が1件以上あるとき `COLLECT_UNREADABLE[<件数>]:` を標準エラー出力へ
+  書くようにした（`PREFLIGHT_ABORT[...]`/`ANALYSIS_GAP[...]` と同じ機械可読タグ
+  の慣習）。終了コードは変えない——CI の `push` ステップは `success()` ゲート
+  なので、ここで失敗にすると当日の価格・ファンダメンタルズの同期まで道連れになる
 - 定性分析の判定が `verdicts` テーブルへ反映されず、直近1か月分の記録が抜けていた
   問題を修正した（Issue #370）。`verdicts`/`verdict_sources` へ書き込む唯一の経路
   `copilot-retro collect`（設計判断 D2、`copilot-ingest-analysis` は DB に触れない）

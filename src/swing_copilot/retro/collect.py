@@ -98,11 +98,21 @@ class CollectSummary:
     `notes` therefore only ever describes the runs in `parsed_run_count`: a
     citation an old archive could not resolve was noted on the scan that
     collected it and is not repeated daily thereafter.
+
+    `unreadable_run_count` (Issue #374) is the subset of `parsed_run_count`
+    that `_load_collectable_run` could not turn into a `_LoadedRun` at all --
+    a missing document, a schema-validation failure (an unrecognized field,
+    for instance), or a `run_id` mismatch. It excludes same-day duplicates,
+    which parsed and validated fine and were merely not the adopted run for
+    their date. `cli.py` surfaces a non-zero count on stderr so a scan that
+    stays exit-0 does not let a parse failure show up only as a missing
+    verdict months later.
     """
 
     scanned_run_count: int
     parsed_run_count: int
     unchanged_run_count: int
+    unreadable_run_count: int
     collected_run_count: int
     verdict_count: int
     source_count: int
@@ -155,6 +165,7 @@ def collect_verdicts(state_store: StateStore, reports_root: Path) -> CollectSumm
         scanned_run_count=len(run_directories),
         parsed_run_count=scan.parsed_run_count,
         unchanged_run_count=scan.unchanged_run_count,
+        unreadable_run_count=scan.unreadable_run_count,
         collected_run_count=collected,
         verdict_count=verdict_count,
         source_count=source_count,
@@ -192,6 +203,7 @@ class _ScanResult:
     candidates: list[_Candidate]
     parsed_run_count: int
     unchanged_run_count: int
+    unreadable_run_count: int
 
 
 def _scan_candidates(
@@ -209,7 +221,7 @@ def _scan_candidates(
     """
     stored_digests = state_store.get_verdict_collection_digests()
     candidates: list[_Candidate] = []
-    parsed = unchanged = 0
+    parsed = unchanged = unreadable = 0
     for run_directory in run_directories:
         digest = _document_digest(run_directory)
         if digest is not None and stored_digests.get(run_directory.run_id) == digest:
@@ -218,12 +230,15 @@ def _scan_candidates(
             continue
         parsed += 1
         loaded = _load_collectable_run(run_directory, notes)
-        if loaded is not None:
-            candidates.append(_Candidate(run_directory, digest, loaded=loaded))
+        if loaded is None:
+            unreadable += 1
+            continue
+        candidates.append(_Candidate(run_directory, digest, loaded=loaded))
     return _ScanResult(
         candidates=candidates,
         parsed_run_count=parsed,
         unchanged_run_count=unchanged,
+        unreadable_run_count=unreadable,
     )
 
 

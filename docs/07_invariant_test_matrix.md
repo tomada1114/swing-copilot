@@ -250,3 +250,35 @@ earnings の `EarningsTiming.backoff_fn`）は共有スロットル下でも生�
 | `pipeline/daily_composition.py` | 日次実行の2つの Finnhub クライアントは同一スロットルを共有する | 生成箇所で別々に `MinIntervalThrottle` を作り、共有が静かに失われる | `tests/pipeline/test_cli.py::TestFinnhubClients::test_both_clients_share_one_account_wide_throttle` |
 | `text/news_finnhub.py`・`data/earnings_finnhub.py` | スロットルとクライアント自身のレート時計の同時注入は `ValueError` で拒否する | 後から渡した方を黙って無視し、呼び出し元が動かない時計を信じる | `tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_rejects_a_rate_clock_beside_a_throttle`、`tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_rejects_throttle_owned_timing_fields` |
 | `text/news_finnhub.py`・`data/earnings_finnhub.py` | バックオフ関数の注入はスロットル注入下でも受け付ける | 排他の範囲を広げすぎ、リトライを fake sleep で試験できなくする | `tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_news_client_keeps_sleep_fn_injectable_beside_a_throttle`、`tests/test_ratelimit.py::TestThrottleAndRateClockAreMutuallyExclusive::test_earnings_client_keeps_backoff_fn_injectable_beside_a_throttle` |
+
+## スキーマ縮小とアーカイブ互換（Issue #374）
+
+`extra="forbid"` は2つの異なる文書を2つの異なる理由で守っている。
+`analysis_result.json` は**スキルの出力**であり、発明されたフィールドや
+改名されたフィールドが黙って捨てられないことがその不変条件である。ここは
+一切緩めない。一方 `analysis_input.json` は**このコードベース自身が書いた**
+アーカイブで、`input_digest` による自己署名を持つ。フィールドを1つ削るたびに
+過去アーカイブ全部が読めなくなるのは、書き込み時の厳格さと読み出し時の
+厳格さを同じスキーマで兼ねていたためである。
+
+`_ArchiveReadableModel._RETIRED_FIELDS` は「かつてこのコードが書き、今は
+書かないキー」だけを列挙した閉じた登録簿であり、`extra="forbid"` の一般的な
+緩和ではない。登録簿に無い未知キーは入力側でも従来どおり拒否される。
+
+登録簿を**子モデル**（`CandidateInput` / `AnalysisContextBlocks`）に置くのは
+実装の都合ではなく順序の要請である。`AnalysisInput._verify_input_digest` は
+`mode="before"` で生ペイロード全体に対してダイジェストを照合する。除去を
+`AnalysisInput` 側で行うと、ダイジェストが「除去後の文書」に対して計算されて
+必ず不一致になる。pydantic は親の before バリデータを先に実行してから子を
+構築するため、子側に置けば署名検証と後方互換が両立する。
+
+今後 `analysis_input.json` からフィールドを削除する変更は、同じコミットで
+登録簿へ追加すること。
+
+| 対象 | 不変条件 | 代表的な反例 | 検証 |
+| --- | --- | --- | --- |
+| `analysis/schemas.py` | 退役フィールドを持つ過去アーカイブが読め、かつ `input_digest` 検証を通る | 除去を `AnalysisInput` 側で行い、署名が除去後の文書に対して計算される | `tests/analysis/test_schemas.py::TestRetiredArchiveFields::test_a_v2_archive_with_both_retired_fields_parses_and_its_digest_verifies` |
+| `analysis/schemas.py` | 登録簿に無い未知フィールドは入力側でも拒否する | 退役対応のついでに入力側の `extra="forbid"` ごと緩める | `tests/analysis/test_schemas.py::TestUnknownFieldsAreRejected::test_a_candidate_field_outside_the_retired_registry_is_still_rejected` |
+| `analysis/schemas.py` | スキル出力側の厳格さは緩めない | 退役フィールド名を `analysis_result.json` へ入れると通ってしまう | `tests/analysis/test_schemas.py::TestUnknownFieldsAreRejected::test_a_retired_input_field_name_is_still_rejected_on_the_result_side` |
+| `analysis/export.py` | 登録簿は読み出し専用で、新規 run は退役フィールドを書かない | 退役フィールドがモデルに残ったまま再びシリアライズされる | `tests/test_quality_contracts.py::test_export_never_writes_a_field_retired_from_analysis_input` |
+| `retro/cli.py` | 解析不能な run があっても終了コードを変えず、機械可読タグで可視化する | スキップが note にしか出ず、取り込み漏れが verdict 欠落としてしか現れない | `tests/retro/test_cli.py::TestCollectCommand::test_an_unreadable_archive_emits_collect_unreadable_on_stderr` |

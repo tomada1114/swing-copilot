@@ -138,12 +138,42 @@ def _run_collect(state_store: StateStore, reports_dir: Path, console: Console) -
         f"走査 {summary.scanned_run_count} run / "
         f"解析 {summary.parsed_run_count} run / "
         f"無変更 {summary.unchanged_run_count} run / "
+        f"解析不能 {summary.unreadable_run_count} run / "
         f"取り込み {summary.collected_run_count} run / "
         f"verdict {summary.verdict_count} 件 / "
         f"source {summary.source_count} 件 / "
         f"coverage {summary.coverage_count} 件"
     )
     _print_notes(console, summary.notes)
+    _emit_unreadable_tag(summary.unreadable_run_count)
+
+
+def _emit_unreadable_tag(unreadable_run_count: int) -> None:
+    """Write the machine-readable `COLLECT_UNREADABLE[<count>]:` stderr line.
+
+    Issue #374: `collect_verdicts` is intentionally fail-soft per run -- one
+    corrupt or unparsable `analysis_input.json`/`analysis_result.json` must
+    not stop the rest of the scan from being collected, and the exit code
+    stays 0 either way (CI's `push` step gates on `success()`, so failing
+    `collect` would take that day's price/fundamental sync down with it). But
+    a silently skipped run previously showed up only as a missing verdict
+    months later. This line makes the skip itself visible in the same
+    grep-for-a-tag idiom `daily_composition.py`'s `PREFLIGHT_ABORT[<reason>]:`
+    and `daily_runner.py`'s `ANALYSIS_GAP[<reason>]:` already use, without
+    changing what the command returns. Emitted only when at least one run was
+    unreadable; a fully successful scan writes nothing here.
+
+    Args:
+        unreadable_run_count: `CollectSummary.unreadable_run_count` from the
+            scan just run.
+    """
+    if unreadable_run_count <= 0:
+        return
+    sys.stderr.write(
+        f"COLLECT_UNREADABLE[{unreadable_run_count}]: "
+        f"{unreadable_run_count} 件の run ディレクトリを解析できず取り込みを"
+        "スキップした（詳細は標準出力の note を参照）。終了コードは変えない。\n"
+    )
 
 
 def _load_settings(path: str) -> Settings:

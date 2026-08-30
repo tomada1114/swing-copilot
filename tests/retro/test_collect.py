@@ -683,6 +683,125 @@ class TestSameDayDeduplication:
         ]
 
 
+class TestRetiredArchiveFields:
+    """Issue #374: P8 collect must ingest archives pre-dating #324's removal.
+
+    17 of the 21 R2-synced archives at the time of this issue carried
+    `decision_history` (per candidate) and/or `performance_summary` (run-wide
+    context), both removed from `analysis_input.json` by Issue #324. Before
+    this fix every one of them failed `AnalysisInput.model_validate` under
+    `extra="forbid"` and was silently skipped as "解析文書を読めなかった".
+    """
+
+    def test_an_archive_with_retired_fields_is_collected_and_its_digest_recorded(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        payload = input_payload()
+        payload["schema_version"] = "analysis-input-v2"
+        payload["candidates"][0]["filings"][0].pop("coverage")
+        payload["candidates"][0]["decision_history"] = None
+        payload["context"]["performance_summary"] = None
+        payload["input_digest"] = canonical_json_digest(
+            payload, excluded_field="input_digest"
+        )
+        write_run(analysis_input=payload)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert (summary.collected_run_count, summary.unreadable_run_count) == (1, 0)
+        assert summary.notes == ()
+        assert _rows(state_store, "SELECT symbol FROM verdicts") == [("AAPL",)]
+        digests = state_store.get_verdict_collection_digests()
+        assert UUID(RUN_ID) in digests
+        assert digests[UUID(RUN_ID)]
+
+
+class TestUnreadableRunCount:
+    """Issue #374: `unreadable_run_count` feeds `COLLECT_UNREADABLE[...]` on the CLI.
+
+    It counts only what `_load_collectable_run` truly could not turn into a
+    `_LoadedRun` -- never a same-day duplicate, which parsed and validated
+    fine and was merely not the run adopted for its date.
+    """
+
+    def test_a_healthy_scan_has_zero_unreadable_runs(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        write_run()
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 0
+
+    def test_a_missing_document_counts_as_unreadable(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        write_run(analysis_input=None)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+
+    def test_an_unparsable_document_counts_as_unreadable(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        write_run(result="{not json")
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+
+    def test_a_run_id_mismatch_counts_as_unreadable(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        foreign = "00000000-0000-4000-8000-000000000001"
+        write_run(run_id=foreign)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+
+    def test_a_same_day_duplicate_is_not_counted_as_unreadable(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        older = "00000000-0000-4000-8000-0000000000a1"
+        newer = "00000000-0000-4000-8000-0000000000a2"
+        write_run(
+            analysis_input=input_payload(run_id=older),
+            result=result_payload(run_id=older),
+            run_id=older,
+        )
+        write_run(
+            analysis_input=input_payload(run_id=newer),
+            result=result_payload(run_id=newer),
+            run_id=newer,
+        )
+        _insert_run(state_store, older, AS_OF, datetime(2027, 3, 1, 15, 6, tzinfo=UTC))
+        _insert_run(state_store, newer, AS_OF, datetime(2027, 3, 1, 16, 52, tzinfo=UTC))
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert (summary.unreadable_run_count, summary.collected_run_count) == (0, 1)
+
+
 class TestIncrementalScan:
     """Issue #209: only archives whose documents changed are re-collected.
 

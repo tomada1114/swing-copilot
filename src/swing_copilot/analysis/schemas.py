@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Self, get_args
+from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Literal, Self, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -118,6 +118,48 @@ class _StrictModel(BaseModel):
     """Base for both directions of the contract: reject unknown fields."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class _ArchiveReadableModel(_StrictModel):
+    """Base for `AnalysisInput` children that must keep reading retired keys.
+
+    `extra="forbid"` protects two different documents for two different
+    reasons. `analysis_result.json` is the skill's *output*: nothing there
+    should ever be silently dropped, so it stays plain `_StrictModel`.
+    `analysis_input.json` is *this codebase's own* archived input, self-signed
+    by `input_digest` -- when a field is retired, the bytes already written to
+    `reports/` keep the old key forever, and re-deriving that digest from a
+    trimmed document would never match (Issue #374).
+
+    `_RETIRED_FIELDS` is therefore a closed, per-model registry of "a key this
+    code used to write and no longer does" -- never a blanket relaxation of
+    `extra="forbid"`. An unknown key outside the registry is still rejected.
+    Retirement belongs on the child model, not on `AnalysisInput` itself:
+    `AnalysisInput._verify_input_digest` runs first, against the untouched raw
+    payload, and only afterwards does pydantic build each child -- so dropping
+    a key here can never shift the bytes the digest was computed over.
+    """
+
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_fields(cls, value: object) -> object:
+        """Remove this model's registered retired keys before validation.
+
+        Args:
+            value: The raw payload pydantic is about to validate.
+
+        Returns:
+            `value` unchanged when it is not a dict or carries none of this
+            model's retired keys; otherwise a shallow copy with those keys
+            removed.
+        """
+        if not isinstance(value, dict) or not cls._RETIRED_FIELDS:
+            return value
+        if not cls._RETIRED_FIELDS & value.keys():
+            return value
+        return {k: v for k, v in value.items() if k not in cls._RETIRED_FIELDS}
 
 
 def _duplicate_value(values: Iterable[str]) -> str | None:
@@ -331,7 +373,7 @@ class NewsSupply(_StrictModel):
         return self
 
 
-class CandidateInput(_StrictModel):
+class CandidateInput(_ArchiveReadableModel):
     """One screened candidate's deterministic context plus its untrusted text.
 
     `score_breakdown`/`risk_constraints`/`prior_verdicts` are pre-rendered
@@ -340,6 +382,12 @@ class CandidateInput(_StrictModel):
     checked against the code's own quantitative determination, never so the
     skill can restate or override it.
     """
+
+    #: Removed by Issue #324's real-trade-record removal: `analysis_input.json`
+    #: no longer carries a per-candidate decision history. Retained solely so
+    #: pre-#324 archives (`analysis-input-v2`) keep parsing under P8 collect
+    #: (Issue #374).
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset({"decision_history"})
 
     symbol: str
     score_breakdown: str
@@ -373,8 +421,14 @@ class CalendarEventInput(_StrictModel):
     provider: str
 
 
-class AnalysisContextBlocks(_StrictModel):
+class AnalysisContextBlocks(_ArchiveReadableModel):
     """Run-wide deterministic context, including the SMA200/FTD regime block."""
+
+    #: Removed by Issue #324's real-trade-record removal: run-wide context no
+    #: longer carries a performance summary. Retained solely so pre-#324
+    #: archives (`analysis-input-v2`) keep parsing under P8 collect
+    #: (Issue #374).
+    _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset({"performance_summary"})
 
     market_regime: str | None
     calendar_events: list[CalendarEventInput] = []

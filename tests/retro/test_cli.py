@@ -131,6 +131,55 @@ class TestCollectCommand:
 
         assert "analysis_input.json" in capsys.readouterr().out
 
+    def test_an_unreadable_archive_emits_collect_unreadable_on_stderr(
+        self,
+        tmp_path: Path,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Issue #374: the exit code stays 0; the tag is what makes it visible.
+
+        CI's `push` step gates on `success()`, so `collect` failing on a
+        broken archive would take that day's price/fundamental sync down with
+        it -- the fail-soft-per-run contract does not change. The tag exists
+        so a skipped archive shows up as more than a note buried in stdout.
+        """
+        write_run(analysis_input=None)
+
+        main(
+            [
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+
+        assert "COLLECT_UNREADABLE[1]:" in capsys.readouterr().err
+
+    def test_a_fully_readable_scan_emits_nothing_on_stderr(
+        self,
+        tmp_path: Path,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        write_run()
+
+        main(
+            [
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+
+        assert capsys.readouterr().err == ""
+
 
 class TestEvaluateCommand:
     @staticmethod

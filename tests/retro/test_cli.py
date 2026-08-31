@@ -36,24 +36,6 @@ RUN_DATE = date(2027, 3, 1)
 CALENDAR = [RUN_DATE + timedelta(days=offset) for offset in range(30)]
 
 
-@pytest.fixture(autouse=True)
-def _offline_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No API keys: `main()` now loads secrets for every subcommand (Issue #381).
-
-    `_env_file=None` isolates every test in this file from whatever `.env` a
-    developer has locally -- previously only `export`/`prepare` needed this
-    (they build real Finnhub/EDGAR clients from it), but `main()` now loads
-    secrets up front, before dispatch, so `logging.getLogger` configuration
-    would otherwise pick up real secret values too (mirrors
-    `tests/test_config.py`). A test that needs a specific secret value (e.g.
-    a redaction test) overrides this via its own `monkeypatch.setattr` call.
-    """
-    monkeypatch.setattr(
-        "swing_copilot.retro.cli.load_secrets",
-        lambda: Secrets(_env_file=None),  # type: ignore[call-arg]
-    )
-
-
 def _rows(db_path: Path, sql: str) -> list[tuple[object, ...]]:
     with Database(db_path).connect() as conn:
         return conn.execute(sql).fetchall()
@@ -395,8 +377,9 @@ class TestCollectThenEvaluate:
 class TestExportCommand:
     """P8-31: `export` writes the dossier; `prepare` runs the whole chain.
 
-    Offline secrets come from the module-level `_offline_secrets` autouse
-    fixture above.
+    Offline secrets come from the autouse `.env` guard in `tests/conftest.py`
+    (Issue #387): `main()` builds `Secrets()` unpatched here, and the guard
+    isolates that call from any real `.env` or exported shell variable.
     """
 
     def test_writes_the_dossier_under_the_reports_root(
@@ -695,11 +678,12 @@ def _restore_logging_state():
 
 
 def _patch_secrets(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
-    """Point `retro/cli.py`'s `load_secrets()` at isolated, offline `Secrets`.
+    """Point `retro/cli.py`'s `load_secrets()` at `Secrets` carrying specific values.
 
-    `_env_file=None` isolates this from whatever `.env` a developer has
-    locally, mirroring `TestExportCommand._offline_secrets` -- a real key
-    would otherwise let `_freshness_sources()` build a real network client.
+    Unlike the module-wide `.env` isolation (handled unconditionally by the
+    autouse guard in `tests/conftest.py`, Issue #387), this exists to inject
+    the *specific* secret values a test needs -- e.g. a redaction test that
+    asserts a given API key never reaches a log line.
     """
     monkeypatch.setattr(
         "swing_copilot.retro.cli.load_secrets",

@@ -397,34 +397,66 @@ class TestLoadSecrets:
         monkeypatch.setenv("FINNHUB_API_KEY", "finnhub-test-123")
         secrets = load_secrets()
         assert secrets.finnhub_api_key == "finnhub-test-123"
+        # Issue #387: this call patches neither `load_secrets` nor `chdir`s
+        # away from the repo -- before the autouse `.env` guard in
+        # `tests/conftest.py`, the other four fields silently picked up the
+        # developer's real secrets here.
+        assert secrets.fred_api_key is None
+        assert secrets.discord_webhook_url is None
+        assert secrets.edgar_identity is None
+        assert secrets.eodhd_api_key is None
 
 
-def _isolated_secrets(**overrides: str) -> Secrets:
-    """Build Secrets isolated from any real `.env` a developer has locally.
+class TestEnvGuard:
+    """Regression tests for the autouse `.env` isolation guard (Issue #387).
 
-    `env_file=".env"` reads whatever `.env` exists in the repo root a test
-    happens to run from; passing `_env_file=None` overrides that for a
-    single instantiation so these tests never depend on (or race with) a
-    developer's real, in-progress `.env` file.
+    The guard itself lives in `tests/conftest.py` (`_block_real_secrets`) so
+    it applies to every test in the suite, not just this file; these tests
+    pin its two required properties for `Secrets` specifically: the `.env`
+    file path is closed, and the explicit `_env_file=` escape hatch survives.
     """
-    return Secrets(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+    def test_load_secrets_ignores_a_planted_dotenv_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("FINNHUB_API_KEY=should-not-be-read\n")
+
+        secrets = load_secrets()
+
+        assert secrets.finnhub_api_key is None
+
+    def test_secrets_defaults_to_none_without_any_env_var_set(self):
+        secrets = Secrets()
+
+        assert secrets.finnhub_api_key is None
+        assert secrets.fred_api_key is None
+        assert secrets.discord_webhook_url is None
+        assert secrets.edgar_identity is None
+        assert secrets.eodhd_api_key is None
+
+    def test_explicit_env_file_still_works(self, tmp_path):
+        env_path = tmp_path / "custom.env"
+        env_path.write_text("FINNHUB_API_KEY=explicit-value\n")
+
+        secrets = Secrets(_env_file=env_path)  # type: ignore[call-arg]
+
+        assert secrets.finnhub_api_key == "explicit-value"
 
 
 class TestRequireSecrets:
     def test_no_features_never_raises(self):
-        require_secrets(_isolated_secrets(), features=set())
+        require_secrets(Secrets(), features=set())
 
     def test_missing_feature_secret_raises_config_error(self):
         with pytest.raises(ConfigError, match="finnhub_api_key"):
-            require_secrets(_isolated_secrets(), features={"finnhub"})
+            require_secrets(Secrets(), features={"finnhub"})
 
     def test_present_feature_secret_passes(self):
-        secrets = _isolated_secrets(finnhub_api_key="finnhub-test")
+        secrets = Secrets(finnhub_api_key="finnhub-test")
         require_secrets(secrets, features={"finnhub"})
 
     def test_multiple_missing_secrets_all_reported(self):
         with pytest.raises(ConfigError) as exc_info:
-            require_secrets(_isolated_secrets(), features={"edgar", "finnhub", "fred"})
+            require_secrets(Secrets(), features={"edgar", "finnhub", "fred"})
         message = str(exc_info.value)
         assert "edgar_identity" in message
         assert "finnhub_api_key" in message
@@ -432,16 +464,16 @@ class TestRequireSecrets:
 
     def test_unknown_feature_raises_config_error(self):
         with pytest.raises(ConfigError, match="unknown feature"):
-            require_secrets(_isolated_secrets(), features={"not_a_real_feature"})
+            require_secrets(Secrets(), features={"not_a_real_feature"})
 
 
 class TestSecretsModel:
     def test_extra_env_vars_are_ignored(self, monkeypatch):
         monkeypatch.setenv("SOME_UNRELATED_ENV_VAR", "value")
-        _isolated_secrets()
+        Secrets()
 
     def test_all_fields_default_to_none(self):
-        secrets = _isolated_secrets()
+        secrets = Secrets()
         assert secrets.finnhub_api_key is None
         assert secrets.fred_api_key is None
         assert secrets.discord_webhook_url is None
@@ -449,7 +481,7 @@ class TestSecretsModel:
         assert secrets.eodhd_api_key is None
 
     def test_blank_env_value_is_treated_as_unset(self):
-        secrets = _isolated_secrets(finnhub_api_key="   ")
+        secrets = Secrets(finnhub_api_key="   ")
         assert secrets.finnhub_api_key is None
 
 

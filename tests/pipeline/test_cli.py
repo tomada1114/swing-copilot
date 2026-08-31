@@ -41,11 +41,6 @@ def _shipped_settings() -> Settings:
     return load_settings("config/settings.yaml")
 
 
-def _isolated_secrets(**overrides: str) -> Secrets:
-    """Build `Secrets` isolated from any real `.env` a developer has locally."""
-    return Secrets(_env_file=None, **overrides)  # type: ignore[call-arg]
-
-
 class TestParseArgs:
     def test_defaults(self):
         options = _parse_args([])
@@ -167,7 +162,7 @@ class TestFinnhubClients:
         # `MinIntervalThrottle` would silently reappear. The rate behavior it
         # buys is fixed in `tests/test_ratelimit.py`.
         news_client, earnings_client = _finnhub_clients(
-            _isolated_secrets(finnhub_api_key="finnhub-key"), DailyRunOptions()
+            Secrets(finnhub_api_key="finnhub-key"), DailyRunOptions()
         )
 
         assert news_client is not None
@@ -176,7 +171,7 @@ class TestFinnhubClients:
 
     def test_skip_text_drops_the_news_client_but_keeps_earnings(self):
         news_client, earnings_client = _finnhub_clients(
-            _isolated_secrets(finnhub_api_key="finnhub-key"),
+            Secrets(finnhub_api_key="finnhub-key"),
             DailyRunOptions(skip_text=True),
         )
 
@@ -184,7 +179,7 @@ class TestFinnhubClients:
         assert earnings_client is not None
 
     def test_no_api_key_builds_no_client_at_all(self):
-        assert _finnhub_clients(_isolated_secrets(), DailyRunOptions()) == (None, None)
+        assert _finnhub_clients(Secrets(), DailyRunOptions()) == (None, None)
 
 
 @pytest.mark.usefixtures("fake_universe")
@@ -207,7 +202,7 @@ class TestComposeDependencies:
             )
 
     def test_missing_required_secret_raises_config_error(self, monkeypatch):
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_secrets", Secrets)
         settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
 
@@ -220,7 +215,7 @@ class TestComposeDependencies:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+            lambda: Secrets(edgar_identity="Test test@example.com"),
         )
         settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
@@ -264,7 +259,7 @@ class TestComposeDependencies:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+            lambda: Secrets(edgar_identity="Test test@example.com"),
         )
         monkeypatch.chdir(tmp_path)
 
@@ -289,7 +284,7 @@ class TestComposeDependencies:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(
+            lambda: Secrets(
                 edgar_identity="Test test@example.com",
                 finnhub_api_key="finnhub-key",
                 fred_api_key="fred-key",
@@ -311,7 +306,7 @@ class TestComposeDependencies:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+            lambda: Secrets(edgar_identity="Test test@example.com"),
         )
         settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
@@ -334,7 +329,7 @@ class TestComposeDependencies:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+            lambda: Secrets(edgar_identity="Test test@example.com"),
         )
         settings = _shipped_settings()
         strategies = load_strategies("config/strategies.yaml")
@@ -378,7 +373,7 @@ class TestMain:
         monkeypatch.setattr(
             daily_module,
             "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
+            lambda: Secrets(edgar_identity="Test test@example.com"),
         )
         monkeypatch.setattr(daily_module, "load_settings", lambda: settings)
         monkeypatch.setattr(daily_module, "load_strategies", lambda: strategies)
@@ -417,7 +412,7 @@ class TestMain:
 
             return _Result()
 
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_secrets", Secrets)
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(daily_module, "_compose_dependencies", fake_compose)
@@ -436,7 +431,7 @@ class TestMain:
         analysis_input_path = Path("reports/2026-07-22/analysis_input.json")
         calls = {}
 
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_secrets", Secrets)
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(
@@ -493,7 +488,7 @@ class TestPreflightAbortStderrContract:
 
     @staticmethod
     def _stub_composition(monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_secrets", Secrets)
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(
@@ -577,7 +572,7 @@ class TestOutcomeFile:
     _FINISHED_AT = datetime(2027, 3, 2, 12, 0, tzinfo=UTC)
 
     def _stub(self, monkeypatch, *, run_daily):
-        monkeypatch.setattr(daily_module, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(daily_module, "load_secrets", Secrets)
         monkeypatch.setattr(daily_module, "load_settings", lambda: "fake-settings")
         monkeypatch.setattr(daily_module, "load_strategies", lambda: "fake-strategies")
         monkeypatch.setattr(

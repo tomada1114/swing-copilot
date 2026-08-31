@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -13,13 +14,16 @@ import duckdb
 import pandas as pd
 import pytest
 
-from swing_copilot.config import Settings, load_settings
+from swing_copilot.config import Secrets, Settings, load_settings
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
+from tests.test_data_sync import _load_data_sync
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import Any, NoReturn
+
+    from pydantic_settings import BaseSettings
 
     from swing_copilot.storage.market_store import MarketStore
 
@@ -198,6 +202,72 @@ def _block_repo_data_connections(monkeypatch: pytest.MonkeyPatch) -> None:
         return _REAL_DUCKDB_CONNECT(*args, **kwargs)
 
     monkeypatch.setattr(duckdb, "connect", blocked_connect)
+
+
+# `Secrets` (`src/swing_copilot/config.py`) and `R2Settings`
+# (`scripts/data_sync.py`) both declare `SettingsConfigDict(env_file=...)`, so
+# any test that builds one without patching it reads the operator's real
+# `.env` -- API keys and R2 write credentials alike (Issue #387; confirmed
+# `tests/test_config.py::test_reads_environment_variables` was doing exactly
+# this). Env-var names, not attribute names: pydantic-settings matches these
+# case-insensitively against the field names below.
+_SECRETS_ENV_VARS = (
+    "FINNHUB_API_KEY",
+    "FRED_API_KEY",
+    "DISCORD_WEBHOOK_URL",
+    "EDGAR_IDENTITY",
+    "EODHD_API_KEY",
+)
+_R2_ENV_VARS = (
+    "R2_ACCOUNT_ID",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
+
+
+def _r2_settings_class() -> type[BaseSettings]:
+    """Return the single `R2Settings` class object shared across the suite.
+
+    `tests/test_data_sync.py` spec-loads `scripts/data_sync.py` under the
+    fixed module name `"data_sync"` in `sys.modules` (`dataclasses` resolves
+    annotations through `sys.modules[cls.__module__]`, so the name has to
+    stay fixed). If this guard spec-loaded the file a second time under a
+    different name, `R2Settings` here would be a distinct class object from
+    the one `test_data_sync.py`'s tests import -- patching `env_file` on it
+    would silently miss the real one. Reuse the existing loader (importing
+    `tests.test_data_sync` runs it, if a full-suite collection has not
+    already) instead of loading the file independently.
+    """
+    module = sys.modules.get("data_sync")
+    if module is None:
+        module = _load_data_sync()
+    return module.R2Settings  # type: ignore[no-any-return]
+
+
+@pytest.fixture(autouse=True)
+def _block_real_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate `Secrets`/`R2Settings` from the operator's real `.env` and shell env.
+
+    Two sources have to be closed, not one: pydantic-settings' default source
+    priority is init > env > dotenv, so an exported shell variable already
+    shadows `.env` -- `delenv` alone would not stop a real `.env` value from
+    leaking (removing the shadow only exposes it), and disabling `env_file`
+    alone would not stop a value a developer has exported in their shell.
+    Only both together guarantee every field resolves to `None` unless a test
+    supplies its own value (via `setenv`, a `Secrets(**overrides)` kwarg, or
+    an explicit `_env_file=`, which overrides the class-level default set
+    here and is therefore still usable by a test that wants to exercise real
+    `.env` parsing against a `tmp_path` file).
+    """
+    monkeypatch.setattr(
+        Secrets, "model_config", {**Secrets.model_config, "env_file": None}
+    )
+    r2_settings = _r2_settings_class()
+    monkeypatch.setattr(
+        r2_settings, "model_config", {**r2_settings.model_config, "env_file": None}
+    )
+    for name in (*_SECRETS_ENV_VARS, *_R2_ENV_VARS):
+        monkeypatch.delenv(name, raising=False)
 
 
 def plant_non_finite_bars(market_store: MarketStore, df: pd.DataFrame) -> None:

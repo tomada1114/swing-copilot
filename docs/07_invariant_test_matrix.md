@@ -29,7 +29,7 @@
 | NFR-03 | 時間予算超過時もローカル出力を残して縮退終了する | text/export/notify を延々実行し、結果を残さない | `tests/pipeline/test_daily_core.py::TestTimeoutBudget::test_pre_step_breach_skips_network_steps_but_the_run_still_completes` |
 | NFR-04 | 外部テキスト障害は screening 結果を消さず degraded にする | ニュース取得例外で run 全体を failed にする | `tests/pipeline/test_failsoft.py::TestTextCollectionFailureDegrades::test_text_failure_degrades_but_still_completes_the_run` |
 | NFR-05 | run は再構成可能な metadata を保存する | strategy または universe identity が監査できない | `tests/pipeline/test_daily_core.py::TestRunFingerprintAndMetadata::test_run_persists_reconstructable_metadata` |
-| NFR-06 | 秘密値をログへ露出しない | HTTP 例外の URL に含まれる API key を stderr へ出す | `tests/pipeline/test_cli.py::TestConfigureLoggingRedactsSecrets::test_redacts_secret_from_message_and_traceback` |
+| NFR-06 | 秘密値をログへ露出しない | HTTP 例外の URL に含まれる API key を stderr へ出す | `tests/test_cli_support.py::TestConfigureCliLoggingRedactsSecrets::test_redacts_secret_from_message_and_traceback`（`copilot-retro` 側は `tests/retro/test_cli.py::TestLoggingConfiguration::test_redacts_a_configured_secret_from_message_and_traceback`） |
 | NFR-07 | strategy building block は登録・組合せ可能である | 未登録 filter/signal が暗黙に実行される | `tests/screening/test_pipeline.py::test_registry_contains_default_strategy_building_blocks` |
 | NFR-08 | line+branch coverage の除外は main/抽象 body だけにする | 到達可能分岐へ `no cover` を付ける | `tests/test_quality_contracts.py::test_no_cover_pragmas_are_limited_to_main_and_abstract_protocol_bodies` |
 | CON-01 | 発注 API を扱わず、人間だけが発注する | broker client または注文送信コードを追加する | 手動確認: `src/` と依存関係をレビューし、broker/order 実装が存在しないことを確認する。 |

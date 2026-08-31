@@ -14,7 +14,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from swing_copilot.config import Secrets, Settings, load_settings, load_strategies
@@ -25,7 +24,6 @@ from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
     _OUTCOME_FILE_ENV_VAR,
     _compose_dependencies,
-    _configure_logging,
     _finnhub_clients,
     _parse_args,
     _required_features,
@@ -48,12 +46,6 @@ def _shipped_settings(*, notification_enabled: bool = False) -> Settings:
     settings = load_settings("config/settings.yaml")
     object.__setattr__(settings.notification, "enabled", notification_enabled)
     return settings
-
-
-def _make_status_error(message: str) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", "https://example.com")
-    response = httpx.Response(401, request=request)
-    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 def _isolated_secrets(**overrides: str) -> Secrets:
@@ -526,98 +518,6 @@ class TestMain:
                 "color": False,
             },
         )
-
-
-class TestConfigureLoggingRedactsSecrets:
-    """Tests `_SecretRedactionFilter`, attached to root logging by `_configure_logging`.
-
-    It must strip every configured secret from both the record message and
-    any attached exception traceback (AGENTS.md: "never log secrets") -- see
-    `text/calendar_fred.py`/`text/news_finnhub.py`, which send their API keys
-    as URL query params that `httpx.HTTPStatusError` embeds verbatim in its
-    message.
-    """
-
-    def test_defaults_to_quiet_root_and_informative_application_logger(self):
-        root_logger = logging.getLogger()
-        application_logger = logging.getLogger("swing_copilot")
-        previous_root_level = root_logger.level
-        previous_application_level = application_logger.level
-        try:
-            _configure_logging(_isolated_secrets())
-
-            assert root_logger.level == logging.WARNING
-            assert application_logger.level == logging.INFO
-        finally:
-            root_logger.setLevel(previous_root_level)
-            application_logger.setLevel(previous_application_level)
-
-    @pytest.mark.parametrize(
-        ("level_name", "level"),
-        [
-            ("DEBUG", logging.DEBUG),
-            ("INFO", logging.INFO),
-            ("WARNING", logging.WARNING),
-            ("ERROR", logging.ERROR),
-        ],
-    )
-    def test_explicit_log_level_applies_to_root_and_application_logger(
-        self, level_name, level
-    ):
-        root_logger = logging.getLogger()
-        application_logger = logging.getLogger("swing_copilot")
-        previous_root_level = root_logger.level
-        previous_application_level = application_logger.level
-        try:
-            _configure_logging(_isolated_secrets(), level=level_name)
-
-            assert root_logger.level == level
-            assert application_logger.level == level
-        finally:
-            root_logger.setLevel(previous_root_level)
-            application_logger.setLevel(previous_application_level)
-
-    def test_redacts_secret_from_message_and_traceback(self, caplog):
-        secrets = _isolated_secrets(
-            finnhub_api_key="finnhub-sekrit123",
-            fred_api_key="fred-sekrit456",
-            discord_webhook_url="https://discord.com/api/webhooks/sekrit-hook",
-        )
-        _configure_logging(secrets)
-        logger = logging.getLogger("swing_copilot.pipeline.daily.test")
-
-        with caplog.at_level(logging.ERROR):
-            try:
-                error = _make_status_error(
-                    "401 error for url "
-                    "'https://fred.stlouisfed.org/releases?api_key=fred-sekrit456'"
-                )
-                raise error
-            except httpx.HTTPStatusError:
-                logger.exception("fetch failed for token=%s", "finnhub-sekrit123")
-
-        assert "fred-sekrit456" not in caplog.text
-        assert "finnhub-sekrit123" not in caplog.text
-        assert "[REDACTED]" in caplog.text
-        # Both the rendered message line and the appended traceback text are
-        # redacted, not just one of the two.
-        record = caplog.records[-1]
-        assert "fred-sekrit456" not in record.message
-        assert "finnhub-sekrit123" not in record.message
-        assert record.exc_text is not None
-        assert "fred-sekrit456" not in record.exc_text
-        assert "[REDACTED]" in record.exc_text
-
-    def test_empty_and_none_secrets_are_never_redacted(self, caplog):
-        secrets = _isolated_secrets()  # every secret unset (None)
-        _configure_logging(secrets)
-        logger = logging.getLogger("swing_copilot.pipeline.daily.test")
-
-        with caplog.at_level(logging.ERROR):
-            logger.error("ordinary message with no secrets in it")
-
-        assert "ordinary message with no secrets in it" in caplog.text
-        assert "[REDACTED]" not in caplog.text
 
 
 class TestPreflightAbortStderrContract:

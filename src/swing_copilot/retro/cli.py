@@ -30,9 +30,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from swing_copilot.cli_support import ExitPolicy, run_cli
+from swing_copilot.cli_support import (
+    LOG_LEVELS,
+    ExitPolicy,
+    configure_cli_logging,
+    run_cli,
+)
 from swing_copilot.clock import SystemClock
-from swing_copilot.config import Settings, load_secrets, load_settings
+from swing_copilot.config import Secrets, Settings, load_secrets, load_settings
 from swing_copilot.data.edgar import EdgarClient
 from swing_copilot.exceptions import ConfigError
 from swing_copilot.retro.collect import collect_verdicts
@@ -84,6 +89,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "設定・コードの書き換えは一切行わない。"
         ),
     )
+    parser.add_argument("--log-level", choices=tuple(LOG_LEVELS), default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     collect_parser = subparsers.add_parser(
@@ -169,9 +175,9 @@ def _emit_unreadable_tag(unreadable_run_count: int) -> None:
     -- previously the note read only "解析文書を読めなかったためスキップ",
     so this guidance pointed at a note with nothing in it. The guidance line
     and the note are both written via `_print_notes`/`console.print`, i.e.
-    stdout -- the same stream `logger.exception`'s traceback does *not* use
-    (this CLI configures no logging handler, so that traceback falls through
-    to `logging.lastResort` on stderr instead).
+    stdout -- a different stream from `logger.exception`'s traceback, which
+    `main()` sends to the stderr handler `configure_cli_logging` installs
+    (Issue #381; before that it fell through to `logging.lastResort`).
 
     Args:
         unreadable_run_count: `CollectSummary.unreadable_run_count` from the
@@ -233,7 +239,10 @@ def _run_evaluate(
 
 
 def _run_export(
-    state_store: StateStore, args: argparse.Namespace, console: Console
+    state_store: StateStore,
+    args: argparse.Namespace,
+    console: Console,
+    secrets: Secrets,
 ) -> None:
     settings = _load_settings(args.settings)
     # `export` reads the proposal ledger to name the closed proposals a
@@ -246,7 +255,7 @@ def _run_export(
                 state_store=state_store,
                 settings=settings,
                 clock=SystemClock(),
-                freshness=_freshness_sources(),
+                freshness=_freshness_sources(secrets),
             ),
             RetroExportRequest(
                 as_of=args.as_of, reports_root=args.reports_dir, ledger_path=args.ledger
@@ -262,14 +271,20 @@ def _run_export(
     _print_notes(console, summary.notes)
 
 
-def _freshness_sources() -> FreshnessSources:
+def _freshness_sources(secrets: Secrets) -> FreshnessSources:
     """Build the freshness adapters the available API keys allow.
 
     A missing key yields no client, and the dossier then carries no freshness
     for that side rather than failing: the retrospective's core evidence is
     already in the database (design §5.3, E31.3).
+
+    Args:
+        secrets: Loaded once by `main()`, not reloaded here (Issue #381) --
+            this is also the boundary that makes `logger.exception` on a
+            failed `FinnhubNewsClient`/`EdgarClient` call safe to configure
+            redaction for, since `main()` configures logging from the same
+            `Secrets` value before any subcommand runs.
     """
-    secrets = load_secrets()
     return FreshnessSources(
         news_client=(
             FinnhubNewsClient(secrets.finnhub_api_key)
@@ -283,12 +298,15 @@ def _freshness_sources() -> FreshnessSources:
 
 
 def _run_prepare(
-    state_store: StateStore, args: argparse.Namespace, console: Console
+    state_store: StateStore,
+    args: argparse.Namespace,
+    console: Console,
+    secrets: Secrets,
 ) -> None:
     """Run the whole chain, which is what the skill's preflight calls (E31.4)."""
     _run_collect(state_store, args.reports_dir, console)
     _run_evaluate(state_store, args, console)
-    _run_export(state_store, args, console)
+    _run_export(state_store, args, console, secrets)
 
 
 def _run_ingest(
@@ -348,6 +366,14 @@ def main(argv: list[str] | None = None) -> None:
             cannot be read, or `ingest` was given documents it cannot trust.
     """
     args = _parse_args(argv)
+    # Configured before anything else touches the database or the network:
+    # `collect`'s `logger.exception` per unreadable archive, and `export`'s
+    # authenticated Finnhub/EDGAR calls, must never fall through to
+    # `logging.lastResort` (unformatted, uncontrollable, and -- for
+    # `export`/`prepare` -- unredacted). `secrets` is loaded exactly once here
+    # and threaded into `_run_export`/`_run_prepare` rather than reloaded.
+    secrets = load_secrets()
+    configure_cli_logging(secrets, level=args.log_level)
     console = Console(file=sys.stdout, width=_CONSOLE_WIDTH)
     state_store = StateStore(Database(args.db))
     state_store.init_schema()
@@ -356,11 +382,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "evaluate":
         _run_evaluate(state_store, args, console)
     elif args.command == "export":
-        _run_export(state_store, args, console)
+        _run_export(state_store, args, console, secrets)
     elif args.command == "ingest":
         _run_ingest(state_store, args, console)
     else:
-        _run_prepare(state_store, args, console)
+        _run_prepare(state_store, args, console, secrets)
 
 
 if __name__ == "__main__":  # pragma: no cover

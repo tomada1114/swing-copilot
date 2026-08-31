@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import re
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -32,6 +34,24 @@ if TYPE_CHECKING:
 
 RUN_DATE = date(2027, 3, 1)
 CALENDAR = [RUN_DATE + timedelta(days=offset) for offset in range(30)]
+
+
+@pytest.fixture(autouse=True)
+def _offline_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No API keys: `main()` now loads secrets for every subcommand (Issue #381).
+
+    `_env_file=None` isolates every test in this file from whatever `.env` a
+    developer has locally -- previously only `export`/`prepare` needed this
+    (they build real Finnhub/EDGAR clients from it), but `main()` now loads
+    secrets up front, before dispatch, so `logging.getLogger` configuration
+    would otherwise pick up real secret values too (mirrors
+    `tests/test_config.py`). A test that needs a specific secret value (e.g.
+    a redaction test) overrides this via its own `monkeypatch.setattr` call.
+    """
+    monkeypatch.setattr(
+        "swing_copilot.retro.cli.load_secrets",
+        lambda: Secrets(_env_file=None),  # type: ignore[call-arg]
+    )
 
 
 def _rows(db_path: Path, sql: str) -> list[tuple[object, ...]]:
@@ -373,20 +393,11 @@ class TestCollectThenEvaluate:
 
 
 class TestExportCommand:
-    """P8-31: `export` writes the dossier; `prepare` runs the whole chain."""
+    """P8-31: `export` writes the dossier; `prepare` runs the whole chain.
 
-    @pytest.fixture(autouse=True)
-    def _offline_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No API keys: the CLI must build no live client in the test suite.
-
-        `_env_file=None` isolates this from whatever `.env` a developer has,
-        which is what keeps the export offline here -- a real key would
-        otherwise construct a real adapter (mirrors `tests/test_config.py`).
-        """
-        monkeypatch.setattr(
-            "swing_copilot.retro.cli.load_secrets",
-            lambda: Secrets(_env_file=None),  # type: ignore[call-arg]
-        )
+    Offline secrets come from the module-level `_offline_secrets` autouse
+    fixture above.
+    """
 
     def test_writes_the_dossier_under_the_reports_root(
         self, tmp_path: Path, reports_root: Path, write_run: Callable[..., Path]
@@ -633,3 +644,210 @@ class TestIngest:
         assert not (directory / "retro_report.md").exists()
         store = StateStore(Database(tmp_path / "copilot.duckdb"))
         assert store.get_retro_narrations(date(2027, 3, 29)) == ()
+
+
+class _RecordingHandler(logging.Handler):
+    """Collects delivered records, for asserting a level actually filtered."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def _raise_runtime_error(message: str) -> None:
+    raise RuntimeError(message)
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    """Undo whatever `configure_cli_logging` mutates on the loggers below.
+
+    `configure_cli_logging` is process-global by design (it configures
+    `logging.root`), so ANY test that calls `main()` must not leak
+    handlers, levels, or filters into whatever runs next in the suite.
+    Restoring `root_logger.handlers` alone is not enough: a handler
+    object that already existed before this test (e.g. pytest's own log
+    capture handler) is reused, not replaced, across `main()` calls, so
+    `configure_cli_logging` mutates that SAME object's `.filters` list in
+    place. Each pre-existing handler's own filter list is snapshotted and
+    restored too, or a redaction filter added by one test could survive
+    into the next and shadow the one that test installs.
+    """
+    root_logger = logging.getLogger()
+    application_logger = logging.getLogger("swing_copilot")
+    saved_handlers = list(root_logger.handlers)
+    saved_root_filters = list(root_logger.filters)
+    saved_handler_filters = [list(handler.filters) for handler in saved_handlers]
+    saved_root_level = root_logger.level
+    saved_application_level = application_logger.level
+    try:
+        yield
+    finally:
+        root_logger.handlers = saved_handlers
+        root_logger.filters = saved_root_filters
+        for handler, filters in zip(saved_handlers, saved_handler_filters, strict=True):
+            handler.filters = filters
+        root_logger.setLevel(saved_root_level)
+        application_logger.setLevel(saved_application_level)
+
+
+def _patch_secrets(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    """Point `retro/cli.py`'s `load_secrets()` at isolated, offline `Secrets`.
+
+    `_env_file=None` isolates this from whatever `.env` a developer has
+    locally, mirroring `TestExportCommand._offline_secrets` -- a real key
+    would otherwise let `_freshness_sources()` build a real network client.
+    """
+    monkeypatch.setattr(
+        "swing_copilot.retro.cli.load_secrets",
+        lambda: Secrets(_env_file=None, **overrides),  # type: ignore[call-arg]
+    )
+
+
+class TestLoggingConfiguration:
+    """Issue #381: `main()` must configure logging before any other work.
+
+    Before this fix `retro/cli.py` never called any of `logging.basicConfig`/
+    `dictConfig`/`addHandler`, so every `logger.exception(...)` in the
+    `retro` package fell through to `logging.lastResort`: WARNING-and-above
+    only, unformatted, uncontrollable by `--log-level`, and -- because
+    `export`/`prepare` make authenticated Finnhub/EDGAR calls via
+    `_freshness_sources()` -- unredacted. `copilot-retro collect` runs in the
+    daily CI job under `continue-on-error: true`, so this log is the only
+    forensic trail a failure there leaves.
+    """
+
+    def test_a_record_reaches_a_configured_handler_not_lastresort(
+        self, tmp_path: Path, reports_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_secrets(monkeypatch)
+        root_logger = logging.getLogger()
+        # Start from no handlers at all, i.e. the state that makes
+        # `logging.lastResort` the fallback -- proves `main()` itself is what
+        # installs a real handler, not some earlier test in the session.
+        root_logger.handlers = []
+        root_logger.filters = []
+
+        main(
+            [
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+
+        assert root_logger.handlers, "main() must install a root handler"
+        handler = root_logger.handlers[0]
+        assert handler is not logging.lastResort
+        record = logging.LogRecord(
+            name="swing_copilot.retro.cli",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="boom",
+            args=(),
+            exc_info=None,
+        )
+        formatted = handler.format(record)
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} WARNING "
+            r"swing_copilot\.retro\.cli: boom",
+            formatted,
+        ), formatted
+
+    def test_default_log_level_filters_out_debug_records(
+        self, tmp_path: Path, reports_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_secrets(monkeypatch)
+
+        main(
+            [
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+
+        assert self._debug_records_delivered() == []
+
+    def test_log_level_flag_lets_debug_records_through(
+        self, tmp_path: Path, reports_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_secrets(monkeypatch)
+
+        main(
+            [
+                "--log-level",
+                "DEBUG",
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+
+        assert len(self._debug_records_delivered()) == 1
+
+    @staticmethod
+    def _debug_records_delivered() -> list[logging.LogRecord]:
+        """Emit one DEBUG record and report whether a handler received it."""
+        capture = _RecordingHandler()
+        logger = logging.getLogger("swing_copilot.retro.cli.test")
+        logger.addHandler(capture)
+        try:
+            logger.debug("only visible with --log-level DEBUG")
+        finally:
+            logger.removeHandler(capture)
+        return capture.records
+
+    def test_redacts_a_configured_secret_from_message_and_traceback(
+        self,
+        tmp_path: Path,
+        reports_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _patch_secrets(monkeypatch, finnhub_api_key="finnhub-sekrit-retro")
+        # A handler's filters are cumulative across every earlier call to
+        # `configure_cli_logging` in this process (each `main()` call adds
+        # one, it never replaces). `SecretRedactionFilter.filter()` nulls
+        # `record.exc_info` once it has redacted a traceback, so an unrelated
+        # filter left over from another test -- e.g. real secrets picked up
+        # from a developer's local `.env` by a test elsewhere in the suite
+        # that does not patch `load_secrets` -- would claim the record first
+        # and this test's own filter would never see `exc_info` at all.
+        # Starting from a clean filter set isolates the assertion from that.
+        for existing_handler in logging.root.handlers:
+            existing_handler.filters = []
+
+        main(
+            [
+                "collect",
+                "--reports-dir",
+                str(reports_root),
+                "--db",
+                str(tmp_path / "retro.duckdb"),
+            ]
+        )
+        logger = logging.getLogger("swing_copilot.retro.cli.test")
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                _raise_runtime_error("401 for token=finnhub-sekrit-retro")
+            except RuntimeError:
+                logger.exception("fetch failed")
+
+        assert "finnhub-sekrit-retro" not in caplog.text
+        assert "[REDACTED]" in caplog.text
+        record = caplog.records[-1]
+        assert record.exc_text is not None
+        assert "finnhub-sekrit-retro" not in record.exc_text
+        assert "[REDACTED]" in record.exc_text

@@ -1,4 +1,15 @@
-"""Position sizing: the tighter of a per-trade risk cap and a per-symbol cap (FR-06)."""
+"""Position sizing: the tighter of a per-trade risk cap and a per-symbol cap.
+
+Simulator-only (Issue #385). This module is called from exactly two places:
+`backtest/engine.py`, which sizes positions against a backtest-only notional
+account, and this module's own tests. The production daily path
+(`risk/checks.py`, FR-06) never sizes a position or reports a share count --
+Issue #348 removed reader-account-dependent sizing from the public product
+because the code has no way to know a reader's actual account, and Issue #352
+finished removing account-dependent fields from the exported analysis input.
+Do not call this from `risk/checks.py` or any other production path; a public
+run must never assume a reader's account size or holdings.
+"""
 
 from __future__ import annotations
 

@@ -70,7 +70,7 @@ bars = research.bars(["AAPL", "MSFT"])
 | `rank` / `score` / `score_*` / `rsi14` / `atr14` / `close` / `avg_volume` | スクリーニングのランキング内訳と生値 | 該当 run の candidates に無い、または成分導入前の行 |
 | `execution_state` / `execution_distance` | ランキング時の実行状態と SMA50 からの ATR 距離（Issue #192） | 未記録（列の導入前の行）。`UNKNOWN` とは別 |
 | `dd15_spy` / `dd5_spy` / `vix_close` | 短い窓の distribution 件数と VIX（Issue #192） | レジーム snapshot が無い run、またはゲート評価不能 |
-| `risk_status` / `binding_constraint` | リスク評価と、株数を決めた制約 | リスク評価が無い |
+| `risk_status` / `binding_constraint` | リスク評価と、候補を最初にblockした残存理由（#348以降は口座サイジング値ではない） | リスク評価が無い |
 | `gate_verdict` / `dd_level` / `dd_count_*` | 市場レジームゲートの状態 | レジーム snapshot が無い run |
 | `position_status` / `exit_reason` / `realized_return_pct` / `days_held` | 追跡台帳（2.5×ATR トレーリング / 25 セッション）の結果 | まだ追跡が始まっていない（Issue #190 以降、`skip` も同じルールで追跡されるので「skip だから NULL」ではなくなった） |
 | `gics_sector` | run 日時点で有効なユニバース snapshot のセクター（as-of inclusive） | snapshot が run 日以前に無い |

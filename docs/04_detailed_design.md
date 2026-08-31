@@ -41,7 +41,7 @@ swing-copilot/
 │   │   ├── technical_signals.py    # FR-05（pandas実装）
 │   │   └── pipeline.py       # strategies.yamlに従い合成
 │   ├── risk/
-│   │   ├── position_sizing.py
+│   │   ├── position_sizing.py  # バックテスト専用（#385）。本番FR-06経路は使わない
 │   │   └── checks.py         # FR-06
 │   ├── regime/
 │   │   ├── gate.py           # SPY/SMA/VIX market gate and snapshot
@@ -2172,13 +2172,21 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     run_id          UUID NOT NULL,
     symbol          VARCHAR NOT NULL,
     status          VARCHAR NOT NULL CHECK (status IN ('approved','rejected','not_calculable')),
+    -- max_shares / shares_by_risk / shares_by_position_cap / sizing_warnings_json:
+    -- 旧サイジング履歴の互換4列（#385で最終確認）。#348以降の新規行は常にNULL
+    -- （sizing_warnings_jsonは'[]'）を書く。読者の口座を仮定した株数は本番/公開
+    -- 経路から撤去済み（#348, #352）で、`src/`側の読み手も#385でゼロになった
+    -- （`copilot-history run`のRisk表がmax_sharesを表示しなくなった）。それでも
+    -- 意図的に列自体は落とさない: DBは訂正のたびに書き換えるものではなく
+    -- （このリポジトリの不変条件）、#348以前に記録された行にとって当時の
+    -- サイジング内訳は書き換えてはならない履歴事実だからである。マイグレーション
+    -- （列削除）は計画しない。
     max_shares      BIGINT,
     entry_price     DOUBLE,
     limit_price     DOUBLE,
     stop_price      DOUBLE,
     reasons_json    JSON NOT NULL,
     warnings_json   JSON NOT NULL,
-    -- 旧サイジング履歴の互換列。#348以降の新規行はNULL。
     shares_by_risk          BIGINT,
     shares_by_position_cap  BIGINT,
     binding_constraint      VARCHAR

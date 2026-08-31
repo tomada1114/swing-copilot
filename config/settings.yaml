@@ -111,8 +111,13 @@ schedule:
 
 notification:
   # The scheduled run is unattended, so Discord is how the day announces itself.
-  # Enabling it makes DISCORD_WEBHOOK_URL a required secret: a run without it
-  # fails fast at composition rather than silently going unannounced.
+  # Since Issue #383 this is not a `copilot-daily` step any more: it gates the
+  # CI-only `scripts/notify_daily.py` step that runs once per day, after the
+  # qualitative verdict exists. `copilot-daily` therefore no longer requires
+  # DISCORD_WEBHOOK_URL, and enabling this without one does not fail
+  # composition -- only the notify step exits non-zero, and its
+  # `continue-on-error: true` keeps that off the job's own result. Check that
+  # step's log if a day goes unannounced.
   enabled: true
 
 postmortem:

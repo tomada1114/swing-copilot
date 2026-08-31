@@ -71,6 +71,11 @@ _CONTINUATION_MARKER_RESERVE = 40
 #: one alike.
 _MAX_BLOCK_BODY_CHARS = DISCORD_MESSAGE_CHAR_LIMIT - 500
 _ELLIPSIS_MARKER = "…"
+#: Joins the header/continuation prefix and every block of one message. Its
+#: own length is part of the per-message budget: forgetting it made the first
+#: message overflow `DISCORD_MESSAGE_CHAR_LIMIT` by exactly these two
+#: characters, which Discord rejects with a non-retryable 400.
+_BLOCK_SEPARATOR = "\n\n"
 
 _PREFLIGHT_ABORT_OUTCOME = "preflight_abort"
 #: Mirrors `scripts/check_daily_complete.py::_LEGITIMATE_STOP_REASONS`. Kept
@@ -107,7 +112,12 @@ def _read_outcome(path: Path | None) -> DailyOutcome | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    # `UnicodeDecodeError` is a `ValueError`, not an `OSError` (see
+    # `swing_copilot/documents.py`): omitting it here would let a
+    # wrongly encoded outcome file escape as a raw decode error and take the
+    # day's only notification with it, which is exactly what this fail-soft
+    # read exists to prevent.
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
         logger.exception("outcome file %s could not be read", path)
         return None
     if not isinstance(payload, dict):
@@ -441,14 +451,16 @@ def _pack_messages(header: str, blocks: Sequence[str], run_dir_label: str) -> li
     """
     safe_blocks = [_safe_block(_shrink_block(block, run_dir_label)) for block in blocks]
 
+    separator_len = len(_BLOCK_SEPARATOR)
     groups: list[list[str]] = [[]]
     group_len = 0  # running content length (blocks + separators) of the open group
     for block in safe_blocks:
         is_first_group = len(groups) == 1
-        budget = DISCORD_MESSAGE_CHAR_LIMIT - (
-            len(header) if is_first_group else _CONTINUATION_MARKER_RESERVE
-        )
-        addition = len(block) + (2 if groups[-1] else 0)
+        prefix_len = len(header) if is_first_group else _CONTINUATION_MARKER_RESERVE
+        # The rendered message is `prefix + separator + group content`, so the
+        # separator that follows the prefix has to come out of the budget too.
+        budget = DISCORD_MESSAGE_CHAR_LIMIT - prefix_len - separator_len
+        addition = len(block) + (separator_len if groups[-1] else 0)
         if groups[-1] and group_len + addition > budget:
             groups.append([])
             group_len = 0
@@ -460,5 +472,5 @@ def _pack_messages(header: str, blocks: Sequence[str], run_dir_label: str) -> li
     messages: list[str] = []
     for index, group in enumerate(groups, start=1):
         prefix = header if index == 1 else f"(続き {index}/{total})"
-        messages.append("\n\n".join([prefix, *group]))
+        messages.append(_BLOCK_SEPARATOR.join([prefix, *group]))
     return messages

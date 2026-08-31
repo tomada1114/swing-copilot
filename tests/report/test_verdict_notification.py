@@ -319,6 +319,21 @@ class TestOutcomeFileEdgeCases:
         assert len(messages) == 1
         assert "outcome ファイル欠落" in messages[0]
 
+    def test_outcome_file_that_is_not_utf8_is_abnormal(self, tmp_path: Path) -> None:
+        # `UnicodeDecodeError` is a `ValueError`, not an `OSError`
+        # (`swing_copilot/documents.py`): a hand-rolled read that omits it
+        # raises straight out of `build_daily_notification`, so the day loses
+        # its only notification instead of getting the fail-soft one.
+        path = tmp_path / "outcome.json"
+        path.write_bytes(b'{"outcome": "\xff\xfesuccess"}')
+
+        messages = build_daily_notification(
+            outcome_file=path, reports_dir=tmp_path / "reports"
+        )
+
+        assert len(messages) == 1
+        assert "outcome ファイル欠落" in messages[0]
+
     def test_outcome_file_missing_outcome_field_is_abnormal(
         self, tmp_path: Path
     ) -> None:
@@ -788,6 +803,23 @@ class TestPureHelpers:
         assert messages[0].startswith(header)
         for index, message in enumerate(messages[1:], start=2):
             assert message.startswith(f"(続き {index}/{len(messages)})")
+
+    def test_pack_messages_counts_the_header_separator_in_the_first_budget(self):
+        # The rendered message is `header + "\n\n" + content`. Sizing the
+        # first group against `LIMIT - len(header)` alone let it land exactly
+        # two characters over the cap, which Discord rejects with a
+        # non-retryable 400 -- losing the whole day's notification.
+        header = "H" * 100
+        first_group_budget = DISCORD_MESSAGE_CHAR_LIMIT - len(header)
+        blocks = [
+            "A" * (first_group_budget - 502),
+            "B" * 500,
+            "C" * 100,
+        ]
+
+        messages = _pack_messages(header, blocks, "reports/2026-08-28/run/")
+
+        assert all(len(message) <= DISCORD_MESSAGE_CHAR_LIMIT for message in messages)
 
     def test_pack_messages_single_short_block_stays_one_message(self):
         header = "[swing-copilot] header"

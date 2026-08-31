@@ -37,11 +37,6 @@ def _load_module() -> ModuleType:
 notify_daily = _load_module()
 
 
-def _isolated_secrets(**overrides: str) -> Secrets:
-    """Build `Secrets` isolated from any real `.env` a developer has locally."""
-    return Secrets(_env_file=None, **overrides)  # type: ignore[call-arg]
-
-
 def _write_settings(tmp_path: Path, *, notification_enabled: bool) -> Path:
     path = tmp_path / "settings.yaml"
     path.write_text(
@@ -80,7 +75,7 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         settings_path = _write_settings(tmp_path, notification_enabled=False)
-        monkeypatch.setattr(notify_daily, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(notify_daily, "load_secrets", Secrets)
         monkeypatch.setattr(
             notify_daily,
             "build_daily_notification",
@@ -97,7 +92,7 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         settings_path = _write_settings(tmp_path, notification_enabled=True)
-        monkeypatch.setattr(notify_daily, "load_secrets", _isolated_secrets)
+        monkeypatch.setattr(notify_daily, "load_secrets", Secrets)
 
         exit_code = notify_daily.main(["--settings", str(settings_path)])
 
@@ -110,9 +105,7 @@ class TestMain:
         monkeypatch.setattr(
             notify_daily,
             "load_secrets",
-            lambda: _isolated_secrets(
-                discord_webhook_url="https://discord.example/hook"
-            ),
+            lambda: Secrets(discord_webhook_url="https://discord.example/hook"),
         )
         monkeypatch.setattr(
             notify_daily,
@@ -143,9 +136,7 @@ class TestMain:
         monkeypatch.setattr(
             notify_daily,
             "load_secrets",
-            lambda: _isolated_secrets(
-                discord_webhook_url="https://discord.example/hook"
-            ),
+            lambda: Secrets(discord_webhook_url="https://discord.example/hook"),
         )
         monkeypatch.setattr(
             notify_daily,
@@ -176,9 +167,7 @@ class TestMain:
         monkeypatch.setattr(
             notify_daily,
             "load_secrets",
-            lambda: _isolated_secrets(
-                discord_webhook_url="https://discord.example/hook"
-            ),
+            lambda: Secrets(discord_webhook_url="https://discord.example/hook"),
         )
         captured: dict[str, object] = {}
 

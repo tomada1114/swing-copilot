@@ -128,11 +128,6 @@ def _make_status_error(message: str) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(message, request=request, response=response)
 
 
-def _isolated_secrets(**overrides: str) -> Secrets:
-    """Build `Secrets` isolated from any real `.env` a developer has locally."""
-    return Secrets(_env_file=None, **overrides)  # type: ignore[call-arg]
-
-
 @pytest.fixture
 def _restore_logging_state():
     """Undo whatever `configure_cli_logging` mutates on the root/app loggers.
@@ -179,7 +174,7 @@ class TestConfigureCliLoggingRedactsSecrets:
     """
 
     def test_defaults_to_quiet_root_and_informative_application_logger(self):
-        configure_cli_logging(_isolated_secrets())
+        configure_cli_logging(Secrets())
 
         assert logging.getLogger().level == logging.WARNING
         assert logging.getLogger("swing_copilot").level == logging.INFO
@@ -196,13 +191,13 @@ class TestConfigureCliLoggingRedactsSecrets:
     def test_explicit_log_level_applies_to_root_and_application_logger(
         self, level_name, level
     ):
-        configure_cli_logging(_isolated_secrets(), level=level_name)
+        configure_cli_logging(Secrets(), level=level_name)
 
         assert logging.getLogger().level == level
         assert logging.getLogger("swing_copilot").level == level
 
     def test_redacts_secret_from_message_and_traceback(self, caplog):
-        secrets = _isolated_secrets(
+        secrets = Secrets(
             finnhub_api_key="finnhub-sekrit123",
             fred_api_key="fred-sekrit456",
             discord_webhook_url="https://discord.com/api/webhooks/sekrit-hook",
@@ -233,7 +228,7 @@ class TestConfigureCliLoggingRedactsSecrets:
         assert "[REDACTED]" in record.exc_text
 
     def test_empty_and_none_secrets_are_never_redacted(self, caplog):
-        secrets = _isolated_secrets()  # every secret unset (None)
+        secrets = Secrets()  # every secret unset (None)
         configure_cli_logging(secrets)
         logger = logging.getLogger("swing_copilot.cli_support.test")
 

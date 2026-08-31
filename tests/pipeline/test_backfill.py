@@ -800,3 +800,36 @@ class TestBackfillCli:
                     "AAA",
                 ]
             )
+
+    def test_fundamentals_command_does_not_leak_a_real_dotenv_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_run_fundamentals` calls bare `Secrets()`, not `load_secrets()` (Issue #387).
+
+        The autouse `.env` guard in `tests/conftest.py` patches
+        `Secrets.model_config` directly rather than `load_secrets`, so it has
+        to cover this call site too even though this test never patches
+        `load_secrets` or `EdgarClient`. Plant a `.env` with a real-looking
+        value and `chdir` into it, with no `EDGAR_IDENTITY` exported: if the
+        guard's `env_file=None` patch ever stopped applying here, `Secrets()`
+        would read the planted file and the command would proceed instead of
+        failing fast.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("EDGAR_IDENTITY", raising=False)
+        (tmp_path / ".env").write_text("EDGAR_IDENTITY=leaked tomada@example.invalid\n")
+
+        with pytest.raises(SystemExit):
+            backfill_main(
+                [
+                    "fundamentals",
+                    "--start",
+                    "2019-01-01",
+                    "--end",
+                    "2026-07-30",
+                    "--db",
+                    str(tmp_path / "copilot.duckdb"),
+                    "--symbols",
+                    "AAA",
+                ]
+            )

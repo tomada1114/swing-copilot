@@ -63,8 +63,14 @@ the rest of the sync has to tolerate without treating the missing history as
 - The window actually applied is recorded in `SyncState.reports_window`, not
   passed to `push` as a separate flag -- so a `push` that forgot the flag
   cannot silently garbage-collect real history. `push` reads it back and,
-  whenever it is set, suppresses `reports/`'s garbage collection entirely:
-  every key `pull` did not fetch stays right where it is on the remote.
+  whenever it is set, narrows `reports/`'s garbage collection to the *key*
+  level (Issue #382): a `reports/` key not referenced by the new manifest is
+  only deleted when it also looks like a run-archive object
+  (`_has_reports_sync_shape`) and its run date is not one this push preserved
+  out-of-window. Every out-of-window archive stays right where it is on the
+  remote; what a windowed push does reclaim is a genuine orphan -- an object
+  an earlier push uploaded but never got to reference before crashing, for a
+  run date this push's window (or a prior full pull) actually covers.
 - `--reports-append-only`'s guard is scoped the same way: a `reports/` key
   outside the recorded window is expected to be locally absent (the GC
   suppression above is what protects it), so only keys the window did fetch
@@ -471,6 +477,48 @@ def _windowed_reports_keys(
         key
         for key in files
         if key.startswith(REPORTS_PREFIX) and _reports_run_date(key) in selected_dates
+    )
+
+
+def _preserved_reports_dates(
+    remote_files: Mapping[str, FileEntry], windowed: frozenset[str]
+) -> frozenset[str]:
+    """Run dates a windowed push carries forward untouched from the remote.
+
+    These are exactly the run dates `_manifest_files_for_push` preserves
+    unchanged in the new manifest (its `preserved` dict, keyed down to dates):
+    every `reports/` key the previous remote manifest held that this push's
+    window did not fetch. A windowed push's garbage collector must never
+    delete a key belonging to one of these dates -- see
+    `_is_reclaimable_reports_orphan`.
+    """
+    return frozenset(
+        _reports_run_date(key)
+        for key in remote_files
+        if key.startswith(REPORTS_PREFIX) and key not in windowed
+    )
+
+
+def _is_reclaimable_reports_orphan(key: str, preserved_dates: frozenset[str]) -> bool:
+    """Whether a windowed push may garbage-collect an unreferenced `key`.
+
+    Applies only to a `reports/`-prefixed `key` already known not to be in
+    the new manifest (`push` checks that separately). Two further conditions
+    narrow it to a genuine orphan -- an object a previous, interrupted push
+    uploaded but never got to reference (Issue #382):
+
+    - It must look like a run-archive object (`_has_reports_sync_shape`).
+      An unrecognized `reports/` key (leftover from an old version of this
+      script, or placed by hand) is left alone rather than guessed at.
+    - Its run date must not be in `preserved_dates`. This protects an
+      out-of-window archive structurally, independent of
+      `_manifest_files_for_push`'s dict merge: it does not rely on that date
+      having been re-listed in the new manifest to survive.
+    """
+    relative = PurePosixPath(key[len(REPORTS_PREFIX) :])
+    return (
+        _has_reports_sync_shape(relative)
+        and _reports_run_date(key) not in preserved_dates
     )
 
 
@@ -1115,18 +1163,20 @@ def push(
         raise DataSyncError(msg)
 
     remote_files: Mapping[str, FileEntry] = remote.files if remote else {}
+    # Computed once and shared by the append-only guard and the GC step below
+    # (Issue #382), rather than re-derived independently by each.
+    windowed = (
+        _windowed_reports_keys(remote_files, reports_window)
+        if reports_window is not None
+        else None
+    )
     _guard_against_emptying_a_populated_root(roots, remote_files, local)
     if append_only_prefixes:
-        windowed_reports_keys = (
-            _windowed_reports_keys(remote_files, reports_window)
-            if reports_window is not None
-            else None
-        )
         _guard_append_only(
             append_only_prefixes,
             remote_files,
             local,
-            windowed_reports_keys=windowed_reports_keys,
+            windowed_reports_keys=windowed,
         )
 
     uploaded: list[str] = []
@@ -1155,20 +1205,37 @@ def push(
     # Garbage collection, listed live per root rather than read from the
     # manifest so that objects orphaned by an earlier interrupted push are
     # collected too. `manifest.json` itself sits outside every root's prefix
-    # and is never touched here. `reports/` is skipped entirely when this
-    # working copy's last pull was windowed (Issue #373): every key the
-    # window did not fetch would otherwise look unreferenced (it is not in
-    # `local`, and -- unlike a full pull -- not necessarily preserved as a
-    # standalone key here either, since `manifest_files` only carries it as
-    # data, not as a GC allowlist) and be deleted, destroying the very
-    # history a windowed CI pull is meant to leave alone.
-    reports_gc_suppressed = reports_window is not None
+    # and is never touched here. `data/` is never windowed, so it keeps the
+    # plain rule: any key not in `manifest_files` is unreferenced and goes.
+    #
+    # `reports/` is narrowed to the *key* level when this working copy's last
+    # pull was windowed (Issue #382, replacing #373's root-level suppression):
+    # `key not in manifest_files` alone is not a safe delete condition here,
+    # because an out-of-window archive's only protection would then be having
+    # been re-listed by `_manifest_files_for_push`'s dict merge -- one code
+    # path, not a structural guarantee. So a `reports/` key not in
+    # `manifest_files` is deleted only when `_is_reclaimable_reports_orphan`
+    # also holds: it looks like a run-archive object, and its run date is not
+    # one this push preserved out-of-window. That combination is exactly a
+    # genuine orphan -- an object an earlier, interrupted push uploaded but
+    # never got to reference before its manifest write -- for a run date this
+    # push's history actually covers. An out-of-window orphan is a known,
+    # accepted gap: it is left for an operator's full pull -> collect -> push.
+    preserved_dates = (
+        _preserved_reports_dates(remote_files, windowed)
+        if windowed is not None
+        else None
+    )
     deleted = sorted(
         key
         for root in roots
-        if not (reports_gc_suppressed and root.prefix == REPORTS_PREFIX)
         for key in store.list_keys(root.prefix)
         if key not in manifest_files
+        and (
+            preserved_dates is None
+            or not key.startswith(REPORTS_PREFIX)
+            or _is_reclaimable_reports_orphan(key, preserved_dates)
+        )
     )
     for key in deleted:
         store.delete(key)

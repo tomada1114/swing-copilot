@@ -99,7 +99,7 @@ Markdown冒頭にはDuckDBが正本であることをコメントで明記する
 - テキスト収集または分析入力エクスポートが失敗しても、候補・リスクまでのCLI/Markdownを出力する
 - 定性分析が一部の銘柄でだけ検証を通った場合、通った銘柄の結果を保持し、通らなかった銘柄だけを縮退表示にする（fail-closed、リトライなし）
 - Markdown保存失敗時も構築済み`DailyBrief`があればターミナル表示は可能にする
-- 通知失敗はrunを`degraded`にするが、ローカル出力は続行する
+- 通知（`scripts/notify_daily.py`、Issue #383）はCI/`copilot-daily`パイプライン外の独立ステップで、`always()`＋`continue-on-error: true`で走るため、通知失敗はrunの`degraded`/`failed`判定に影響しない
 - 断定的な売買指示は`copilot-ingest-analysis`でCON-03検査し、renderer任せにしない
 
 ## 7. 受け入れ基準

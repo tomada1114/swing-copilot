@@ -63,7 +63,8 @@ swing-copilot/
 │   │   ├── terminal_report.py # Richによるstdout表示
 │   │   ├── markdown_report.py # Markdown原子保存
 │   │   ├── rejections.py     # rejections.json（落選明細＋candidate_limit切り捨て）
-│   │   └── discord_notify.py # FR-09
+│   │   ├── discord_notify.py # FR-09（Notifierプロトコル + DiscordNotifier実装）
+│   │   └── verdict_notification.py # FR-09（Issue #383。日次通知本文の純粋な組み立て。呼び出し元は scripts/notify_daily.py）
 │   ├── backtest/
 │   │   ├── entries.py        # 指値価格・日足約定規則（リスク評価と共有）
 │   │   ├── engine.py         # 複数銘柄ポートフォリオシミュレータ
@@ -1242,10 +1243,10 @@ class DiscordNotifier:
         """
         Discord Webhookへレポートの要約（サマリテキスト＋レポートへの言及）を送信する。
         送信失敗時はFalseを返し、例外は送出しない（バッチ全体を止めない）。
-        呼び出し元（pipeline/daily.py step 7）がFalseを見てrun_stepsに
-        failedを記録する。
         """
 ```
+
+**呼び出し元（Issue #383）**: `pipeline/daily.py`はもうこの`Notifier`を呼ばない。日次バッチのstep 7 (`_run_step_notify`) は`6_analysis_export`の直後に走り、その時点では定性verdictがまだ存在しなかった（`swing-daily`スキルが`analysis_result.json`を書き、`copilot-ingest-analysis`が検証するのはさらに後）ため、通知は常に「候補N件」としか言えなかった。代わりに`.github/workflows/swing-daily.yml`末尾の`always()`ステップが`scripts/notify_daily.py`を1日1回起動し、`report/verdict_notification.py::build_daily_notification()`が組み立てた本文をこの`DiscordNotifier`へ渡す。`DailyDependencies`はもう`notifier`フィールドを持たない。3.18節下記を参照。
 
 MarkdownはDuckDBの正本ではない。`copilot-ingest-analysis`が検証済み分析結果から生成ファイルの定性欄を正本から再描画する（3.17節）。過去判断を分析入力へ載せる条件は`docs/05_ui_design.md` 7章を正とする。
 
@@ -1256,6 +1257,31 @@ MarkdownはDuckDBの正本ではない。`copilot-ingest-analysis`が検証済�
 `build_analysis_brief(symbol, analysis)`は不合格経路をすべて`degraded=True`＋説明文へ畳む——分析未実施（`analysis is None`）は「分析待ち（swing-daily スキルで分析を実行してください）」、`analysis/validate.py`が保留した銘柄は「検証不合格のため非表示」。正常にingestしたresultは候補symbolを完全被覆するため「定性分析なし」は手組みの`ValidatedAnalysis`に対する防御的fallbackに限られる。部分描画は行わない。`format_verdict(analysis)`はterminal/markdown共通のverdict行を返す純関数で、`degraded`または`verdict`が`None`のときは`None`（＝何も描画しない）を返す——沈黙が「懸念なし」と読まれてはならないためである。`skip`は`⚠ 定性: 見送り推奨（要約）`、`proceed`は`✓ 定性: 懸念なし`。`DailyBrief`はrun単位の`no_trade: bool = False`/`no_trade_reason: str | None = None`を持ち、真のときヘッダ直後に「本日は取引なし（定性判断）」を強調表示する。
 
 `analysis/cli.py::ingest()`は`report_context.json`から復元した`DailyBrief`に対し`build_analysis_brief()`を各候補へ適用し、`no_trade`系フィールドと併せて差し替えるだけで、決定論的フィールド（スコア・サイジング・実行状態・落選・レジーム）は無変更で持ち越す。
+
+### 3.18a `report/verdict_notification.py` / `scripts/notify_daily.py`（FR-09、Issue #383）
+
+旧`pipeline/daily.py`のstep 7 (`_run_step_notify`) は`6_analysis_export`の直後に走っており、その時点では`swing-daily`スキルの`analysis_result.json`も`copilot-ingest-analysis`の検証も未着手で、定性verdictがまだ存在しなかった。通知は常に「候補N件」としか言えず、`proceed`が出た稀な日（`reports/`の実績で17 runのうち4 run）を他の日と区別できなかった。この節が置き換える通知は**1日1通**で、`copilot-daily`の全終了経路（成功・縮退・失敗・各preflight abort）を必ず1通に写像し、`proceed`のある日はその売買計画を本文へ載せる。
+
+**責務の分離**: `report/verdict_notification.py`は純粋関数のみで構成し、DuckDB・ネットワークのいずれにも触れない（`swing_copilot`パッケージの95%カバレッジ床の対象）。`scripts/notify_daily.py`は`scripts/check_daily_complete.py`と同じ形の薄いCI composition rootで、環境変数・パス解決・`DiscordNotifier`呼び出しだけを持つ（`pyproject.toml`の`[project.scripts]`には追加しない。`.github/workflows/swing-daily.yml`が`uv run python scripts/notify_daily.py`として直接起動する）。
+
+```python
+def build_daily_notification(
+    *, outcome_file: Path | None, reports_dir: Path
+) -> list[str]:
+    """1〜N件の送信用メッセージ本文を返す（各<= DISCORD_MESSAGE_CHAR_LIMIT）。"""
+```
+
+**入力は2種類のJSONだけ**（Decision B）: `copilot-daily`が`--outcome-file`/`COPILOT_DAILY_OUTCOME_FILE`へ書く終了状態JSON（`outcome`/`reason`/`run_id`/`run_date`/`candidates`、`pipeline/daily_composition.py::_RunOutcome`）と、`reports/<run_date>/<run_id>/`配下の`analysis_input.json`/`analysis_result.json`/`report_context.json`。通知ステップはR2 pushの後に走るため、DuckDBを開くとファイルロックが競合しうる——これは制約であって選択ではない。
+
+**検証は再実装しない**: `analysis/validate.py`の`load_analysis_input`/`load_analysis_result`/`validate_artifact_identity`/`validate_analysis`をそのまま再利用し、`copilot-ingest-analysis`と同じprovenance・evidence・CON-03検査で`ValidatedAnalysis`を復元する（3.17節）。銘柄単位のfail-closed withhold（`SymbolOutcome.error is not None`）はここでも「検証不合格のため除外」という定型文へ落とし、`SymbolOutcome.error`の生文字列は**表示しない**——`check_no_unevidenced_behavioral_claims`が投げる例外メッセージは違反したテキストそのものを引用するため、そのまま出すとCON-03が伏せた内容を通知経由で漏らしかねない。会社名・順位・合計スコア・`RiskAssessment`一式（entry/limit/stop/1R/ATR14/warnings/binding_constraint）は`report_context.json`の`brief.candidates[]`（`report/daily_brief.py`の`BriefCandidate`/`BriefRisk`）から取る——`analysis_input.json`の`score_breakdown`/`risk_constraints`は人間可読のprose blockであり、ATR14の実額もentry_priceも構造化フィールドとしては持たないため、この用途には向かない。1株あたりリスクだけは`limit_price - stop_price`の単純な減算で導出し、その旨を本文へ明記する（他はすべて`RiskAssessment`の値をそのまま表示。株数は出さない——`risk/checks.py`冒頭の「読者の口座残高を知らない」契約のとおり）。
+
+**CON-03は二重に効かせる**（Decision E）: `validate_analysis`が既に通した`verdict.reasons[].text`であっても、`_safe_block()`が組み立て済みブロック全体へもう一度`analysis/safety.py::check_display_texts`を通す。違反時はそのブロックだけを定型の除外文へ差し替える（ingestの銘柄単位fail-closedと同じ粒度）。「ingestで既に通っているから安全」という前提を持ち込まない。
+
+**Discordの2000字上限**（Decision C）: 共通ヘッダ＋`proceed`銘柄ごとの自己完結ブロックを`_pack_messages()`が貪欲法で詰める。1メッセージ目はヘッダで始まり、以降は`"(続き i/n)"`で始まる。1ブロックを2メッセージに跨がせることはない——単体で予算（`_MAX_BLOCK_BODY_CHARS`）を超えるブロックは`verdict.reasons[].text`（唯一の非有界フィールド）を末尾から省略記号付きで切り詰め、`reports/<run_date>/<run_id>/`への参照を残す。送信は順番どおりで、失敗した時点で残りは送らない（`DiscordNotifier.notify()`自身のbounded retryはメッセージ単位で独立）。
+
+**`Notifier`/`DiscordNotifier`は不変**（Decision F）: `report/discord_notify.py`のProtocol・bounded retry・`_HttpPost`注入点はこの変更で一切触っていない。呼び出し元が`pipeline/daily.py`からこの節の`scripts/notify_daily.py`へ変わっただけである。`DailyDependencies`は`notifier`フィールドを失い（3.21節）、`pipeline/daily_composition.py::_required_features()`は`settings.notification.enabled`をもう見ない——`discord`はrequired secretsに現れなくなった。`settings.notification.enabled`自体は残り、`scripts/notify_daily.py`がこのステップ全体の送信可否ゲートとして読み替える。
+
+**ワークフロー統合**: `.github/workflows/swing-daily.yml`末尾、`Verify the analysis completed`（`check_daily_complete.py`）の直後に`if: ${{ always() && (inputs.mode || 'live') == 'live' }}`かつ`continue-on-error: true`のステップを追加した。`always()`は「Run swing-daily」やR2 push・completeチェックがどこで落ちても1通は届く要件のため、`continue-on-error: true`は通知の失敗が既に完了しているR2 pushやジョブ全体の成否を道連れにしないためである。`DISCORD_WEBHOOK_URL`は`Run swing-daily`ステップの`env:`にしか無いため、このステップの`env:`にも渡す。
 
 ### 3.19 `backtest/engine.py` / `backtest/runner.py`（FR-10）
 
@@ -1363,9 +1389,11 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 `DailyDependencies`が実アダプタまたはfakeを運ぶ。開始時に検証済み`Settings`、
 選択`StrategySpec`、`strategy_key`のcanonical JSONから完全SHA-256指紋を作り、
 provider名/data tier、実効ユニバースのsnapshot日・identity、アプリ版・metadata
-schema版とともに`runs`へ保存する。固定8ステップのうちステップ1〜4、ブリーフ生成、
+schema版とともに`runs`へ保存する。`_VISIBLE_PIPELINE_STEPS`が公開する固定7ステップ
+（`1_prices`〜`6_analysis_export`、`8_output`。旧`7_notify`はIssue #383で廃止し、
+残るステップ名の番号は詰めていない。3.18a節）のうちステップ1〜4、ブリーフ生成、
 またはrun固有Markdown保存の失敗は`FAILED`・非ゼロ終了とする。一方、テキスト、
-分析入力エクスポート、通知、`latest.md`更新、`report_context.json`・`rejections.json`
+分析入力エクスポート、`latest.md`更新、`report_context.json`・`rejections.json`
 保存の失敗は、run固有Markdownが残る限り`RunStatus.DEGRADED`・終了コード0とする。主表示はステップ8
 でstdoutへ出し、終了時の運用サマリにはrun ID、status、exit code、provider/data tier、
 欠損source、成果物パス、`uv run copilot-history run --run-id <UUID>`を一箇所に表示する。
@@ -1566,7 +1594,7 @@ def main(argv: list[str] | None = None) -> None:
 
 ### 3.21a `pipeline/postmortem.py`（P2-11、roadmap §5 P2-11）
 
-`run_daily()`の`_run_soft_steps()`に、分析入力エクスポート(6)と通知(7)の間の新しいfail-softステップ`"postmortem"`として追加した（番号付きステップ名は`5_text`/`6_analysis_export`/`7_notify`/`8_output`。`6_llm`→`6_analysis_export`のリネームはP7のスキル移行で、ステップの中身が変わったことに伴って行った）。時間予算超過時は他のfail-softステップと同じ`_TIME_BUDGET_STEP_OUTCOME`でスキップされる。
+`run_daily()`の`_run_soft_steps()`に、分析入力エクスポート(6)と出力(8)の間の新しいfail-softステップ`"postmortem"`として追加した（番号付きステップ名は`5_text`/`6_analysis_export`/`8_output`。`6_llm`→`6_analysis_export`のリネームはP7のスキル移行で、ステップの中身が変わったことに伴って行った。旧`7_notify`はIssue #383でパイプラインから廃止し、3.18a節が引き継いだ）。時間予算超過時は他のfail-softステップと同じ`_TIME_BUDGET_STEP_OUTCOME`でスキップされる。
 
 **目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。同一`(run_id, horizon_days)`の結果はDELETEと再INSERTを1トランザクションで行う完全置換とし、訂正後に価格欠損となった候補の古い結果も削除する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
 

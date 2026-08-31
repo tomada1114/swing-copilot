@@ -36,16 +36,9 @@ from swing_copilot.storage.database import DEFAULT_DB_PATH
 from swing_copilot.universe import UniverseError, UniverseMember, UniverseResolution
 
 
-def _shipped_settings(*, notification_enabled: bool = False) -> Settings:
-    """Load the shipped settings with the Discord toggle pinned.
-
-    `config/settings.yaml` enables Discord, which makes `discord_webhook_url` a
-    required secret. Tests that are not about notifications pin it off so their
-    fixture secrets stay minimal, and the notification tests pin it on.
-    """
-    settings = load_settings("config/settings.yaml")
-    object.__setattr__(settings.notification, "enabled", notification_enabled)
-    return settings
+def _shipped_settings() -> Settings:
+    """Load the shipped `config/settings.yaml`."""
+    return load_settings("config/settings.yaml")
 
 
 def _isolated_secrets(**overrides: str) -> Secrets:
@@ -126,25 +119,14 @@ class TestParseArgs:
 
 class TestRequiredFeatures:
     def test_full_run_requires_edgar_finnhub_and_fred(self):
-        settings = _shipped_settings()
-
-        features = _required_features(DailyRunOptions(), settings)
+        features = _required_features(DailyRunOptions())
 
         assert features == {"edgar", "finnhub", "fred"}
 
     def test_skip_text_drops_finnhub_and_fred(self):
-        settings = _shipped_settings()
-
-        features = _required_features(DailyRunOptions(skip_text=True), settings)
+        features = _required_features(DailyRunOptions(skip_text=True))
 
         assert features == {"edgar"}
-
-    def test_notification_enabled_adds_discord(self):
-        settings = _shipped_settings(notification_enabled=True)
-
-        features = _required_features(DailyRunOptions(), settings)
-
-        assert "discord" in features
 
 
 @pytest.fixture
@@ -253,7 +235,6 @@ class TestComposeDependencies:
         assert deps.news_client is None
         assert deps.earnings_client is None
         assert deps.calendar_client is None
-        assert deps.notifier is None
 
     def test_explicit_as_of_uses_the_point_in_time_universe_resolver(
         self, monkeypatch, tmp_path
@@ -323,23 +304,6 @@ class TestComposeDependencies:
         assert deps.news_client is not None
         assert deps.earnings_client is not None
         assert deps.calendar_client is not None
-
-    def test_notification_enabled_without_webhook_is_a_fail_fast_config_error(
-        self, monkeypatch
-    ):
-        # Feature-gated secret validation (D7): enabling a feature without its
-        # secret is a configuration error to fix, not something to silently
-        # degrade around.
-        monkeypatch.setattr(
-            daily_module,
-            "load_secrets",
-            lambda: _isolated_secrets(edgar_identity="Test test@example.com"),
-        )
-        settings = _shipped_settings(notification_enabled=True)
-        strategies = load_strategies("config/strategies.yaml")
-
-        with pytest.raises(ConfigError, match="discord_webhook_url"):
-            _compose_dependencies(DailyRunOptions(skip_text=True), settings, strategies)
 
     def test_dry_run_composes_an_isolated_db_and_report_dir(
         self, monkeypatch, tmp_path

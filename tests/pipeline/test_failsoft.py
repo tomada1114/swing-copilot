@@ -1,9 +1,11 @@
 """Fail-soft boundary tests for pipeline/daily.py (FR-12, `docs/03_basic_design.md` 7).
 
 Text collection (5) and analysis-input export (6) failures degrade the run but
-never abort it: notification (7) and local output (8) still run when applicable.
-complete. Market/store/screening (1-4) failures are fatal, exit nonzero, and
-never corrupt state for a subsequent successful rerun.
+never abort it: local output (8) still runs and produces a report. Discord
+notification is no longer one of the pipeline's own steps (Issue #383); it
+runs once per day from `scripts/notify_daily.py` instead, well after the
+qualitative verdict exists. Market/store/screening (1-4) failures are fatal,
+exit nonzero, and never corrupt state for a subsequent successful rerun.
 """
 
 from __future__ import annotations
@@ -183,21 +185,6 @@ class PartiallyFailingNewsClient:
                 fetched_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
             )
         ]
-
-
-class FailingNotifier:
-    def notify(self, summary, report_path):
-        del summary, report_path
-        return False
-
-
-class _AssertNeverCalledNotifier:
-    """Proves step 8 never reaches the real webhook client during dry-run."""
-
-    def notify(self, summary, report_path):
-        del summary, report_path
-        msg = "Notifier.notify() must not be called in dry-run mode"
-        raise AssertionError(msg)
 
 
 def _uptrending_bars(symbols: list[str], as_of: date, days: int = 260) -> pd.DataFrame:
@@ -982,26 +969,6 @@ class TestVirtualLedgerPositionsCountAsHeld:
         assert "verdict tracking ledger unreadable" in caplog.text
 
 
-class TestNotifyFailureDegrades:
-    def test_notify_failure_degrades_but_the_report_still_exists(
-        self, base_deps, state_store, settings
-    ):
-        object.__setattr__(settings.notification, "enabled", True)
-        deps = replace(base_deps, notifier=FailingNotifier())
-
-        # A live (non-dry-run) run: dry-run mode always suppresses step 7
-        # (see `TestDryRunSuppressesNotification` below), so exercising the
-        # actual notify-failure path requires `is_dry_run=False`.
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=False), deps)
-
-        assert result.status == RunStatus.DEGRADED
-        assert result.exit_code == 0
-        assert result.report_path is not None
-        assert result.report_path.is_file()
-        assert _step_status(state_store, result.run_id, "7_notify") == "failed"
-        assert _step_status(state_store, result.run_id, "8_output") == "success"
-
-
 class TestOutputFailureContract:
     def test_brief_construction_failure_is_failed_with_nonzero_exit(
         self, base_deps, state_store, monkeypatch
@@ -1143,25 +1110,6 @@ class TestHistoricalReplayMarker:
             "historical replay marker write failed" in record.getMessage()
             for record in caplog.records
         )
-
-
-class TestDryRunSuppressesNotification:
-    def test_dry_run_skips_notify_even_when_notification_is_enabled(
-        self, base_deps, state_store, settings
-    ):
-        object.__setattr__(settings.notification, "enabled", True)
-        deps = replace(base_deps, notifier=_AssertNeverCalledNotifier())
-
-        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
-
-        assert result.status == RunStatus.SUCCESS
-        assert _step_status(state_store, result.run_id, "7_notify") == "skipped"
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            detail = conn.execute(
-                "SELECT detail FROM run_steps WHERE run_id = ? AND step = ?",
-                [str(result.run_id), "7_notify"],
-            ).fetchone()[0]
-        assert detail == "skipped: dry-run mode"
 
 
 class TestMarketFailureIsFatalAndRerunnable:

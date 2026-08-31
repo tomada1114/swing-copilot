@@ -57,11 +57,14 @@ flowchart TD
         EXPORT["analysis/export.py<br/>分析入力の書き出し（FR-08）"]
         BRIEF["report/daily_brief.py<br/>FR-09"]
         OUT["terminal_report.py / markdown_report.py"]
-        NOTIFY["report/discord_notify.py<br/>FR-09"]
     end
 
     subgraph Ingest["取り込みCLI: uv run copilot-ingest-analysis"]
         VALIDATE["analysis/validate.py + safety.py<br/>スキーマ・provenance・CON-03（FR-08）"]
+    end
+
+    subgraph Notify["CIステップ: uv run python scripts/notify_daily.py（Issue #383）"]
+        NOTIFY["report/verdict_notification.py<br/>+ report/discord_notify.py<br/>FR-09"]
     end
 
     subgraph Offline["オフライン支援機能"]
@@ -102,8 +105,7 @@ flowchart TD
     BRIEF --> RCTX[("reports/<date>/report_context.json")]
     OUT --> STDOUT["stdout"]
     OUT --> MDOUT[("reports/<date>/<run_id>.md")]
-    BRIEF --> NOTIFY
-    NOTIFY --> DISCORD
+    Batch --> OUTCOME[("copilot-daily outcome file<br/>(COPILOT_DAILY_OUTCOME_FILE)")]
 
     AIN --> SKILL
     SKILL --> ARES[("reports/<date>/analysis_result.json")]
@@ -111,6 +113,12 @@ flowchart TD
     ARES --> VALIDATE
     RCTX --> VALIDATE
     VALIDATE --> OUT
+
+    OUTCOME --> NOTIFY
+    AIN --> NOTIFY
+    ARES --> NOTIFY
+    RCTX --> NOTIFY
+    NOTIFY --> DISCORD
 
     DUCKDB -.-> BT
     BT -.-> DUCKDB
@@ -180,7 +188,6 @@ sequenceDiagram
     participant TXT as text/*
     participant EXP as analysis/export.py
     participant OUT as report/daily_brief + renderers
-    participant DC as report/discord_notify.py
     participant MS as MarketStore(DuckDB+Parquet)
     participant ST as StateStore(DuckDB)
     participant FS as 当日のレポートディレクトリ
@@ -225,18 +232,18 @@ sequenceDiagram
         D->>ST: run_steps(step=6_analysis_export, status=success)
     end
 
-    D->>DC: (7) Discord通知（notification.enabled=trueの場合のみ）
-    D->>ST: run_steps(step=7, status)
-
     D->>OUT: (8) DailyBrief構築、Markdown原子保存、stdout表示（定性欄は「分析待ち」）
     OUT-->>FS: (6)が成功していれば report_context.json も保存
     OUT-->>Local: CLI日次ブリーフ
     D->>ST: run_steps(step=8, status)
+    D->>Local: 終了状態（success/degraded/failed/preflight_abort）をoutcomeファイルへ書く
 ```
 
-日次バッチ完了後、GitHub Actions の `swing-daily.yml` job が `swing-daily` スキルを
-起動すると以下が続く。この経路はDuckDBへ書き込まず、データ同期以外のネットワークにも
-接続しない。定性分析スキルは CI でのみ実行する。
+日次バッチはDiscord通知を送らない（Issue #383より前は最後から2番目のstep=7がこれを
+担っていたが、その時点では定性verdictがまだ存在せず「候補N件」としか言えなかった）。
+GitHub Actions の `swing-daily.yml` job が `swing-daily` スキルを起動すると以下が続く。
+この経路はDuckDBへ書き込まず、データ同期以外のネットワークにも接続しない。定性分析
+スキルは CI でのみ実行する。
 
 ```mermaid
 sequenceDiagram
@@ -246,6 +253,8 @@ sequenceDiagram
     participant FS as 当日のレポートディレクトリ
     participant IN as copilot-ingest-analysis
     participant OUT as report renderers
+    participant NT as scripts/notify_daily.py（Issue #383）
+    participant DC as Discord Webhook
 
     CI->>SK: スキル起動
     SK->>FS: analysis_input.json 読み取り
@@ -261,6 +270,12 @@ sequenceDiagram
     end
     IN->>OUT: 定性欄だけを差し替えて再描画
     OUT-->>CI: Markdown再保存 + 実行ログ
+
+    Note over CI,DC: R2への push・completeチェックの後、常に (always()) 1回だけ走る。<br/>notification.enabled=false の日は何も送らない。
+    CI->>NT: uv run python scripts/notify_daily.py
+    NT->>FS: outcomeファイル + analysis_input / analysis_result / report_context を読む（DuckDBは開かない）
+    NT->>NT: validate_analysis()を再利用してverdictを復元、<br/>CON-03（check_display_texts）を組み立て済み本文へ再適用
+    NT->>DC: 1日1通（2000字超は分割、続きに"(続き i/n)"を付与）
 ```
 
 ---
@@ -294,7 +309,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 | 2 | SEC EDGAR API | 財務諸表・ファンダメンタルズ、8-K/10-Q監視 | 公式REST API（edgartools経由） | 不要（ただしUser-Agentヘッダー必須: 氏名/アプリ名＋連絡先メールアドレス） | 10リクエスト/秒上限 |
 | 3 | Finnhub API | ニュース収集（company-newsエンドポイント） | 公式REST API | APIキー（無料枠） | 60コール/分 |
 | 4 | FRED API | 経済カレンダー・指標 | 公式REST API | APIキー（無料） | 明示的なSLAなし（実装時に要確認、常識的な間隔を空ける） |
-| － | Discord Webhook | 日次レポート通知（デフォルト有効。無人実行の結果を知る主経路であり、有効なままWebhook URLが無い実行は設定エラーで止まる） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
+| － | Discord Webhook | 定性verdict確定後の日次通知（デフォルト有効。`scripts/notify_daily.py`がCIの最終ステップとして1日1回、`copilot-daily`の終了経路によらず送る。Issue #383より前は`copilot-daily`自身のstep 7が送っていたが、その時点では定性verdictが未確定で「候補N件」としか言えなかった。有効なままWebhook URLが無い実行はそのステップだけがエラーで終わり、`continue-on-error: true`によりR2 pushやジョブ全体は道連れにしない） | Webhook POST | Webhook URL自体が認証情報 | Discord側のWebhookレート制限（実装時に要確認） |
 
 現行の価格providerは`yfinance`であり、全runのdata tierは`prototype`である。`prototype`の最終CLIブリーフとMarkdownには「非公式データに基づく試作結果」を必ず表示する。本番tierはまだ実装していないため、起動モードの追加や曖昧な本番切替は行わない。
 
@@ -460,7 +475,7 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | FR-06 | リスク管理チェック（読者の口座を仮定した株数は算出しない） | `risk/checks.py` |
 | FR-07 | テキスト収集 | `text/news_finnhub.py`, `text/edgar_filings.py`, `text/calendar_fred.py` |
 | FR-08 | 定性分析（スキル連携、事実/解釈分離） | `analysis/export.py`, `analysis/context.py`, `analysis/schemas.py`, `analysis/validate.py`, `analysis/safety.py`, `analysis/snapshot.py`, `analysis/cli.py`, `.claude/skills/swing-daily`（`analyze-news`/`analyze-filings`/`interpret-screening`） |
-| FR-09 | CLI・Markdown＋Discord通知 | `report/daily_brief.py`, `report/terminal_report.py`, `report/markdown_report.py`, `report/discord_notify.py` |
+| FR-09 | CLI・Markdown＋Discord通知 | `report/daily_brief.py`, `report/terminal_report.py`, `report/markdown_report.py`, `report/discord_notify.py`, `report/verdict_notification.py`, `scripts/notify_daily.py` |
 | FR-10 | バックテスト（対S&P500） | `backtest/strategies.py`, `backtest/runner.py`, `risk/position_sizing.py`（名目資金サイジング、シミュレータ専用） |
 | FR-11 | ペーパートレード記録（**廃止 2026-08-19**: 公開トラックレコード化に伴い実売買記録機能を撤去） | — |
 | FR-12 | 日次バッチ（冪等・フェイルソフト） | `pipeline/daily.py` |

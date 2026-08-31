@@ -499,14 +499,25 @@ def _preserved_reports_dates(
     )
 
 
-def _is_reclaimable_reports_orphan(key: str, preserved_dates: frozenset[str]) -> bool:
+def _is_reclaimable_reports_orphan(
+    key: str,
+    preserved_dates: frozenset[str],
+    remote_files: Mapping[str, FileEntry],
+) -> bool:
     """Whether a windowed push may garbage-collect an unreferenced `key`.
 
     Applies only to a `reports/`-prefixed `key` already known not to be in
-    the new manifest (`push` checks that separately). Two further conditions
-    narrow it to a genuine orphan -- an object a previous, interrupted push
-    uploaded but never got to reference (Issue #382):
+    the new manifest (`push` checks that separately). Three further
+    conditions narrow it to a genuine orphan -- an object a previous,
+    interrupted push uploaded but never got to reference (Issue #382):
 
+    - It must not already be a member of `remote_files`, the last committed
+      manifest. A genuine orphan is, by construction, never referenced by
+      any manifest -- the push that uploaded it crashed before it could add
+      the key there. A key that IS in `remote_files` is a real,
+      previously-published archive; if it is locally absent right now that
+      has some other cause (an accidental local delete, a partial checkout,
+      a bug elsewhere), and windowed push must never delete it.
     - It must look like a run-archive object (`_has_reports_sync_shape`).
       An unrecognized `reports/` key (leftover from an old version of this
       script, or placed by hand) is left alone rather than guessed at.
@@ -517,7 +528,8 @@ def _is_reclaimable_reports_orphan(key: str, preserved_dates: frozenset[str]) ->
     """
     relative = PurePosixPath(key[len(REPORTS_PREFIX) :])
     return (
-        _has_reports_sync_shape(relative)
+        key not in remote_files
+        and _has_reports_sync_shape(relative)
         and _reports_run_date(key) not in preserved_dates
     )
 
@@ -1046,14 +1058,18 @@ def _guard_append_only(
         windowed_reports_keys: When the pull that produced `local`'s
             `reports/` tree was windowed (Issue #373), the `reports/` keys
             that window fetched. A remote `reports/` key outside this set is
-            *expected* to be absent locally -- that absence is what
-            `reports/`'s suppressed garbage collection relies on -- so a
-            missing local entry for such a key is skipped rather than treated
-            as a deletion. It does NOT excuse a rewrite: a key outside the
-            window that is nonetheless present locally with different bytes
-            is still a violation, so the sha256 comparison always runs when
-            the key exists locally. `None` means the pull was not windowed:
-            every remote key under `prefixes` is expected locally, exactly as
+            *expected* to be absent locally, so a missing local entry for
+            such a key is skipped rather than treated as a deletion. Whether
+            the underlying object is retained is a separate decision made by
+            `push`'s GC step, narrowed to the key level by
+            `_is_reclaimable_reports_orphan` and `preserved_dates` (Issue
+            #382) rather than by suppressing garbage collection for the whole
+            `reports/` tree, as it did before that change. This parameter
+            does NOT excuse a rewrite: a key outside the window that is
+            nonetheless present locally with different bytes is still a
+            violation, so the sha256 comparison always runs when the key
+            exists locally. `None` means the pull was not windowed: every
+            remote key under `prefixes` is expected locally, exactly as
             before this parameter existed.
 
     Raises:
@@ -1088,7 +1104,7 @@ def _guard_append_only(
 def _manifest_files_for_push(
     remote_files: Mapping[str, FileEntry],
     local: Mapping[str, FileEntry],
-    reports_window: int | None,
+    windowed: frozenset[str] | None,
 ) -> dict[str, FileEntry]:
     """The full set of keys the new manifest must reference.
 
@@ -1098,22 +1114,26 @@ def _manifest_files_for_push(
     A windowed pull's `local` scan does not: it deliberately never fetched the
     `reports/` keys outside its window. Writing `Manifest(files=local)`
     directly would silently stop referencing every one of them -- the
-    underlying object survives (GC is suppressed for the very same reason,
-    see `push`'s GC step), but a manifest that no longer lists it is
-    equivalent to losing it for every future `pull`, which reads only
-    `manifest.files` and never lists the bucket itself. So those out-of-window
-    `reports/` entries are carried forward unchanged from `remote_files`; a
-    local key wins over a carried-forward one on the rare overlap (an
-    operator's local tree that still holds more than the recorded window and
-    corrected one of those older archives).
+    underlying object survives (see `push`'s GC step), but a manifest that no
+    longer lists it is equivalent to losing it for every future `pull`, which
+    reads only `manifest.files` and never lists the bucket itself. So those
+    out-of-window `reports/` entries are carried forward unchanged from
+    `remote_files`; a local key wins over a carried-forward one on the rare
+    overlap (an operator's local tree that still holds more than the recorded
+    window and corrected one of those older archives).
+
+    `windowed` is the `reports/` keys this working copy's window actually
+    fetched (`None` when the pull was unwindowed) -- the same value `push`
+    already computed for the append-only guard and the GC step, passed
+    through here rather than recomputed, so there is exactly one computation
+    of it per push.
     """
-    if reports_window is None:
+    if windowed is None:
         return dict(local)
-    fetched = _windowed_reports_keys(remote_files, reports_window)
     preserved = {
         key: entry
         for key, entry in remote_files.items()
-        if key.startswith(REPORTS_PREFIX) and key not in fetched
+        if key.startswith(REPORTS_PREFIX) and key not in windowed
     }
     return preserved | dict(local)
 
@@ -1163,8 +1183,9 @@ def push(
         raise DataSyncError(msg)
 
     remote_files: Mapping[str, FileEntry] = remote.files if remote else {}
-    # Computed once and shared by the append-only guard and the GC step below
-    # (Issue #382), rather than re-derived independently by each.
+    # Computed once and shared by the append-only guard, `_manifest_files_for_push`,
+    # and the GC step below (Issue #382), rather than re-derived independently
+    # by each.
     windowed = (
         _windowed_reports_keys(remote_files, reports_window)
         if reports_window is not None
@@ -1195,7 +1216,7 @@ def push(
     # push follows a windowed pull) the out-of-window `reports/` entries
     # carried forward untouched from `remote_files` -- see
     # `_manifest_files_for_push`.
-    manifest_files = _manifest_files_for_push(remote_files, local, reports_window)
+    manifest_files = _manifest_files_for_push(remote_files, local, windowed)
     _write_remote_manifest(
         store,
         Manifest(generation=generation, updated_at=now(), files=manifest_files),
@@ -1234,7 +1255,7 @@ def push(
         and (
             preserved_dates is None
             or not key.startswith(REPORTS_PREFIX)
-            or _is_reclaimable_reports_orphan(key, preserved_dates)
+            or _is_reclaimable_reports_orphan(key, preserved_dates, remote_files)
         )
     )
     for key in deleted:

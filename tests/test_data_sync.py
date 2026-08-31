@@ -771,6 +771,45 @@ def test_windowed_pull_then_push_leaves_an_out_of_window_orphan_alone(tmp_path):
     assert orphan_key in store.objects
 
 
+def test_windowed_pull_then_push_never_deletes_an_in_window_archive_missing_only_locally(
+    tmp_path,
+):
+    """Issue #382 regression: a real published archive is never an orphan, even if locally absent.
+
+    A genuine orphan (what `_is_reclaimable_reports_orphan` exists to reclaim)
+    was uploaded but never referenced by any committed manifest. This case is
+    different: the key IS in the last committed remote manifest -- it is a
+    real, previously-published archive -- and is merely missing from the
+    local tree for some unrelated reason (an accidental local delete, a
+    partial checkout, a bug elsewhere), not because it fell outside the
+    recorded window. The reclaim predicate must tell these apart and must
+    never delete the latter.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    run_ids = _seed_report_run_dates(origin.parent / "reports", _WINDOW_DATES)
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    data_sync.pull(store, _roots(mirror), reports_window=10)
+
+    # An in-window archive, present in `remote_files` (this push's manifest
+    # will read it back from the store), goes missing from the local mirror
+    # for a reason unrelated to windowing.
+    affected_date = _WINDOW_NEWEST_10[3]
+    affected_run_id = run_ids[affected_date]
+    md_key, result_key = _report_keys_for_date(affected_date, affected_run_id)
+    shutil.rmtree(mirror.parent / "reports" / affected_date)
+
+    push_report = data_sync.push(store, _roots(mirror), now=lambda: FIXED_NOW)
+
+    assert md_key not in push_report.deleted
+    assert result_key not in push_report.deleted
+    assert store.objects[md_key] == f"md-{affected_date}".encode()
+    assert store.objects[result_key] == f"result-{affected_date}".encode()
+
+
 def test_windowed_pull_then_push_never_deletes_an_unrecognized_reports_key(tmp_path):
     """A key that does not look like a run archive is left alone rather than guessed at (Issue #382).
 

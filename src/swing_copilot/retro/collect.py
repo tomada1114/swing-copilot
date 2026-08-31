@@ -37,6 +37,8 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from swing_copilot.analysis.export import (
     ANALYSIS_INPUT_FILENAME,
     ANALYSIS_RESULT_FILENAME,
@@ -387,6 +389,12 @@ def _load_collectable_run(
     parse under their strict schemas, and `result.run_id` matches the
     directory name -- decided independently of, and before, same-day
     deduplication.
+
+    Issue #376: the two documents are parsed one at a time (rather than in a
+    shared `try`) precisely so a parse failure's note can name *which* one
+    failed -- `analysis_input.json` and `analysis_result.json` are different
+    files with different schemas, and a note that cannot tell them apart gives
+    the operator nothing to open first.
     """
     label = f"{run_directory.run_date.isoformat()}/{run_directory.run_id}"
     input_path = run_directory.path / ANALYSIS_INPUT_FILENAME
@@ -398,10 +406,22 @@ def _load_collectable_run(
 
     try:
         analysis_input = load_analysis_input(input_path)
+    except AnalysisIngestError as exc:
+        logger.exception(
+            "retro collect: %s の %s 解析に失敗", label, ANALYSIS_INPUT_FILENAME
+        )
+        notes.append(f"{label}: {ANALYSIS_INPUT_FILENAME}{_describe_load_failure(exc)}")
+        return None
+
+    try:
         result = load_analysis_result(result_path)
-    except AnalysisIngestError:
-        logger.exception("retro collect: %s の解析に失敗", label)
-        notes.append(f"{label}: 解析文書を読めなかったためスキップ")
+    except AnalysisIngestError as exc:
+        logger.exception(
+            "retro collect: %s の %s 解析に失敗", label, ANALYSIS_RESULT_FILENAME
+        )
+        notes.append(
+            f"{label}: {ANALYSIS_RESULT_FILENAME}{_describe_load_failure(exc)}"
+        )
         return None
 
     if result.run_id != run_directory.run_id:
@@ -412,6 +432,51 @@ def _load_collectable_run(
         return None
 
     return _LoadedRun(analysis_input=analysis_input, result=result)
+
+
+#: A pydantic `ValidationError` can carry one entry per rejected field, and an
+#: unbounded blob does not belong in a note that lands in `notes`/DB. Capping
+#: keeps the note small while still naming the first (usually most relevant)
+#: failures.
+_MAX_VALIDATION_FIELDS_IN_NOTE = 3
+
+
+def _describe_load_failure(exc: AnalysisIngestError) -> str:
+    """Return the note suffix explaining why one document failed to load.
+
+    Issue #376: a note that only says "解析文書を読めなかった" leaves the
+    operator to open the archive by hand to find out why -- exactly the
+    failure mode #374 went a month without anyone noticing. When the
+    underlying cause is a pydantic `ValidationError` (an unknown, missing, or
+    mistyped field under the strict schema), every rejected field's `loc` is
+    named here, capped at `_MAX_VALIDATION_FIELDS_IN_NOTE`. Any other cause
+    (a missing file, undecodable bytes, invalid JSON -- see `documents.py`)
+    has no field to name, so that exception's own message is used instead;
+    it already states the reason.
+
+    Args:
+        exc: The `AnalysisIngestError` `load_analysis_input`/
+            `load_analysis_result` raised. Its `__cause__` is always set --
+            both functions only ever raise via `raise ... from exc`.
+
+    Returns:
+        A string starting with a space, ready to append after the filename.
+    """
+    cause = exc.__cause__
+    if not isinstance(cause, ValidationError):
+        return f" を読めなかったためスキップ（{cause}）"
+    locations = [_format_error_loc(error["loc"]) for error in cause.errors()]
+    shown = locations[:_MAX_VALIDATION_FIELDS_IN_NOTE]
+    remainder = len(locations) - len(shown)
+    fields = "; ".join(shown)
+    if remainder > 0:
+        fields += f" 他{remainder}件"
+    return f" の検証に失敗したためスキップ（フィールド: {fields}）"
+
+
+def _format_error_loc(loc: tuple[int | str, ...]) -> str:
+    """Render one pydantic error location as a dotted field path."""
+    return ".".join(str(part) for part in loc) or "(root)"
 
 
 def _write_run(

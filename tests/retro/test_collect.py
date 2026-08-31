@@ -14,7 +14,10 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from swing_copilot.analysis.export import ANALYSIS_RESULT_FILENAME
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.retro import collect as collect_module
 from swing_copilot.retro.collect import collect_verdicts
@@ -382,6 +385,66 @@ class TestCollectFailSoft:
 
         assert summary.collected_run_count == 0
         assert len(summary.notes) == 1
+        assert ANALYSIS_RESULT_FILENAME in summary.notes[0]
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_an_invalid_analysis_input_names_the_document_and_field(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376: the note must say *which* document and *which* field.
+
+        Before this fix, any `AnalysisIngestError` -- whether the document was
+        missing, unparsable JSON, or (as here) a schema-validation failure --
+        collapsed into the same uninformative
+        "解析文書を読めなかったためスキップ", with no way to tell a
+        `strategy_key` type error apart from a truncated file without opening
+        the archive by hand.
+        """
+        payload = input_payload(strategy_key=123)
+
+        write_run(analysis_input=payload)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_INPUT_FILENAME in note
+        assert "strategy_key" in note
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_an_invalid_analysis_result_names_the_document_and_field(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376: a `verdict.recommendation` outside its `Literal` set.
+
+        The rejected field's dotted path (`symbols.0.verdict.recommendation`)
+        must appear in the note, and the note must name
+        `analysis_result.json` -- not `analysis_input.json`, which parsed
+        fine here.
+        """
+        invalid_symbol = symbol_payload(
+            verdict={
+                "recommendation": "buy",
+                "reasons": [{"text": "根拠", "source_ids": [FILING_ID]}],
+            }
+        )
+        write_run(result=result_payload(symbols=[invalid_symbol]))
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_RESULT_FILENAME in note
+        assert ANALYSIS_INPUT_FILENAME not in note
+        assert "symbols.0.verdict.recommendation" in note
         assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
 
     def test_a_result_whose_run_id_disagrees_with_its_directory_is_skipped(

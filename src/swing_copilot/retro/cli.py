@@ -163,6 +163,16 @@ def _emit_unreadable_tag(unreadable_run_count: int) -> None:
     changing what the command returns. Emitted only when at least one run was
     unreadable; a fully successful scan writes nothing here.
 
+    Issue #376: the note this line points to now actually names which
+    document (`analysis_input.json`/`analysis_result.json`) and, for a schema
+    failure, which field(s) were rejected (`collect._describe_load_failure`)
+    -- previously the note read only "解析文書を読めなかったためスキップ",
+    so this guidance pointed at a note with nothing in it. The guidance line
+    and the note are both written via `_print_notes`/`console.print`, i.e.
+    stdout -- the same stream `logger.exception`'s traceback does *not* use
+    (this CLI configures no logging handler, so that traceback falls through
+    to `logging.lastResort` on stderr instead).
+
     Args:
         unreadable_run_count: `CollectSummary.unreadable_run_count` from the
             scan just run.
@@ -172,7 +182,8 @@ def _emit_unreadable_tag(unreadable_run_count: int) -> None:
     sys.stderr.write(
         f"COLLECT_UNREADABLE[{unreadable_run_count}]: "
         f"{unreadable_run_count} 件の run ディレクトリを解析できず取り込みを"
-        "スキップした（詳細は標準出力の note を参照）。終了コードは変えない。\n"
+        "スキップした（対象文書とフィールドは標準出力の note を参照）。"
+        "終了コードは変えない。\n"
     )
 
 

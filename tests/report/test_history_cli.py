@@ -87,6 +87,24 @@ def _candidate(symbol: str = "AAPL", rank: int = 1) -> Candidate:
     )
 
 
+def _insert_legacy_risk_assessment(
+    state_store: StateStore, run_id: UUID, symbol: str, max_shares: int
+) -> None:
+    """Insert a pre-#348 style `risk_assessments` row with a real share count.
+
+    `record_risk_assessments` always writes `NULL` for the sizing columns
+    now (Issue #348), so a row carrying a non-NULL `max_shares` can only be
+    reproduced by writing straight to the table -- exactly what an
+    un-rewritten pre-#348 archive still looks like (Issue #385).
+    """
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO risk_assessments (run_id, symbol, status, max_shares, "
+            "reasons_json, warnings_json) VALUES (?, ?, 'approved', ?, '[]', '[]')",
+            [str(run_id), symbol, max_shares],
+        )
+
+
 def _populate(state_store: StateStore) -> UUID:
     """Example 1's shape: 1 run with 2 candidates and 1 rejection."""
     run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
@@ -178,6 +196,20 @@ class TestRunDetail:
         assert "AAPL" in output
         assert "approved" in output
         assert "trade_risk" not in output
+
+    def test_a_pre_348_rows_share_count_never_appears_in_the_risk_table(
+        self, state_store: StateStore, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #385: `max_shares` is a compat column with zero readers now."""
+        run_id = _populate(state_store)
+        _insert_legacy_risk_assessment(state_store, run_id, "MSFT", 17)
+
+        main(["run", "--run-id", str(run_id), "--db", _db_path(state_store)])
+
+        output = capsys.readouterr().out
+        assert "MSFT" in output
+        assert "Shares" not in output
+        assert "17" not in output
 
     def test_unknown_run_id_exits_nonzero_without_traceback(
         self, state_store: StateStore, capsys: pytest.CaptureFixture[str]

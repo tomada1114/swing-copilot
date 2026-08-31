@@ -165,13 +165,11 @@ def _render_run_detail(console: Console, detail: RunDetail) -> None:
         table = Table(title="Risk")
         table.add_column("Symbol")
         table.add_column("Status")
-        table.add_column("Shares", justify="right")
         table.add_column("Binding constraint")
         for risk in detail.risk_assessments:
             table.add_row(
                 risk.symbol,
                 risk.status,
-                str(risk.max_shares) if risk.max_shares is not None else "-",
                 risk.binding_constraint or "-",
             )
         console.print(table)

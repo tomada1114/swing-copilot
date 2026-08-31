@@ -45,11 +45,17 @@ class RunCandidateRow:
 
 @dataclass(frozen=True, slots=True)
 class RunRiskRow:
-    """One risk assessment as recorded for a specific run (REQ-003)."""
+    """One risk assessment as recorded for a specific run (REQ-003).
+
+    Deliberately has no share-count field (Issue #385): `max_shares` is a
+    compatibility column for pre-#348 rows only, kept in `risk_assessments`
+    as the historical audit trail but never read back here, since the
+    reader-visible side of run history must not surface account-dependent
+    sizing.
+    """
 
     symbol: str
     status: str
-    max_shares: int | None
     binding_constraint: str | None
 
 
@@ -381,7 +387,7 @@ def get_run_detail(database: Database, run_id: UUID) -> RunDetail | None:
         ).fetchall()
         risk_rows = conn.execute(
             """
-            SELECT symbol, status, max_shares, binding_constraint
+            SELECT symbol, status, binding_constraint
             FROM risk_assessments
             WHERE run_id = ?
             ORDER BY symbol
@@ -400,9 +406,7 @@ def get_run_detail(database: Database, run_id: UUID) -> RunDetail | None:
         for row in candidate_rows
     )
     risk_assessments = tuple(
-        RunRiskRow(
-            symbol=row[0], status=row[1], max_shares=row[2], binding_constraint=row[3]
-        )
+        RunRiskRow(symbol=row[0], status=row[1], binding_constraint=row[2])
         for row in risk_rows
     )
     return RunDetail(

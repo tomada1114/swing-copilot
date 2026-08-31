@@ -487,18 +487,31 @@ def test_daily_workflow_uses_dont_ask_and_a_narrow_tool_allowlist():
 def test_daily_workflow_wires_the_outcome_file_and_uploads_the_execution_log():
     """Issue #372: outcome-file plumbing must not depend on the prompt.
 
-    The env var lives in the job's `env:` (not a per-step `env:`) so it
-    reaches `copilot-daily` regardless of what the headless session actually
-    runs, and the execution log is uploaded (`if: always()`) so a session's
-    behavior can be inspected after the fact -- not knowing that was itself
-    the defect this issue traces to.
+    The env var has to reach `copilot-daily` regardless of what the headless
+    session actually runs, and the execution log is uploaded (`if: always()`)
+    so a session's behavior can be inspected after the fact -- not knowing
+    that was itself the defect this issue traces to.
+
+    It is exported into `$GITHUB_ENV` rather than declared in the job's
+    `env:`, which is what Issue #380 traces to: `runner` is a step-scoped
+    context, so a job-level `env:` referencing it makes GitHub reject the
+    whole file. `GITHUB_ENV` keeps the job-wide reach without that. The
+    export must come before the step that runs the analysis, or the
+    fallback is not set when `copilot-daily` is invoked.
     """
     workflow = yaml.safe_load(DAILY_WORKFLOW.read_text(encoding="utf-8"))
     job = workflow["jobs"]["daily"]
 
-    assert job["env"]["COPILOT_DAILY_OUTCOME_FILE"] == (
-        "${{ runner.temp }}/copilot-daily-outcome.json"
+    assert "COPILOT_DAILY_OUTCOME_FILE" not in (job.get("env") or {})
+
+    step_names = [step.get("name") for step in job["steps"]]
+    export_index = step_names.index("Export the daily outcome file path")
+    export_step = job["steps"][export_index]
+    assert (
+        'echo "COPILOT_DAILY_OUTCOME_FILE=$RUNNER_TEMP/copilot-daily-outcome.json"'
+        ' >> "$GITHUB_ENV"' in export_step["run"]
     )
+    assert export_index < step_names.index("Run swing-daily")
 
     steps = {step["name"]: step for step in job["steps"] if "name" in step}
     verify_step = steps["Verify the analysis completed"]
@@ -514,6 +527,41 @@ def test_daily_workflow_wires_the_outcome_file_and_uploads_the_execution_log():
     assert upload_step["with"]["path"] == "${{ steps.claude.outputs.execution_file }}"
     assert upload_step["with"]["retention-days"] == 14
     assert upload_step["with"]["if-no-files-found"] == "ignore"
+
+
+def test_no_workflow_references_the_runner_context_outside_a_step():
+    """Issue #380: a job-level `runner` reference is a silent scheduler outage.
+
+    GitHub validates context availability when it *loads* the file, before
+    any job exists. A `runner` reference outside a step therefore does not
+    fail a job -- it fails the whole run with zero jobs, and the only place
+    that shows up is a red run in the Actions tab. For `swing-daily.yml`,
+    whose sole automated trigger is `schedule`, that means the daily loop
+    stops running with nothing else to notice it (it did, from 2026-08-30
+    until this fix).
+
+    `actionlint` catches this in pre-commit and in CI. This test is the
+    offline copy of that check for the one invariant that has already bitten,
+    so the suite fails on it even where `actionlint` is not installed.
+    """
+    workflows = sorted((PROJECT_ROOT / ".github/workflows").glob("*.yml"))
+    assert workflows, "no workflow files found"
+
+    offenders: list[str] = []
+    for path in workflows:
+        for job_name, job in (
+            yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+        ).items():
+            if not isinstance(job, dict):
+                continue
+            job_level = {key: value for key, value in job.items() if key != "steps"}
+            if "runner." in yaml.safe_dump(job_level):
+                offenders.append(f"{path.name}:{job_name}")
+
+    assert not offenders, (
+        "`runner` is only available inside a step; these job-level uses make "
+        f"GitHub reject the workflow file: {offenders}"
+    )
 
 
 def test_headless_daily_run_uses_tool_reads_and_exact_bash_shapes():

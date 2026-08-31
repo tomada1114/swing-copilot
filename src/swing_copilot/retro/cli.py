@@ -323,8 +323,17 @@ def _run_ingest(
 
 
 def _print_notes(console: Console, notes: tuple[str, ...]) -> None:
+    """Print each note in yellow without interpreting it as Rich markup.
+
+    A note can carry arbitrary exception text -- including an
+    operator-supplied `--reports-dir` path via `OSError`, or (Issue #376) a
+    document's own failure message -- so an embedded closing tag such as
+    `[/]` must not raise `rich.errors.MarkupError` and turn a deliberately
+    fail-soft command into a hard crash. `markup=False` disables tag parsing
+    while `style="yellow"` still applies the colour.
+    """
     for note in notes:
-        console.print(f"[yellow]{note}[/yellow]")
+        console.print(note, style="yellow", markup=False)
 
 
 def main(argv: list[str] | None = None) -> None:

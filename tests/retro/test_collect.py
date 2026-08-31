@@ -385,7 +385,14 @@ class TestCollectFailSoft:
 
         assert summary.collected_run_count == 0
         assert len(summary.notes) == 1
-        assert ANALYSIS_RESULT_FILENAME in summary.notes[0]
+        note = summary.notes[0]
+        assert ANALYSIS_RESULT_FILENAME in note
+        # The failure body, not just the filename: this is the
+        # `AnalysisIngestError`'s own message (F1's `exc`, not `exc.__cause__`),
+        # so a regression that starts interpolating the bare cause again --
+        # or drops the reason text altogether -- is caught here rather than
+        # passing unnoticed.
+        assert "is not valid JSON" in note
         assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
 
     def test_an_invalid_analysis_input_names_the_document_and_field(
@@ -414,6 +421,61 @@ class TestCollectFailSoft:
         note = summary.notes[0]
         assert ANALYSIS_INPUT_FILENAME in note
         assert "strategy_key" in note
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_a_missing_field_and_a_stray_field_render_different_error_types(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376 review (F3): `loc` alone cannot discriminate these two.
+
+        A missing required field and an unknown stray field both name in
+        `loc`, so before this fix they rendered identically as bare
+        `フィールド: <loc>` -- leaving the operator unable to tell "this
+        archive predates a schema addition" from "this archive has a stray
+        field", exactly the discrimination the #374 post-mortem needed.
+        Appending pydantic's own `error["type"]` (`missing` vs
+        `extra_forbidden`) fixes that.
+        """
+        payload = input_payload(bogus_field="unexpected")
+        write_run(analysis_input=payload)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        note = summary.notes[0]
+        assert "bogus_field" in note
+        assert "extra_forbidden" in note
+
+    def test_more_than_three_rejected_fields_are_truncated_with_a_count(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376 review: an empty document is the common #374-shaped case.
+
+        `AnalysisInput` requires 8 top-level fields, so `{}` rejects all of
+        them -- more than `_MAX_VALIDATION_FIELDS_IN_NOTE` (3) -- exercising
+        the truncation branch that the offline coverage run otherwise never
+        reaches. The first three fields render in declaration order
+        (`schema_version`, `run_id`, `as_of`), and the remaining five are
+        summarized rather than listed.
+        """
+        write_run(analysis_input={})
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_INPUT_FILENAME in note
+        assert "schema_version" in note
+        assert "run_id" in note
+        assert "as_of" in note
+        assert "他5件" in note
         assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
 
     def test_an_invalid_analysis_result_names_the_document_and_field(

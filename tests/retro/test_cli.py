@@ -7,15 +7,17 @@ verified narrations there so the L2 qualitative gate has something to count.
 
 from __future__ import annotations
 
+import io
 import json
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from rich.console import Console
 
 from swing_copilot.config import Secrets
-from swing_copilot.retro.cli import main
+from swing_copilot.retro.cli import _print_notes, main
 from swing_copilot.retro.schemas import RetroInput
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
@@ -179,6 +181,27 @@ class TestCollectCommand:
         )
 
         assert capsys.readouterr().err == ""
+
+    def test_a_note_containing_markup_like_text_prints_verbatim_without_raising(
+        self,
+    ) -> None:
+        """Issue #376 review: a note can carry arbitrary exception text.
+
+        Before this fix, `_print_notes` interpolated each note into
+        `f"[yellow]{note}[/yellow]"` and let Rich parse the result as markup.
+        A note containing something that looks like a closing tag -- e.g. an
+        operator-supplied `--reports-dir` path surfaced via `OSError`, or a
+        document's own failure message -- would raise
+        `rich.errors.MarkupError` and turn the deliberately fail-soft
+        `collect` command into a hard crash.
+        """
+        buffer = io.StringIO()
+        console = Console(file=buffer, force_terminal=False, width=200)
+        note = "archive[/]broken: フィールド (extra_forbidden)"
+
+        _print_notes(console, (note,))
+
+        assert note in buffer.getvalue()
 
 
 class TestEvaluateCommand:

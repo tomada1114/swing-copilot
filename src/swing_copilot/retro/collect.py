@@ -61,6 +61,8 @@ from swing_copilot.storage.verdict_records import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pydantic_core import ErrorDetails
+
     from swing_copilot.analysis.schemas import (
         AnalysisInput,
         AnalysisResult,
@@ -448,35 +450,46 @@ def _describe_load_failure(exc: AnalysisIngestError) -> str:
     operator to open the archive by hand to find out why -- exactly the
     failure mode #374 went a month without anyone noticing. When the
     underlying cause is a pydantic `ValidationError` (an unknown, missing, or
-    mistyped field under the strict schema), every rejected field's `loc` is
-    named here, capped at `_MAX_VALIDATION_FIELDS_IN_NOTE`. Any other cause
-    (a missing file, undecodable bytes, invalid JSON -- see `documents.py`)
-    has no field to name, so that exception's own message is used instead;
-    it already states the reason.
+    mistyped field under the strict schema), every rejected field's location
+    and error type are named here, capped at `_MAX_VALIDATION_FIELDS_IN_NOTE`.
+    Any other cause (a missing file, undecodable bytes, invalid JSON -- see
+    `documents.py`) has no field to name, so `exc`'s own message is used
+    instead; it already states the reason (e.g. "Analysis document could not
+    be read: <path>"). `exc`, not `exc.__cause__`, is interpolated there so
+    the note stays meaningful even if some future `AnalysisIngestError` reaches
+    this branch without a chained cause.
 
     Args:
         exc: The `AnalysisIngestError` `load_analysis_input`/
-            `load_analysis_result` raised. Its `__cause__` is always set --
-            both functions only ever raise via `raise ... from exc`.
+            `load_analysis_result` raised. Its `__cause__` is always set today
+            -- both functions only ever raise via `raise ... from exc`.
 
     Returns:
         A string starting with a space, ready to append after the filename.
     """
     cause = exc.__cause__
     if not isinstance(cause, ValidationError):
-        return f" を読めなかったためスキップ（{cause}）"
-    locations = [_format_error_loc(error["loc"]) for error in cause.errors()]
-    shown = locations[:_MAX_VALIDATION_FIELDS_IN_NOTE]
-    remainder = len(locations) - len(shown)
-    fields = "; ".join(shown)
+        return f" を読めなかったためスキップ（{exc}）"
+    fields = [_format_error(error) for error in cause.errors()]
+    shown = fields[:_MAX_VALIDATION_FIELDS_IN_NOTE]
+    remainder = len(fields) - len(shown)
+    rendered = "; ".join(shown)
     if remainder > 0:
-        fields += f" 他{remainder}件"
-    return f" の検証に失敗したためスキップ（フィールド: {fields}）"
+        rendered += f" 他{remainder}件"
+    return f" の検証に失敗したためスキップ（フィールド: {rendered}）"
 
 
-def _format_error_loc(loc: tuple[int | str, ...]) -> str:
-    """Render one pydantic error location as a dotted field path."""
-    return ".".join(str(part) for part in loc) or "(root)"
+def _format_error(error: ErrorDetails) -> str:
+    """Render one pydantic error as its dotted field path plus error type.
+
+    The `loc` alone cannot tell a missing required field apart from a stray
+    field rejected by `extra="forbid"` -- both render as the same field
+    name -- so `error["type"]` (e.g. `missing`, `extra_forbidden`,
+    `int_type`) is appended, giving the operator exactly the discrimination
+    the #374 post-mortem needed.
+    """
+    location = ".".join(str(part) for part in error["loc"]) or "(root)"
+    return f"{location} ({error['type']})"
 
 
 def _write_run(

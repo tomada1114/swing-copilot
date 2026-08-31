@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -72,6 +73,32 @@ class TestNarrowing:
     def test_an_empty_database_yields_empty_frames(self, dashboard_db: Fixture) -> None:
         assert queries.runs(dashboard_db.db_path).empty
         assert queries.rejections_for_run(dashboard_db.db_path, str(RUN_ID)).empty
+
+
+class TestReasonsForSymbol:
+    """Issue #385: pre-#352 reason text may describe a reader's account."""
+
+    @pytest.mark.parametrize(
+        ("run_date", "is_visible"),
+        [
+            pytest.param(date(2026, 8, 20), False, id="day_before_cutoff"),
+            pytest.param(date(2026, 8, 21), True, id="exactly_at_cutoff"),
+            pytest.param(date(2026, 8, 22), True, id="day_after_cutoff"),
+        ],
+    )
+    def test_the_account_dependent_cutoff_is_inclusive(
+        self,
+        builder: Builder,
+        dashboard_db: Fixture,
+        run_date: date,
+        is_visible: bool,
+    ) -> None:
+        builder.run(run_date=run_date)
+        builder.reason("AAPL", index=0, text="最終株数17株はこの制約下での結果である")
+
+        frame = queries.reasons_for_symbol(dashboard_db.db_path, str(RUN_ID), "AAPL")
+
+        assert frame.empty is not is_visible
 
 
 class TestIncompleteRuns:

@@ -21,18 +21,31 @@ import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from datetime import date
+from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
 from swing_copilot.storage.json_guard import dumps_safe
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
-    from datetime import date
 
     import duckdb
 
     from swing_copilot.storage.database import Database
+
+#: Earliest verdict `as_of` guaranteed free of reader-account-dependent share
+#: counts. Issue #348 dropped account-dependent sizing from the production
+#: risk path; Issue #352 (merged 2026-08-21) then removed the last
+#: account-dependent fields from `risk_constraints` in `analysis_input.json`,
+#: so a verdict dated on or after this day was written from an export that
+#: never carried "final shares" language in the first place. A verdict dated
+#: before it may still describe a reader's account (share counts, "口座規模")
+#: verbatim in `reasons_json` / `verdict_reasons.text` -- those rows are kept
+#: forever as the historical record and are never rewritten (Issue #385), so
+#: both re-injection into `<prior_verdicts>` (`get_prior_verdicts` below) and
+#: the dashboard's per-symbol reason display gate on this same constant.
+ACCOUNT_INDEPENDENT_VERDICT_CUTOFF: Final = date(2026, 8, 21)
 
 _INSERT_VERDICT = """
     INSERT INTO verdicts (
@@ -869,7 +882,11 @@ def get_prior_verdicts(
     record feature.
 
     Point-in-time: `as_of < before_date` strictly, so today's own verdict can
-    never be fed back into today's input.
+    never be fed back into today's input. Also bounded below by
+    `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (Issue #385): a verdict recorded
+    before that day may describe a reader's account verbatim in its reason
+    text, and that text is never rewritten, so it must never be re-injected
+    into a fresh `analysis_input.json`.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -893,6 +910,7 @@ def get_prior_verdicts(
                        reasons_json
                 FROM verdicts
                 WHERE symbol = ? AND strategy_key = ? AND as_of < ?
+                  AND as_of >= ?
                 ORDER BY as_of DESC, run_id DESC
                 LIMIT ?
             )
@@ -904,7 +922,13 @@ def get_prior_verdicts(
               ON o.run_id = r.run_id AND o.symbol = r.symbol
             ORDER BY r.as_of DESC, r.run_id DESC, o.horizon_days
             """,
-            [symbol, strategy_key, before_date, limit],
+            [
+                symbol,
+                strategy_key,
+                before_date,
+                ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
+                limit,
+            ],
         ).fetchall()
 
     outcomes: dict[str, list[PriorVerdictOutcome]] = defaultdict(list)

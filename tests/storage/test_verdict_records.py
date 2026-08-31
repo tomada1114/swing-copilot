@@ -18,6 +18,7 @@ import duckdb
 import pytest
 
 from swing_copilot.storage.verdict_records import (
+    ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
     AnalysisSourceCoverageRecord,
     CollectedRunRecords,
     NewsSupplyRecord,
@@ -1088,7 +1089,20 @@ class TestGetVerdictCitationsInWindow:
 
 
 class TestGetPriorVerdicts:
-    """Issue #191: a repeat candidate's own earlier verdicts, fed back in."""
+    """Issue #191: a repeat candidate's own earlier verdicts, fed back in.
+
+    Every verdict date in this class is on or after
+    `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (2026-08-21) unless a test is
+    specifically exercising that cutoff (Issue #385): a verdict dated before
+    it is never visible through `get_prior_verdicts` regardless of the
+    point-in-time `before_date` argument, so an older date would make an
+    unrelated assertion pass for the wrong reason.
+    """
+
+    #: A `before_date` comfortably after the account-dependent cutoff, so the
+    #: point-in-time (`as_of < before_date`) tests below exercise only that
+    #: rule and never trip the account-dependent one by accident.
+    _BEFORE_DATE = date(2026, 8, 25)
 
     @staticmethod
     def _write(
@@ -1113,7 +1127,7 @@ class TestGetPriorVerdicts:
         run_id = self._write(
             state_store,
             "AAPL",
-            date(2026, 7, 1),
+            date(2026, 8, 21),
             reasons=(
                 VerdictReasonRecord(
                     text="受注が伸びている",
@@ -1136,7 +1150,7 @@ class TestGetPriorVerdicts:
             ],
         )
 
-        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
 
         assert len(prior) == 1
         assert prior[0].recommendation == "proceed"
@@ -1151,9 +1165,9 @@ class TestGetPriorVerdicts:
         self, state_store: StateStore
     ) -> None:
         """Not an error and not a neutral result -- just not measurable yet."""
-        self._write(state_store, "AAPL", date(2026, 7, 1))
+        self._write(state_store, "AAPL", date(2026, 8, 21))
 
-        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
 
         assert len(prior) == 1
         assert prior[0].outcomes == ()
@@ -1161,9 +1175,9 @@ class TestGetPriorVerdicts:
     @pytest.mark.parametrize(
         ("verdict_date", "is_visible"),
         [
-            pytest.param(date(2026, 7, 19), True, id="day_before_cutoff"),
-            pytest.param(AS_OF, False, id="exactly_at_cutoff"),
-            pytest.param(date(2026, 7, 21), False, id="day_after_cutoff"),
+            pytest.param(date(2026, 8, 24), True, id="day_before_cutoff"),
+            pytest.param(_BEFORE_DATE, False, id="exactly_at_cutoff"),
+            pytest.param(date(2026, 8, 26), False, id="day_after_cutoff"),
         ],
     )
     def test_the_point_in_time_cutoff_is_strictly_exclusive(
@@ -1172,50 +1186,100 @@ class TestGetPriorVerdicts:
         """Today's own verdict can never be fed back into today's own input."""
         self._write(state_store, "AAPL", verdict_date)
 
-        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3)
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
 
         assert bool(prior) is is_visible
+
+    @pytest.mark.parametrize(
+        ("verdict_date", "is_visible"),
+        [
+            pytest.param(
+                date(2026, 8, 20), False, id="day_before_account_dependent_cutoff"
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
+                True,
+                id="exactly_at_account_dependent_cutoff",
+            ),
+            pytest.param(
+                date(2026, 8, 22), True, id="day_after_account_dependent_cutoff"
+            ),
+        ],
+    )
+    def test_the_account_dependent_cutoff_is_inclusive(
+        self, state_store: StateStore, verdict_date: date, is_visible: bool
+    ) -> None:
+        """Issue #385: pre-#352 verdicts may quote reader-account share counts."""
+        self._write(state_store, "AAPL", verdict_date)
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+
+        assert bool(prior) is is_visible
+
+    def test_a_symbol_with_only_pre_cutoff_verdicts_returns_empty(
+        self, state_store: StateStore
+    ) -> None:
+        """UNH-shaped case: a symbol not re-candidated since before the cutoff."""
+        self._write(state_store, "AAPL", date(2026, 7, 1))
+        self._write(state_store, "AAPL", date(2026, 8, 20))
+
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+            == ()
+        )
 
     def test_only_the_same_strategys_verdicts_are_comparable_feedback(
         self, state_store: StateStore
     ) -> None:
         self._write(
-            state_store, "AAPL", date(2026, 7, 1), strategy_key="mean_reversion"
+            state_store, "AAPL", date(2026, 8, 21), strategy_key="mean_reversion"
         )
 
-        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+            == ()
+        )
 
     def test_another_symbols_verdict_is_never_returned(
         self, state_store: StateStore
     ) -> None:
-        self._write(state_store, "MSFT", date(2026, 7, 1))
+        self._write(state_store, "MSFT", date(2026, 8, 21))
 
-        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+            == ()
+        )
 
     def test_the_newest_verdicts_are_kept_when_the_limit_bites(
         self, state_store: StateStore
     ) -> None:
-        for day in (1, 2, 3):
-            self._write(state_store, "AAPL", date(2026, 7, day))
+        for day in (21, 22, 23):
+            self._write(state_store, "AAPL", date(2026, 8, day))
 
-        prior = state_store.get_prior_verdicts("AAPL", "default", AS_OF, 2)
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 2)
 
         assert [record.as_of for record in prior] == [
-            date(2026, 7, 3),
-            date(2026, 7, 2),
+            date(2026, 8, 23),
+            date(2026, 8, 22),
         ]
 
     def test_a_non_positive_limit_reads_nothing_at_all(
         self, state_store: StateStore
     ) -> None:
-        self._write(state_store, "AAPL", date(2026, 7, 1))
+        self._write(state_store, "AAPL", date(2026, 8, 21))
 
-        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 0) == ()
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 0)
+            == ()
+        )
 
     def test_a_symbol_with_no_archived_verdict_returns_empty(
         self, state_store: StateStore
     ) -> None:
-        assert state_store.get_prior_verdicts("AAPL", "default", AS_OF, 3) == ()
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+            == ()
+        )
 
 
 class TestGetVerdictReasonBasesInWindow:

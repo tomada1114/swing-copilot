@@ -33,6 +33,7 @@ from swing_copilot.report.incomplete_runs import (
     find_incomplete_runs,
 )
 from swing_copilot.storage.database import Database
+from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -90,11 +91,18 @@ def scorecard_for_run(db_path: Path, run_id: str) -> pd.DataFrame:
 
 
 def reasons_for_symbol(db_path: Path, run_id: str, symbol: str) -> pd.DataFrame:
-    """`v_verdict_reasons` rows for one symbol, in the order they were written."""
+    """`v_verdict_reasons` rows for one symbol, in the order they were written.
+
+    Filtered to `run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (Issue #385):
+    a run before that date may have a verdict whose reason text describes a
+    reader's account (share counts) verbatim, and `verdict_reasons.text` is
+    never rewritten to remove that, so the dashboard withholds it here
+    instead -- the same cutoff `get_prior_verdicts` gates re-injection on.
+    """
     return research.query(
         "SELECT reason_index, text, basis, source_id_count FROM v_verdict_reasons "
-        "WHERE run_id = ? AND symbol = ? ORDER BY reason_index",
-        [run_id, symbol],
+        "WHERE run_id = ? AND symbol = ? AND run_date >= ? ORDER BY reason_index",
+        [run_id, symbol, ACCOUNT_INDEPENDENT_VERDICT_CUTOFF],
         db_path=db_path,
     )
 

@@ -21,7 +21,7 @@ import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
@@ -46,6 +46,84 @@ if TYPE_CHECKING:
 #: both re-injection into `<prior_verdicts>` (`get_prior_verdicts` below) and
 #: the dashboard's per-symbol reason display gate on this same constant.
 ACCOUNT_INDEPENDENT_VERDICT_CUTOFF: Final = date(2026, 8, 21)
+
+#: The instant Issue #352 merged (PR #352, merge commit `78dd2f1`; `gh pr
+#: view 352 --json mergedAt` -> `2026-08-21T19:14:55Z`), removing the last
+#: account-dependent field from `risk_constraints` in `analysis_input.json`.
+#: `runs.started_at` is `now()` at the moment a run actually *executed*
+#: (`storage/state_store.py::start_run` inserts it as DuckDB's `now()`) --
+#: wall time, never touched by `--as-of` (AGENTS.md: "wall time is metadata,
+#: never a substitute for `as_of`"). So a run that *started* on or
+#: after this instant necessarily ran account-independent code and produced
+#: an account-independent export, no matter how far in the past `--as-of`
+#: told it to replay (Issue #389: `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` alone
+#: looks at `run_date`, which `--as-of` sets to the replayed date, not the
+#: date the run actually happened -- so a replay of an old date was
+#: permanently withholding an already account-independent reason).
+#: `reason_text_visible_sql`/`is_reason_text_visible` below combine the two
+#: cutoffs as a pure relaxation of `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` alone.
+ACCOUNT_INDEPENDENT_EXPORT_SINCE: Final = datetime(2026, 8, 21, 19, 14, 55, tzinfo=UTC)
+
+
+def reason_text_visible_sql(
+    started_at_column: str = "started_at", run_date_column: str = "run_date"
+) -> str:
+    """The shared SQL predicate for whether a verdict's reason text may be shown (Issue #389).
+
+    A pure relaxation of the plain `run_date_column >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`
+    rule Issue #385 shipped: nothing visible under that rule becomes hidden
+    here. A reason is visible when the run that wrote it either *started* at
+    or after `ACCOUNT_INDEPENDENT_EXPORT_SINCE` (git-verifiable proof its
+    export was already account-independent, however early `--as-of` dated
+    the run itself), or is *dated* at or after
+    `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`. Both `dashboard/queries.py`'s
+    `reasons_for_symbol` and `get_prior_verdicts` below build their SQL from
+    this one function so the two never drift apart -- what one shows, the
+    other may re-inject.
+
+    `started_at_column` reading `NULL` (e.g. a `LEFT JOIN runs` that found no
+    row) makes the first term `NULL`, which is never true, so the expression
+    degrades to the second term alone -- the pre-#389 rule, unchanged for a
+    verdict whose owning run cannot be resolved.
+
+    Args:
+        started_at_column: SQL expression for the candidate `runs.started_at`
+            (qualify it, e.g. `"r.started_at"`, in a multi-table query).
+        run_date_column: SQL expression for the run's date -- `runs.run_date`,
+            or `verdicts.as_of` where the two are equal by construction (see
+            `storage/schema.py`'s `verdicts.as_of` comment).
+
+    Returns:
+        A boolean SQL expression with exactly two `?` placeholders. Bind
+        `(ACCOUNT_INDEPENDENT_EXPORT_SINCE, ACCOUNT_INDEPENDENT_VERDICT_CUTOFF)`
+        to them, in that order.
+    """
+    return f"({started_at_column} >= ? OR {run_date_column} >= ?)"
+
+
+def is_reason_text_visible(
+    *, started_at: datetime | None, run_date: date | None
+) -> bool:
+    """Pure-Python mirror of `reason_text_visible_sql`'s bound predicate (Issue #389).
+
+    For a caller holding already-fetched values (the symbol page's
+    `RunRef`) rather than building SQL. Must always agree with
+    `reason_text_visible_sql` for the same `(started_at, run_date)` pair --
+    see `tests/storage/test_verdict_records.py` for the equivalence check.
+
+    Args:
+        started_at: The candidate `runs.started_at`, or `None` when the run's
+            own `runs` row is unresolved.
+        run_date: The run's date (or the verdict's own `as_of`, equal to it
+            by construction), or `None` when unknown.
+
+    Returns:
+        Whether a reason written by this run's export may be shown.
+    """
+    if started_at is not None and started_at >= ACCOUNT_INDEPENDENT_EXPORT_SINCE:
+        return True
+    return run_date is not None and run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
+
 
 _INSERT_VERDICT = """
     INSERT INTO verdicts (
@@ -883,10 +961,14 @@ def get_prior_verdicts(
 
     Point-in-time: `as_of < before_date` strictly, so today's own verdict can
     never be fed back into today's input. Also bounded below by
-    `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (Issue #385): a verdict recorded
-    before that day may describe a reader's account verbatim in its reason
-    text, and that text is never rewritten, so it must never be re-injected
-    into a fresh `analysis_input.json`.
+    `reason_text_visible_sql()` (Issue #389, relaxing #385's plain
+    `as_of >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`): a verdict whose owning run
+    neither started on/after `ACCOUNT_INDEPENDENT_EXPORT_SINCE` nor is dated
+    on/after `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` may describe a reader's
+    account verbatim in its reason text, and that text is never rewritten, so
+    it must never be re-injected into a fresh `analysis_input.json`. The
+    filter is applied inside the `recent` CTE, before `LIMIT` -- a verdict it
+    excludes never consumes one of the `limit` slots.
 
     Args:
         database: Shared DuckDB connection owner.
@@ -902,16 +984,18 @@ def get_prior_verdicts(
     """
     if limit <= 0:
         return ()
+    predicate = reason_text_visible_sql("owning_run.started_at", "v.as_of")
     with database.connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             WITH recent AS (
-                SELECT run_id, as_of, symbol, strategy_key, recommendation,
-                       reasons_json
-                FROM verdicts
-                WHERE symbol = ? AND strategy_key = ? AND as_of < ?
-                  AND as_of >= ?
-                ORDER BY as_of DESC, run_id DESC
+                SELECT v.run_id, v.as_of, v.symbol, v.strategy_key,
+                       v.recommendation, v.reasons_json
+                FROM verdicts v
+                LEFT JOIN runs owning_run ON owning_run.run_id = v.run_id
+                WHERE v.symbol = ? AND v.strategy_key = ? AND v.as_of < ?
+                  AND {predicate}
+                ORDER BY v.as_of DESC, v.run_id DESC
                 LIMIT ?
             )
             SELECT r.run_id, r.as_of, r.symbol, r.strategy_key, r.recommendation,
@@ -921,11 +1005,12 @@ def get_prior_verdicts(
             LEFT JOIN verdict_outcomes AS o
               ON o.run_id = r.run_id AND o.symbol = r.symbol
             ORDER BY r.as_of DESC, r.run_id DESC, o.horizon_days
-            """,
+            """,  # noqa: S608 - predicate from a fixed internal helper, no interpolated input
             [
                 symbol,
                 strategy_key,
                 before_date,
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE,
                 ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
                 limit,
             ],

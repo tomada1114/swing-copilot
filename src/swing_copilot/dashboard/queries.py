@@ -33,7 +33,11 @@ from swing_copilot.report.incomplete_runs import (
     find_incomplete_runs,
 )
 from swing_copilot.storage.database import Database
-from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
+from swing_copilot.storage.verdict_records import (
+    ACCOUNT_INDEPENDENT_EXPORT_SINCE,
+    ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
+    reason_text_visible_sql,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -93,16 +97,28 @@ def scorecard_for_run(db_path: Path, run_id: str) -> pd.DataFrame:
 def reasons_for_symbol(db_path: Path, run_id: str, symbol: str) -> pd.DataFrame:
     """`v_verdict_reasons` rows for one symbol, in the order they were written.
 
-    Filtered to `run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (Issue #385):
-    a run before that date may have a verdict whose reason text describes a
-    reader's account (share counts) verbatim, and `verdict_reasons.text` is
-    never rewritten to remove that, so the dashboard withholds it here
-    instead -- the same cutoff `get_prior_verdicts` gates re-injection on.
+    Gated by `reason_text_visible_sql()` (Issue #389, a pure relaxation of
+    #385's plain `run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` filter): a
+    run whose `runs.started_at` is on or after `ACCOUNT_INDEPENDENT_EXPORT_SINCE`
+    ran account-independent code and wrote an account-independent export no
+    matter how early `--as-of` dated it, so an `--as-of` replay of an old
+    date is no longer withheld. A verdict that genuinely ran before Issue
+    #352 -- both `started_at` and `run_date` predate the two cutoffs -- is
+    still withheld: `verdict_reasons.text` is never rewritten to remove a
+    reader-account mention, so the dashboard withholds it here instead, the
+    same predicate `get_prior_verdicts` gates re-injection on.
     """
+    predicate = reason_text_visible_sql()
     return research.query(
-        "SELECT reason_index, text, basis, source_id_count FROM v_verdict_reasons "
-        "WHERE run_id = ? AND symbol = ? AND run_date >= ? ORDER BY reason_index",
-        [run_id, symbol, ACCOUNT_INDEPENDENT_VERDICT_CUTOFF],
+        "SELECT reason_index, text, basis, source_id_count FROM v_verdict_reasons "  # noqa: S608 - fixed predicate, no interpolated input
+        f"WHERE run_id = ? AND symbol = ? AND {predicate} "
+        "ORDER BY reason_index",
+        [
+            run_id,
+            symbol,
+            ACCOUNT_INDEPENDENT_EXPORT_SINCE,
+            ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
+        ],
         db_path=db_path,
     )
 

@@ -141,6 +141,22 @@ def as_date(value: object) -> date | None:
     return value if isinstance(value, date) else None
 
 
+def as_datetime(value: object) -> datetime | None:
+    """A DuckDB TIMESTAMPTZ column as a timezone-aware `datetime`, or `None`.
+
+    Unlike `as_date`, the time component is kept: `runs.started_at` (Issue
+    #389) is compared against `verdict_records.ACCOUNT_INDEPENDENT_EXPORT_SINCE`,
+    an instant rather than a day, so truncating to a date here would lose the
+    precision that comparison needs.
+    """
+    if is_missing(value):
+        return None
+    # pandas' Timestamp subclasses datetime and already carries the DuckDB
+    # TIMESTAMPTZ column's tzinfo, so no conversion is needed beyond the type
+    # narrowing below.
+    return value if isinstance(value, datetime) else None
+
+
 def as_float(value: object) -> float | None:
     """A numeric column as a `float`, or `None` when absent or non-numeric."""
     if is_missing(value):

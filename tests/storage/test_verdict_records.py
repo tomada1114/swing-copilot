@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -18,6 +18,7 @@ import duckdb
 import pytest
 
 from swing_copilot.storage.verdict_records import (
+    ACCOUNT_INDEPENDENT_EXPORT_SINCE,
     ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
     AnalysisSourceCoverageRecord,
     CollectedRunRecords,
@@ -27,6 +28,8 @@ from swing_copilot.storage.verdict_records import (
     VerdictReasonRecord,
     VerdictRecord,
     VerdictSourceRecord,
+    is_reason_text_visible,
+    reason_text_visible_sql,
 )
 from swing_copilot.text.base import TextItem
 
@@ -1088,6 +1091,62 @@ class TestGetVerdictCitationsInWindow:
         assert state_store.get_verdict_citations_in_window(AS_OF, AS_OF) == ()
 
 
+class TestReasonTextVisiblePredicate:
+    """Issue #389: two substrates for the same rule must never disagree.
+
+    `reason_text_visible_sql` (SQL text) and `is_reason_text_visible` (plain
+    Python) encode the exact same predicate -- what the dashboard shows and
+    what `get_prior_verdicts` re-injects must never disagree, so both must
+    return the same boolean for the same inputs.
+    """
+
+    @pytest.mark.parametrize(
+        ("started_at", "run_date", "expected"),
+        [
+            pytest.param(None, date(2026, 8, 20), False, id="no_run_before_cutoff"),
+            pytest.param(None, date(2026, 8, 21), True, id="no_run_at_cutoff"),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE - timedelta(seconds=1),
+                date(2026, 8, 20),
+                False,
+                id="started_at_just_before_export_since_run_date_before_cutoff",
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE,
+                date(2020, 1, 1),
+                True,
+                id="started_at_at_export_since_overrides_an_old_run_date",
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE - timedelta(days=400),
+                ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
+                True,
+                id="run_date_at_cutoff_overrides_an_old_started_at",
+            ),
+        ],
+    )
+    def test_the_python_mirror_agrees_with_the_sql_predicate(
+        self,
+        started_at: datetime | None,
+        run_date: date,
+        expected: bool,
+    ) -> None:
+        assert (
+            is_reason_text_visible(started_at=started_at, run_date=run_date) is expected
+        )
+
+        with duckdb.connect(":memory:") as conn:
+            conn.execute("CREATE TABLE t (started_at TIMESTAMPTZ, run_date DATE)")
+            conn.execute("INSERT INTO t VALUES (?, ?)", [started_at, run_date])
+            predicate = reason_text_visible_sql()
+            row = conn.execute(
+                f"SELECT {predicate} FROM t",  # noqa: S608 - fixed predicate, no interpolated input
+                [ACCOUNT_INDEPENDENT_EXPORT_SINCE, ACCOUNT_INDEPENDENT_VERDICT_CUTOFF],
+            ).fetchone()
+        assert row is not None
+        assert bool(row[0]) is expected
+
+
 class TestGetPriorVerdicts:
     """Issue #191: a repeat candidate's own earlier verdicts, fed back in.
 
@@ -1113,12 +1172,41 @@ class TestGetPriorVerdicts:
         reasons: tuple[VerdictReasonRecord, ...] = (),
         strategy_key: str = "default",
     ) -> UUID:
+        """Write a verdict with no `runs` row for it (the degrade-to-`as_of` case).
+
+        Every pre-existing test in this class relies on this: without a
+        `runs` row, `get_prior_verdicts`' `LEFT JOIN runs` reads `started_at`
+        as `NULL`, so `reason_text_visible_sql`'s first term is never true and
+        visibility falls through to `as_of >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`
+        alone -- the pre-#389 rule, unchanged.
+        """
         run_id = uuid4()
         verdict = replace(
             _verdict(run_id, symbol, as_of=as_of, reasons=reasons),
             strategy_key=strategy_key,
         )
         state_store.replace_run_verdicts(run_id, [verdict], [])
+        return run_id
+
+    @staticmethod
+    def _write_with_run(
+        state_store: StateStore, symbol: str, as_of: date, started_at: datetime
+    ) -> UUID:
+        """Write a verdict whose owning `runs` row has an explicit `started_at`.
+
+        Simulates `--as-of` (Issue #389): `run_date`/`as_of` is the replayed
+        date, `started_at` is the instant the run actually executed, and the
+        two may disagree by months.
+        """
+        run_id = uuid4()
+        verdict = _verdict(run_id, symbol, as_of=as_of)
+        state_store.replace_run_verdicts(run_id, [verdict], [])
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
+                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
+                [str(run_id), as_of, started_at],
+            )
         return run_id
 
     def test_returns_the_reasons_and_their_matured_outcomes(
@@ -1227,6 +1315,91 @@ class TestGetPriorVerdicts:
             state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
             == ()
         )
+
+    def test_an_as_of_replay_of_a_pre_cutoff_date_is_still_fed_back(
+        self, state_store: StateStore
+    ) -> None:
+        """Issue #389: an `--as-of` replay's `started_at` outruns its `as_of`.
+
+        `copilot-daily --as-of <old date>` writes `as_of` to the replayed
+        date but `started_at` to the real (much later) wall clock. The
+        verdict it produced came from an already account-independent export
+        and must still be re-injected, unlike a genuinely old run.
+        """
+        self._write_with_run(
+            state_store,
+            "AAPL",
+            date(2026, 5, 1),
+            ACCOUNT_INDEPENDENT_EXPORT_SINCE + timedelta(days=10),
+        )
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+
+        assert len(prior) == 1
+        assert prior[0].as_of == date(2026, 5, 1)
+
+    def test_a_run_that_genuinely_predates_the_export_cutoff_stays_hidden(
+        self, state_store: StateStore
+    ) -> None:
+        """A real pre-#352 run: both `started_at` and `as_of` predate the cutoffs."""
+        self._write_with_run(
+            state_store,
+            "AAPL",
+            date(2026, 8, 20),
+            ACCOUNT_INDEPENDENT_EXPORT_SINCE - timedelta(days=1),
+        )
+
+        assert (
+            state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+            == ()
+        )
+
+    @pytest.mark.parametrize(
+        ("started_at", "is_visible"),
+        [
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE - timedelta(seconds=1),
+                False,
+                id="one_second_before_export_since",
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE, True, id="exactly_export_since"
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE + timedelta(seconds=1),
+                True,
+                id="one_second_after_export_since",
+            ),
+        ],
+    )
+    def test_the_started_at_boundary_is_inclusive(
+        self, state_store: StateStore, started_at: datetime, is_visible: bool
+    ) -> None:
+        """Isolates the `started_at` term of the predicate.
+
+        `as_of` (2026-08-20) stays before `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`
+        throughout, so only `started_at` can move the result here.
+        """
+        self._write_with_run(state_store, "AAPL", date(2026, 8, 20), started_at)
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+
+        assert bool(prior) is is_visible
+
+    def test_a_verdict_whose_run_is_unresolved_degrades_to_the_as_of_rule(
+        self, state_store: StateStore
+    ) -> None:
+        """Degrades to the pre-#389 rule when a `runs` row cannot be found.
+
+        No `runs` row (an archive recovered without one, or a data gap):
+        `started_at` reads `NULL` and only
+        `as_of >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` decides visibility.
+        """
+        self._write(state_store, "AAPL", ACCOUNT_INDEPENDENT_VERDICT_CUTOFF)
+
+        prior = state_store.get_prior_verdicts("AAPL", "default", self._BEFORE_DATE, 3)
+
+        assert len(prior) == 1
 
     def test_only_the_same_strategys_verdicts_are_comparable_feedback(
         self, state_store: StateStore

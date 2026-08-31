@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -12,6 +12,7 @@ import pytest
 import swing_copilot.dashboard
 from swing_copilot.dashboard import queries
 from swing_copilot.research import ResearchError
+from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_EXPORT_SINCE
 from tests.dashboard.conftest import (
     PRIOR_RUN_DATE,
     PRIOR_RUN_ID,
@@ -95,6 +96,57 @@ class TestReasonsForSymbol:
     ) -> None:
         builder.run(run_date=run_date)
         builder.reason("AAPL", index=0, text="最終株数17株はこの制約下での結果である")
+
+        frame = queries.reasons_for_symbol(dashboard_db.db_path, str(RUN_ID), "AAPL")
+
+        assert frame.empty is not is_visible
+
+    def test_an_as_of_replay_of_a_pre_cutoff_date_still_shows_its_reasons(
+        self, builder: Builder, dashboard_db: Fixture
+    ) -> None:
+        """Issue #389: `run_date` is the replayed date, `started_at` is real wall time."""
+        builder.run(
+            run_date=date(2026, 5, 1),
+            started_at=ACCOUNT_INDEPENDENT_EXPORT_SINCE + timedelta(days=10),
+        )
+        builder.reason("AAPL", index=0, text="最終株数17株はこの制約下での結果である")
+
+        frame = queries.reasons_for_symbol(dashboard_db.db_path, str(RUN_ID), "AAPL")
+
+        assert not frame.empty
+
+    @pytest.mark.parametrize(
+        ("started_at", "is_visible"),
+        [
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE - timedelta(seconds=1),
+                False,
+                id="one_second_before_export_since",
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE, True, id="exactly_export_since"
+            ),
+            pytest.param(
+                ACCOUNT_INDEPENDENT_EXPORT_SINCE + timedelta(seconds=1),
+                True,
+                id="one_second_after_export_since",
+            ),
+        ],
+    )
+    def test_the_started_at_boundary_is_inclusive(
+        self,
+        builder: Builder,
+        dashboard_db: Fixture,
+        started_at: datetime,
+        is_visible: bool,
+    ) -> None:
+        """Isolates the `started_at` term of the predicate.
+
+        `run_date` alone (2026-08-20) stays before the cutoff throughout, so
+        only `started_at` can make a difference here.
+        """
+        builder.run(run_date=date(2026, 8, 20), started_at=started_at)
+        builder.reason("AAPL", index=0, text="決算プロキシミティを理由に見送り")
 
         frame = queries.reasons_for_symbol(dashboard_db.db_path, str(RUN_ID), "AAPL")
 

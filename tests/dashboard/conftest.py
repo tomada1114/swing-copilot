@@ -71,7 +71,16 @@ class Builder:
         run_date: date = RUN_DATE,
         status: str = "success",
         mode: str = "live",
+        started_at: datetime | None = None,
     ) -> Builder:
+        """Insert a `runs` row.
+
+        `started_at` defaults to `run_date` at 18:00 UTC, mimicking an
+        ordinary same-day run. Pass it explicitly to simulate a `--as-of`
+        replay (Issue #389): `run_date` set to the replayed date while
+        `started_at` reflects when the run actually executed, which may be
+        much later.
+        """
         self._execute(
             "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
             "started_at) VALUES (?, ?, ?, 'cfg0123456789abcdef', ?, ?)",
@@ -80,7 +89,11 @@ class Builder:
                 run_date,
                 mode,
                 status,
-                datetime(run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC),
+                started_at
+                if started_at is not None
+                else datetime(
+                    run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC
+                ),
             ],
         )
         return self

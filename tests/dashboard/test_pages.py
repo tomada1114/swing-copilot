@@ -6,7 +6,7 @@ autouse network guard in `tests/conftest.py` stays satisfied.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -15,6 +15,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from swing_copilot.dashboard import create_app, guidance
+from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_EXPORT_SINCE
 from tests.dashboard.conftest import (
     PRIOR_RUN_ID,
     RUN_ID,
@@ -202,6 +203,55 @@ class TestSymbolPage:
 
         assert response.status_code == HTTPStatus.OK
         assert "決算プロキシミティを理由に見送り" in response.text
+
+    def test_an_as_of_replay_of_a_pre_cutoff_date_still_renders_its_reason_text(
+        self, client: TestClient, builder: Builder
+    ) -> None:
+        """Issue #389: `--as-of` dates `run_date` to the past, not `started_at`.
+
+        `copilot-daily --as-of 2026-05-01` run *today* writes `run_date =
+        2026-05-01` (well before `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`) but
+        `started_at` is the real wall-clock instant the run executed --
+        necessarily after `ACCOUNT_INDEPENDENT_EXPORT_SINCE`, since Issue
+        #352 has long since merged. The reason text it wrote came from an
+        already account-independent export and must not be withheld.
+        """
+        replay = builder.for_run(PRIOR_RUN_ID)
+        replay.run(
+            run_date=date(2026, 5, 1),
+            started_at=datetime(2026, 8, 31, 12, 0, tzinfo=UTC),
+        )
+        replay.universe("MSFT")
+        replay.candidate("MSFT")
+        replay.verdict("MSFT", recommendation="proceed", as_of=date(2026, 5, 1))
+        replay.reason("MSFT", index=0, text="決算プロキシミティを理由に見送り")
+
+        response = client.get(f"/runs/{PRIOR_RUN_ID}/symbols/MSFT")
+
+        assert response.status_code == HTTPStatus.OK
+        assert "決算プロキシミティを理由に見送り" in response.text
+        assert "理由本文は表示しない" not in response.text
+
+    def test_a_run_that_genuinely_predates_export_since_stays_withheld(
+        self, client: TestClient, builder: Builder
+    ) -> None:
+        """A real pre-#352 run: both `started_at` and `run_date` predate the cutoffs."""
+        assert ACCOUNT_INDEPENDENT_EXPORT_SINCE.date() == date(2026, 8, 21)
+        old = builder.for_run(PRIOR_RUN_ID)
+        old.run(
+            run_date=date(2026, 8, 20),
+            started_at=ACCOUNT_INDEPENDENT_EXPORT_SINCE.replace(day=20),
+        )
+        old.universe("MSFT")
+        old.candidate("MSFT")
+        old.verdict("MSFT", recommendation="proceed", as_of=date(2026, 8, 20))
+        old.reason("MSFT", index=0, text="最終株数17株はこの制約下での結果である")
+
+        response = client.get(f"/runs/{PRIOR_RUN_ID}/symbols/MSFT")
+
+        assert response.status_code == HTTPStatus.OK
+        assert "最終株数17株" not in response.text
+        assert "理由本文は表示しない" in response.text
 
 
 @pytest.mark.usefixtures("populated")

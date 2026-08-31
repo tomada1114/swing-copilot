@@ -82,6 +82,7 @@ def _run_ref(record: Mapping[str, object]) -> RunRef:
     return RunRef(
         run_id=str(record.get("run_id", "")),
         run_date=fmt.as_date(record.get("run_date")),
+        started_at=fmt.as_datetime(record.get("started_at")),
         mode=_text(record.get("mode")),
         status=_text(record.get("status")),
         status_tone=fmt.tone_of(fmt.RUN_STATUS_TONES, _text(record.get("status"))),

@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import sys
-import traceback
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -15,7 +14,12 @@ from typing import TYPE_CHECKING, cast
 
 from rich.console import Console
 
-from swing_copilot.cli_support import ExitPolicy, run_cli
+from swing_copilot.cli_support import (
+    LOG_LEVELS,
+    ExitPolicy,
+    configure_cli_logging,
+    run_cli,
+)
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import (
     load_secrets,
@@ -30,7 +34,6 @@ from swing_copilot.exceptions import ConfigError, PreflightAbort
 from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import DailyRunOptions, DailyRunResult
 from swing_copilot.pipeline.daily import (
-    _LOG_LEVELS,
     DailyDependencies,
     _paths_for_mode,
     _run_mode,
@@ -60,7 +63,6 @@ from swing_copilot.universe import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from datetime import datetime
 
     from swing_copilot.config import Secrets, Settings, StrategiesConfig
@@ -119,7 +121,7 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
         help="screen at most this many universe symbols; 0 keeps only open holdings",
     )
     parser.add_argument("--strategy", default="default")
-    parser.add_argument("--log-level", choices=tuple(_LOG_LEVELS), default=None)
+    parser.add_argument("--log-level", choices=tuple(LOG_LEVELS), default=None)
     parser.add_argument(
         "--allow-same-day-rerun",
         action="store_true",
@@ -264,56 +266,6 @@ def _compose_dependencies(
     )
 
 
-class _SecretRedactionFilter(logging.Filter):
-    """Replace configured secret values before a log record reaches stderr."""
-
-    def __init__(self, secrets: Iterable[str | None]) -> None:
-        super().__init__()
-        self._secrets = tuple(
-            sorted({secret for secret in secrets if secret}, key=len, reverse=True)
-        )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not self._secrets:
-            return True
-
-        record.msg = self._redact(record.getMessage())
-        record.args = ()
-        if record.exc_info is not None:
-            formatted = "".join(traceback.format_exception(*record.exc_info))
-            record.exc_text = self._redact(formatted)
-            record.exc_info = None
-        return True
-
-    def _redact(self, value: str) -> str:
-        redacted = value
-        for secret in self._secrets:
-            redacted = redacted.replace(secret, "[REDACTED]")
-        return redacted
-
-
-def _configure_logging(secrets: Secrets, *, level: str | None = None) -> None:
-    """Configure stderr logging levels and redaction for configured secrets."""
-    root_level = _LOG_LEVELS[level] if level is not None else logging.WARNING
-    application_level = _LOG_LEVELS[level] if level is not None else logging.INFO
-    logging.basicConfig(
-        level=root_level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logging.getLogger().setLevel(root_level)
-    logging.getLogger("swing_copilot").setLevel(application_level)
-    redaction_filter = _SecretRedactionFilter(
-        (
-            secrets.finnhub_api_key,
-            secrets.fred_api_key,
-            secrets.discord_webhook_url,
-        )
-    )
-    for handler in logging.root.handlers:
-        handler.addFilter(redaction_filter)
-
-
 @dataclass(frozen=True, slots=True)
 class _RunOutcome:
     """One `copilot-daily` invocation's terminal state, for the outcome file.
@@ -441,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
     # just the batch inside it.
     started_at = SystemClock().now()
     options = _parse_args(argv)
-    _configure_logging(load_secrets(), level=options.log_level)
+    configure_cli_logging(load_secrets(), level=options.log_level)
     settings = load_settings()
     strategies = load_strategies()
     deps = run_cli(

@@ -97,13 +97,6 @@ from swing_copilot.universe_sampling import select_universe_sample
 
 logger = logging.getLogger(__name__)
 
-_LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-}
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from uuid import UUID

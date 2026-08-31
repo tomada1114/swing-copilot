@@ -56,17 +56,26 @@ jobs:
     # swing-daily スキル内部の全体上限が 45 分。データ取得・ingest・
     # R2 の pull/push を足した余裕として 90 分を取る。
     timeout-minutes: 90
-    env:
-      # copilot-daily 自身がこの環境変数をフォールバックとして読む
-      # (`--outcome-file` が渡ればそちらを優先。pipeline/daily_composition.py)。
-      # job の env: に置くことで、分析セッションが素で `uv run copilot-daily` を
-      # 叩いても、preflight abort を含む全終了経路で outcome ファイルが書かれる
-      # (Issue #372。プロンプト指示への依存を避けるための設計)。
-      COPILOT_DAILY_OUTCOME_FILE: ${{ runner.temp }}/copilot-daily-outcome.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # copilot-daily 自身がこの環境変数をフォールバックとして読む
+      # (`--outcome-file` が渡ればそちらを優先。pipeline/daily_composition.py)。
+      # 以降の全ステップに効かせることで、分析セッションが素で
+      # `uv run copilot-daily` を叩いても、preflight abort を含む全終了経路で
+      # outcome ファイルが書かれる (Issue #372。プロンプト指示への依存を避ける
+      # ための設計)。
+      #
+      # job の env: には置けない。`runner` コンテキストはステップの中でしか
+      # 参照できず、job レベルの env: で使うとワークフローファイル自体が
+      # 受理されず job が1つも作られないまま run が failure になる
+      # (startup failure。Issue #380)。GITHUB_ENV 経由なら同じ「job 全体に
+      # 効く」性質を保ったまま RUNNER_TEMP を解決できる。
+      - name: Export the daily outcome file path
+        run: |
+          echo "COPILOT_DAILY_OUTCOME_FILE=$RUNNER_TEMP/copilot-daily-outcome.json" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:

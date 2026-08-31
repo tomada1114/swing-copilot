@@ -28,6 +28,21 @@ repos:
     hooks:
       - id: zizmor
 
+  # zizmor はワークフローの「安全性」を見るが、GitHub がそのファイルを
+  # 受理するかどうかは見ない。Issue #380 の startup failure (job レベルの
+  # env: で `runner` コンテキストを参照し、run が job 0 件で failure になる)
+  # は yaml.safe_load も zizmor も通り抜けた。actionlint はこれを式の
+  # コンテキスト検査で捕まえる。
+  #
+  # shellcheck / pyflakes への委譲は切ってある。PATH にそれらが在るかどうかで
+  # 結果が変わるフックは、ローカルと CI で挙動が割れる。ここで欲しいのは
+  # 「ワークフローファイルが妥当か」の判定だけである。
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        args: ["-shellcheck=", "-pyflakes="]
+
   - repo: local
     hooks:
       - id: mypy

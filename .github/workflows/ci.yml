@@ -160,7 +160,7 @@ jobs:
         run: uv run python scripts/smoke_test.py dist/*.whl
 
   zizmor:
-    name: Workflow Security Lint
+    name: Workflow Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -177,3 +177,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: uvx zizmor .github/workflows/
+
+      # pre-commit のフック定義 (rev がピン留めされている) をそのまま呼ぶ。
+      # actionlint の版を2か所で持たないための書き方であり、フックを入れて
+      # いないクローンからの push も CI 側で同じ検査に通す。
+      # ワークフローファイルの不受理は Actions タブの失敗 run にしか出ず、
+      # 気づかれないまま日次が止まる (Issue #380)。
+      - name: actionlint
+        run: uvx pre-commit run --all-files actionlint

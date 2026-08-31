@@ -311,6 +311,13 @@ INIT_SCHEMA_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS verdicts (
         run_id         UUID NOT NULL,
         symbol         VARCHAR NOT NULL,
+        -- Equal to the owning `runs.run_date` by construction, not by a
+        -- constraint: `retro/collect.py` always writes
+        -- `as_of=run_directory.run_date` (Issue #389). Readers that need
+        -- "the run's date" but only have a `verdicts` row (no join to
+        -- `runs`, or a `runs` row that cannot be resolved) read this column
+        -- as that date's stand-in -- see `reason_text_visible_sql`'s
+        -- `run_date_column` argument.
         as_of          DATE NOT NULL,
         strategy_key   VARCHAR NOT NULL,
         recommendation VARCHAR NOT NULL
@@ -972,11 +979,14 @@ ANALYSIS_VIEW_STATEMENTS = (
     """,
     # Issue #192: one row per individual verdict reason, joined to the verdict
     # it belongs to, so "how did symbols whose reasons cited no source
-    # perform" is a filter rather than a JSON walk.
+    # perform" is a filter rather than a JSON walk. `started_at` (Issue #389)
+    # is projected here so `dashboard/queries.py::reasons_for_symbol` can
+    # apply `verdict_records.reason_text_visible_sql()` without a second join.
     """
     CREATE OR REPLACE VIEW v_verdict_reasons AS
     SELECT
         r.run_date,
+        r.started_at,
         r.mode,
         vr.run_id,
         vr.symbol,

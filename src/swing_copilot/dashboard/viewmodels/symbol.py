@@ -15,7 +15,7 @@ from swing_copilot.dashboard.models import (
     TrackingPanel,
 )
 from swing_copilot.dashboard.viewmodels import common
-from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
+from swing_copilot.storage.verdict_records import is_reason_text_visible
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -199,13 +199,13 @@ def _risk(entry: common.ScorecardEntry | None) -> tuple[Stat, ...]:
 def _is_reason_text_withheld(run: RunRef) -> bool:
     """Whether `queries.reasons_for_symbol` dropped this run's reason text.
 
-    That query filters on `run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`
-    (Issue #385), so for an older run an empty frame means "withheld", not
-    "never collected" -- and the page must not tell the reader to wait for a
-    retro collect that already happened.
+    Mirrors that query's `reason_text_visible_sql()` gate via its Python
+    counterpart `is_reason_text_visible` (Issue #389), so this banner and the
+    query it describes can never disagree. For a run this predicate excludes,
+    an empty frame means "withheld", not "never collected" -- the page must
+    not tell the reader to wait for a retro collect that already happened.
     """
-    cutoff = ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
-    return run.run_date is not None and run.run_date < cutoff
+    return not is_reason_text_visible(started_at=run.started_at, run_date=run.run_date)
 
 
 def _reason_rows(frame: pd.DataFrame) -> tuple[ReasonRow, ...]:

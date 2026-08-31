@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from datetime import date
+    from datetime import date, datetime
 
     from swing_copilot.dashboard.formatting import Cell, NullToken
     from swing_copilot.dashboard.guidance import Hint
@@ -33,6 +33,10 @@ class RunRef:
 
     run_id: str
     run_date: date | None
+    #: `runs.started_at` (Issue #389): whether this run's reason text is
+    #: safe to show turns on when it *started*, not just its `run_date` --
+    #: see `viewmodels/symbol.py::_is_reason_text_withheld`.
+    started_at: datetime | None
     mode: str
     status: str
     status_tone: str

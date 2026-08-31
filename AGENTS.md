@@ -213,6 +213,23 @@ D2: `copilot-ingest-analysis` never touches the DB) — now runs inside that
 same CI job, after the analysis and before the push, so a day's verdicts ride
 out with everything else instead of being lost when the runner is discarded.
 
+`reports/<run_date>/<run_id>/` is retained forever and grows without bound
+(Issue #370 made it R2-canonical, on purpose — retention/deletion was
+considered and rejected in Issue #373); what does not scale is a *fresh*
+CI runner re-fetching all of it every weekday. The scheduled job's `pull`
+therefore passes `--reports-window 10`: only the `reports/` keys belonging to
+the 10 most recent *run dates* (never calendar days, so a holiday or a missed
+run cannot shrink it below 10 actual runs) are fetched; `data/` is always
+pulled in full. The window actually used is recorded in the shared state
+file, and the following `push` derives its behavior from that record rather
+than from a repeated flag: `reports/`'s garbage collection is suppressed
+entirely (an out-of-window key is expected to be locally absent, not
+deleted), and `--reports-append-only`'s guard only checks keys the window did
+fetch. The accepted trade-off is that CI's own `copilot-retro collect` only
+ever sees the last 10 run dates; a correction to an older archive still needs
+an operator's local full `pull` (no window) → `collect` → `push` (without
+`--reports-append-only`) to be re-collected and re-published.
+
 ### Working with the data locally
 
 - Read-only work (ad-hoc research, a read-only dashboard): pull the remote
@@ -233,6 +250,10 @@ out with everything else instead of being lost when the runner is discarded.
   credentials and is untracked), and pull the data and report-archive history
   fresh — never by copying or symlinking another checkout's `data/` or
   `reports/`.
+- `--reports-window` is a CI-only flag (`justfile`'s `data-pull` and any local
+  `scripts/data_sync.py pull` never pass it): a local working copy always
+  pulls `reports/` in full, which is also what lets it recover a windowed CI
+  runner's blind spot (see above).
 
 The daily pipeline's entry point exits `2` on a preflight abort, and stderr's
 first line carries a machine-readable tag that the caller branches on — never

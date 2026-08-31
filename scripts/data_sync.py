@@ -48,6 +48,36 @@ pull -> work -> push, never left open overnight.
 `data/copilot.duckdb` is treated as an opaque binary here and is never opened
 as a database: DuckDB's file lock is exclusive, and taking it could fail a
 concurrent run.
+
+**`reports/` is unbounded and `pull --reports-window N` bounds only the CI
+cost of fetching it, never the remote history.** `reports/<date>/<run_id>/`
+accumulates one run per weekday forever (Issue #370 made it R2-canonical), so
+a fresh GitHub Actions runner's full `pull` grows linearly with calendar time.
+`--reports-window N` restricts a `pull` to the `data/` tree (always full) plus
+only the `reports/` keys belonging to the `N` most recent *run dates* (never
+calendar days, so a holiday or a missed run cannot shrink the window below `N`
+actual runs). This makes a windowed local tree intentionally incomplete, which
+the rest of the sync has to tolerate without treating the missing history as
+"deleted upstream":
+
+- The window actually applied is recorded in `SyncState.reports_window`, not
+  passed to `push` as a separate flag -- so a `push` that forgot the flag
+  cannot silently garbage-collect real history. `push` reads it back and,
+  whenever it is set, suppresses `reports/`'s garbage collection entirely:
+  every key `pull` did not fetch stays right where it is on the remote.
+- `--reports-append-only`'s guard is scoped the same way: a `reports/` key
+  outside the recorded window is expected to be locally absent (the GC
+  suppression above is what protects it), so only keys the window did fetch
+  are checked for a same-content match. A missing or rewritten key *inside*
+  the window is still a violation, exactly as before windowing existed.
+- `_guard_against_emptying_a_populated_root` and the mirror-deletion in `pull`
+  need no special case: a windowed local `reports/` tree is non-empty (it has
+  the window's own files) and every key `pull` chose not to fetch is still
+  listed in the manifest, so it is never mistaken for a genuine deletion.
+
+Recovering a windowed CI runner's blind spot -- a correction to an
+out-of-window archive -- is an operator task: a full local `pull` (no window)
+-> `copilot-retro collect` -> `push` (without `--reports-append-only`).
 """
 
 from __future__ import annotations
@@ -212,11 +242,20 @@ class Manifest(BaseModel):
 
 
 class SyncState(BaseModel):
-    """The generation this working copy last pulled."""
+    """The generation this working copy last pulled.
+
+    `reports_window` defaults to `None` so a state file written before this
+    field existed still parses. It records whether the pull that produced
+    this working copy's `reports/` tree was windowed, and by how much -- the
+    single source `push` reads to decide whether `reports/`'s garbage
+    collection and append-only guard must tolerate keys this copy never
+    fetched.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     generation: int
+    reports_window: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -402,6 +441,39 @@ def _has_reports_sync_shape(relative: PurePosixPath) -> bool:
     return _is_uuid(parts[1])
 
 
+def _reports_run_date(key: str) -> str:
+    """The `<date>` component of a `reports/`-prefixed object key.
+
+    Callers only ever pass a key already known to start with `REPORTS_PREFIX`
+    and to have `_has_reports_sync_shape`'s shape, so the first path segment
+    after the prefix is always the run date.
+    """
+    return key[len(REPORTS_PREFIX) :].split("/", 1)[0]
+
+
+def _windowed_reports_keys(
+    files: Mapping[str, FileEntry], window: int
+) -> frozenset[str]:
+    """The `reports/` keys of `files` belonging to the `window` newest run dates.
+
+    Counted in run dates, not calendar days, so a market holiday or a missed
+    run cannot shrink the window below `window` actual runs (Issue #373). A
+    `window` at or beyond the number of run dates present simply selects all
+    of them -- `list[:window]` on a shorter list is the whole list. Keys under
+    `data/` never appear here; `data/` is never windowed.
+    """
+    dates = sorted(
+        {_reports_run_date(key) for key in files if key.startswith(REPORTS_PREFIX)},
+        reverse=True,
+    )
+    selected_dates = frozenset(dates[:window])
+    return frozenset(
+        key
+        for key in files
+        if key.startswith(REPORTS_PREFIX) and _reports_run_date(key) in selected_dates
+    )
+
+
 def build_roots(data_dir: Path, reports_dir: Path) -> tuple[SyncRoot, ...]:
     """Build the `data/` and `reports/` sync roots for a given local pair."""
     return (
@@ -578,10 +650,21 @@ def read_state(data_dir: Path) -> SyncState | None:
         raise DataSyncError(msg) from error
 
 
-def write_state(data_dir: Path, generation: int) -> None:
-    """Record the generation this working copy now holds."""
+def write_state(
+    data_dir: Path, generation: int, *, reports_window: int | None = None
+) -> None:
+    """Record the generation (and `reports/` window, if any) now held.
+
+    Args:
+        data_dir: The `data/` root that carries the shared state file.
+        generation: The manifest generation this working copy now matches.
+        reports_window: The `reports/` window applied to produce this
+            working copy's `reports/` tree, or `None` for a full tree.
+    """
     data_dir.mkdir(parents=True, exist_ok=True)
-    body = SyncState(generation=generation).model_dump_json(indent=2)
+    body = SyncState(
+        generation=generation, reports_window=reports_window
+    ).model_dump_json(indent=2)
     _replace_atomically(data_dir / STATE_FILE_NAME, body.encode("utf-8"))
 
 
@@ -623,6 +706,7 @@ class PullReport:
     skipped: tuple[str, ...]
     deleted: tuple[str, ...]
     retained: tuple[str, ...]
+    reports_window: int | None = None
 
     def render(self) -> str:
         """Human-readable summary."""
@@ -631,6 +715,13 @@ class PullReport:
             f"取得={len(self.downloaded)} 既存流用={len(self.skipped)} "
             f"削除={len(self.deleted)}"
         )
+        if self.reports_window is not None:
+            summary = (
+                f"{summary}\n"
+                f"  reports/ は直近 {self.reports_window} run date だけを対象にした"
+                "(--reports-window)。push はこの窓を記録済みの state から読み、"
+                "窓外の reports/ は削除しない"
+            )
         if not self.retained:
             return summary
         return (
@@ -702,7 +793,12 @@ def _download_verified(
         temporary.unlink(missing_ok=True)
 
 
-def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
+def pull(
+    store: ObjectStore,
+    roots: tuple[SyncRoot, ...],
+    *,
+    reports_window: int | None = None,
+) -> PullReport:
     """Make the local `data/` and `reports/` trees match the remote manifest.
 
     Files whose sha256 already matches are left alone; everything else is
@@ -713,6 +809,19 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
     empty, because "the bucket has not adopted this root yet" and "the root's
     contents were deleted upstream" are indistinguishable from the manifest
     alone, and only one of them justifies deleting the operator's local copy.
+
+    Args:
+        store: The remote object store.
+        roots: The local trees to pull into.
+        reports_window: When given, only fetch `reports/` keys belonging to
+            the `reports_window` most recent run dates (`data/` is always
+            fetched in full regardless). A `reports/` key the manifest lists
+            but this window excludes is left exactly as it is locally --
+            fetched if a prior full or wider-windowed pull already put it
+            there, absent if not -- never deleted, since deletion is decided
+            against the *full* manifest below, unaffected by the window. The
+            window actually used is recorded in the shared state file so
+            `push` can derive the same tolerance (Issue #373).
 
     Raises:
         DataSyncError: When the bucket has no manifest, or a downloaded object
@@ -726,10 +835,20 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
         )
         raise DataSyncError(msg)
 
+    if reports_window is None:
+        keys_to_fetch: Mapping[str, FileEntry] = manifest.files
+    else:
+        windowed = _windowed_reports_keys(manifest.files, reports_window)
+        keys_to_fetch = {
+            key: entry
+            for key, entry in manifest.files.items()
+            if not key.startswith(REPORTS_PREFIX) or key in windowed
+        }
+
     local = scan_local(roots)
     downloaded: list[str] = []
     skipped: list[str] = []
-    for key, entry in sorted(manifest.files.items()):
+    for key, entry in sorted(keys_to_fetch.items()):
         current = local.get(key)
         if current is not None and current.sha256 == entry.sha256:
             skipped.append(key)
@@ -737,6 +856,9 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
         _download_verified(store, key, _local_path(roots, key), entry)
         downloaded.append(key)
 
+    # Deletion always compares against the *full* manifest, windowed or not:
+    # a key this pull chose not to fetch is still listed there, so it is
+    # never mistaken for a genuine upstream deletion.
     retainable = _retainable_prefixes(roots, manifest.files)
     deleted: list[str] = []
     retained: list[str] = []
@@ -750,13 +872,16 @@ def pull(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> PullReport:
     for key in deleted:
         _local_path(roots, key).unlink()
 
-    write_state(_data_root(roots).local_dir, manifest.generation)
+    write_state(
+        _data_root(roots).local_dir, manifest.generation, reports_window=reports_window
+    )
     return PullReport(
         generation=manifest.generation,
         downloaded=tuple(downloaded),
         skipped=tuple(skipped),
         deleted=tuple(deleted),
         retained=tuple(retained),
+        reports_window=reports_window,
     )
 
 
@@ -846,6 +971,8 @@ def _guard_append_only(
     prefixes: tuple[str, ...],
     remote_files: Mapping[str, FileEntry],
     local: Mapping[str, FileEntry],
+    *,
+    windowed_reports_keys: frozenset[str] | None = None,
 ) -> None:
     """Refuse a push that rewrites or drops an already-published object.
 
@@ -863,15 +990,40 @@ def _guard_append_only(
     correcting an archive and re-collecting it is a supported operator
     workflow, and the digest-based scan exists to serve it.
 
+    Args:
+        prefixes: Root prefixes this push must not rewrite or drop objects
+            under.
+        remote_files: The manifest currently published on the remote.
+        local: This push's local scan.
+        windowed_reports_keys: When the pull that produced `local`'s
+            `reports/` tree was windowed (Issue #373), the `reports/` keys
+            that window fetched. A remote `reports/` key outside this set is
+            *expected* to be absent locally -- that absence is what
+            `reports/`'s suppressed garbage collection relies on -- so a
+            missing local entry for such a key is skipped rather than treated
+            as a deletion. It does NOT excuse a rewrite: a key outside the
+            window that is nonetheless present locally with different bytes
+            is still a violation, so the sha256 comparison always runs when
+            the key exists locally. `None` means the pull was not windowed:
+            every remote key under `prefixes` is expected locally, exactly as
+            before this parameter existed.
+
     Raises:
         DataSyncError: When a key the remote already publishes under one of
-            `prefixes` is missing locally or has different content.
+            `prefixes` is present locally with different content, or is
+            missing locally and this window expects it to be present.
     """
     for key, remote_entry in sorted(remote_files.items()):
         if not any(key.startswith(prefix) for prefix in prefixes):
             continue
         local_entry = local.get(key)
         if local_entry is None:
+            if (
+                windowed_reports_keys is not None
+                and key.startswith(REPORTS_PREFIX)
+                and key not in windowed_reports_keys
+            ):
+                continue
             msg = (
                 f"append-only 違反: 既にリモートにある {key} がローカルに無い。"
                 "無人実行は既存のアーカイブを削除できない"
@@ -883,6 +1035,39 @@ def _guard_append_only(
                 "無人実行は既存のアーカイブを変更できない"
             )
             raise DataSyncError(msg)
+
+
+def _manifest_files_for_push(
+    remote_files: Mapping[str, FileEntry],
+    local: Mapping[str, FileEntry],
+    reports_window: int | None,
+) -> dict[str, FileEntry]:
+    """The full set of keys the new manifest must reference.
+
+    A full (unwindowed) pull's `local` scan already covers everything the
+    manifest should list, so this is just `dict(local)`.
+
+    A windowed pull's `local` scan does not: it deliberately never fetched the
+    `reports/` keys outside its window. Writing `Manifest(files=local)`
+    directly would silently stop referencing every one of them -- the
+    underlying object survives (GC is suppressed for the very same reason,
+    see `push`'s GC step), but a manifest that no longer lists it is
+    equivalent to losing it for every future `pull`, which reads only
+    `manifest.files` and never lists the bucket itself. So those out-of-window
+    `reports/` entries are carried forward unchanged from `remote_files`; a
+    local key wins over a carried-forward one on the rare overlap (an
+    operator's local tree that still holds more than the recorded window and
+    corrected one of those older archives).
+    """
+    if reports_window is None:
+        return dict(local)
+    fetched = _windowed_reports_keys(remote_files, reports_window)
+    preserved = {
+        key: entry
+        for key, entry in remote_files.items()
+        if key.startswith(REPORTS_PREFIX) and key not in fetched
+    }
+    return preserved | dict(local)
 
 
 def push(
@@ -910,12 +1095,15 @@ def push(
         DataSyncError: When the optimistic-lock precondition is unmet, the
             local tree holds nothing to sync at all, one root would be emptied
             on the remote while the other still has local content, or an
-            append-only prefix's published object changed.
+            append-only prefix's published object changed within the pull
+            window this working copy actually holds.
         ConcurrentWriteError: When the remote advanced since the recorded pull.
     """
     remote = read_remote_manifest(store)
     state_dir = _data_root(roots).local_dir
-    generation = _next_generation(remote, read_state(state_dir))
+    state = read_state(state_dir)
+    generation = _next_generation(remote, state)
+    reports_window = state.reports_window if state is not None else None
 
     local = scan_local(roots)
     if not local:
@@ -929,7 +1117,17 @@ def push(
     remote_files: Mapping[str, FileEntry] = remote.files if remote else {}
     _guard_against_emptying_a_populated_root(roots, remote_files, local)
     if append_only_prefixes:
-        _guard_append_only(append_only_prefixes, remote_files, local)
+        windowed_reports_keys = (
+            _windowed_reports_keys(remote_files, reports_window)
+            if reports_window is not None
+            else None
+        )
+        _guard_append_only(
+            append_only_prefixes,
+            remote_files,
+            local,
+            windowed_reports_keys=windowed_reports_keys,
+        )
 
     uploaded: list[str] = []
     unchanged: list[str] = []
@@ -943,21 +1141,34 @@ def push(
 
     # The commit point. Everything above only added objects the old manifest
     # does not reference; everything below only removes objects the new one
-    # does not reference.
+    # does not reference. `manifest_files` is `local` plus (only when this
+    # push follows a windowed pull) the out-of-window `reports/` entries
+    # carried forward untouched from `remote_files` -- see
+    # `_manifest_files_for_push`.
+    manifest_files = _manifest_files_for_push(remote_files, local, reports_window)
     _write_remote_manifest(
-        store, Manifest(generation=generation, updated_at=now(), files=local)
+        store,
+        Manifest(generation=generation, updated_at=now(), files=manifest_files),
     )
-    write_state(state_dir, generation)
+    write_state(state_dir, generation, reports_window=reports_window)
 
     # Garbage collection, listed live per root rather than read from the
     # manifest so that objects orphaned by an earlier interrupted push are
     # collected too. `manifest.json` itself sits outside every root's prefix
-    # and is never touched here.
+    # and is never touched here. `reports/` is skipped entirely when this
+    # working copy's last pull was windowed (Issue #373): every key the
+    # window did not fetch would otherwise look unreferenced (it is not in
+    # `local`, and -- unlike a full pull -- not necessarily preserved as a
+    # standalone key here either, since `manifest_files` only carries it as
+    # data, not as a GC allowlist) and be deleted, destroying the very
+    # history a windowed CI pull is meant to leave alone.
+    reports_gc_suppressed = reports_window is not None
     deleted = sorted(
         key
         for root in roots
+        if not (reports_gc_suppressed and root.prefix == REPORTS_PREFIX)
         for key in store.list_keys(root.prefix)
-        if key not in local
+        if key not in manifest_files
     )
     for key in deleted:
         store.delete(key)
@@ -1056,7 +1267,15 @@ def _classify(
 
 
 def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
-    """Compare local and remote without writing anything on either side."""
+    """Compare local and remote without writing anything on either side.
+
+    A working copy produced by a windowed pull (Issue #373) never fetched the
+    `reports/` keys outside its recorded window, and is not expected to hold
+    them -- that absence is exactly what the append-only guard's and push's
+    GC suppression both treat as normal. Without accounting for that here,
+    `removed` would list every one of those keys forever, so a windowed
+    working copy could never report `in-sync` even immediately after a pull.
+    """
     manifest = read_remote_manifest(store)
     state = read_state(_data_root(roots).local_dir)
     local = scan_local(roots)
@@ -1076,8 +1295,21 @@ def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
             prefixes=tuple(root.prefix for root in roots),
         )
 
+    reports_window = state.reports_window if state is not None else None
+    expected_absent: frozenset[str] = frozenset()
+    if reports_window is not None:
+        windowed = _windowed_reports_keys(manifest.files, reports_window)
+        expected_absent = frozenset(
+            key
+            for key in manifest.files
+            if key.startswith(REPORTS_PREFIX) and key not in windowed
+        )
     added = tuple(key for key in sorted(local) if key not in manifest.files)
-    removed = tuple(key for key in sorted(manifest.files) if key not in local)
+    removed = tuple(
+        key
+        for key in sorted(manifest.files)
+        if key not in local and key not in expected_absent
+    )
     modified = tuple(
         key
         for key in sorted(local)
@@ -1110,11 +1342,12 @@ def run(
     roots: tuple[SyncRoot, ...],
     *,
     reports_append_only: bool = False,
+    reports_window: int | None = None,
 ) -> int:
     """Execute one subcommand against an injected store and print its report."""
     match command:
         case "pull":
-            print(pull(store, roots).render())
+            print(pull(store, roots, reports_window=reports_window).render())
         case "push":
             prefixes = (REPORTS_PREFIX,) if reports_append_only else ()
             print(push(store, roots, append_only_prefixes=prefixes).render())
@@ -1126,6 +1359,23 @@ def run(
     return 0
 
 
+def _positive_int(value: str) -> int:
+    """`argparse` type: an integer strictly greater than zero.
+
+    Raises:
+        argparse.ArgumentTypeError: When `value` is not a positive integer.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        msg = f"整数を指定する: {value!r}"
+        raise argparse.ArgumentTypeError(msg) from error
+    if parsed <= 0:
+        msg = f"1 以上の整数を指定する: {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the `pull` / `push` / `status` subcommand parser."""
     parser = argparse.ArgumentParser(
@@ -1135,7 +1385,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("pull", help="リモート正本をローカルへ取得する")
+    pull_parser = subparsers.add_parser("pull", help="リモート正本をローカルへ取得する")
+    pull_parser.add_argument(
+        "--reports-window",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "reports/ を直近 N run date だけ取得する (data/ は常に全件。"
+            "既定は指定なし = 全件取得。無人実行の CI job だけがこれを付ける"
+            " -- 適用した窓は state ファイルに記録され、push はそこから GC 抑止と"
+            " append-only の判定範囲を導出する)"
+        ),
+    )
     push_parser = subparsers.add_parser(
         "push", help="ローカルを次世代としてリモートへ公開する"
     )
@@ -1162,6 +1424,7 @@ def main(argv: list[str] | None = None) -> int:
             store,
             DEFAULT_ROOTS,
             reports_append_only=bool(getattr(args, "reports_append_only", False)),
+            reports_window=getattr(args, "reports_window", None),
         )
     except DataSyncError as error:
         print(f"error: {error}", file=sys.stderr)

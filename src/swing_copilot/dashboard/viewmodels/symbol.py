@@ -15,6 +15,7 @@ from swing_copilot.dashboard.models import (
     TrackingPanel,
 )
 from swing_copilot.dashboard.viewmodels import common
+from swing_copilot.storage.verdict_records import ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -90,6 +91,7 @@ def build_symbol_detail(sources: SymbolSources) -> SymbolDetail | None:
             scorecard_values.get("news_supply_level"), key="pre_measurement"
         ),
         reasons=_reason_rows(sources.reasons),
+        reasons_withheld=_is_reason_text_withheld(sources.run),
         score_components=common.score_component_stats(candidate),
         technicals=_technicals(values, scorecard_values),
         execution=_execution(values, scorecard_values),
@@ -192,6 +194,18 @@ def _risk(entry: common.ScorecardEntry | None) -> tuple[Stat, ...]:
         Stat("リスク判定", fmt.text(entry.value("risk_status"), key="not_ingested")),
         Stat("ブロック理由", fmt.text(entry.value("binding_constraint"), key="absent")),
     )
+
+
+def _is_reason_text_withheld(run: RunRef) -> bool:
+    """Whether `queries.reasons_for_symbol` dropped this run's reason text.
+
+    That query filters on `run_date >= ACCOUNT_INDEPENDENT_VERDICT_CUTOFF`
+    (Issue #385), so for an older run an empty frame means "withheld", not
+    "never collected" -- and the page must not tell the reader to wait for a
+    retro collect that already happened.
+    """
+    cutoff = ACCOUNT_INDEPENDENT_VERDICT_CUTOFF
+    return run.run_date is not None and run.run_date < cutoff
 
 
 def _reason_rows(frame: pd.DataFrame) -> tuple[ReasonRow, ...]:

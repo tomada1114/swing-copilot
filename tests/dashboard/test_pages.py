@@ -182,6 +182,10 @@ class TestSymbolPage:
 
         assert response.status_code == HTTPStatus.OK
         assert "最終株数17株" not in response.text
+        # The reason *was* collected; saying otherwise sends the reader off to
+        # re-run a retro collect that already ran.
+        assert "まだ DuckDB に無い" not in response.text
+        assert "理由本文は表示しない" in response.text
 
     def test_a_run_exactly_at_the_cutoff_still_renders_its_reason_text(
         self, client: TestClient, builder: Builder

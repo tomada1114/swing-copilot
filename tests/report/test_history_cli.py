@@ -207,9 +207,12 @@ class TestRunDetail:
         main(["run", "--run-id", str(run_id), "--db", _db_path(state_store)])
 
         output = capsys.readouterr().out
-        assert "MSFT" in output
         assert "Shares" not in output
-        assert "17" not in output
+        # Scoped to the row itself: the header prints a random run UUID, whose
+        # hex happens to contain "17" about 9% of the time.
+        risk_rows = [line for line in output.splitlines() if "MSFT" in line]
+        assert risk_rows
+        assert all("17" not in line for line in risk_rows)
 
     def test_unknown_run_id_exits_nonzero_without_traceback(
         self, state_store: StateStore, capsys: pytest.CaptureFixture[str]

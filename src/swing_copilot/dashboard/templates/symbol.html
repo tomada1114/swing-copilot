@@ -36,6 +36,8 @@
       </li>
       {% endfor %}
     </ol>
+    {% elif view.reasons_withheld %}
+    <p class="empty">この run は口座依存の株数に触れうる時期（2026-08-21 より前）の verdict なので、理由本文は表示しない。記録自体は DuckDB に残っている。</p>
     {% else %}
     <p class="empty">この run の verdict 理由はまだ DuckDB に無い。verdicts は次の run の retro collect で取り込まれる。</p>
     {% endif %}

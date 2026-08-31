@@ -21,9 +21,10 @@ from fractions import Fraction
 class PositionSizeResult:
     """Sizing breakdown (P1-03): which cap produced the final share count.
 
-    `shares` is the floored minimum of the two intermediate values, with
-    ties broken toward `shares_by_risk` (`RiskChecker` uses this to derive
-    `binding_constraint`).
+    `shares` is the floored minimum of the two intermediate values. The
+    breakdown is kept because pre-#348 `risk_assessments` rows recorded it;
+    `RiskChecker` no longer derives `binding_constraint` from it (Issue #385:
+    the only caller is `backtest/engine.py`).
     """
 
     shares_by_risk: int

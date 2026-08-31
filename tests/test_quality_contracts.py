@@ -543,15 +543,22 @@ def test_no_workflow_references_the_runner_context_outside_a_step():
     `actionlint` catches this in pre-commit and in CI. This test is the
     offline copy of that check for the one invariant that has already bitten,
     so the suite fails on it even where `actionlint` is not installed.
+
+    Both scopes outside a step are checked. The workflow-level `env:` is not
+    a hypothetical variant of the job-level one: it is where someone would
+    naturally move the declaration next, and it fails identically.
     """
-    workflows = sorted((PROJECT_ROOT / ".github/workflows").glob("*.yml"))
+    # GitHub accepts both extensions, so a future `*.yaml` must not be exempt.
+    workflows = sorted((PROJECT_ROOT / ".github/workflows").glob("*.y*ml"))
     assert workflows, "no workflow files found"
 
     offenders: list[str] = []
     for path in workflows:
-        for job_name, job in (
-            yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
-        ).items():
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        top_level = {key: value for key, value in document.items() if key != "jobs"}
+        if "runner." in yaml.safe_dump(top_level):
+            offenders.append(f"{path.name}:<workflow>")
+        for job_name, job in (document.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
             job_level = {key: value for key, value in job.items() if key != "steps"}
@@ -559,7 +566,7 @@ def test_no_workflow_references_the_runner_context_outside_a_step():
                 offenders.append(f"{path.name}:{job_name}")
 
     assert not offenders, (
-        "`runner` is only available inside a step; these job-level uses make "
+        "`runner` is only available inside a step; these uses outside one make "
         f"GitHub reject the workflow file: {offenders}"
     )
 

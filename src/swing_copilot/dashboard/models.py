@@ -169,6 +169,10 @@ class SymbolDetail:
     verdict: Badge
     news_supply_level: Cell
     reasons: tuple[ReasonRow, ...]
+    #: True when `reasons` is empty because the run predates
+    #: `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` and its reason text is withheld
+    #: (Issue #385), not because the verdict was never collected.
+    reasons_withheld: bool
     score_components: tuple[Stat, ...]
     technicals: tuple[Stat, ...]
     execution: tuple[Stat, ...]

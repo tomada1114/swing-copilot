@@ -457,11 +457,11 @@ NFR-03「35分以内」を満たすため、各ステップの`duration_s`を`ru
 | FR-03 | EDGARファンダ取得 | `data/edgar.py`, `storage/market_store.py` |
 | FR-04 | ファンダ品質フィルタ（第1段） | `screening/fundamental_filters.py`, `screening/pipeline.py` |
 | FR-05 | テクニカルシグナル（第2段・プラガブル） | `screening/technical_signals.py`, `screening/base.py`, `screening/pipeline.py` |
-| FR-06 | リスク管理チェック | `risk/position_sizing.py`, `risk/checks.py` |
+| FR-06 | リスク管理チェック（読者の口座を仮定した株数は算出しない） | `risk/checks.py` |
 | FR-07 | テキスト収集 | `text/news_finnhub.py`, `text/edgar_filings.py`, `text/calendar_fred.py` |
 | FR-08 | 定性分析（スキル連携、事実/解釈分離） | `analysis/export.py`, `analysis/context.py`, `analysis/schemas.py`, `analysis/validate.py`, `analysis/safety.py`, `analysis/snapshot.py`, `analysis/cli.py`, `.claude/skills/swing-daily`（`analyze-news`/`analyze-filings`/`interpret-screening`） |
 | FR-09 | CLI・Markdown＋Discord通知 | `report/daily_brief.py`, `report/terminal_report.py`, `report/markdown_report.py`, `report/discord_notify.py` |
-| FR-10 | バックテスト（対S&P500） | `backtest/strategies.py`, `backtest/runner.py` |
+| FR-10 | バックテスト（対S&P500） | `backtest/strategies.py`, `backtest/runner.py`, `risk/position_sizing.py`（名目資金サイジング、シミュレータ専用） |
 | FR-11 | ペーパートレード記録（**廃止 2026-08-19**: 公開トラックレコード化に伴い実売買記録機能を撤去） | — |
 | FR-12 | 日次バッチ（冪等・フェイルソフト） | `pipeline/daily.py` |
 | NFR-01 | コスト（LLM API従量課金なし） | 定性分析をClaude Codeスキルへ委譲する構成そのもの（`src/`はLLM APIクライアントを持たない）、$0構成のデータソース選定 |

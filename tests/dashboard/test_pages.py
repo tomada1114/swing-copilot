@@ -6,6 +6,7 @@ autouse network guard in `tests/conftest.py` stays satisfied.
 
 from __future__ import annotations
 
+from datetime import date
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,13 @@ import pytest
 from starlette.testclient import TestClient
 
 from swing_copilot.dashboard import create_app, guidance
-from tests.dashboard.conftest import RUN_ID, Builder, Fixture, write_run_archive
+from tests.dashboard.conftest import (
+    PRIOR_RUN_ID,
+    RUN_ID,
+    Builder,
+    Fixture,
+    write_run_archive,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -159,6 +166,42 @@ class TestSymbolPage:
 
         assert response.status_code == HTTPStatus.NOT_FOUND
         assert "run が見つからない" in response.text
+
+    def test_a_pre_cutoff_runs_reason_text_never_renders(
+        self, client: TestClient, builder: Builder
+    ) -> None:
+        """Issue #385: a pre-#352 reason may quote a reader's account verbatim."""
+        old = builder.for_run(PRIOR_RUN_ID)
+        old.run(run_date=date(2026, 8, 20))
+        old.universe("MSFT")
+        old.candidate("MSFT")
+        old.verdict("MSFT", recommendation="proceed", as_of=date(2026, 8, 20))
+        old.reason("MSFT", index=0, text="最終株数17株はこの制約下での結果である")
+
+        response = client.get(f"/runs/{PRIOR_RUN_ID}/symbols/MSFT")
+
+        assert response.status_code == HTTPStatus.OK
+        assert "最終株数17株" not in response.text
+        # The reason *was* collected; saying otherwise sends the reader off to
+        # re-run a retro collect that already ran.
+        assert "まだ DuckDB に無い" not in response.text
+        assert "理由本文は表示しない" in response.text
+
+    def test_a_run_exactly_at_the_cutoff_still_renders_its_reason_text(
+        self, client: TestClient, builder: Builder
+    ) -> None:
+        """The boundary day itself (2026-08-21) is already account-independent."""
+        boundary = builder.for_run(PRIOR_RUN_ID)
+        boundary.run(run_date=date(2026, 8, 21))
+        boundary.universe("MSFT")
+        boundary.candidate("MSFT")
+        boundary.verdict("MSFT", recommendation="proceed", as_of=date(2026, 8, 21))
+        boundary.reason("MSFT", index=0, text="決算プロキシミティを理由に見送り")
+
+        response = client.get(f"/runs/{PRIOR_RUN_ID}/symbols/MSFT")
+
+        assert response.status_code == HTTPStatus.OK
+        assert "決算プロキシミティを理由に見送り" in response.text
 
 
 @pytest.mark.usefixtures("populated")

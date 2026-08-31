@@ -118,8 +118,10 @@ def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str:
         prior: Newest-first past verdicts with whatever horizons matured.
 
     Returns:
-        A `<prior_verdicts>` block, or `""` when the symbol has no archived
-        verdict (the normal state for a first-time candidate).
+        A `<prior_verdicts>` block, or `""` when the caller supplied none —
+        the normal state for a first-time candidate, and also for a symbol
+        whose only archived verdicts predate
+        `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` (Issue #385).
     """
     if not prior:
         return ""

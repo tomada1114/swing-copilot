@@ -152,7 +152,6 @@ class TestGetRunDetail:
         assert detail.candidates[0].signal_names == ("trend_sma",)
         assert len(detail.risk_assessments) == 1
         assert detail.risk_assessments[0].binding_constraint is None
-        assert detail.risk_assessments[0].max_shares is None
 
 
 class TestGetRejections:

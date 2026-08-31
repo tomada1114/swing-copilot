@@ -789,6 +789,45 @@ def test_windowed_pull_then_append_only_push_does_not_flag_out_of_window_absence
     assert f"reports/{new_run_date}/{new_run_id}.md" in report.uploaded
 
 
+def test_windowed_pull_then_append_only_push_still_rejects_an_out_of_window_rewrite(
+    tmp_path,
+):
+    """Windowing excuses absence only, never a rewrite of a present key.
+
+    Regression for the bug where the window skip fired before the local
+    entry was even looked up: an out-of-window key that IS present locally
+    with different bytes (e.g. written back by a compromised analysis
+    session) must still trip the append-only guard, exactly as an in-window
+    rewrite does.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    run_ids = _seed_report_run_dates(origin.parent / "reports", _WINDOW_DATES)
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    data_sync.pull(store, _roots(mirror), reports_window=10)
+
+    out_of_window = _WINDOW_OLDEST_5[0]
+    run_id = run_ids[out_of_window]
+    result_path = (
+        mirror.parent / "reports" / out_of_window / run_id / "analysis_result.json"
+    )
+    _write(result_path, b"rewritten-by-injection")
+
+    with pytest.raises(data_sync.DataSyncError, match="append-only"):
+        data_sync.push(
+            store,
+            _roots(mirror),
+            now=lambda: FIXED_NOW,
+            append_only_prefixes=(data_sync.REPORTS_PREFIX,),
+        )
+
+    _, result_key = _report_keys_for_date(out_of_window, run_id)
+    assert store.objects[result_key] == f"result-{out_of_window}".encode()
+
+
 def test_full_pull_then_push_still_gcs_normally_after_windowed_pull_landed(tmp_path):
     """A full pull resets the recorded window, so ordinary GC applies again.
 
@@ -1288,6 +1327,51 @@ def test_status_reports_diverged_when_both_sides_moved(tmp_path):
     assert report.status is data_sync.SyncStatus.DIVERGED
     assert report.modified == (DUCKDB_KEY,)
     assert "status: diverged" in report.render()
+
+
+def test_status_after_windowed_pull_reports_in_sync(tmp_path):
+    """A windowed working copy must be able to report in-sync (Issue #373).
+
+    Without window awareness, `removed` would list every out-of-window
+    `reports/` key the pull deliberately never fetched -- exactly the keys
+    the window is designed to leave alone -- so `status` could never say
+    `in-sync` on any machine that has ever used `--reports-window`.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    _seed_report_run_dates(origin.parent / "reports", _WINDOW_DATES)
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    data_sync.pull(store, _roots(mirror), reports_window=10)
+
+    report = status(store, mirror)
+
+    assert report.status is data_sync.SyncStatus.IN_SYNC
+    assert report.removed == ()
+
+
+def test_status_after_windowed_pull_still_flags_a_missing_in_window_key(tmp_path):
+    """Windowing excuses absence only outside the window, not inside it."""
+    origin = make_workspace(tmp_path, "origin")
+    run_ids = _seed_report_run_dates(origin.parent / "reports", _WINDOW_DATES)
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    data_sync.pull(store, _roots(mirror), reports_window=10)
+
+    in_window = _WINDOW_NEWEST_10[0]
+    run_id = run_ids[in_window]
+    (mirror.parent / "reports" / in_window / run_id / "analysis_result.json").unlink()
+
+    report = status(store, mirror)
+
+    _, result_key = _report_keys_for_date(in_window, run_id)
+    assert result_key in report.removed
+    assert report.status is data_sync.SyncStatus.LOCAL_CHANGED
 
 
 def test_status_reports_no_local_state_before_the_first_pull(tmp_path):

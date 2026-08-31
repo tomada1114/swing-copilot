@@ -999,27 +999,31 @@ def _guard_append_only(
             `reports/` tree was windowed (Issue #373), the `reports/` keys
             that window fetched. A remote `reports/` key outside this set is
             *expected* to be absent locally -- that absence is what
-            `reports/`'s suppressed garbage collection relies on -- so it is
-            skipped rather than treated as a deletion. `None` means the pull
-            was not windowed: every remote key under `prefixes` is expected
-            locally, exactly as before this parameter existed.
+            `reports/`'s suppressed garbage collection relies on -- so a
+            missing local entry for such a key is skipped rather than treated
+            as a deletion. It does NOT excuse a rewrite: a key outside the
+            window that is nonetheless present locally with different bytes
+            is still a violation, so the sha256 comparison always runs when
+            the key exists locally. `None` means the pull was not windowed:
+            every remote key under `prefixes` is expected locally, exactly as
+            before this parameter existed.
 
     Raises:
         DataSyncError: When a key the remote already publishes under one of
-            `prefixes`, and that this window expects to be present locally,
-            is missing or has different content.
+            `prefixes` is present locally with different content, or is
+            missing locally and this window expects it to be present.
     """
     for key, remote_entry in sorted(remote_files.items()):
         if not any(key.startswith(prefix) for prefix in prefixes):
             continue
-        if (
-            windowed_reports_keys is not None
-            and key.startswith(REPORTS_PREFIX)
-            and key not in windowed_reports_keys
-        ):
-            continue
         local_entry = local.get(key)
         if local_entry is None:
+            if (
+                windowed_reports_keys is not None
+                and key.startswith(REPORTS_PREFIX)
+                and key not in windowed_reports_keys
+            ):
+                continue
             msg = (
                 f"append-only 違反: 既にリモートにある {key} がローカルに無い。"
                 "無人実行は既存のアーカイブを削除できない"
@@ -1263,7 +1267,15 @@ def _classify(
 
 
 def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
-    """Compare local and remote without writing anything on either side."""
+    """Compare local and remote without writing anything on either side.
+
+    A working copy produced by a windowed pull (Issue #373) never fetched the
+    `reports/` keys outside its recorded window, and is not expected to hold
+    them -- that absence is exactly what the append-only guard's and push's
+    GC suppression both treat as normal. Without accounting for that here,
+    `removed` would list every one of those keys forever, so a windowed
+    working copy could never report `in-sync` even immediately after a pull.
+    """
     manifest = read_remote_manifest(store)
     state = read_state(_data_root(roots).local_dir)
     local = scan_local(roots)
@@ -1283,8 +1295,21 @@ def status(store: ObjectStore, roots: tuple[SyncRoot, ...]) -> StatusReport:
             prefixes=tuple(root.prefix for root in roots),
         )
 
+    reports_window = state.reports_window if state is not None else None
+    expected_absent: frozenset[str] = frozenset()
+    if reports_window is not None:
+        windowed = _windowed_reports_keys(manifest.files, reports_window)
+        expected_absent = frozenset(
+            key
+            for key in manifest.files
+            if key.startswith(REPORTS_PREFIX) and key not in windowed
+        )
     added = tuple(key for key in sorted(local) if key not in manifest.files)
-    removed = tuple(key for key in sorted(manifest.files) if key not in local)
+    removed = tuple(
+        key
+        for key in sorted(manifest.files)
+        if key not in local and key not in expected_absent
+    )
     modified = tuple(
         key
         for key in sorted(local)

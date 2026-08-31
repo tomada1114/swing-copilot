@@ -36,7 +36,6 @@ from swing_copilot.pipeline.daily import (
     _run_mode,
     _run_step_analysis_export,
     _run_step_fundamentals,
-    _run_step_notify,
     _run_step_output,
     _run_step_postmortem,
     _run_step_prices,
@@ -723,23 +722,6 @@ def _run_soft_steps(
 
     degraded = _run_track_update_soft_step(deps, ctx, deadline) or degraded
 
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step 7_notify skipped: time budget exceeded")
-        notify_outcome = _TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step 7_notify starting")
-        _step_started(deps, "7_notify")
-        notify_outcome = _run_step_notify(
-            deps,
-            ctx.candidates,
-            ctx.run_date,
-            ctx.exposure_decision,
-            is_dry_run=options.is_dry_run,
-        )
-    _record_step(deps, ctx.run_id, "7_notify", notify_outcome, started_at)
-    degraded = degraded or not notify_outcome.success
-
     status_before_output = RunStatus.DEGRADED if degraded else RunStatus.SUCCESS
     notices = (
         ((deps.universe_warning,) if deps.universe_warning is not None else ())
@@ -752,7 +734,6 @@ def _run_soft_steps(
                 ("text", text_outcome),
                 ("analysis export", export_outcome),
                 ("postmortem", postmortem_outcome),
-                ("notification", notify_outcome),
             )
             if outcome.detail is not None
             and (not outcome.success or not outcome.is_skipped)

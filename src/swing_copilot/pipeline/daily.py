@@ -109,7 +109,6 @@ if TYPE_CHECKING:
     from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.models import DailyRunResult
     from swing_copilot.report.daily_brief import SignalPerformanceRow
-    from swing_copilot.report.discord_notify import Notifier
     from swing_copilot.risk.checks import RiskAssessment
     from swing_copilot.screening.base import (
         Candidate,
@@ -173,7 +172,6 @@ _VISIBLE_PIPELINE_STEPS = (
     "4_risk",
     "5_text",
     "6_analysis_export",
-    "7_notify",
     "8_output",
 )
 
@@ -246,7 +244,6 @@ class DailyDependencies:
     earnings_client: EarningsCalendarClient | None = None
     news_client: _NewsClientLike | None = None
     calendar_client: _CalendarClientLike | None = None
-    notifier: Notifier | None = None
     provider_name: str = "yfinance"
     data_tier: DataTier = DataTier.PROTOTYPE
     strategy_key: str = "default"
@@ -1798,38 +1795,6 @@ def _published_tracking(
         )
         for row in board
     )
-
-
-def _notification_summary(
-    candidates: list[Candidate], run_date: date, exposure: ExposureDecision
-) -> str:
-    """One-line Discord summary, led by the exposure decision."""
-    return (
-        f"[swing-copilot] Exposure Ceiling: {exposure.verdict.value} "
-        f"(Gate: {exposure.gate.value}, DD: {exposure.dd_level.value}, "
-        f"Data quality: {exposure.data_quality.value})\n"
-        f"{run_date.isoformat()}: {len(candidates)} candidate(s) today"
-    )
-
-
-def _run_step_notify(
-    deps: DailyDependencies,
-    candidates: list[Candidate],
-    run_date: date,
-    exposure: ExposureDecision,
-    *,
-    is_dry_run: bool,
-) -> _StepOutcome:
-    if is_dry_run:
-        return _StepOutcome(True, "skipped: dry-run mode", is_skipped=True)
-    if not deps.settings.notification.enabled or deps.notifier is None:
-        return _StepOutcome(True, "skipped: notification disabled", is_skipped=True)
-    sent = deps.notifier.notify(
-        _notification_summary(candidates, run_date, exposure), None
-    )
-    if not sent:
-        return _StepOutcome(False, "Discord webhook notification failed")
-    return _StepOutcome(True)
 
 
 def _record_step(

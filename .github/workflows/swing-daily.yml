@@ -329,6 +329,30 @@ jobs:
           --started-after "$STARTED_AFTER"
           --outcome-file "$COPILOT_DAILY_OUTCOME_FILE"
 
+      # Issue #383: 定性 verdict 確定後に毎日1通だけ Discord へ通知する。
+      # 旧来は copilot-daily 内の step 7 (`_run_step_notify`) が
+      # `6_analysis_export` の直後に送っていたが、その時点では
+      # verdict がまだ存在しない (skill が analysis_result.json を書き、
+      # copilot-ingest-analysis が検証するのはその後) ため、通知は常に
+      # 「候補N件」としか言えなかった。ここへ移すことで、verdict が
+      # 確定した後の本当の結論 (proceed の売買計画、全件 skip、縮退・
+      # withhold) を伝えられる。
+      #
+      # always(): 「Verify the analysis completed」が落ちた日、あるいは
+      # それより前のどのステップが落ちた日も、必ず1通は届けるのが要件
+      # (scripts/notify_daily.py と report/verdict_notification.py が
+      # outcome ファイルの有無・内容だけから終了区分を判定する)。
+      # continue-on-error: true で、通知の失敗が R2 push 済みのデータ
+      # (この時点で既に完了している) を道連れにしない。
+      # DISCORD_WEBHOOK_URL は「Run swing-daily」ステップの env: にしか
+      # 無いため、ここにも渡す。
+      - name: Send the daily verdict notification
+        if: ${{ always() && (inputs.mode || 'live') == 'live' }}
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: uv run python scripts/notify_daily.py
+
       # 失敗した日ほどレポートを見たいので always()。
       - name: Upload reports
         if: always()

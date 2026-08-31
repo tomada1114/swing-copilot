@@ -1,9 +1,13 @@
-"""Fully offline five-symbol E2E smoke test for all eight daily-batch steps (FR-12).
+"""Fully offline five-symbol E2E smoke test for the daily-batch pipeline (FR-12).
 
-Every external port (`DataProvider`, text clients, `EdgarClient`, `Notifier`,
-`Clock`) is a fake — no real network/API call anywhere, matching every other
-test module's pattern in this repo (the autouse socket guard in
-`tests/conftest.py` would fail the test immediately if one slipped through).
+Every external port (`DataProvider`, text clients, `EdgarClient`, `Clock`) is a
+fake — no real network/API call anywhere, matching every other test module's
+pattern in this repo (the autouse socket guard in `tests/conftest.py` would
+fail the test immediately if one slipped through). Discord notification
+(`Notifier`) is no longer one of `copilot-daily`'s own steps (Issue #383): it
+now runs once per day from `scripts/notify_daily.py`, well after the
+qualitative verdict exists, so it has its own offline coverage in
+`tests/report/test_verdict_notification.py` / `tests/test_notify_daily.py`.
 
 Qualitative analysis itself is not performed by `copilot-daily` (it exports
 `analysis_input.json` for the `swing-daily` skill and stops); this suite
@@ -148,15 +152,6 @@ class FakeCalendarClient:
         return []
 
 
-class FakeNotifier:
-    def __init__(self):
-        self.calls = []
-
-    def notify(self, summary, report_path):
-        self.calls.append((summary, report_path))
-        return True
-
-
 def _uptrending_bars(symbols: list[str], as_of: date, days: int = 260) -> pd.DataFrame:
     rows = []
     for symbol in symbols:
@@ -224,7 +219,6 @@ def deps(tmp_path):
     state_store = StateStore(Database(tmp_path / "copilot.duckdb"))
     state_store.init_schema()
     settings = load_settings("config/settings.yaml")
-    object.__setattr__(settings.notification, "enabled", True)
 
     return DailyDependencies(
         data_provider=FakeDataProvider(
@@ -239,14 +233,12 @@ def deps(tmp_path):
         edgar_client=FakeEdgarClient(),
         news_client=FakeNewsClient(),
         calendar_client=FakeCalendarClient(),
-        notifier=FakeNotifier(),
         output_dir=str(tmp_path / "reports"),
     )
 
 
 class TestFiveSymbolEndToEnd:
-    def test_all_eight_steps_complete_and_produce_a_markdown_brief(self, deps):
-        # Live mode exercises notification; dry-run intentionally skips it.
+    def test_all_pipeline_steps_complete_and_produce_a_markdown_brief(self, deps):
         result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
         assert result.status == RunStatus.SUCCESS
@@ -269,7 +261,6 @@ class TestFiveSymbolEndToEnd:
             "4_risk",
             "5_text",
             "6_analysis_export",
-            "7_notify",
             "8_output",
             "postmortem",
             "retro_collect",
@@ -283,7 +274,6 @@ class TestFiveSymbolEndToEnd:
             "4_risk": "success",
             "5_text": "success",
             "6_analysis_export": "success",
-            "7_notify": "success",
             "8_output": "success",
             "postmortem": "success",
             "retro_collect": "success",
@@ -410,15 +400,6 @@ class TestFiveSymbolEndToEnd:
         assert deps.data_provider.requested_symbols
         requested = deps.data_provider.requested_symbols[-1]
         assert set(MARKET_STRIP_SYMBOLS).issubset(requested)
-
-    def test_notifier_is_called_with_summary_before_output_is_archived(self, deps):
-        # Dry-run suppresses notification, so this contract needs live mode.
-        result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
-
-        assert len(deps.notifier.calls) == 1
-        _summary, notified_path = deps.notifier.calls[0]
-        assert notified_path is None
-        assert result.report_path is not None
 
     def test_rerun_is_idempotent_and_gets_a_new_run_id(self, deps):
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)

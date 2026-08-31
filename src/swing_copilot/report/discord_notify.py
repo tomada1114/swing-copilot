@@ -1,14 +1,19 @@
 """Discord webhook report notification (FR-09, NFR-07).
 
 `Notifier` is a small Protocol so a future channel (email, Slack) plugs into
-`pipeline/daily.py` step 8 by adding one new class, never touching the
-pipeline itself. `DiscordNotifier.notify()` never raises — it has no
-`StateStore` dependency and returns whether the send succeeded so the
-*caller* (the pipeline) can record a `run_steps` failure without stopping
-the batch (`docs/04_detailed_design.md` 3.18's `-> None` signature is a
-stale placeholder here: without a return value the caller would have no
-way to detect a failed send that raised nothing, so this module returns
-`bool` instead — see the P2-4 divergence note).
+its caller by adding one new class, never touching the caller itself. Since
+Issue #383, that caller is `scripts/notify_daily.py` -- a CI step that runs
+once per day, after `copilot-ingest-analysis` has (or has not) landed a
+verdict, not `pipeline/daily.py` itself (which never had a verdict to report
+at the point its old step 7 used to run). `DiscordNotifier.notify()` never
+raises — it has no `StateStore` dependency and returns whether the send
+succeeded so the caller can decide how to react (`scripts/notify_daily.py`
+exits non-zero; a `continue-on-error: true` workflow step keeps that from
+failing the job) without stopping any batch of its own
+(`docs/04_detailed_design.md` 3.18's `-> None` signature is a stale
+placeholder here: without a return value the caller would have no way to
+detect a failed send that raised nothing, so this module returns `bool`
+instead — see the P2-4 divergence note).
 
 Retries follow the bounded-retry convention established by
 `data/edgar.py`'s `EdgarClient._with_retries` (injectable sleep function,

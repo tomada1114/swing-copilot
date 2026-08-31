@@ -18,7 +18,7 @@
 | FR-06 | 公開リスク判定は銘柄単位の指値・逆指値・ATR14・1Rだけを計算し、読者の口座や保有を参照しない | 口座評価額から株数を推測して分析入力へ出す | `tests/risk/test_checks.py::TestTradePlan::test_approved_plan_exposes_close_limit_stop_atr_and_one_r`、`tests/analysis/test_context.py::TestRiskConstraints::test_it_renders_the_symbol_level_trade_plan` |
 | FR-07 | 一時的な Finnhub 障害は全試行でレート制限を守って再試行する | 429 後の再試行が待機を飛ばす | `tests/text/test_news_finnhub.py::TestRetries::test_retries_rate_limited_request_and_throttles_every_attempt` |
 | FR-08 | スキル結果の run identity 不一致はレポートを書き換えない | 別 run の `analysis_result.json` を取り込む | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_mismatched_skill_result_preserves_the_daily_report` |
-| FR-09 | 日次 run はローカル Markdown と 8 つの可視 step を残す | 通知成功後にレポートが作られない | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_eight_steps_complete_and_produce_a_markdown_brief` |
+| FR-09 | 日次 run はローカル Markdown と 7 つの可視 step を残す（旧`7_notify`はIssue #383でパイプラインから廃止し、通知はCIの独立ステップ`scripts/notify_daily.py`が担う） | レポート生成前に通知処理が挟まる | `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_all_pipeline_steps_complete_and_produce_a_markdown_brief` |
 | FR-10 | 売買コストをエントリー・決済の両方に適用する | 決済時のスリッページを損益から漏らす | `tests/backtest/test_engine.py::TestBenchmarkAndReproducibility::test_final_equity_includes_exit_slippage_and_commission` |
 | FR-10a | 初期逆指値は本番・台帳・バックテストで同一の終値アンカーである | `k > 0`や寄付約定でバックテストだけが約定価格を逆指値の基準にする | `tests/backtest/test_engine.py::TestStopAnchorParity::test_risk_checker_and_backtest_use_the_same_signal_close_anchor`、`tests/backtest/test_engine.py::TestStopAnchorParity::test_fill_paths_keep_the_initial_stop_anchored_to_signal_close` |
 | FR-10b | 約定日に自分の逆指値を割り込むギャップは同一セッションでstop決済され、最終現金が手計算値と一致する | 約定後の出口評価を翌日に遅らせる、または片側のコストを落とす | `tests/backtest/test_engine.py::TestGapStop::test_gap_below_initial_stop_on_fill_day_settles_with_both_side_costs` |
@@ -80,7 +80,8 @@
 ## 日次統合 E2E の境界
 
 通常経路は `DailyDependencies` の全外部 port を fake にした offline E2E で、価格・
-財務・screening・risk・text・analysis input export・通知・Markdown を順に確認する。
+財務・screening・risk・text・analysis input export・Markdown を順に確認する
+（通知はIssue #383でパイプライン外のCIステップ`scripts/notify_daily.py`へ移動した）。
 スキルは同じ run の fixture result を書くだけで、Python プロセスはモデル呼出しを
 行わない。identity が一致する正経路は
 `tests/test_e2e_smoke.py::TestFiveSymbolEndToEnd::test_exported_run_identity_allows_offline_skill_result_ingest`、

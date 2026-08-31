@@ -279,7 +279,7 @@ def _seed_virtual_position(
 
 
 class TestHappyPath:
-    def test_completes_all_eight_steps_successfully(self, deps, state_store):
+    def test_completes_all_pipeline_steps_successfully(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
@@ -298,17 +298,16 @@ class TestHappyPath:
             "4_risk",
             "5_text",
             "6_analysis_export",
-            "7_notify",
             "8_output",
             "postmortem",
             "retro_collect",
             "retro_evaluate",
             "track_update",
         ]
-        # 1/3/4/8 succeed outright; 2/5/6/7 are deliberate skips (no
-        # optional clients configured); postmortem (P2-11), the retro
-        # collect/evaluate steps (P8-30) and verdict tracking succeed with
-        # nothing to look back at yet — none of these are failures.
+        # 1/3/4/8 succeed outright; 2/5/6 are deliberate skips (no optional
+        # clients configured); postmortem (P2-11), the retro collect/evaluate
+        # steps (P8-30) and verdict tracking succeed with nothing to look back
+        # at yet — none of these are failures.
         assert all(status in {"success", "skipped"} for _step, status in steps)
 
         bars = deps.market_store.read_bars(
@@ -469,10 +468,10 @@ class TestIdempotency:
             second_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(second.run_id)]
             ).fetchone()
-        # 8 pre-existing steps + local postmortem, MAE/MFE, the two retro
-        # (collect/evaluate) steps, and verdict tracking.
-        assert first_steps == (12,)
-        assert second_steps == (12,)
+        # 7 pipeline steps (Issue #383 removed `7_notify`) + local postmortem,
+        # MAE/MFE, the two retro (collect/evaluate) steps, and verdict tracking.
+        assert first_steps == (11,)
+        assert second_steps == (11,)
 
 
 class TestFatalStepFailure:
@@ -3128,7 +3127,7 @@ class TestTimeoutBudget:
         self, deps, state_store
     ):
         object.__setattr__(deps.settings.schedule, "timeout_minutes", 1)  # 60s budget
-        # run_started_at=0.0 -> deadline=60.0; by the time steps 5/6/7 check,
+        # run_started_at=0.0 -> deadline=60.0; by the time steps 5/6 check,
         # "elapsed" is already far past the budget, even though nothing in
         # the fatal steps (1-4) itself was individually slow.
         deps_late = replace(deps, monotonic=FakeMonotonic(0.0, 999_999.0))
@@ -3149,7 +3148,6 @@ class TestTimeoutBudget:
             )
         assert rows["5_text"] == "skipped"
         assert rows["6_analysis_export"] == "skipped"
-        assert rows["7_notify"] == "skipped"
         assert rows["8_output"] == "success"
 
 

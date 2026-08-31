@@ -163,12 +163,15 @@ Part1調査の結論として、本システムは意思決定支援ツールと
 > **仕様変更（P7、スキル移行時）**: 旧LLM統合にあった`catalyst_quality`（触媒の質、表示専用）と`guidance_direction`（ガイダンス方向性）は新しい分析契約に含めず廃止した。いずれもランキング・リスク判定へ接続されていない表示専用フィールドであり、必要になれば`analysis/schemas.py`の任意フィールドとして復活できる。
 
 **FR-09 レポート・通知**
-- 説明: 日次結果をCLIへ見やすく表示し、同じ`DailyBrief`から監査用Markdownを生成する。DuckDBを正本とし、Markdownは再生成可能な派生成果物とする。Discord Webhook通知はデフォルトで有効とし、無人実行の結果を届ける主経路とする。
+- 説明: 日次結果をCLIへ見やすく表示し、同じ`DailyBrief`から監査用Markdownを生成する。DuckDBを正本とし、Markdownは再生成可能な派生成果物とする。Discord Webhook通知はデフォルトで有効とし、無人実行の結果を届ける主経路とする。通知はパイプライン内のステップではなく、CI（`swing-daily.yml`）が`copilot-daily`実行後・R2 push後に走らせる独立ステップ（`scripts/notify_daily.py`）が1日1回だけ送る（Issue #383）。これは、定性分析（verdict）が確定するのが`copilot-ingest-analysis`後であり、パイプライン内で送るとverdict確定前の通知になってしまうため。
 - 受け入れ基準:
   - `copilot-daily`が進捗ログをstderr、最終ブリーフをstdoutへ出し、市場概況・候補順位・シグナル・リスク・定性分析（未実施ならその旨）・警告を確認できる。`copilot-ingest-analysis`は同じ`DailyBrief`から同じレンダラで再描画する。
   - `reports/<run_date>/<run_id>.md`と`reports/latest.md`を同一ディレクトリの一時ファイルから原子的に置換し、同日再実行の履歴を上書きしない。
   - CLIとMarkdownが共通の`DailyBrief`を入力とし、表示形式ごとにデータ取得・判断ロジックを重複させない。
-  - `notification.enabled: true`（デフォルト）かつWebhook URLが設定されている場合に、モックWebhookエンドポイントへサマリ内容を含むペイロードが送信されることをテストで確認できる。`notification.enabled: false`の場合は送信が行われないこと、`true`でWebhook URLが無い場合は縮退せず設定エラーとして即座に失敗することをテストで確認できる。
+  - `scripts/notify_daily.py`は`COPILOT_DAILY_OUTCOME_FILE`（終了状態）と`reports/<run_date>/<run_id>/`配下のJSON（`analysis_input.json`・`analysis_result.json`・`report_context.json`）だけを読み、DuckDBを開かないことを確認できる。`proceed`のverdictが1件以上ある日は、各銘柄の指値・逆指値・1R%・1株あたりリスク（ドル）・ATR14・状態/binding_constraint/警告・verdict理由を含む口座非依存のトレードプランを通知本文に含み、株数（口座規模に依存する値）は一切含まないことを確認できる。それ以外の終端状態（全銘柄skip、複数種のpreflight abort、ジョブ失敗、ingestの縮退・withholding）でも通知は必ず1通送られることを確認できる。
+  - `notification.enabled: true`（デフォルト）かつWebhook URLが設定されている場合に、モックWebhookエンドポイントへ本文を含むペイロードが送信されることをテストで確認できる。`notification.enabled: false`の場合は送信が行われないこと、`true`でWebhook URLが無い場合は`scripts/notify_daily.py`が設定エラーとして非ゼロ終了することをテストで確認できる（この失敗はワークフロー側の`continue-on-error: true`により、日次バッチ全体のジョブ失敗にはしない）。
+  - 本文がDiscordの2000字上限を超える場合は、共通ヘッダ＋銘柄ごとの自己完結ブロックへ分割し、1銘柄のブロックを2通に分割しないことを確認できる。単一ブロックだけで上限を超える場合は`verdict.reasons[].text`を明示的な省略記号つきで切り詰めることを確認できる。
+  - `scripts/notify_daily.py`が組み立てた通知本文に対し、送信直前に`analysis/safety.py`のCON-03検査を（ingest時の検査を前提とせず）再適用し、違反があれば該当銘柄のブロックだけをfail-closedで縮退表示に置き換えることを確認できる。
   - CLI・Markdown・通知内に断定的な売買指示（CON-03）が含まれないことをテストとレビューで確認できる。
 
 **FR-10 バックテスト**

@@ -44,7 +44,6 @@ from swing_copilot.ratelimit import (
     FINNHUB_MIN_REQUEST_INTERVAL_SECONDS,
     MinIntervalThrottle,
 )
-from swing_copilot.report.discord_notify import DiscordNotifier
 from swing_copilot.report.terminal_report import (
     TerminalPaths,
     TerminalRunSummary,
@@ -159,12 +158,10 @@ def _parse_args(argv: list[str] | None = None) -> DailyRunOptions:
     )
 
 
-def _required_features(options: DailyRunOptions, settings: Settings) -> set[str]:
+def _required_features(options: DailyRunOptions) -> set[str]:
     features = {"edgar"}
     if not options.skip_text:
         features |= {"finnhub", "fred"}
-    if settings.notification.enabled:
-        features.add("discord")
     return features
 
 
@@ -208,7 +205,7 @@ def _compose_dependencies(
         msg = f"Unknown strategy {options.strategy_key!r}; available: {available}"
         raise ConfigError(msg)
     secrets = load_secrets()
-    require_secrets(secrets, _required_features(options, settings))
+    require_secrets(secrets, _required_features(options))
 
     mode = _run_mode(options)
     db_path, output_dir = _paths_for_mode(mode)
@@ -239,11 +236,6 @@ def _compose_dependencies(
         if secrets.fred_api_key and not options.skip_text
         else None
     )
-    notifier = (
-        DiscordNotifier(secrets.discord_webhook_url)
-        if settings.notification.enabled and secrets.discord_webhook_url
-        else None
-    )
 
     return DailyDependencies(
         data_provider=YFinanceProvider(),
@@ -259,7 +251,6 @@ def _compose_dependencies(
         earnings_client=earnings_client,
         news_client=news_client,
         calendar_client=calendar_client,
-        notifier=notifier,
         output_dir=output_dir,
         strategy_key=options.strategy_key,
         progress=ProgressReporter(Console(stderr=True)),

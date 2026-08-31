@@ -78,12 +78,18 @@ jobs:
         run: uv sync --locked --group ops
 
       # R2 が data/・reports/ の正本。分析より先に引く。
+      # reports/ は日次runアーカイブが単調増加する (Issue #370)。まっさらな
+      # ランナーの pull コストを定数に保つため、--reports-window で直近10
+      # run date だけ取得する (data/ は常に全件)。窓は state ファイルに記録され、
+      # 後段の push はそこから reports/ の GC 抑止と append-only の判定範囲を
+      # 導出する (Issue #373)。窓外アーカイブへの訂正の再取り込みは運用者の
+      # ローカル全件 pull -> collect -> push (--reports-append-only なし) が担う。
       - name: Pull data from R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: uv run --group ops python scripts/data_sync.py pull
+        run: uv run --group ops python scripts/data_sync.py pull --reports-window 10
 
       # reports/ を R2 から引いた直後は、過去日の analysis_result.json も
       # ワークスペースに存在する。check_daily_complete.py の --started-after が

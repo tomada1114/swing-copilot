@@ -1587,6 +1587,42 @@ def test_credentials_do_not_leak_into_repr_or_str(monkeypatch):
     )
 
 
+def test_bare_r2settings_ignores_the_repo_dotenv_file():
+    """Regression test for the autouse `.env` guard in `tests/conftest.py` (Issue #387).
+
+    `R2Settings.model_config["env_file"]` is `REPO_ROOT / ".env"` -- an
+    absolute path, so `monkeypatch.chdir` cannot dodge it the way it can for
+    the repo-relative default used elsewhere. Without the guard's
+    `env_file=None` patch, a bare `R2Settings()` here would read the
+    operator's real R2 write credentials from the repository's `.env`.
+    """
+    settings = data_sync.R2Settings()
+
+    assert settings.r2_account_id is None
+    assert settings.r2_access_key_id is None
+    assert settings.r2_secret_access_key is None
+
+
+def test_r2settings_explicit_env_file_still_works(tmp_path):
+    """The guard disables only the class-level default `env_file`.
+
+    An explicit `_env_file=` at construction time overrides that default, so
+    a test that genuinely wants to exercise `.env` parsing still can --
+    against an isolated `tmp_path` file, never the operator's real one.
+    """
+    env_path = tmp_path / "r2.env"
+    env_path.write_text(
+        "R2_ACCOUNT_ID=explicit-account\n"
+        "R2_ACCESS_KEY_ID=explicit-key\n"
+        "R2_SECRET_ACCESS_KEY=explicit-secret\n"
+    )
+
+    settings = data_sync.R2Settings(_env_file=env_path)
+
+    assert settings.r2_account_id is not None
+    assert settings.r2_account_id.get_secret_value() == "explicit-account"
+
+
 def test_run_prints_the_status_report(tmp_path, capsys):
     data_dir = make_workspace(tmp_path)
     store = FakeObjectStore()

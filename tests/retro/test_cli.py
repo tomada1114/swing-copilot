@@ -661,6 +661,39 @@ def _raise_runtime_error(message: str) -> None:
     raise RuntimeError(message)
 
 
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    """Undo whatever `configure_cli_logging` mutates on the loggers below.
+
+    `configure_cli_logging` is process-global by design (it configures
+    `logging.root`), so ANY test that calls `main()` must not leak
+    handlers, levels, or filters into whatever runs next in the suite.
+    Restoring `root_logger.handlers` alone is not enough: a handler
+    object that already existed before this test (e.g. pytest's own log
+    capture handler) is reused, not replaced, across `main()` calls, so
+    `configure_cli_logging` mutates that SAME object's `.filters` list in
+    place. Each pre-existing handler's own filter list is snapshotted and
+    restored too, or a redaction filter added by one test could survive
+    into the next and shadow the one that test installs.
+    """
+    root_logger = logging.getLogger()
+    application_logger = logging.getLogger("swing_copilot")
+    saved_handlers = list(root_logger.handlers)
+    saved_root_filters = list(root_logger.filters)
+    saved_handler_filters = [list(handler.filters) for handler in saved_handlers]
+    saved_root_level = root_logger.level
+    saved_application_level = application_logger.level
+    try:
+        yield
+    finally:
+        root_logger.handlers = saved_handlers
+        root_logger.filters = saved_root_filters
+        for handler, filters in zip(saved_handlers, saved_handler_filters, strict=True):
+            handler.filters = filters
+        root_logger.setLevel(saved_root_level)
+        application_logger.setLevel(saved_application_level)
+
+
 def _patch_secrets(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
     """Point `retro/cli.py`'s `load_secrets()` at isolated, offline `Secrets`.
 
@@ -674,7 +707,6 @@ def _patch_secrets(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
     )
 
 
-@pytest.mark.usefixtures("_restore_logging_state")
 class TestLoggingConfiguration:
     """Issue #381: `main()` must configure logging before any other work.
 
@@ -687,40 +719,6 @@ class TestLoggingConfiguration:
     daily CI job under `continue-on-error: true`, so this log is the only
     forensic trail a failure there leaves.
     """
-
-    @pytest.fixture
-    def _restore_logging_state(self):
-        """Undo whatever `configure_cli_logging` mutates on the loggers below.
-
-        `configure_cli_logging` is process-global by design (it configures
-        `logging.root`), so a test that calls `main()` must not leak
-        handlers, levels, or filters into whatever runs next in the suite.
-        Restoring `root_logger.handlers` alone is not enough: a handler
-        object that already existed before this test (e.g. pytest's own log
-        capture handler) is reused, not replaced, across `main()` calls, so
-        `configure_cli_logging` mutates that SAME object's `.filters` list in
-        place. Each pre-existing handler's own filter list is snapshotted and
-        restored too, or a redaction filter added by one test could survive
-        into the next and shadow the one that test installs.
-        """
-        root_logger = logging.getLogger()
-        application_logger = logging.getLogger("swing_copilot")
-        saved_handlers = list(root_logger.handlers)
-        saved_root_filters = list(root_logger.filters)
-        saved_handler_filters = [list(handler.filters) for handler in saved_handlers]
-        saved_root_level = root_logger.level
-        saved_application_level = application_logger.level
-        try:
-            yield
-        finally:
-            root_logger.handlers = saved_handlers
-            root_logger.filters = saved_root_filters
-            for handler, filters in zip(
-                saved_handlers, saved_handler_filters, strict=True
-            ):
-                handler.filters = filters
-            root_logger.setLevel(saved_root_level)
-            application_logger.setLevel(saved_application_level)
 
     def test_a_record_reaches_a_configured_handler_not_lastresort(
         self, tmp_path: Path, reports_root: Path, monkeypatch: pytest.MonkeyPatch

@@ -140,11 +140,20 @@ def _restore_logging_state():
     `configure_cli_logging` is process-global by design (it configures
     `logging.root`), so a test that calls it must not leak handlers, levels,
     or filters into whatever runs next in the same pytest session.
+
+    Restoring `root_logger.handlers` alone is not enough. A handler that
+    already existed (pytest's own session-scoped capture handler survives the
+    whole worker) is reused rather than replaced, and `configure_cli_logging`
+    appends its `SecretRedactionFilter` to that SAME object's `.filters` list.
+    A filter left behind there keeps clearing every later record's `args` and
+    `exc_info` for the rest of the worker, so each pre-existing handler's own
+    filter list is snapshotted and restored too.
     """
     root_logger = logging.getLogger()
     application_logger = logging.getLogger("swing_copilot")
     saved_handlers = list(root_logger.handlers)
     saved_filters = list(root_logger.filters)
+    saved_handler_filters = [list(handler.filters) for handler in saved_handlers]
     saved_root_level = root_logger.level
     saved_application_level = application_logger.level
     try:
@@ -152,6 +161,8 @@ def _restore_logging_state():
     finally:
         root_logger.handlers = saved_handlers
         root_logger.filters = saved_filters
+        for handler, filters in zip(saved_handlers, saved_handler_filters, strict=True):
+            handler.filters = filters
         root_logger.setLevel(saved_root_level)
         application_logger.setLevel(saved_application_level)
 

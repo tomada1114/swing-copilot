@@ -175,9 +175,9 @@ def _emit_unreadable_tag(unreadable_run_count: int) -> None:
     -- previously the note read only "解析文書を読めなかったためスキップ",
     so this guidance pointed at a note with nothing in it. The guidance line
     and the note are both written via `_print_notes`/`console.print`, i.e.
-    stdout -- the same stream `logger.exception`'s traceback does *not* use
-    (this CLI configures no logging handler, so that traceback falls through
-    to `logging.lastResort` on stderr instead).
+    stdout -- a different stream from `logger.exception`'s traceback, which
+    `main()` sends to the stderr handler `configure_cli_logging` installs
+    (Issue #381; before that it fell through to `logging.lastResort`).
 
     Args:
         unreadable_run_count: `CollectSummary.unreadable_run_count` from the

@@ -369,7 +369,19 @@ copilot-retro evaluate --as-of 2027-03-11            # 満期を迎えた当否�
 copilot-retro export --as-of 2027-03-11              # 証拠一式をJSONへ書き出す
 copilot-retro prepare --as-of 2027-03-11             # 上記3つをまとめて実行する
 copilot-retro ingest reports/retro/2027-03-11        # 回答を検証し記録＋narrationを蓄積
+copilot-retro --log-level DEBUG collect              # ログレベルを上げる（後述）
 ```
+
+`--log-level`（`DEBUG`/`INFO`/`WARNING`/`ERROR`、既定はrootが`WARNING`・
+`swing_copilot`が`INFO`）は**サブコマンドより前**に置く。親パーサに登録されて
+いるため`copilot-retro collect --log-level DEBUG`は
+`unrecognized arguments`で落ちる。サブコマンドを持たない`copilot-daily`には
+この制約が無いので、そちらの書き方をそのまま持ち込まないこと。
+
+ログはstderrへ`%(asctime)s %(levelname)s %(name)s: %(message)s`で出る。
+`export`/`prepare`はFinnhub/EDGARを認証付きで叩くため、設定済みのAPIキーと
+webhook URLはメッセージ本文とトレースバックの両方で`[REDACTED]`に置換される
+（Issue #381、AGENTS.md「Never log secrets」）。
 
 `collect`は`reports/<date>/<run_id>/analysis_result.json`を走査し、run単位の
 完全置換で`verdicts`/`verdict_sources`へ取り込む。`strategy_key`と

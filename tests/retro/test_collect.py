@@ -14,7 +14,10 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from swing_copilot.analysis.export import ANALYSIS_RESULT_FILENAME
+from swing_copilot.analysis.export import (
+    ANALYSIS_INPUT_FILENAME,
+    ANALYSIS_RESULT_FILENAME,
+)
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.retro import collect as collect_module
 from swing_copilot.retro.collect import collect_verdicts
@@ -382,6 +385,128 @@ class TestCollectFailSoft:
 
         assert summary.collected_run_count == 0
         assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_RESULT_FILENAME in note
+        # The failure body, not just the filename: this is the
+        # `AnalysisIngestError`'s own message (F1's `exc`, not `exc.__cause__`),
+        # so a regression that starts interpolating the bare cause again --
+        # or drops the reason text altogether -- is caught here rather than
+        # passing unnoticed.
+        assert "is not valid JSON" in note
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_an_invalid_analysis_input_names_the_document_and_field(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376: the note must say *which* document and *which* field.
+
+        Before this fix, any `AnalysisIngestError` -- whether the document was
+        missing, unparsable JSON, or (as here) a schema-validation failure --
+        collapsed into the same uninformative
+        "解析文書を読めなかったためスキップ", with no way to tell a
+        `strategy_key` type error apart from a truncated file without opening
+        the archive by hand.
+        """
+        payload = input_payload(strategy_key=123)
+
+        write_run(analysis_input=payload)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_INPUT_FILENAME in note
+        assert "strategy_key" in note
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_a_missing_field_and_a_stray_field_render_different_error_types(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376 review (F3): `loc` alone cannot discriminate these two.
+
+        A missing required field and an unknown stray field both name in
+        `loc`, so before this fix they rendered identically as bare
+        `フィールド: <loc>` -- leaving the operator unable to tell "this
+        archive predates a schema addition" from "this archive has a stray
+        field", exactly the discrimination the #374 post-mortem needed.
+        Appending pydantic's own `error["type"]` (`missing` vs
+        `extra_forbidden`) fixes that.
+        """
+        payload = input_payload(bogus_field="unexpected")
+        write_run(analysis_input=payload)
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        note = summary.notes[0]
+        assert "bogus_field" in note
+        assert "extra_forbidden" in note
+
+    def test_more_than_three_rejected_fields_are_truncated_with_a_count(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376 review: an empty document is the common #374-shaped case.
+
+        `AnalysisInput` requires 8 top-level fields, so `{}` rejects all of
+        them -- more than `_MAX_VALIDATION_FIELDS_IN_NOTE` (3) -- exercising
+        the truncation branch that the offline coverage run otherwise never
+        reaches. The first three fields render in declaration order
+        (`schema_version`, `run_id`, `as_of`), and the remaining five are
+        summarized rather than listed.
+        """
+        write_run(analysis_input={})
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_INPUT_FILENAME in note
+        assert "schema_version" in note
+        assert "run_id" in note
+        assert "as_of" in note
+        assert "他5件" in note
+        assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
+
+    def test_an_invalid_analysis_result_names_the_document_and_field(
+        self,
+        state_store: StateStore,
+        reports_root: Path,
+        write_run: Callable[..., Path],
+    ) -> None:
+        """Issue #376: a `verdict.recommendation` outside its `Literal` set.
+
+        The rejected field's dotted path (`symbols.0.verdict.recommendation`)
+        must appear in the note, and the note must name
+        `analysis_result.json` -- not `analysis_input.json`, which parsed
+        fine here.
+        """
+        invalid_symbol = symbol_payload(
+            verdict={
+                "recommendation": "buy",
+                "reasons": [{"text": "根拠", "source_ids": [FILING_ID]}],
+            }
+        )
+        write_run(result=result_payload(symbols=[invalid_symbol]))
+
+        summary = collect_verdicts(state_store, reports_root)
+
+        assert summary.unreadable_run_count == 1
+        assert len(summary.notes) == 1
+        note = summary.notes[0]
+        assert ANALYSIS_RESULT_FILENAME in note
+        assert ANALYSIS_INPUT_FILENAME not in note
+        assert "symbols.0.verdict.recommendation" in note
         assert _rows(state_store, "SELECT count(*) FROM verdicts") == [(0,)]
 
     def test_a_result_whose_run_id_disagrees_with_its_directory_is_skipped(

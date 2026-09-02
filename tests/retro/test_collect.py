@@ -31,6 +31,7 @@ from tests.analysis.conftest import (
     result_payload,
     symbol_payload,
 )
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,12 +92,7 @@ def _insert_run(
     state_store: StateStore, run_id: str, run_date: date, started_at: datetime
 ) -> None:
     """Insert a minimal `runs` row so `get_run_started_at` can resolve it."""
-    with state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-            [run_id, run_date, started_at],
-        )
+    seed_run(state_store, run_id, run_date, started_at=started_at)
 
 
 class TestCollectHappyPath:

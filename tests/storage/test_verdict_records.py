@@ -32,6 +32,7 @@ from swing_copilot.storage.verdict_records import (
     reason_text_visible_sql,
 )
 from swing_copilot.text.base import TextItem
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from swing_copilot.storage.state_store import StateStore
@@ -1201,12 +1202,7 @@ class TestGetPriorVerdicts:
         run_id = uuid4()
         verdict = _verdict(run_id, symbol, as_of=as_of)
         state_store.replace_run_verdicts(run_id, [verdict], [])
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(run_id), as_of, started_at],
-            )
+        seed_run(state_store, run_id, as_of, started_at=started_at)
         return run_id
 
     def test_returns_the_reasons_and_their_matured_outcomes(

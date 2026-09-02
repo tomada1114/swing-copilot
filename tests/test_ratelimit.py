@@ -13,19 +13,13 @@ from swing_copilot.ratelimit import (
 )
 from swing_copilot.text.news_finnhub import FinnhubNewsClient
 from tests.conftest import ThrottleTimeline
+from tests.support.fakes import FixedClock
 
 _AS_OF = date(2027, 1, 10)
 _REQUEST_SECONDS = 0.3
-
-
-class FakeClock:
-    """Calendar/audit clock; the rate limit runs on `ThrottleTimeline`."""
-
-    def today(self) -> date:
-        return _AS_OF
-
-    def now(self) -> datetime:
-        return datetime(2027, 1, 10, 12, tzinfo=UTC)
+#: The fixed `now()` `FixedClock(_AS_OF, _NOW)` below returns; the rate limit
+#: itself runs on `ThrottleTimeline`, not on this calendar/audit clock.
+_NOW = datetime(2027, 1, 10, 12, tzinfo=UTC)
 
 
 def _news_payload(*_args, **_kwargs):
@@ -68,7 +62,7 @@ def _finnhub_pair(
     news_client = FinnhubNewsClient(
         "test-key",
         http_get=news_get,
-        date_clock=FakeClock(),
+        date_clock=FixedClock(_AS_OF, _NOW),
         rate_clock=None if is_shared else timeline.clock,
         sleep_fn=timeline.sleep,
         throttle=throttle,
@@ -76,7 +70,7 @@ def _finnhub_pair(
     earnings_client = FinnhubEarningsClient(
         "test-key",
         http_get=earnings_get,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=(
             EarningsTiming(backoff_fn=timeline.sleep)
             if is_shared
@@ -266,7 +260,7 @@ class TestSharedFinnhubThrottle:
         news_client = FinnhubNewsClient(
             "test-key",
             http_get=rate_limited_then_succeeds,
-            date_clock=FakeClock(),
+            date_clock=FixedClock(_AS_OF, _NOW),
             sleep_fn=timeline.sleep,
             throttle=throttle,
         )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -17,7 +16,7 @@ import pytest
 from swing_copilot.config import Secrets, Settings, load_settings
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
-from tests.test_data_sync import _load_data_sync
+from tests.support.script_loader import load_script_module
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -228,19 +227,12 @@ _R2_ENV_VARS = (
 def _r2_settings_class() -> type[BaseSettings]:
     """Return the single `R2Settings` class object shared across the suite.
 
-    `tests/test_data_sync.py` spec-loads `scripts/data_sync.py` under the
-    fixed module name `"data_sync"` in `sys.modules` (`dataclasses` resolves
-    annotations through `sys.modules[cls.__module__]`, so the name has to
-    stay fixed). If this guard spec-loaded the file a second time under a
-    different name, `R2Settings` here would be a distinct class object from
-    the one `test_data_sync.py`'s tests import -- patching `env_file` on it
-    would silently miss the real one. Reuse the existing loader (importing
-    `tests.test_data_sync` runs it, if a full-suite collection has not
-    already) instead of loading the file independently.
+    `load_script_module` memoizes on `sys.modules["data_sync"]`, so every
+    caller -- this guard included -- resolves to the same `R2Settings` class
+    object; patching `env_file` here reaches the one every test actually
+    imports.
     """
-    module = sys.modules.get("data_sync")
-    if module is None:
-        module = _load_data_sync()
+    module = load_script_module("data_sync", "scripts/data_sync.py")
     return module.R2Settings  # type: ignore[no-any-return]
 
 

@@ -17,6 +17,7 @@ import pytest
 
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,10 +39,11 @@ class Fixture:
 class Builder:
     """Insert rows straight into an initialized schema.
 
-    Deliberately raw SQL rather than the production writers: these tests are
-    about how the dashboard *reads* history, including shapes the current
-    writers no longer produce (a pre-#192 candidate row, a verdict archived
-    without a risk assessment).
+    Deliberately raw SQL for every table but `runs`: these tests are about
+    how the dashboard *reads* history, including shapes the current writers
+    no longer produce (a pre-#192 candidate row, a verdict archived without a
+    risk assessment). `run()` has no such legacy-shape need, so it seeds
+    through `StateStore.insert_run()` (Issue #398) instead.
 
     Every method writes for `run_id`; `for_run()` returns a builder bound to
     another run, which keeps each method's signature about the row rather
@@ -57,6 +59,7 @@ class Builder:
     def __init__(self, database: Database, run_id: UUID = RUN_ID) -> None:
         self._database = database
         self._run_id = str(run_id)
+        self._raw_run_id = run_id
 
     def for_run(self, run_id: UUID) -> Builder:
         """A builder writing into a different run."""
@@ -81,20 +84,16 @@ class Builder:
         `started_at` reflects when the run actually executed, which may be
         much later.
         """
-        self._execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, ?, 'cfg0123456789abcdef', ?, ?)",
-            [
-                self._run_id,
-                run_date,
-                mode,
-                status,
-                started_at
-                if started_at is not None
-                else datetime(
-                    run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC
-                ),
-            ],
+        seed_run(
+            StateStore(self._database),
+            self._raw_run_id,
+            run_date,
+            status=status,
+            mode=mode,
+            config_hash="cfg0123456789abcdef",
+            started_at=started_at
+            if started_at is not None
+            else datetime(run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC),
         )
         return self
 

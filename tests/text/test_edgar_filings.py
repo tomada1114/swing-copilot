@@ -9,26 +9,7 @@ from swing_copilot.text.edgar_filings import (
     FilingLookbackBounds,
     fetch_recent_filings_text,
 )
-
-
-class FakeEdgarClient:
-    def __init__(self, items: list[TextItem]) -> None:
-        self._items = items
-        self.calls: list[
-            tuple[str, list[str], datetime, datetime | None, int | None]
-        ] = []
-
-    def fetch_filing_texts(
-        self,
-        symbol: str,
-        form_types: list[str],
-        *,
-        as_of: datetime,
-        since: datetime | None = None,
-        limit: int | None = None,
-    ) -> list[TextItem]:
-        self.calls.append((symbol, form_types, as_of, since, limit))
-        return self._items
+from tests.support.fakes import StubEdgarClient
 
 
 def _item(source_id: str = "edgar:acc-1") -> TextItem:
@@ -46,7 +27,7 @@ def _item(source_id: str = "edgar:acc-1") -> TextItem:
 
 def test_delegates_to_edgar_client_fetch_filing_texts():
     items = [_item()]
-    fake = FakeEdgarClient(items)
+    fake = StubEdgarClient(items)
 
     as_of = date(2027, 1, 2)
     result = fetch_recent_filings_text(
@@ -70,7 +51,7 @@ def test_delegates_to_edgar_client_fetch_filing_texts():
 
 
 def test_lookback_days_and_limit_are_forwarded_to_the_edgar_client():
-    fake = FakeEdgarClient([])
+    fake = StubEdgarClient([])
 
     fetch_recent_filings_text(
         fake,

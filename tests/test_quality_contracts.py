@@ -993,3 +993,63 @@ def test_begin_transaction_appears_only_in_the_shared_primitive():
     ]
 
     assert offending == []
+
+
+# --- Issue #398: runs-table seeding goes through StateStore.insert_run() ---
+
+#: `tests/storage/` tests `StateStore`/`Database` themselves -- reaching
+#: `._database` there is the contract under test, not a shortcut around it,
+#: and the issue's own DoD scopes the ban to "outside tests/storage/".
+#: `tests/support/` is the trusted shared seeding implementation
+#: (`runs.py`'s `seed_run()` wraps `insert_run()`; its module docstring also
+#: mentions the old `state_store._database` pattern in prose, which is not a
+#: reintroduction of it).
+_DATABASE_ACCESS_ALLOWED_PREFIXES = ("tests/storage/", "tests/support/")
+
+#: The one seed site Issue #398 could not migrate onto
+#: `StateStore.insert_run()`: `test_existing_success_run_aborts_before_start_run`
+#: asserts on the pre-existing row's `report_path`, and `insert_run()` has no
+#: parameter for it (only `complete_run()` sets one). Maps to the expected
+#: `INSERT INTO runs` occurrence count in that file, so a *new* raw seed
+#: added anywhere else in it still fails this test.
+_RUNS_RAW_INSERT_EXCEPTIONS = {"tests/pipeline/test_daily_core.py": 1}
+
+
+def test_runs_table_seeding_goes_through_state_store_insert_run():
+    """Issue #398: a hand-written `INSERT INTO runs` outside storage tests is banned.
+
+    Eleven test modules used to reach `state_store._database` directly to
+    seed a `runs` row at an arbitrary lifecycle point, each carrying its own
+    `# noqa: SLF001`. `StateStore.insert_run()` (Issue #395) is the public
+    write path for exactly that now, and `tests/support/runs.py`'s
+    `seed_run()` is a thin wrapper over it. This keeps the pattern from
+    creeping back into a twelfth file: a new raw `INSERT INTO runs` outside
+    `tests/storage/` fails here, with one named, counted exception (see
+    `_RUNS_RAW_INSERT_EXCEPTIONS`) where the assertion needs a column
+    `insert_run()` does not expose.
+
+    This does not assert that no test outside `tests/storage/` ever reaches
+    `._database` at all -- dozens of read-only accesses remain (`run_steps`,
+    `screening_rejections`, `runs.metadata_json`, and more), each covering a
+    column or table with no public `StateStore`/`MarketStore` accessor.
+    Adding one would be a production-code change, which is explicitly out of
+    scope for #398 ("#395 が追加した `StateStore.insert_run()` を使うだけ").
+    This test targets the one anti-pattern the issue actually fixed: raw
+    `runs`-table seeding, now that a public alternative exists for it.
+    """
+    self_path = Path(__file__).relative_to(PROJECT_ROOT).as_posix()
+    offending = []
+    for path in sorted((PROJECT_ROOT / "tests").rglob("*.py")):
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        if relative == self_path or any(
+            relative.startswith(prefix) for prefix in _DATABASE_ACCESS_ALLOWED_PREFIXES
+        ):
+            continue
+        occurrences = path.read_text(encoding="utf-8").count("INSERT INTO runs")
+        expected = _RUNS_RAW_INSERT_EXCEPTIONS.get(relative, 0)
+        if occurrences != expected:
+            offending.append(
+                f"{relative} ({occurrences} occurrence(s), expected {expected})"
+            )
+
+    assert offending == []

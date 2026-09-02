@@ -836,7 +836,9 @@ def fetch_calendar_events(start: "date", end: "date", *, as_of: "date") -> list[
 from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import Field, StringConstraints
+
+from swing_copilot.strict_model import StrictModel
 
 INPUT_SCHEMA_VERSION = "analysis-input-v3"
 RESULT_SCHEMA_VERSION = "analysis-result-v3"
@@ -845,10 +847,11 @@ SourceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-class _StrictModel(BaseModel):
-    """両方向の共通基底: 未知フィールドを拒否する。"""
-
-    model_config = ConfigDict(extra="forbid")
+class _StrictModel(StrictModel):
+    """両方向の共通基底。`extra="forbid"`の宣言点は`StrictModel`（Issue #394）
+    ただ1箇所であり、ここは実サブクラスとして残す（ruffの
+    `runtime-evaluated-base-classes`が下位の全サブクラスを`pydantic.BaseModel`
+    まで追跡できるようにするため）。"""
 
 
 class _ArchiveReadableModel(_StrictModel):

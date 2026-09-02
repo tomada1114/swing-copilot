@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   には毎回マーカー無しのパーティションが降ってくる——`BarsFormatError` で価格ステップ（fatal）が
   落ち、しかもエラーはすでに実行済みの `copilot-backfill rebuild` を案内する行き止まりになる。
   マーカー名は `BARS_FORMAT_MARKER_NAME` として `market_store` から公開し、同期側と共有する
+- 仮想台帳の分割再基準化を**初回建玉にも**掛けるようにした（Issue #413）。`_rebase_position`
+  は既存の open ポジションにしか掛かっておらず、`risk_assessments` が凍結した run 当日の
+  as-traded 価格で建玉し直す経路（`_seed_position`）が素通りしていた。`copilot-track rebuild`
+  は削除してこの経路で引き直すため、エントリー後に分割した銘柄を rebuild すると、分割前の
+  ストップを分割後のバーに当てて**分割幅ちょうどの誤ストップを再生産**する——修復のために
+  走らせた操作が、修復対象と同じ壊れ方を作り直して台帳を「直った」ように見せる状態だった。
+  `_applicable_splits` は「凍結価格が既に織り込んでいる最後のセッション」を引数に取る形へ
+  変え、open ポジションは `last_marked_date`、初回建玉は entry 日を渡す。`entry_price` が
+  無いときの代替（bars 由来）と ATR 由来のストップは `read_bars` が既に調整済みなので
+  割らない。docs/04 §3.24.3-5 が既に「`risk_assessments.entry_price` → 分割の再基準化 →
+  日次前進」と書いており、実装が設計正本から外れていた
 
 ### Added
 

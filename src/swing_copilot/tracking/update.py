@@ -164,18 +164,25 @@ def update_tracking(
         return TrackingUpdateResult(0, 0, 0, tuple(notes))
     bars = _read_bars(market_store, candidates, open_positions, as_of)
 
+    # One splits read for the whole ledger, like `_read_bars`: `read_splits`
+    # opens a connection per call, and DuckDB's file lock is exclusive. The
+    # candidates are in here too, not just the open positions: a verdict being
+    # opened for the first time carries frozen prices of its own (Issue #413).
+    splits = market_store.read_splits(
+        sorted(
+            {position.symbol for position in open_positions}
+            | {candidate.symbol for candidate in candidates}
+        ),
+        as_of=as_of,
+    )
+
     pending: list[_Work] = []
     for candidate in candidates:
-        work = _seed_position(bars, trade_plan, candidate, notes)
+        work = _seed_position(bars, trade_plan, candidate, splits, notes)
         if work is not None:
             pending.append(work)
     opened_count = len(pending)
 
-    # One splits read for the whole ledger, like `_read_bars`: `read_splits`
-    # opens a connection per call, and DuckDB's file lock is exclusive.
-    splits = market_store.read_splits(
-        sorted({position.symbol for position in open_positions}), as_of=as_of
-    )
     pending.extend(
         _rebased_work(state_store, bars, position, splits, notes)
         for position in open_positions
@@ -439,7 +446,9 @@ def _rebased_work(
     """
     position_bars = _position_bars(bars, position.symbol, position.entry_date)
     applicable = _applicable_splits(
-        splits.get(position.symbol, ()), position, position_bars
+        splits.get(position.symbol, ()),
+        position.last_marked_date or position.entry_date,
+        position_bars,
     )
     if not applicable:
         return _Work(position=position, bars=position_bars, seed_marks=())
@@ -455,13 +464,13 @@ def _rebased_work(
 
 
 def _applicable_splits(
-    splits: Sequence[SplitEvent], position: VerdictPosition, bars: pd.DataFrame
+    splits: Sequence[SplitEvent], marked_through: date, bars: pd.DataFrame
 ) -> tuple[SplitEvent, ...]:
-    """The splits this update has to re-base `position` for.
+    """The splits this update has to re-base a position's frozen prices for.
 
     A split counts when its ex-date is newer than the last session already
-    marked -- everything on or before that date is already reflected in the
-    stored figures -- **and** the position has a stored session on or after
+    reflected in those figures -- everything on or before that date is
+    already in them -- **and** the position has a stored session on or after
     it. That second clause is what makes the rebase idempotent: replaying
     that session moves `last_marked_date` to the ex-date or past it, so the
     next run with the same `as_of` finds nothing left to apply. Without it a
@@ -470,7 +479,10 @@ def _applicable_splits(
     Args:
         splits: The symbol's splits visible at `as_of` (`read_splits` already
             dropped anything later).
-        position: The open position being carried forward.
+        marked_through: The last session the frozen figures already reflect --
+            `last_marked_date` for an open position, and the entry date for a
+            verdict being opened for the first time, whose `risk_assessments`
+            prices are quoted in the dollars that traded that day.
         bars: That position's own bar window, no row newer than `as_of`.
 
     Returns:
@@ -478,13 +490,17 @@ def _applicable_splits(
     """
     if not splits or bars.empty:
         return ()
-    marked_through = position.last_marked_date or position.entry_date
     newest_session = max(bars["date"])
     return tuple(
         split
         for split in sorted(splits, key=lambda event: event.ex_date)
         if marked_through < split.ex_date <= newest_session
     )
+
+
+def _split_factor(splits: Sequence[SplitEvent]) -> float:
+    """The cumulative divisor `splits` put between frozen prices and the bars."""
+    return math.prod(split.factor for split in splits)
 
 
 def _rebase_position(
@@ -512,7 +528,7 @@ def _rebase_position(
     Returns:
         The rebased position and its rebased marks.
     """
-    cumulative = math.prod(split.factor for split in splits)
+    cumulative = _split_factor(splits)
     if cumulative == 1.0:
         # A 1-for-1 "split" (or two that cancel): nothing to rescale, and
         # rewriting every mark for a no-op would only add churn.
@@ -553,6 +569,7 @@ def _seed_position(
     all_bars: pd.DataFrame,
     config: TradePlanConfig,
     candidate: TrackableVerdict,
+    splits: Mapping[str, Sequence[SplitEvent]],
     notes: list[str],
 ) -> _Work | None:
     """Build the entry state for a `proceed`/`skip` verdict not yet tracked.
@@ -564,11 +581,30 @@ def _seed_position(
     a `not_calculable` assessment leaves it unset -- the run day's stored
     close stands in. With neither, the verdict simply stays untracked and the
     next update tries again.
+
+    Only the figures the *risk assessment* froze are re-based onto the bars'
+    basis, and only for splits between the entry date and `as_of`: those are
+    quoted in the dollars that traded on the run day, while `read_bars` has
+    already divided the bars by every split visible at `as_of`. The two
+    fallbacks are deliberately left alone -- a stand-in entry close read out
+    of `bars`, and an ATR-derived stop computed from `bars`, are both on the
+    bars' own basis already, so dividing them would re-base them twice.
+
+    Rebasing a *newly opened* position matters because `copilot-track
+    rebuild` reopens from the `verdicts` row (Issue #413): without this, a
+    position whose symbol split after entry is replayed with a pre-split stop
+    against post-split bars and stops out instantly at a loss the size of the
+    split -- reproducing the very corruption the rebuild exists to remove.
     """
     bars = _position_bars(all_bars, candidate.symbol, candidate.as_of)
+    factor = _split_factor(
+        _applicable_splits(splits.get(candidate.symbol, ()), candidate.as_of, bars)
+    )
     entry_price = candidate.entry_price
     if entry_price is None:
         entry_price = _close_on(bars, candidate.symbol, candidate.as_of)
+    elif factor != 1.0:
+        entry_price /= factor
     if entry_price is None or entry_price <= 0:
         notes.append(
             f"{candidate.symbol} {candidate.as_of.isoformat()}: "
@@ -577,6 +613,14 @@ def _seed_position(
         return None
 
     stop_price = candidate.stop_price
+    if stop_price is not None and factor != 1.0:
+        stop_price /= factor
+    if factor != 1.0:
+        notes.append(
+            f"{candidate.symbol} {candidate.as_of.isoformat()}: "
+            f"エントリー後の分割（累積 {factor:g}倍）に合わせて"
+            "建玉時の凍結価格を再基準化した"
+        )
     if stop_price is None:
         atr = atr_as_of(bars, candidate.symbol, candidate.as_of, config.exit_atr_period)
         if atr is None:

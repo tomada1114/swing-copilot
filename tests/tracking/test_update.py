@@ -990,6 +990,72 @@ class TestSplitRebase:
             for note in result.notes
         )
 
+    def test_a_first_time_open_rebases_the_risk_assessments_frozen_prices(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        """A verdict opened for the first time across a split (Issue #413).
+
+        `risk_assessments` froze the run day's as-traded dollars, but the
+        bars this replay reads are on `as_of`'s basis, so seeding without a
+        rebase tests a pre-split stop against post-split lows. This is the
+        path `copilot-track rebuild` reopens through, where the position had
+        no chance to be rebased while it was open.
+        """
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
+
+        # Opened for the first time *at* DAY_1: the split already sits between
+        # the entry date and `as_of`, so no prior update ever rebased it.
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_1
+        )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert result.opened_count == 1
+        # Not a 50% loss: the company split, it did not halve in value.
+        assert position.status == "open"
+        assert position.exit_reason is None
+        assert position.entry_price == pytest.approx(50.0)
+        assert position.stop_price == pytest.approx(47.5)
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.close for mark in marks] == pytest.approx([50.0, 50.0])
+
+    def test_a_bar_derived_entry_price_is_not_rebased_a_second_time(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        """The fallbacks come off `read_bars`, which already applied the split.
+
+        Dividing them again would put a first-time open at a quarter of the
+        real price, so the rebase deliberately covers only the figures
+        `risk_assessments` froze.
+        """
+        seed_verdict(state_store)
+        seed_risk(state_store, entry_price=None, stop_price=None)
+        write_bars(market_store, flat_prelude())
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
+
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        # The entry-day close as `read_bars` returns it at `as_of`: 50.00, the
+        # rebased prelude -- not 25.00.
+        assert position.entry_price == pytest.approx(50.0)
+        # ATR(14) over the rebased prelude is 1.00, so the derived stop is
+        # 50.00 - 2.5 * 1.00, likewise computed on the bars' own basis.
+        assert position.stop_price == pytest.approx(47.5)
+
     def test_a_reverse_split_scales_the_frozen_prices_up(
         self,
         state_store: StateStore,
@@ -1441,6 +1507,52 @@ class TestRebuildPositions:
         assert row.after is not None
         assert row.after.status == "open"
         assert row.after.return_pct == pytest.approx(1.0)
+
+    def test_rebuilding_across_a_split_does_not_reproduce_the_false_stop(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        """The MNST shape end to end (Issue #413).
+
+        The store is repaired to as-traded values *and* the split is recorded,
+        so `read_bars(as_of=...)` hands the pre-split sessions back halved
+        while `risk_assessments.entry_price` stays in the dollars that
+        actually traded on the run day. A rebuild that reopened from that
+        frozen price without rebasing would stop the position out at
+        precisely minus the split -- re-creating the corruption it was run to
+        remove, and leaving the ledger looking repaired.
+        """
+        seed_verdict(state_store)
+        seed_risk(state_store)
+        write_bars(market_store, flat_prelude())
+        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+
+        # The repair: as-traded history plus the split as an event.
+        write_bars(
+            market_store,
+            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+        )
+        plant_split(market_store, DAY_1, 2.0)
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL),
+            as_of=DAY_1,
+        )
+
+        rebuilt = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert rebuilt is not None
+        assert rebuilt.status == "open"
+        assert rebuilt.exit_reason is None
+        assert rebuilt.entry_price == pytest.approx(50.0)
+        assert rebuilt.stop_price == pytest.approx(47.5)
+        after = result.positions[0].after
+        assert after is not None
+        assert after.return_pct == pytest.approx(0.0)
 
     def test_a_run_id_narrows_the_rebuild_to_one_position(
         self,

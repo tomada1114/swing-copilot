@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import math
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
@@ -373,6 +374,13 @@ def save_candidate_stream(stream: CandidateStream, path: Path) -> None:
     previous cache untouched and removes the temporary file. The parent
     directory must already exist; the caller owns creating it.
 
+    `--candidate-cache` (`backtest/cli.py`) exists precisely so the same
+    path can be shared across separate `copilot-backtest` invocations, so
+    the staging path is unique per call rather than `io_atomic`'s own
+    deterministic `.{name}.tmp`: two processes racing a cache miss on the
+    same destination must never stage into the same temporary file, or one
+    could publish the other's partially-written body.
+
     Args:
         stream: The stream to persist.
         path: Destination Parquet file.
@@ -385,7 +393,20 @@ def save_candidate_stream(stream: CandidateStream, path: Path) -> None:
     table = _stream_table(stream)
     buffer = io.BytesIO()
     pq.write_table(table, buffer)
-    write_bytes_atomically(path, buffer.getvalue())
+    write_bytes_atomically(
+        path, buffer.getvalue(), temporary_path=_unique_temporary_path(path)
+    )
+
+
+def _unique_temporary_path(destination: Path) -> Path:
+    """A same-directory staging path unique to this call, not just this name.
+
+    `io_atomic`'s own default `.{name}.tmp` is deterministic, which is fine
+    when only one writer ever targets a destination -- it is not fine here,
+    where a shared `--candidate-cache` path can be written by two concurrent
+    `copilot-backtest` processes.
+    """
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
 
 
 def load_candidate_stream(path: Path) -> CandidateStream:

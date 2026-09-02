@@ -817,7 +817,19 @@ def _download_verified(
     checked against the manifest's size and sha256, and is moved into place
     with `Path.replace`. A mismatch -- the signature of a `push` that died
     before writing its manifest -- raises, leaving the previous local file
-    untouched and no temporary file behind.
+    untouched and no temporary file behind. This streaming stage-then-verify
+    shape (rather than `io_atomic.write_bytes_atomically`, which needs the
+    whole body already in memory) is deliberate for `data/`/`reports/`
+    objects that can be large; it is named as an explicit exemption in
+    `tests/test_quality_contracts.py`'s `_ATOMIC_REPLACEMENT_ALLOWLIST`
+    rather than left an accidental blind spot.
+
+    The staging file is created mode `0600` before anything is written to
+    it, and that mode carries through `Path.replace` onto `destination` --
+    matching `tempfile.mkstemp`'s owner-only default, so a pulled artifact
+    (the DuckDB trading history, the run archive) never becomes
+    group/world-readable the way plain `Path.open("wb")` (`0666 & ~umask`)
+    would leave it.
 
     Raises:
         DataSyncError: When the downloaded bytes disagree with the manifest.
@@ -825,6 +837,7 @@ def _download_verified(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = _make_temporary_path(destination)
     try:
+        temporary.touch(mode=0o600, exist_ok=False)
         store.download(key, temporary)
         size = temporary.stat().st_size
         digest = _sha256(temporary)

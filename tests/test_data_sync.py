@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -254,6 +255,29 @@ def test_pull_reuses_local_files_whose_sha256_already_matches(tmp_path):
 
     assert report.downloaded == ()
     assert set(report.skipped) == {DUCKDB_KEY, BARS_2024_KEY, BARS_2025_KEY}
+
+
+def test_pull_writes_downloaded_files_owner_only(tmp_path):
+    """A pulled file must stay `0600`, never inherit the process umask.
+
+    `_download_verified` used to stage through `tempfile.mkstemp`, which is
+    `0600` by construction; replacing it with a plain `Path`-based staging
+    file silently widened every pulled artifact -- the DuckDB trading
+    history and the run archive -- to whatever `0666 & ~umask` resolves to
+    (typically `0644`, group/world-readable). Pinned here so that regression
+    cannot recur unnoticed.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    pull(store, mirror)
+
+    for relative in ("copilot.duckdb", "bars/year=2024/data.parquet"):
+        mode = stat.S_IMODE((mirror / relative).stat().st_mode)
+        assert mode == 0o600, f"{relative}: expected 0o600, got {oct(mode)}"
 
 
 # --------------------------------------------------------------------------- #

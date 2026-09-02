@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import math
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -455,7 +456,17 @@ class MarketStore:
 
         buffer = io.BytesIO()
         combined.to_parquet(buffer, index=False)
-        write_bytes_atomically(partition_file, buffer.getvalue())
+        # A unique staging path, not `io_atomic`'s own deterministic
+        # `.{name}.tmp`: two writers targeting the same year partition at
+        # once (e.g. two `write_bars` calls racing) must never stage into
+        # the same temporary file, or one could publish the other's
+        # partially-written body.
+        temporary_path = partition_file.with_name(
+            f".{partition_file.name}.{uuid.uuid4().hex}.tmp"
+        )
+        write_bytes_atomically(
+            partition_file, buffer.getvalue(), temporary_path=temporary_path
+        )
 
     def read_bars(
         self, symbols: list[str], start: date, end: date, as_of: date

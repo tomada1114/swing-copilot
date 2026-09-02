@@ -17,7 +17,19 @@ AST契約テスト3本（`test_only_io_atomic_replaces_files_in_place` /
   を持つ。`temporary_path`は既定の`.{name}.tmp`の代わりに使う一時ファイルパスで、
   `destination.parent`直下でなければならない。GC判定が特定の一時ファイル命名
   （隠しファイル＋乱数サフィックス）に依存する呼び出し元
-  （`scripts/data_sync.py`）のためのフックである。
+  （`scripts/data_sync.py`、`backtest/candidate_stream.py`、
+  `storage/market_store.py`）のためのフックである。
+  `test_only_io_atomic_replaces_files_in_place`は`os.replace`/`os.rename`/
+  `tempfile.mkstemp`/`tempfile.NamedTemporaryFile`/`shutil.move`を
+  （`from`インポートされた別名を含めて）検出するのに加え、`Path.replace()`/
+  `Path.rename()`のような1引数・キーワードなしの呼び出しも自前の原子的置換
+  として検出する。ただし`scripts/data_sync.py`の`_download_verified`（巨大
+  になり得るダウンロード本体をメモリに二重展開せず済むよう、ストリーミング
+  のままステージング＋検証＋`Path.replace`する）と`scripts/bootstrap.py`の
+  `_rename_source_directory`（テンプレートを新規プロジェクト化する一度きりの
+  ディレクトリ改名で、ファイル内容の原子的置換ではない）は、テストの
+  `_ATOMIC_REPLACEMENT_ALLOWLIST`で名指しして許可された例外であり、検出対象
+  から除外される。
 - **例外基底**（`swing_copilot.exceptions.SwingCopilotError`）: `src/`・`scripts/`の
   `*Error`はすべてこれを継承する。多重継承（例:
   `report/markdown_report.py`の`LatestMarkdownUpdateError(SwingCopilotError, OSError)`）

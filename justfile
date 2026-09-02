@@ -28,6 +28,17 @@ lint:
 test:
     uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
 
+# Run only the tests this diff (vs the merge-base with main) can plausibly
+# affect (scripts/diff_gate.py's deterministic path -> pytest-target rule
+# table, widened by a one-hop import reverse map), plus a >=90% line+branch
+# coverage gate on the changed source files only -- the repo-wide 95% floor
+# below is a CI-only concern, since a partial run's package-wide number would
+# be systematically and confusingly pessimistic. Falls back to the whole
+# suite (`ALL`) whenever a path is unrecognized, a shared-fixture/build file
+# changed, or the estimated cost is close to the full suite's anyway.
+test-changed *ARGS:
+    uv run python scripts/diff_gate.py test {{ARGS}}
+
 # Run all checks: format, lint, test
 check: fmt lint test
 
@@ -54,8 +65,17 @@ smoke:
     uv build --wheel
     uv run python scripts/smoke_test.py
 
-# Non-mutating local release/PR gate (fail-fast: cheap gates before the suite)
-verify: lint docs-check smoke test
+# Fast pre-PR gate: lint + a strict docs build + the tests this diff can
+# reach. NOT covered here -- CI enforces all of it on every PR: repo-wide 95%
+# line+branch coverage, the wheel build + smoke test, spell check, and
+# zizmor/actionlint. Use `just verify-full` for a release or a direct-to-main
+# completion claim.
+verify: lint docs-check test-changed
+
+# Full non-mutating local release/PR gate, no diff scoping (the former
+# `verify`): lint, strict docs build, wheel smoke test, and the whole suite
+# with the repo-wide coverage gate.
+verify-full: lint docs-check smoke test
 
 # boto3 lives in the optional `ops` group, so these three ask for it explicitly
 # rather than making every `uv run` install it.

@@ -2,7 +2,8 @@
 name: create-pr
 description: >
   Create or update pull requests following project conventions. Runs pre-checks
-  (`just verify`), generates a Conventional Commits title, fills the PR template with
+  (`just verify`, the diff-scoped fast gate — CI runs the full gate on every
+  PR), generates a Conventional Commits title, fills the PR template with
   summary/test plan/checklist, and verifies all checklist items pass before
   creating via gh CLI. Use PROACTIVELY when: PR creation, pull request,
   create PR, open PR, submit PR, PR update, review request.
@@ -41,24 +42,32 @@ gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number,title,url
 
 ## Step 2: Quality Gate
 
-Run the full quality check suite. This is the prerequisite for PR creation.
+Run the fast pre-PR gate. This is the prerequisite for PR creation.
 
 ```bash
 just verify
 ```
 
-`just verify` is non-mutating and runs `lint -> docs-check -> smoke -> test`
-(fail-fast: the cheap gates come first).
+`just verify` is non-mutating and runs `lint -> docs-check -> test-changed`
+(fail-fast: the cheap gates come first). `test-changed` scopes pytest to the
+tests this diff (vs the merge-base with `main`) can plausibly affect —
+`scripts/diff_gate.py`'s rule table, falling back to the whole suite whenever
+a path is unrecognized or a shared/build file changed — and gates the
+*changed* source files at >=90% line+branch coverage.
 **If any step fails, abort PR creation** and report the failure.
 
 After it succeeds, run `git status --short` again. Any change means the pushed
 branch would not match the verified state; stop and investigate.
 
 On success, the following checklist items are verified:
-- Tests and 95% line+branch coverage pass (`just test`)
+- The tests this diff can affect pass, and its changed source files clear a
+  90% line+branch coverage floor (`just test-changed`) — the repo-wide 95%
+  floor and the wheel smoke test are CI-only concerns (`.github/workflows/ci.yml`
+  runs both, plus the whole suite, on every PR); a gap the diff-scoped
+  selection misses is a `scripts/diff_gate.py` rule-table fix, not something
+  to chase locally with `just verify-full`
 - Type checks and formatting pass (`just lint`)
 - Documentation builds strictly (`just docs-check`)
-- The built wheel passes the isolated smoke test (`just smoke`)
 
 ## Step 3: Additional Verification
 
@@ -135,7 +144,7 @@ Fill each item based on verification results from Steps 2-3:
 
 | Item | Criteria |
 |------|----------|
-| Full local verification | `just verify` passed on the committed tree |
+| Fast local verification | `just verify` (diff-scoped) passed on the committed tree |
 | Domain invariants reviewed | Every applicable changed-path scenario in Step 3 has evidence |
 | Documentation updated | Required only when public API changed. No change = checked |
 | No breaking changes | No breaking changes, or documented in Summary = checked |

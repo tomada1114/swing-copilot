@@ -140,9 +140,14 @@ just fmt
 just verify
 ```
 
-`just verify` is the non-mutating PR/release gate: lint and type checks, tests
-with 95% line+branch coverage, a strict docs build, and wheel smoke testing.
-For packaging verification alone, run `just smoke` (or `uv build --wheel && uv run python scripts/smoke_test.py`)
+`just verify` is the fast, non-mutating pre-PR gate: lint and type checks, a
+strict docs build, and only the tests the current diff can plausibly affect
+(with a 90% line+branch coverage floor on the changed files). CI runs the
+full gate — the whole suite at 95% line+branch coverage, plus a wheel smoke
+test — on every PR regardless, so `just verify` deliberately does not
+duplicate that locally; run `just verify-full` for the same full gate before
+a release or a direct-to-main completion claim. For packaging verification
+alone, run `just smoke` (or `uv build --wheel && uv run python scripts/smoke_test.py`)
 to install the freshly built wheel into a temporary virtual environment and
 confirm the distribution imports from the wheel, not from `src/`.
 

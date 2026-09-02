@@ -39,16 +39,34 @@ src/swing_copilot/
 ├── clock.py             # The only wall-clock boundary
 ├── config.py            # Strict settings and strategy validation
 ├── models.py            # Shared domain values
+├── exceptions.py        # SwingCopilotError base hierarchy
+├── strict_model.py      # extra="forbid" pydantic base for skill-boundary schemas
+├── io_atomic.py         # Dependency-free atomic file replacement (the only place)
+├── retry.py, ratelimit.py  # External-call retry / throttle primitives
+├── cli_support.py       # Domain error -> exit code conversion shared by every CLI
+├── documents.py         # Text / JSON document readers, boundary-typed failures
+├── universe.py, universe_sampling.py  # S&P 500 membership resolution and deterministic --limit sampling
 ├── data/                # Market/fundamental external adapters
 ├── text/                # Untrusted text-source adapters
 ├── screening/           # Pure indicators, filters, signals, ranking
+├── regime/              # Market gate (SMA200 / distribution days / FTD) state
 ├── risk/                # Position sizing, concentration, correlation
 ├── backtest/            # Deterministic point-in-time simulator
 ├── analysis/            # Skill boundary: export, strict schemas, provenance, safety
+├── report/              # Markdown / terminal / Discord rendering, history CLI
 ├── storage/             # DuckDB/Parquet repositories and transactions
 ├── research/            # Read-only DataFrame accessors for notebooks/ad-hoc SQL
+├── retro/               # Verdict retrospective loop (collect / evaluate / export / prepare / ingest)
+├── tracking/            # Virtual ledger that scores verdict outcomes
+├── dashboard/           # Read-only decision-history web UI (just dashboard)
 └── pipeline/            # Composition root and imperative orchestration
 ```
+
+Shared primitives (`io_atomic`, `exceptions.SwingCopilotError`, `strict_model.StrictModel`,
+`cli_support.run_cli`) are each implemented exactly once; reuse them instead of
+reimplementing atomic writes, the exception hierarchy, strict schema
+configuration, or CLI exit-code conversion (`tests/test_quality_contracts.py`
+enforces this mechanically; see `docs/reference.md`).
 
 - Keep the public API small and export deliberate additions via
   `swing_copilot.__init__.__all__`.

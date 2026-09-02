@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Self
 
 import yaml
 from pydantic import (
-    BaseModel,
     ConfigDict,
     Field,
     ValidationError,
@@ -27,6 +26,7 @@ from swing_copilot.analysis.news_supply import DEFAULT_SUFFICIENT_SYMBOL_MENTION
 from swing_copilot.analysis.schemas import canonical_json_digest
 from swing_copilot.documents import read_text_document
 from swing_copilot.exceptions import ConfigError
+from swing_copilot.strict_model import StrictModel
 from swing_copilot.tracking.board import DEFAULT_PUBLISHED_RETENTION_BUSINESS_DAYS
 
 if TYPE_CHECKING:
@@ -73,10 +73,17 @@ class Secrets(BaseSettings):
         return value
 
 
-class _StrictModel(BaseModel):
-    """Base for settings.yaml sections: reject unknown keys (fail fast)."""
+class _StrictModel(StrictModel):
+    """Base for settings.yaml sections: reject unknown keys (fail fast).
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    `extra="forbid"` comes from `StrictModel` (Issue #394's one declaration
+    point); pydantic merges a subclass's `model_config` with its parent's
+    rather than replacing it, so adding `strict=True` here keeps the
+    inherited `extra="forbid"` (`tests/test_strict_model.py` fixes that merge
+    behavior).
+    """
+
+    model_config = ConfigDict(strict=True)
 
 
 class UniverseConfig(_StrictModel):
@@ -85,8 +92,8 @@ class UniverseConfig(_StrictModel):
     index: str = "sp500"
     refresh_interval_days: int = Field(default=7, ge=1)
     snapshot_path: str = "config/universe_snapshot.csv"
-    manual_include: list[str] = []
-    manual_exclude: list[str] = []
+    manual_include: list[str] = Field(default_factory=list)
+    manual_exclude: list[str] = Field(default_factory=list)
 
 
 class RiskConfig(_StrictModel):
@@ -632,7 +639,7 @@ class MinerviniStrategyConfig(_StrictModel):
 class StrategySpec(_StrictModel):
     """Validated composition and ranking rules for one screening strategy."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     # YAML sequences deserialize as lists. Keep scalar values strict while
     # accepting that serialization boundary for this immutable tuple API.
@@ -646,7 +653,7 @@ class StrategySpec(_StrictModel):
 class StrategiesConfig(_StrictModel):
     """Typed contents of `config/strategies.yaml`."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     strategies: dict[str, StrategySpec] = Field(min_length=1)
 

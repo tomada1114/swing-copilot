@@ -674,13 +674,7 @@ def _collected_test_nodes(test_path: Path) -> set[str]:
 
 _IO_ATOMIC_MODULE = PROJECT_ROOT / "src/swing_copilot/io_atomic.py"
 _STRICT_MODEL_MODULE = PROJECT_ROOT / "src/swing_copilot/strict_model.py"
-#: `config.py` keeps its own pre-existing `_StrictModel` (and the
-#: `StrategiesConfig` family built on it) as this test's one allowlisted
-#: exception. Issue #396 owns `StrategiesConfig` end to end and is already
-#: in flight against this same file; folding it into `StrictModel` here would
-#: collide with that work rather than avoid it. Tracked as a follow-up once
-#: #396 lands, not silently forgotten.
-_STRICT_SCHEMA_ALLOWLIST = frozenset({PROJECT_ROOT / "src/swing_copilot/config.py"})
+_STRICT_SCHEMA_ALLOWLIST: frozenset[Path] = frozenset()
 #: `os.replace`/`os.rename`/`tempfile.mkstemp`/`tempfile.NamedTemporaryFile`/
 #: `shutil.move`, as `(module, attribute)` pairs -- the primitives every
 #: self-implemented atomic replace in this repository has been built from so

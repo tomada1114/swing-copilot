@@ -739,6 +739,35 @@ class TestPairedSeparation:
         assert summary.stderr is None
         assert (summary.ci_low, summary.ci_high) == (None, None)
 
+    def test_paired_day_count_is_the_days_averaged_not_the_row_count(self) -> None:
+        # RP-002: sample_size counts contributing *outcome rows*, which is a
+        # different number from the *days* the interval was actually built
+        # from. Three two-sided days (8 rows) plus one one-sided day (1 more
+        # row, excluded) makes that gap visible: sample_size=9,
+        # paired_day_count=3, excluded_day_count=1.
+        day_c = date(2027, 3, 12)
+        day_d = date(2027, 3, 13)
+        rows = (
+            _dated("A", "proceed", 10.0, DAY_A),
+            _dated("B", "skip", 8.0, DAY_A),
+            _dated("C", "skip", 6.0, DAY_A),
+            _dated("D", "proceed", -4.0, DAY_B),
+            _dated("E", "skip", -5.0, DAY_B),
+            _dated("F", "proceed", 2.0, day_c),
+            _dated("G", "proceed", 3.0, day_c),
+            _dated("H", "skip", 1.0, day_c),
+            _dated("I", "proceed", 99.0, day_d),
+        )
+
+        summary = _five_day(compute_separation_paired(rows, THRESHOLDS))
+
+        # Day A: 10 - mean(8, 6) = 3. Day B: -4 - -5 = 1.
+        # Day C: mean(2, 3) - 1 = 1.5. Mean of the three: 5.5 / 3.
+        assert summary.value == pytest.approx(5.5 / 3)
+        assert summary.sample_size == 9
+        assert summary.paired_day_count == 3
+        assert summary.excluded_day_count == 1
+
 
 class TestPairedSeparationExcess:
     def test_the_benchmarks_own_move_is_removed_from_both_sides(self) -> None:
@@ -797,6 +826,9 @@ class TestDispersion:
         assert summary.stderr == pytest.approx(math.sqrt(2.0))
         assert summary.ci_low == pytest.approx(2.0 - 1.959963984540054 * math.sqrt(2))
         assert summary.ci_high == pytest.approx(2.0 + 1.959963984540054 * math.sqrt(2))
+        # RP-002: the pooled (non-paired) metric never sets this -- it is not
+        # built from per-day differences at all.
+        assert summary.paired_day_count is None
 
     def test_a_single_observation_per_side_has_no_defined_spread(self) -> None:
         rows = (

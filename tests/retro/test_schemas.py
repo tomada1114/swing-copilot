@@ -543,6 +543,60 @@ class TestRetroInput:
         assert document.aggregates.tracked_performance is not None
         assert document.aggregates.tracked_performance[0].recommendation == "proceed"
 
+    def test_a_dossier_written_before_paired_day_count_keeps_its_digest(self) -> None:
+        # RP-002: the paired day count was added to `separation_paired` rows
+        # after dossiers carrying that block (Issue #190) already existed,
+        # e.g. the archived 2026-07-30 / 2026-08-12 generations under
+        # `reports/retro/` -- absent locally (gitignored, not part of this
+        # checkout), so this reproduces the same shape the existing digest
+        # tests above use: a hand-built `separation_paired` block signed
+        # without the new key, verified through today's widened schema.
+        payload = _unsigned_payload()
+        payload["aggregates"]["separation_paired"] = [
+            {
+                "metric_id": "metric:separation_paired:5d",
+                "horizon_days": 5,
+                "value": 1.5,
+                "sample_size": 4,
+                "is_preliminary": True,
+                "stderr": 0.5,
+                "ci_low": 0.52,
+                "ci_high": 2.48,
+                "excluded_day_count": 1,
+            }
+        ]
+        archived_digest = retro_input_digest(payload)
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": archived_digest}
+        )
+
+        assert document.aggregates.separation_paired is not None
+        assert document.aggregates.separation_paired[0].paired_day_count is None
+
+    def test_a_counted_paired_day_count_changes_a_fresh_documents_digest(self) -> None:
+        payload = _unsigned_payload()
+        payload["aggregates"]["separation_paired"] = [
+            {
+                "metric_id": "metric:separation_paired:5d",
+                "horizon_days": 5,
+                "value": 1.5,
+                "sample_size": 4,
+                "is_preliminary": True,
+                "paired_day_count": 3,
+            }
+        ]
+        uncounted = deepcopy(payload)
+        del uncounted["aggregates"]["separation_paired"][0]["paired_day_count"]
+
+        document = RetroInput.model_validate(
+            {**payload, "input_digest": retro_input_digest(payload)}
+        )
+
+        assert document.aggregates.separation_paired is not None
+        assert document.aggregates.separation_paired[0].paired_day_count == 3
+        assert retro_input_digest(payload) != retro_input_digest(uncounted)
+
     def test_accepts_an_empty_window_with_no_metrics_or_surprises(self) -> None:
         payload = _unsigned_payload()
         payload["aggregates"] = {

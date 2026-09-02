@@ -142,6 +142,13 @@ class MetricSummary:
     narrower than the truth and would read as more certain than the data is.
     `excluded_day_count` is set only by the paired metrics, where it counts
     the run days dropped for having just one verdict side.
+
+    `paired_day_count` (RP-002) is set only by the paired metrics too: the
+    number of per-day differences the value was averaged over. `sample_size`
+    on a paired row is the contributing *outcome row* count, not the number
+    of days, and confusing the two lets a reader think a window of just a
+    few paired days has cleared the L1 evidence floor (n>=20) that
+    `sample_size` alone would seem to satisfy.
     """
 
     metric_id: str
@@ -153,6 +160,7 @@ class MetricSummary:
     ci_low: float | None = None
     ci_high: float | None = None
     excluded_day_count: int | None = None
+    paired_day_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,6 +554,7 @@ def _paired_separation_for(
         ci_low=_ci_bound(value, stderr, sign=-1),
         ci_high=_ci_bound(value, stderr, sign=1),
         excluded_day_count=excluded_day_count,
+        paired_day_count=len(differences),
     )
 
 

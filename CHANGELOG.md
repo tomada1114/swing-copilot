@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- retro のペアード separation（`metric:separation_paired:*` /
+  `metric:separation_paired_excess:*`）に、平均へ採用した日次差の本数
+  `paired_day_count` を追加した（RP-002）。これらの指標の `sample_size` は差の
+  計算に寄与した `verdict_outcomes` 行数であって、両側 95% 区間を作った日次差の
+  本数ではないため、`sample_size` だけを読むと L1 の証拠ゲート（n≥20 かつ区間
+  が 0 を跨がない）を字面で満たしたと誤読しうる状態だった。`MetricEntry` の
+  既定は `None`（プール版・重み合成ヘッドラインは対象外）で、
+  `retro_input_digest` はこの既定の欠落キーを無視するため、RP-002 以前に
+  書かれた dossier の `input_digest` は変更後も検証を通る
 - 戦略別ランキング成分の**機構**を追加した（Issue #251 段階1）。`ScoreWeights` に
   `pivot_proximity`（`vcp_pivot` と終値の距離。ピボット丁度で 1.0、上下どちらへ 5%
   離れると 0.0）、`rs_percentile`（`minervini_rs_percentile`/100）、`criteria_met`

@@ -31,11 +31,13 @@ Write discipline:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from swing_copilot.storage.database import atomic, fetch_records
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date
 
     from swing_copilot.storage.database import Database
@@ -358,19 +360,13 @@ def sync_verdict_position_recommendations(
         )
         if not drifted:
             return ()
-        conn.execute("BEGIN TRANSACTION")
-        try:
+        with atomic(conn):
             for run_id, symbol, recommendation in drifted:
                 conn.execute(
                     "UPDATE verdict_positions SET recommendation = ? "
                     "WHERE run_id = ? AND symbol = ?",
                     [recommendation, str(run_id), symbol],
                 )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
     finally:
         conn.close()
     return drifted
@@ -411,17 +407,13 @@ def delete_orphaned_verdict_positions(
         )
         if not orphans:
             return ()
-        conn.execute("BEGIN TRANSACTION")
-        for run_id, symbol in orphans:
-            for table in ("verdict_position_marks", "verdict_positions"):
-                conn.execute(
-                    f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
-                    [str(run_id), symbol],
-                )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+        with atomic(conn):
+            for run_id, symbol in orphans:
+                for table in ("verdict_position_marks", "verdict_positions"):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
+                        [str(run_id), symbol],
+                    )
     finally:
         conn.close()
     return orphans
@@ -464,8 +456,8 @@ def get_verdict_positions(
         ORDER BY entry_date, run_id, symbol
     """  # noqa: S608 - interpolation is a fixed column list and `?` placeholders
     with database.connect() as conn:
-        rows = conn.execute(query, parameters).fetchall()
-    return tuple(_position(row) for row in rows)
+        records = fetch_records(conn, query, parameters)
+    return tuple(_position(record) for record in records)
 
 
 def get_verdict_position(
@@ -478,36 +470,52 @@ def get_verdict_position(
         WHERE run_id = ? AND symbol = ?
     """  # noqa: S608 - the only interpolation is a fixed column list
     with database.connect() as conn:
-        row = conn.execute(query, [str(run_id), symbol]).fetchone()
-    return None if row is None else _position(row)
+        records = fetch_records(conn, query, [str(run_id), symbol])
+    return None if not records else _position(records[0])
 
 
-def _position(row: Sequence[object]) -> VerdictPosition:
-    """Rebuild a `VerdictPosition` from a `_POSITION_COLUMNS` row.
+def _position(record: Mapping[str, object]) -> VerdictPosition:
+    """Rebuild a `VerdictPosition` from a `_POSITION_COLUMNS` row, by column name.
 
     A `NULL` `recommendation` reads as `proceed`: the column arrived with
     Issue #190, and every row that predates it could only have been opened
     from a `proceed` verdict.
     """
     return VerdictPosition(
-        run_id=UUID(str(row[0])),
-        symbol=str(row[1]),
-        strategy_key=str(row[2]),
-        recommendation=PROCEED if row[3] is None else str(row[3]),
-        no_trade=bool(row[4]),
-        entry_date=row[5],  # type: ignore[arg-type]
-        entry_price=float(row[6]),  # type: ignore[arg-type]
-        stop_price=None if row[7] is None else float(row[7]),  # type: ignore[arg-type]
-        days_held=int(row[8]),  # type: ignore[call-overload]
-        max_hold_days=int(row[9]),  # type: ignore[call-overload]
-        status=str(row[10]),
-        exit_date=row[11],  # type: ignore[arg-type]
-        exit_price=None if row[12] is None else float(row[12]),  # type: ignore[arg-type]
-        exit_reason=None if row[13] is None else str(row[13]),
-        realized_return_pct=(
-            None if row[14] is None else float(row[14])  # type: ignore[arg-type]
+        run_id=UUID(str(record["run_id"])),
+        symbol=str(record["symbol"]),
+        strategy_key=str(record["strategy_key"]),
+        recommendation=(
+            PROCEED
+            if record["recommendation"] is None
+            else str(record["recommendation"])
         ),
-        last_marked_date=row[15],  # type: ignore[arg-type]
+        no_trade=bool(record["no_trade"]),
+        entry_date=cast("date", record["entry_date"]),
+        entry_price=float(cast("float", record["entry_price"])),
+        stop_price=(
+            None
+            if record["stop_price"] is None
+            else float(cast("float", record["stop_price"]))
+        ),
+        days_held=int(cast("int", record["days_held"])),
+        max_hold_days=int(cast("int", record["max_hold_days"])),
+        status=str(record["status"]),
+        exit_date=cast("date | None", record["exit_date"]),
+        exit_price=(
+            None
+            if record["exit_price"] is None
+            else float(cast("float", record["exit_price"]))
+        ),
+        exit_reason=(
+            None if record["exit_reason"] is None else str(record["exit_reason"])
+        ),
+        realized_return_pct=(
+            None
+            if record["realized_return_pct"] is None
+            else float(cast("float", record["realized_return_pct"]))
+        ),
+        last_marked_date=cast("date | None", record["last_marked_date"]),
     )
 
 
@@ -534,9 +542,7 @@ def upsert_verdict_position(
         msg = "all marks must belong to the position being written"
         raise ValueError(msg)
 
-    conn = database.connect()
-    try:
-        conn.execute("BEGIN TRANSACTION")
+    with database.transaction() as conn:
         conn.execute(
             _UPSERT_POSITION,
             [
@@ -570,12 +576,6 @@ def upsert_verdict_position(
                     mark.unrealized_return_pct,
                 ],
             )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
 
 
 def get_verdict_position_marks(

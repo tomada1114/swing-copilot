@@ -962,3 +962,34 @@ def _declares_extra_forbid(config_dict_call: ast.Call) -> bool:
         and keyword.value.value == "forbid"
         for keyword in config_dict_call.keywords
     )
+
+
+# --- Issue #395: one storage transaction primitive --------------------------
+
+
+def test_begin_transaction_appears_only_in_the_shared_primitive():
+    """AGENTS.md's "one logical write = one transaction" now has one owner.
+
+    Before Issue #395, ~20 call sites across `storage/` each hand-wrote their
+    own `BEGIN TRANSACTION` / `try`/`except Exception: ROLLBACK; raise` /
+    `else: COMMIT` boilerplate. `Database.transaction()` /
+    `storage.database.atomic()` is now the single place that spells out the
+    three statements; every writer composes it instead. This pins down that
+    single ownership structurally: a future call site that reaches for its
+    own `conn.execute("BEGIN TRANSACTION")` -- instead of composing the
+    shared primitive -- fails this test on sight. It does not, and cannot,
+    catch a site that omits a transaction altogether (`docs/08` §4's
+    `record_risk_assessments` incident): such a site emits no
+    `BEGIN TRANSACTION` string and would pass this check silently: that
+    failure mode still depends on a rollback-injection test at the writer
+    itself.
+    """
+    storage_dir = PROJECT_ROOT / "src/swing_copilot/storage"
+    offending = [
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in sorted(storage_dir.rglob("*.py"))
+        if path.name != "database.py"
+        and "BEGIN TRANSACTION" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offending == []

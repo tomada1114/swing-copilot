@@ -101,33 +101,26 @@ def record_signals(
     pipeline now writes `signal_hits` through `record_screening_results`
     instead; this entry point is kept for the existing rows' shape only.
     """
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for hit in signals:
-                conn.execute(
-                    """
-                    INSERT INTO signals (
-                        run_date, symbol, strategy_key, signal_name, strength, metrics_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (run_date, symbol, strategy_key, signal_name) DO UPDATE SET
-                        strength = EXCLUDED.strength,
-                        metrics_json = EXCLUDED.metrics_json
-                    """,
-                    [
-                        run_date,
-                        hit.symbol,
-                        strategy_key,
-                        hit.signal_name,
-                        hit.strength,
-                        dumps_safe(dict(hit.metrics)),
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+    with database.transaction() as conn:
+        for hit in signals:
+            conn.execute(
+                """
+                INSERT INTO signals (
+                    run_date, symbol, strategy_key, signal_name, strength, metrics_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_date, symbol, strategy_key, signal_name) DO UPDATE SET
+                    strength = EXCLUDED.strength,
+                    metrics_json = EXCLUDED.metrics_json
+                """,
+                [
+                    run_date,
+                    hit.symbol,
+                    strategy_key,
+                    hit.signal_name,
+                    hit.strength,
+                    dumps_safe(dict(hit.metrics)),
+                ],
+            )
 
 
 def record_candidates(
@@ -249,39 +242,32 @@ def record_screening_results(
             every row.
     """
     retained = select_persisted_truncations(result.truncated, meta.candidate_limit)
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for candidate in result.candidates:
-                _insert_candidate(conn, candidate, str(meta.run_id), meta.strategy_key)
-            for rejection in result.rejections:
-                conn.execute(
-                    """
-                    INSERT INTO screening_rejections (
-                        run_id, symbol, stage, reason_code, detail, as_of
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (run_id, symbol) DO UPDATE SET
-                        stage = EXCLUDED.stage,
-                        reason_code = EXCLUDED.reason_code,
-                        detail = EXCLUDED.detail,
-                        as_of = EXCLUDED.as_of
-                    """,
-                    [
-                        str(meta.run_id),
-                        rejection.symbol,
-                        rejection.stage.value,
-                        rejection.reason_code.value,
-                        dumps_safe(dict(rejection.detail)),
-                        meta.as_of,
-                    ],
-                )
-            _replace_truncations(conn, retained, meta)
-            _replace_signal_hits(conn, result.signal_hits, meta)
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+    with database.transaction() as conn:
+        for candidate in result.candidates:
+            _insert_candidate(conn, candidate, str(meta.run_id), meta.strategy_key)
+        for rejection in result.rejections:
+            conn.execute(
+                """
+                INSERT INTO screening_rejections (
+                    run_id, symbol, stage, reason_code, detail, as_of
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, symbol) DO UPDATE SET
+                    stage = EXCLUDED.stage,
+                    reason_code = EXCLUDED.reason_code,
+                    detail = EXCLUDED.detail,
+                    as_of = EXCLUDED.as_of
+                """,
+                [
+                    str(meta.run_id),
+                    rejection.symbol,
+                    rejection.stage.value,
+                    rejection.reason_code.value,
+                    dumps_safe(dict(rejection.detail)),
+                    meta.as_of,
+                ],
+            )
+        _replace_truncations(conn, retained, meta)
+        _replace_signal_hits(conn, result.signal_hits, meta)
 
 
 def _replace_signal_hits(
@@ -407,27 +393,20 @@ def record_signal_outcomes(
     """
     if not outcomes:
         return
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for outcome in outcomes:
-                conn.execute(
-                    _UPSERT_SIGNAL_OUTCOMES,
-                    [
-                        str(outcome.run_id),
-                        outcome.symbol,
-                        outcome.horizon_days,
-                        outcome.as_of,
-                        list(outcome.signal_names),
-                        outcome.forward_return_pct,
-                        outcome.classification,
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+    with database.transaction() as conn:
+        for outcome in outcomes:
+            conn.execute(
+                _UPSERT_SIGNAL_OUTCOMES,
+                [
+                    str(outcome.run_id),
+                    outcome.symbol,
+                    outcome.horizon_days,
+                    outcome.as_of,
+                    list(outcome.signal_names),
+                    outcome.forward_return_pct,
+                    outcome.classification,
+                ],
+            )
 
 
 def replace_signal_outcomes(
@@ -444,31 +423,24 @@ def replace_signal_outcomes(
         msg = "all outcomes must match the replacement run_id and horizon_days"
         raise ValueError(msg)
 
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
+    with database.transaction() as conn:
+        conn.execute(
+            "DELETE FROM signal_outcomes WHERE run_id = ? AND horizon_days = ?",
+            [str(run_id), horizon_days],
+        )
+        for outcome in outcomes:
             conn.execute(
-                "DELETE FROM signal_outcomes WHERE run_id = ? AND horizon_days = ?",
-                [str(run_id), horizon_days],
+                _UPSERT_SIGNAL_OUTCOMES,
+                [
+                    str(outcome.run_id),
+                    outcome.symbol,
+                    outcome.horizon_days,
+                    outcome.as_of,
+                    list(outcome.signal_names),
+                    outcome.forward_return_pct,
+                    outcome.classification,
+                ],
             )
-            for outcome in outcomes:
-                conn.execute(
-                    _UPSERT_SIGNAL_OUTCOMES,
-                    [
-                        str(outcome.run_id),
-                        outcome.symbol,
-                        outcome.horizon_days,
-                        outcome.as_of,
-                        list(outcome.signal_names),
-                        outcome.forward_return_pct,
-                        outcome.classification,
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,42 +495,35 @@ def replace_universe_forward_returns(
         msg = "all returns must match the replacement run_id and horizon_days"
         raise ValueError(msg)
 
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
+    with database.transaction() as conn:
+        conn.execute(
+            "DELETE FROM universe_forward_returns "
+            "WHERE run_id = ? AND horizon_days = ?",
+            [str(run_id), horizon_days],
+        )
+        for record in returns:
             conn.execute(
-                "DELETE FROM universe_forward_returns "
-                "WHERE run_id = ? AND horizon_days = ?",
-                [str(run_id), horizon_days],
+                """
+                INSERT INTO universe_forward_returns (
+                    run_id, symbol, horizon_days, as_of, outcome_class,
+                    reason_code, forward_return_pct
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE SET
+                    as_of = EXCLUDED.as_of,
+                    outcome_class = EXCLUDED.outcome_class,
+                    reason_code = EXCLUDED.reason_code,
+                    forward_return_pct = EXCLUDED.forward_return_pct
+                """,
+                [
+                    str(record.run_id),
+                    record.symbol,
+                    record.horizon_days,
+                    record.as_of,
+                    record.outcome_class,
+                    record.reason_code,
+                    record.forward_return_pct,
+                ],
             )
-            for record in returns:
-                conn.execute(
-                    """
-                    INSERT INTO universe_forward_returns (
-                        run_id, symbol, horizon_days, as_of, outcome_class,
-                        reason_code, forward_return_pct
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (run_id, symbol, horizon_days) DO UPDATE SET
-                        as_of = EXCLUDED.as_of,
-                        outcome_class = EXCLUDED.outcome_class,
-                        reason_code = EXCLUDED.reason_code,
-                        forward_return_pct = EXCLUDED.forward_return_pct
-                    """,
-                    [
-                        str(record.run_id),
-                        record.symbol,
-                        record.horizon_days,
-                        record.as_of,
-                        record.outcome_class,
-                        record.reason_code,
-                        record.forward_return_pct,
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
 
 
 def record_risk_assessments(
@@ -571,15 +536,8 @@ def record_risk_assessments(
     a mid-batch failure would leave a partial run — indistinguishable, when
     read back, from a run whose later symbols were never assessed.
     """
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            _insert_risk_assessments(conn, assessments, run_id)
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+    with database.transaction() as conn:
+        _insert_risk_assessments(conn, assessments, run_id)
 
 
 def _insert_risk_assessments(

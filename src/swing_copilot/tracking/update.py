@@ -27,6 +27,18 @@ guessed at: a position that has no bars at all is retried on every update
 until one arrives, while a single unusable session inside an otherwise good
 history is skipped and noted (design 3.24.3-2; replaying already-marked days
 against corrected bars is the out-of-scope `--rebuild`, 3.24.3-4).
+
+A position's `entry_price` and `stop_price` are frozen in the dollars that
+traded on the day it opened, while `MarketStore.read_bars` hands back prices
+on the basis visible at `as_of` -- so a split between the two re-bases the
+bars underneath a stop that did not move, and the position would be closed
+out at a price nothing ever traded at. The ledger therefore re-bases from the
+*events* (`MarketStore.read_splits`), never from a price ratio: every split
+whose ex-date falls after the last marked session divides the frozen prices
+and every published mark by its factor. This is exact where the old ratio
+heuristic was a guess -- it cannot mistake a dividend or a real 12% gap for a
+corporate action, and it is not fooled by a store whose entry-day close never
+moved (Issue #413, where the pre-split rows had simply been left unadjusted).
 """
 
 from __future__ import annotations
@@ -52,12 +64,13 @@ from swing_copilot.storage.tracking_records import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date
 
     import pandas as pd
 
     from swing_copilot.config import TradePlanConfig
+    from swing_copilot.data.adjustments import SplitEvent
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
     from swing_copilot.storage.tracking_records import TrackableVerdict
@@ -70,13 +83,6 @@ logger = logging.getLogger(__name__)
 _LOOKBACK_DAYS = 90
 
 _OHLC_KEYS = ("open", "low", "close")
-
-#: Ratio deviation on the entry-date close above which a price move is
-#: treated as a stock split rather than dividend-adjustment drift (exclusive:
-#: exactly 10% does not rebase). `auto_adjust=True` also re-scales history for
-#: every ex-dividend date, and US large-cap quarterly dividends run under 2%,
-#: while even the smallest ordinary splits (3-for-2, 5-for-4) clear 10%.
-_REBASE_THRESHOLD = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,8 +167,14 @@ def update_tracking(
             pending.append(work)
     opened_count = len(pending)
 
+    # One splits read for the whole ledger, like `_read_bars`: `read_splits`
+    # opens a connection per call, and DuckDB's file lock is exclusive.
+    splits = market_store.read_splits(
+        sorted({position.symbol for position in open_positions}), as_of=as_of
+    )
     pending.extend(
-        _rebased_work(state_store, bars, position, notes) for position in open_positions
+        _rebased_work(state_store, bars, position, splits, notes)
+        for position in open_positions
     )
 
     advanced_count = closed_count = 0
@@ -223,89 +235,129 @@ def _rebased_work(
     state_store: StateStore,
     bars: pd.DataFrame,
     position: VerdictPosition,
+    splits: Mapping[str, Sequence[SplitEvent]],
     notes: list[str],
 ) -> _Work:
     """Build one already-open position's `_Work`, rebasing it first if needed.
 
-    Detection is self-contained here rather than depending on `write_bars`'s
-    execution order (design P8-116): it only reads bars and the position's
-    own stored state, both already in hand by the time `update_tracking`
-    calls this.
+    Args:
+        state_store: Source of the marks already published for this position.
+        bars: The batched frame every tracked symbol was read into.
+        position: The open position to carry forward.
+        splits: Every tracked symbol's splits visible at `as_of`.
+        notes: Data-quality/rebase notes, appended to in place.
+
+    Returns:
+        The work item `_advance` replays, already on the current basis.
     """
     position_bars = _position_bars(bars, position.symbol, position.entry_date)
+    applicable = _applicable_splits(
+        splits.get(position.symbol, ()), position, position_bars
+    )
+    if not applicable:
+        return _Work(position=position, bars=position_bars, seed_marks=())
     existing_marks = state_store.get_verdict_position_marks(
         position.run_id, position.symbol
     )
     rebased_position, rebased_marks = _rebase_position(
-        position, position_bars, existing_marks, notes
+        position, applicable, existing_marks, notes
     )
     return _Work(
         position=rebased_position, bars=position_bars, seed_marks=rebased_marks
     )
 
 
+def _applicable_splits(
+    splits: Sequence[SplitEvent], position: VerdictPosition, bars: pd.DataFrame
+) -> tuple[SplitEvent, ...]:
+    """The splits this update has to re-base `position` for.
+
+    A split counts when its ex-date is newer than the last session already
+    marked -- everything on or before that date is already reflected in the
+    stored figures -- **and** the position has a stored session on or after
+    it. That second clause is what makes the rebase idempotent: replaying
+    that session moves `last_marked_date` to the ex-date or past it, so the
+    next run with the same `as_of` finds nothing left to apply. Without it a
+    symbol whose bars have stopped arriving would be re-scaled on every run.
+
+    Args:
+        splits: The symbol's splits visible at `as_of` (`read_splits` already
+            dropped anything later).
+        position: The open position being carried forward.
+        bars: That position's own bar window, no row newer than `as_of`.
+
+    Returns:
+        The applicable splits, ascending by ex-date.
+    """
+    if not splits or bars.empty:
+        return ()
+    marked_through = position.last_marked_date or position.entry_date
+    newest_session = max(bars["date"])
+    return tuple(
+        split
+        for split in sorted(splits, key=lambda event: event.ex_date)
+        if marked_through < split.ex_date <= newest_session
+    )
+
+
 def _rebase_position(
     position: VerdictPosition,
-    bars: pd.DataFrame,
+    splits: Sequence[SplitEvent],
     marks: Sequence[VerdictPositionMark],
     notes: list[str],
 ) -> tuple[VerdictPosition, tuple[VerdictPositionMark, ...]]:
-    """Detect a stock split and rescale the position's frozen dollar figures.
+    """Rescale the position's frozen dollar figures onto the current basis.
 
-    Bars are re-fetched with `auto_adjust=True` every run, so a split rewrites
-    the whole stored history to post-split terms while `entry_price` /
-    `stop_price`, frozen as absolute dollars at open, do not move on their
-    own. This compares the stored `entry_price` against the (possibly
-    rewritten) bar close on the same session; a deviation past
-    `_REBASE_THRESHOLD` rescales `entry_price`, `stop_price`, and every mark
-    already published for this position by the same ratio, so a rebased
-    position is never stopped out against its pre-rebase basis. Called before
-    `_advance` replays any session (REQ-008).
+    `entry_price`, `stop_price` and every published mark are quoted in the
+    dollars that traded when they were written, while `read_bars` returns the
+    basis visible at `as_of`. Dividing them all by the product of the splits
+    since the last mark puts the whole position back on the bars' own scale,
+    so `_advance` can never test a post-split low against a pre-split stop
+    (REQ-008). A `None` stop stays `None`: it means "no stop was ever set",
+    which no amount of rescaling changes.
+
+    Args:
+        position: The open position, on its pre-split basis.
+        splits: The splits to apply, from `_applicable_splits` (never empty).
+        marks: Every mark already published for this position.
+        notes: Rebase notes, appended to in place.
 
     Returns:
-        The (possibly rebased) position, and the (possibly rebased) marks --
-        empty when no rebase was needed, since nothing then needs rewriting.
+        The rebased position and its rebased marks.
     """
-    if position.entry_price <= 0:
-        notes.append(
-            f"{position.symbol} {position.entry_date.isoformat()}: "
-            "entry_priceが0以下のため価格再調整の判定をスキップした"
-        )
-        return position, ()
-
-    bar_close = _close_on(bars, position.symbol, position.entry_date)
-    if bar_close is None:
-        notes.append(
-            f"{position.symbol} {position.entry_date.isoformat()}: "
-            "entry_dateのバーが参照窓に無いため価格再調整の判定をスキップした"
-        )
-        return position, ()
-
-    ratio = bar_close / position.entry_price
-    if abs(ratio - 1.0) <= _REBASE_THRESHOLD:
+    cumulative = math.prod(split.factor for split in splits)
+    if cumulative == 1.0:
+        # A 1-for-1 "split" (or two that cancel): nothing to rescale, and
+        # rewriting every mark for a no-op would only add churn.
         return position, ()
 
     before_entry_price = position.entry_price
     rebased_position = replace(
         position,
-        entry_price=position.entry_price * ratio,
+        entry_price=position.entry_price / cumulative,
         stop_price=(
-            None if position.stop_price is None else position.stop_price * ratio
+            None if position.stop_price is None else position.stop_price / cumulative
         ),
     )
     rebased_marks = tuple(
         replace(
             mark,
-            close=mark.close * ratio,
-            stop_price=None if mark.stop_price is None else mark.stop_price * ratio,
+            close=mark.close / cumulative,
+            stop_price=(
+                None if mark.stop_price is None else mark.stop_price / cumulative
+            ),
         )
         for mark in marks
     )
+    described = "、".join(
+        f"ex_date={split.ex_date.isoformat()}, factor={split.factor:g}"
+        for split in splits
+    )
     notes.append(
         f"{position.symbol} {position.entry_date.isoformat()}: "
-        f"価格再調整を検出（比率 {ratio:.6f}）、"
-        f"entry_price {before_entry_price:.6f} → "
-        f"{rebased_position.entry_price:.6f} に再基準化"
+        f"株式分割（{described}）により再基準化"
+        f"（entry_price {before_entry_price:.6f} → "
+        f"{rebased_position.entry_price:.6f}）"
     )
     return rebased_position, rebased_marks
 

@@ -28,8 +28,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   を削除した。既存の `exit_reason='manual'` 行と CHECK 制約は台帳の連続性を保つため残す。
   後方互換シムは無い
 
+### Changed
+
+- 日足バーの保存基準を「最新の調整済み価格」から**生（as-traded、未調整）値の不変保存**へ
+  改めた（Issue #413）。分割・配当は新テーブル `corporate_actions`（`(symbol, ex_date, kind)`
+  自然キー）にイベントとして保存し、`MarketStore.read_bars(..., as_of)` が `ex_date <= as_of`
+  の分割だけを読み出し時に掛けて返す（価格 ÷ 係数、出来高 × 係数。配当は保存するが価格には
+  掛けない）。`YFinanceProvider` は `auto_adjust=False, actions=True` で取得し、Yahoo が分割を
+  履歴に適用し損ねた行（MNST 2026-08-11 の 2:1 分割で観測）を分割カレンダーと隣接行の連続性から
+  生値に戻す。解消できない銘柄は再試行しない `FetchFailure` として落とす。`write_bars` は
+  既存行と 0.5% を超えて食い違う行や調整基準の混在を示す系列を、その銘柄ごと書かずに隔離する
+  （`BarWriteResult.quarantined`。日次 run の価格ステップ detail に `quarantined symbols` として
+  載る）。ストアには形式マーカー `data/bars/_format.json` を置き、未移行ストアへの読み書きは
+  `BarsFormatError` で fail-fast する。仮想台帳の分割再基準化は 10% 比率ヒューリスティック
+  （`_rebase_position`）から `corporate_actions` のイベント駆動へ置き換えた。`research.bars()`
+  は既定で生値を返し、`as_of` を渡すと当時見えた価格を再現する。**既存ストアは
+  `copilot-backfill rebuild` で全履歴を再構築する必要がある**（pull → rebuild → check → push）
+
 ### Added
 
+- `copilot-backfill rebuild [--symbols A,B] [--limit N]`（全履歴を provider から取り直して生値で
+  置換し、`corporate_actions` を upsert、形式マーカーを書く。正規化できない銘柄は旧行を維持して
+  列挙）と `copilot-backfill check [--symbols A,B]`（read-only。形式マーカーと各銘柄の調整基準
+  混在署名を報告）を追加した（Issue #413）
 - 戦略別ランキング成分の**機構**を追加した（Issue #251 段階1）。`ScoreWeights` に
   `pivot_proximity`（`vcp_pivot` と終値の距離。ピボット丁度で 1.0、上下どちらへ 5%
   離れると 0.0）、`rs_percentile`（`minervini_rs_percentile`/100）、`criteria_met`

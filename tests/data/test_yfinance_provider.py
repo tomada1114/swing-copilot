@@ -471,3 +471,160 @@ class TestGetLatestBars:
 
         assert result.bars.empty
         assert {failure.symbol for failure in result.failures} == {"AAPL"}
+
+
+class TestRawBarsAndCorporateActions:
+    """Issue #413: the response is stored as-traded, actions travel with it."""
+
+    @staticmethod
+    def _split_fixture(closes: list[float], splits: list[float]) -> pd.DataFrame:
+        """One symbol's response, Yahoo-adjusted, with a `Stock Splits` column."""
+        dates = ["2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16"]
+        return _frame(
+            {
+                ("Open", "MNST"): closes,
+                ("High", "MNST"): closes,
+                ("Low", "MNST"): closes,
+                ("Close", "MNST"): closes,
+                ("Volume", "MNST"): [1000, 1000, 1000, 1000],
+                ("Dividends", "MNST"): [0.0, 0.0, 0.0, 0.0],
+                ("Stock Splits", "MNST"): splits,
+            },
+            dates,
+        )
+
+    def test_download_asks_for_unadjusted_prices_and_actions(self):
+        captured: list[dict[str, object]] = []
+
+        def _download(*_args, **kwargs):
+            captured.append(kwargs)
+            return pd.DataFrame()
+
+        provider = YFinanceProvider(download_fn=_download, sleep_fn=lambda _d: None)
+        provider.get_daily_bars(["AAPL"], date(2026, 7, 15), date(2026, 7, 18))
+
+        assert all(kwargs["auto_adjust"] is False for kwargs in captured)
+        assert all(kwargs["actions"] is True for kwargs in captured)
+
+    def test_bars_come_back_as_traded_not_split_adjusted(self):
+        # Yahoo adjusted every row for the 07-16 2:1 split, so the two
+        # pre-split rows print at half their as-traded price.
+        fixture = self._split_fixture([50.0, 50.5, 50.2, 51.0], [0.0, 0.0, 0.0, 2.0])
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+
+        assert list(result.bars["close"]) == pytest.approx([100.0, 101.0, 100.4, 51.0])
+        assert list(result.bars["volume"]) == [500, 500, 500, 1000]
+
+    def test_a_split_and_a_dividend_become_action_rows(self):
+        dates = ["2026-07-15", "2026-07-16"]
+        fixture = _frame(
+            {
+                ("Open", "AAPL"): [20.0, 20.0],
+                ("High", "AAPL"): [20.0, 20.0],
+                ("Low", "AAPL"): [20.0, 20.0],
+                ("Close", "AAPL"): [20.0, 20.0],
+                ("Volume", "AAPL"): [1000, 1000],
+                ("Dividends", "AAPL"): [0.0, 0.24],
+                ("Stock Splits", "AAPL"): [4.0, 0.0],
+            },
+            dates,
+        )
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_daily_bars(["AAPL"], date(2026, 7, 15), date(2026, 7, 17))
+
+        assert list(result.actions.columns) == ["symbol", "ex_date", "kind", "value"]
+        assert [tuple(row) for row in result.actions.to_numpy()] == [
+            ("AAPL", date(2026, 7, 15), "split", 4.0),
+            ("AAPL", date(2026, 7, 16), "dividend", 0.24),
+        ]
+
+    def test_a_zero_valued_action_cell_is_no_action(self):
+        fixture = self._split_fixture([50.0, 50.5, 50.2, 51.0], [0.0, 0.0, 0.0, 0.0])
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+
+        assert result.actions.empty
+        assert list(result.bars["close"]) == pytest.approx([50.0, 50.5, 50.2, 51.0])
+
+    def test_an_action_outside_the_window_is_not_reported(self):
+        fixture = self._split_fixture([50.0, 50.5, 50.2, 51.0], [0.0, 0.0, 0.0, 2.0])
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 16))
+
+        assert result.actions.empty
+
+    def test_a_response_without_action_columns_still_yields_bars(self):
+        """A feed that ignores `actions=True` reads as "no corporate action"."""
+        fixture = _frame(
+            {
+                ("Open", "AAPL"): [20.0],
+                ("High", "AAPL"): [20.0],
+                ("Low", "AAPL"): [20.0],
+                ("Close", "AAPL"): [20.0],
+                ("Volume", "AAPL"): [1000],
+            },
+            ["2026-07-15"],
+        )
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_daily_bars(["AAPL"], date(2026, 7, 15), date(2026, 7, 16))
+
+        assert result.actions.empty
+        assert result.bars.iloc[0]["close"] == pytest.approx(20.0)
+
+    def test_an_unresolvable_adjustment_basis_fails_the_symbol(self):
+        # Alternating bases a 2:1 split cannot explain: no assignment of
+        # hypotheses removes the signature, so the symbol is withheld whole.
+        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _d: None
+        )
+
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+
+        assert result.bars.empty
+        assert len(result.failures) == 1
+        assert result.failures[0].symbol == "MNST"
+        assert result.failures[0].retryable is False
+        assert "分割調整の混在" in result.failures[0].reason
+
+    def test_a_rejected_symbol_is_never_retried(self):
+        calls = 0
+        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+
+        def _download(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return fixture
+
+        provider = YFinanceProvider(download_fn=_download, sleep_fn=lambda _d: None)
+        provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+
+        assert calls == 1
+
+    def test_a_rejected_symbol_contributes_no_actions_either(self):
+        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+        provider = YFinanceProvider(
+            download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _d: None
+        )
+
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+
+        assert result.actions.empty
+
+    def test_get_latest_bars_carries_the_actions_through(self):
+        fixture = self._split_fixture([50.0, 50.5, 50.2, 51.0], [0.0, 0.0, 0.0, 2.0])
+        provider = YFinanceProvider(download_fn=lambda *_a, **_k: fixture)
+
+        result = provider.get_latest_bars(["MNST"], date(2026, 7, 16))
+
+        assert len(result.bars) == 1
+        # The newest bar is always as-traded, so it is comparable with a
+        # price quoted today without any adjustment.
+        assert result.bars.iloc[0]["close"] == pytest.approx(51.0)
+        assert list(result.actions["kind"]) == ["split"]

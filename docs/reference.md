@@ -61,7 +61,8 @@ research.truncated_candidates()   # candidate_limit で順位落ちした near-m
 research.universe_forward_returns()  # 候補 ∪ 順位落ち ∪ 落選の forward return
 research.signal_hits()          # run_id キーのシグナル発火
 research.verdict_reasons()      # verdict の理由 1 件 1 行（basis / source_id_count）
-research.bars(["AAPL"])        # Parquet 直読の日足（DBファイルに触れない）
+research.bars(["AAPL"])        # 生値（as-traded）。既定は as_of なし、DBファイルに触れない
+research.bars(["AAPL"], as_of=date(2026, 8, 12), db_path=DB_PATH)  # as_of 時点の分割調整済み値を再現
 research.query("SELECT ...")   # 任意の read-only SQL
 research.ensure_views(path)     # ビュー未作成の古い DB を修復
 ```
@@ -76,6 +77,12 @@ research.ensure_views(path)     # ビュー未作成の古い DB を修復
 `v_tracked_positions`は台帳行に加えて、各`(run_id, symbol)`の最新マークから
 `last_mark_date`・`last_close`・`unrealized_return_pct`を返し、建玉時に保存した
 `max_hold_days`も公開表示へ渡す。最新値が無い行は未記録のまま残るため、読み手はゼロと解釈しない。
+
+`research.bars(symbols, parquet_root=..., *, as_of=None, db_path=None)`（Issue #413）は
+既定で生値（as-traded、企業行動未調整）を返す。当時見えた価格を再現するには
+`as_of`を渡す——read-onlyで`db_path`のDuckDBを開いて分割イベントを読み、
+`as_of`時点までの分割係数を掛けた値を返す（配当は掛けない）。パーティションは
+あるが形式マーカーが無い未移行ストアに対しては`BarsFormatError`をそのまま送出する。
 
 ::: swing_copilot.research.frames
 
@@ -650,6 +657,10 @@ retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤで�
 copilot-backfill bars --start 2019-01-01                   # ユニバース全銘柄の日足
 copilot-backfill bars --start 2019-01-01 --symbols SPY,QQQ # 個別指定
 copilot-backfill fundamentals --start 2019-01-01           # 10-K/10-Qの過去分
+copilot-backfill rebuild                                   # 全銘柄の全履歴を生値へ再構築（書き込み）
+copilot-backfill rebuild --symbols MNST,TXN --limit 20      # 対象銘柄・決定論的サンプルだけ再構築
+copilot-backfill check                                      # ストアに実在する全銘柄を走査（read-only）
+copilot-backfill check --symbols MNST                       # 対象銘柄だけ走査
 ```
 
 `--end`を省略した場合だけCLI境界で`SystemClock().today()`を使う。ドメイン関数へは
@@ -680,7 +691,9 @@ copilot-backfill fundamentals --start 2019-01-01           # 10-K/10-Qの過去�
 銘柄単位の失敗はfail-softで、失敗した銘柄名を集約して最後に報告し、
 他の銘柄の取得は続行する。ただし1銘柄も取得できず書き込みが0行だった場合は
 終了コード1で落ちる——`copilot-backfill ... && copilot-backtest ...`が
-空のDBに対して走るのを防ぐためである。
+空のDBに対して走るのを防ぐためである。`write_bars`の整合性ゲート
+（Issue #413、下記「`rebuild` / `check`」節参照）で隔離された銘柄は
+`隔離した銘柄: ...`として同じ出力に加わる（既存行は不変）。
 
 !!! note "全件破棄と回復手順（Issue #295 の判断）"
     `write_bars`は非有限値（NaN／±inf）を1セルでも検出すると、そのバッチ全体を
@@ -701,6 +714,36 @@ S&P 500ユニバースに含まれないので、`--symbols`で別途バック�
 広げて呼ぶ。EDGARのbulk company-factsは常に全履歴を返すので、追加のアダプタ
 改修なしに過去四半期を`filed_at`付きで取り込める。`EDGAR_IDENTITY`が未設定なら
 何もせず非0終了する。
+
+### `rebuild` / `check`（Issue #413、生バー化への復旧経路）
+
+`copilot-backfill rebuild [--db PATH] [--settings PATH] [--symbols A,B] [--limit N]`は、
+対象銘柄（`--symbols`省略時はユニバース全体、`--limit`は決定論的サンプル）の
+全履歴を再取得し、`write_bars`の重複不変ゲートを経由せず**既存行を全year
+パーティションから削除したうえで**生値（as-traded）を書き直す。終了時に
+`rebuild: 対象 N 銘柄 / 置換 R / 拒否 J / 書き込み W 行`を表示し、調整基準の
+混在を解消できなかった銘柄は既存行を残したまま`既存行を維持した銘柄: ...`
+に列挙する。解消できた銘柄は`corporate_actions`を全履歴分upsertする。
+**形式マーカー（`data/bars/_format.json`）は1銘柄以上を実際に置換できた
+ときだけ書く**——全銘柄が拒否された場合はストアを未移行のまま残し、
+`rebuild: 全銘柄の取得に失敗したため置き換えは行われませんでした。`を
+出して終了コード1で落ちる。既存パーティションにマーカーが無い未移行スト
+アに対しても動く必要があるため、`rebuild`はマーカー検査を迂回する。
+
+`copilot-backfill check [--db PATH] [--symbols A,B]`は読み出し専用で、
+`--settings`と`--limit`は持たない——`--symbols`省略時は**ユニバースでは
+なく`MarketStore.stored_symbols()`**（ストアに実在する銘柄）を対象にする。
+`MarketStore.read_raw_bars()`で生値をそのまま読み、マーカーが揃っていれば
+`形式マーカー: ok（basis=raw, version=2）`、揃っていなければ
+`形式マーカー: NG`と`BarsFormatError`の本文を表示する。続けて混在署名が
+無ければ`check: ok（対象 N 銘柄、混在署名なし）`、あれば
+`check: 対象 N 銘柄 / 混在署名 K 銘柄`に続けて該当銘柄ごとに
+`混在署名: SYM（最初のジャンプ YYYY-MM-DD）`を1行ずつ列挙する。何も
+書き込まない。
+
+全銘柄`rebuild`は`data/`のR2 generationを進める操作なので、実行前に確認を取り、
+定時実行と重ならない時間帯に`pull` → `rebuild` → `check` → `push`を1セットで
+行う（`AGENTS.md`の「Working with the data locally」節）。
 
 ## `copilot-filter-matrix`とフィルタ独立通過率
 

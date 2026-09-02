@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
@@ -12,7 +13,9 @@ from duckdb import ConstraintException
 
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
+    BARS_COLUMNS,
     DEFAULT_PARQUET_ROOT,
+    BarsFormatError,
     FundamentalsFetchStamp,
     FundamentalsFetchState,
     FundamentalsRecord,
@@ -20,6 +23,8 @@ from swing_copilot.storage.market_store import (
     NonFiniteBarsError,
     ParquetRootNotFoundError,
     resolve_parquet_root,
+    validate_bars_format,
+    write_bars_format_marker,
 )
 
 if TYPE_CHECKING:
@@ -101,24 +106,33 @@ class TestWriteAndReadBars:
         assert len(result) == 1
 
     def test_write_bars_correction_replaces_same_natural_key(self, market_store):
+        """Within the tolerance, a re-fetch is a *correction* and replaces.
+
+        A provider revising a close by a fraction of a cent is ordinary; the
+        row it names is the same fact, told slightly better. Only a deviation
+        large enough to mean a different adjustment basis quarantines the
+        symbol instead (`TestWriteBarsQuarantineGate`).
+        """
         market_store.write_bars(
             _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
         )
-        market_store.write_bars(
-            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 11.5, 1000)])
+        result = market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.23, 1100)])
         )
 
-        result = market_store.read_bars(
+        assert result.quarantined == ()
+        stored = market_store.read_bars(
             ["AAPL"], date(2026, 7, 1), date(2026, 7, 31), as_of=date(2026, 7, 20)
         )
-        assert len(result) == 1
-        assert result.iloc[0]["close"] == pytest.approx(11.5)
+        assert len(stored) == 1
+        assert stored.iloc[0]["close"] == pytest.approx(10.23)
+        assert stored.iloc[0]["volume"] == 1100
 
     def test_replace_failure_preserves_partition_and_cleans_unique_temp(
         self, market_store: MarketStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         initial = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
-        corrected = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 11.5, 1000)])
+        corrected = _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.23, 1000)])
         market_store.write_bars(initial)
         partition_dir = market_store.parquet_root / "year=2026"
         partition_file = partition_dir / "data.parquet"
@@ -1196,3 +1210,624 @@ class TestResolveParquetRoot:
             ["AAPL"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 7, 20)
         ).empty
         assert not absent.exists()
+
+
+def _actions(rows: list[tuple[str, str, str, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "ex_date": date.fromisoformat(ex_date),
+                "kind": kind,
+                "value": value,
+            }
+            for symbol, ex_date, kind, value in rows
+        ]
+    )
+
+
+class TestBarsFormatMarker:
+    """Issue #413: a store must say which adjustment basis it holds."""
+
+    def test_the_first_write_stamps_the_marker(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+
+        marker = market_store.parquet_root / "_format.json"
+        assert json.loads(marker.read_text(encoding="utf-8")) == {
+            "basis": "raw",
+            "version": 2,
+        }
+
+    def test_an_empty_root_needs_no_marker(self, tmp_path: Path) -> None:
+        validate_bars_format(tmp_path / "bars")
+
+    def test_a_partitioned_root_without_a_marker_is_refused(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        (market_store.parquet_root / "_format.json").unlink()
+
+        with pytest.raises(BarsFormatError, match="rebuild"):
+            market_store.read_bars(
+                ["AAPL"], date(2026, 7, 1), date(2026, 7, 31), as_of=date(2026, 7, 20)
+            )
+
+    def test_a_marker_naming_another_basis_is_refused(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        marker = market_store.parquet_root / "_format.json"
+        marker.write_text('{"basis": "adjusted", "version": 1}', encoding="utf-8")
+
+        with pytest.raises(BarsFormatError, match="形式マーカー"):
+            market_store.write_bars(
+                _bars([("AAPL", "2026-07-16", 10, 10.5, 9.5, 10.2, 1000)])
+            )
+
+    def test_an_unreadable_marker_is_refused_rather_than_assumed(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        marker = market_store.parquet_root / "_format.json"
+        marker.write_text("not json at all", encoding="utf-8")
+
+        with pytest.raises(BarsFormatError):
+            market_store.earliest_bar_dates(["AAPL"])
+
+    def test_a_missing_marker_leaves_the_partition_untouched(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        partition = market_store.parquet_root / "year=2026" / "data.parquet"
+        previous = partition.read_bytes()
+        (market_store.parquet_root / "_format.json").unlink()
+
+        with pytest.raises(BarsFormatError):
+            market_store.write_bars(
+                _bars([("AAPL", "2026-07-16", 10, 10.5, 9.5, 10.2, 1000)])
+            )
+
+        assert partition.read_bytes() == previous
+
+    def test_writing_the_marker_is_idempotent(self, tmp_path: Path) -> None:
+        root = tmp_path / "bars"
+        write_bars_format_marker(root)
+        write_bars_format_marker(root)
+
+        validate_bars_format(root)
+
+
+class TestWriteBarsQuarantineGate:
+    """Raw bars are immutable facts; a contradicting batch is withheld."""
+
+    def test_a_mixed_basis_batch_quarantines_the_symbol(self, market_store):
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2026-07-29", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-07-30", 48, 48, 48, 48.6, 1000),
+                    ("MNST", "2026-07-31", 97, 97, 97, 97.6, 1000),
+                    ("MNST", "2026-08-03", 96, 96, 96, 96.4, 1000),
+                ]
+            )
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["MNST"]
+        assert "混在" in result.quarantined[0].reason
+        assert market_store.read_bars(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31)
+        ).empty
+
+    def test_a_deviation_beyond_the_tolerance_quarantines_the_symbol(
+        self, market_store
+    ):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+
+        result = market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 5.1, 2000)])
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["AAPL"]
+        assert "2026-07-15" in result.quarantined[0].reason
+        assert "10.2" in result.quarantined[0].reason
+        assert "5.1" in result.quarantined[0].reason
+
+    def test_a_quarantined_symbol_leaves_the_stored_row_untouched(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+        partition = market_store.parquet_root / "year=2026" / "data.parquet"
+        previous = partition.read_bytes()
+
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 5.1, 2000)])
+        )
+
+        assert partition.read_bytes() == previous
+
+    def test_a_clean_symbol_in_the_same_batch_is_still_written(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAPL", "2026-07-15", 10, 10.5, 9.5, 5.1, 1000),
+                    ("MSFT", "2026-07-16", 20, 20.5, 19.5, 20.2, 1000),
+                ]
+            )
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["AAPL"]
+        stored = market_store.read_bars(
+            ["AAPL", "MSFT"],
+            date(2026, 7, 1),
+            date(2026, 7, 31),
+            as_of=date(2026, 7, 31),
+        )
+        assert set(stored["symbol"]) == {"AAPL", "MSFT"}
+        aapl = stored[stored["symbol"] == "AAPL"]
+        assert len(aapl) == 1
+        assert aapl.iloc[0]["close"] == pytest.approx(10.2)
+
+    def test_a_deviation_across_a_year_boundary_is_still_seen(self, market_store):
+        market_store.write_bars(
+            _bars([("AAPL", "2025-12-31", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAPL", "2025-12-31", 10, 10.5, 9.5, 5.1, 1000),
+                    ("AAPL", "2026-01-02", 10, 10.5, 9.5, 10.3, 1000),
+                ]
+            )
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["AAPL"]
+        assert not (market_store.parquet_root / "year=2026").exists()
+
+    def test_a_first_write_has_nothing_to_contradict(self, market_store):
+        result = market_store.write_bars(
+            _bars([("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000)])
+        )
+
+        assert result.quarantined == ()
+
+
+class TestCorporateActions:
+    def test_write_then_read_back_both_kinds(self, market_store):
+        market_store.write_corporate_actions(
+            _actions(
+                [
+                    ("MNST", "2026-08-11", "split", 2.0),
+                    ("MNST", "2026-08-20", "dividend", 0.24),
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+        stored = market_store.read_corporate_actions(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31)
+        )
+
+        assert list(stored["kind"]) == ["split", "dividend"]
+        assert list(stored["value"]) == pytest.approx([2.0, 0.24])
+        assert set(stored["provider"]) == {"yfinance"}
+
+    def test_a_later_write_corrects_the_same_natural_key(self, market_store):
+        stamp = datetime(2026, 9, 2, tzinfo=UTC)
+        market_store.write_corporate_actions(
+            _actions([("MNST", "2026-08-11", "split", 2.0)]),
+            provider="yfinance",
+            fetched_at=stamp,
+        )
+        market_store.write_corporate_actions(
+            _actions([("MNST", "2026-08-11", "split", 3.0)]),
+            provider="eodhd",
+            fetched_at=stamp,
+        )
+
+        stored = market_store.read_corporate_actions(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31)
+        )
+
+        assert len(stored) == 1
+        assert stored.iloc[0]["value"] == pytest.approx(3.0)
+        assert stored.iloc[0]["provider"] == "eodhd"
+
+    def test_a_failing_row_rolls_the_whole_batch_back(self, market_store):
+        with pytest.raises(ConstraintException):
+            market_store.write_corporate_actions(
+                _actions(
+                    [
+                        ("MNST", "2026-08-11", "split", 2.0),
+                        ("MNST", "2026-08-20", "buyback", 1.0),
+                    ]
+                ),
+                provider="yfinance",
+                fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+            )
+
+        assert market_store.read_corporate_actions(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31)
+        ).empty
+
+    def test_writing_no_actions_is_a_no_op(self, market_store):
+        market_store.write_corporate_actions(
+            _actions([]),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+        assert market_store.read_splits(["MNST"], as_of=date(2026, 12, 31)) == {}
+
+    def test_reading_no_symbols_never_touches_the_database(self, market_store):
+        assert market_store.read_splits([], as_of=date(2026, 12, 31)) == {}
+        assert market_store.read_corporate_actions(
+            [], date(2026, 1, 1), date(2026, 12, 31)
+        ).empty
+
+    def test_read_splits_excludes_dividends(self, market_store):
+        market_store.write_corporate_actions(
+            _actions(
+                [
+                    ("MNST", "2026-08-11", "split", 2.0),
+                    ("MNST", "2026-08-20", "dividend", 0.24),
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+        splits = market_store.read_splits(["MNST"], as_of=date(2026, 12, 31))
+
+        assert [split.factor for split in splits["MNST"]] == pytest.approx([2.0])
+
+    @pytest.mark.parametrize(
+        ("as_of", "expected"),
+        [
+            pytest.param(date(2026, 8, 10), False, id="day-before"),
+            pytest.param(date(2026, 8, 11), True, id="ex-date"),
+            pytest.param(date(2026, 8, 12), True, id="day-after"),
+        ],
+    )
+    def test_only_splits_on_or_before_as_of_are_visible(
+        self, market_store: MarketStore, as_of: date, *, expected: bool
+    ) -> None:
+        market_store.write_corporate_actions(
+            _actions([("MNST", "2026-08-11", "split", 2.0)]),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+        assert ("MNST" in market_store.read_splits(["MNST"], as_of=as_of)) is expected
+
+    def test_an_ex_date_range_bounds_are_inclusive(self, market_store):
+        market_store.write_corporate_actions(
+            _actions(
+                [
+                    ("MNST", "2026-08-10", "split", 2.0),
+                    ("MNST", "2026-08-12", "split", 3.0),
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+        stored = market_store.read_corporate_actions(
+            ["MNST"], date(2026, 8, 10), date(2026, 8, 12)
+        )
+
+        assert len(stored) == 2
+
+
+class TestReadBarsAppliesSplits:
+    """`read_bars` is where the as-of adjustment basis is decided."""
+
+    @staticmethod
+    def _seed(market_store: MarketStore) -> None:
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2026-08-10", 90, 91, 89, 90.0, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                    ("MNST", "2026-08-12", 46, 47, 45, 46.0, 3000),
+                ]
+            )
+        )
+        market_store.write_corporate_actions(
+            _actions([("MNST", "2026-08-11", "split", 2.0)]),
+            provider="yfinance",
+            fetched_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+
+    def test_a_split_after_as_of_is_invisible(self, market_store):
+        self._seed(market_store)
+
+        result = market_store.read_bars(
+            ["MNST"], date(2026, 8, 1), date(2026, 8, 10), as_of=date(2026, 8, 10)
+        )
+
+        assert result.iloc[0]["close"] == pytest.approx(90.0)
+        assert result.iloc[0]["volume"] == 1000
+
+    def test_a_split_on_as_of_applies_to_earlier_rows(self, market_store):
+        self._seed(market_store)
+
+        result = market_store.read_bars(
+            ["MNST"], date(2026, 8, 1), date(2026, 8, 11), as_of=date(2026, 8, 11)
+        )
+
+        assert result.iloc[0]["close"] == pytest.approx(45.0)
+        assert result.iloc[0]["volume"] == 2000
+        assert result.iloc[1]["close"] == pytest.approx(45.5)
+
+    def test_a_split_after_end_but_on_or_before_as_of_still_applies(self, market_store):
+        """The point of point-in-time: the window does not bound the basis."""
+        self._seed(market_store)
+
+        result = market_store.read_bars(
+            ["MNST"], date(2026, 8, 1), date(2026, 8, 10), as_of=date(2026, 8, 12)
+        )
+
+        assert list(result["date"]) == [date(2026, 8, 10)]
+        assert result.iloc[0]["close"] == pytest.approx(45.0)
+
+    def test_a_symbol_without_splits_reads_raw(self, market_store):
+        self._seed(market_store)
+        market_store.write_bars(
+            _bars([("AAPL", "2026-08-10", 200, 201, 199, 200.0, 500)])
+        )
+
+        result = market_store.read_bars(
+            ["AAPL"], date(2026, 8, 1), date(2026, 8, 31), as_of=date(2026, 8, 31)
+        )
+
+        assert result.iloc[0]["close"] == pytest.approx(200.0)
+
+    def test_the_returned_columns_are_unchanged_by_adjustment(self, market_store):
+        self._seed(market_store)
+
+        result = market_store.read_bars(
+            ["MNST"], date(2026, 8, 1), date(2026, 8, 31), as_of=date(2026, 8, 31)
+        )
+
+        assert list(result.columns) == list(BARS_COLUMNS)
+
+
+class TestReplaceSymbolBars:
+    """The rebuild path: an operator accepting a new basis wholesale."""
+
+    def test_every_year_of_the_symbol_is_replaced(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2025-12-31", 10, 10, 10, 10.0, 100),
+                    ("MNST", "2026-01-02", 10, 10, 10, 10.0, 100),
+                    ("AAPL", "2025-12-31", 20, 20, 20, 20.0, 100),
+                ]
+            )
+        )
+
+        market_store.replace_symbol_bars(
+            ["MNST"], _bars([("MNST", "2026-01-02", 5, 5, 5, 5.0, 200)])
+        )
+
+        stored = market_store.read_bars(
+            ["MNST", "AAPL"],
+            date(2025, 1, 1),
+            date(2026, 12, 31),
+            as_of=date(2026, 12, 31),
+        )
+        assert [(row.symbol, row.date) for row in stored.itertuples()] == [
+            ("AAPL", date(2025, 12, 31)),
+            ("MNST", date(2026, 1, 2)),
+        ]
+        assert stored.iloc[1]["close"] == pytest.approx(5.0)
+
+    def test_it_bypasses_the_immutability_gate(self, market_store):
+        market_store.write_bars(_bars([("MNST", "2026-07-15", 90, 91, 89, 90.0, 1000)]))
+
+        market_store.replace_symbol_bars(
+            ["MNST"], _bars([("MNST", "2026-07-15", 45, 46, 44, 45.0, 2000)])
+        )
+
+        stored = market_store.read_bars(
+            ["MNST"], date(2026, 7, 1), date(2026, 7, 31), as_of=date(2026, 7, 31)
+        )
+        assert stored.iloc[0]["close"] == pytest.approx(45.0)
+
+    def test_it_stamps_the_marker_on_an_unmigrated_store(self, market_store):
+        market_store.write_bars(_bars([("MNST", "2026-07-15", 90, 91, 89, 90.0, 1000)]))
+        (market_store.parquet_root / "_format.json").unlink()
+
+        market_store.replace_symbol_bars(
+            ["MNST"], _bars([("MNST", "2026-07-15", 45, 46, 44, 45.0, 2000)])
+        )
+
+        validate_bars_format(market_store.parquet_root)
+
+    def test_replacing_no_symbols_is_a_no_op(self, market_store):
+        market_store.write_bars(_bars([("MNST", "2026-07-15", 90, 91, 89, 90.0, 1000)]))
+        partition = market_store.parquet_root / "year=2026" / "data.parquet"
+        previous = partition.read_bytes()
+
+        market_store.replace_symbol_bars([], _bars([]))
+
+        assert partition.read_bytes() == previous
+
+    def test_a_year_with_no_existing_partition_is_created(self, market_store):
+        market_store.write_bars(_bars([("MNST", "2025-07-15", 90, 91, 89, 90.0, 1000)]))
+
+        market_store.replace_symbol_bars(
+            ["MNST"], _bars([("MNST", "2026-07-15", 45, 46, 44, 45.0, 2000)])
+        )
+
+        stored = market_store.read_bars(
+            ["MNST"], date(2025, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31)
+        )
+        assert list(stored["date"]) == [date(2026, 7, 15)]
+
+    def test_a_symbol_with_no_replacement_rows_is_erased(self, market_store):
+        market_store.write_bars(_bars([("MNST", "2026-07-15", 90, 91, 89, 90.0, 1000)]))
+
+        market_store.replace_symbol_bars(["MNST"], _bars([]))
+
+        assert market_store.read_bars(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31)
+        ).empty
+
+    def test_a_non_finite_replacement_is_rejected_before_any_partition_moves(
+        self, market_store
+    ):
+        market_store.write_bars(_bars([("MNST", "2026-07-15", 90, 91, 89, 90.0, 1000)]))
+        partition = market_store.parquet_root / "year=2026" / "data.parquet"
+        previous = partition.read_bytes()
+
+        with pytest.raises(NonFiniteBarsError):
+            market_store.replace_symbol_bars(
+                ["MNST"],
+                _bars([("MNST", "2026-07-15", 45, 46, 44, float("nan"), 2000)]),
+            )
+
+        assert partition.read_bytes() == previous
+
+
+class TestCorporateActionsOnALegacyDatabase:
+    """A database written before Issue #413 has no `corporate_actions` table.
+
+    Every reader must treat that as "no corporate action recorded" rather
+    than as an error: a read-only connection cannot create the table, and
+    refusing to serve bars would take a research session's whole history away
+    over a table it never needed.
+    """
+
+    @staticmethod
+    def _legacy_read_only_store(tmp_path: Path) -> MarketStore:
+        db_path = tmp_path / "legacy.duckdb"
+        writable = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+        with writable.get_connection() as conn:
+            conn.execute("DROP TABLE corporate_actions")
+        return MarketStore(
+            Database(db_path, read_only=True), parquet_root=tmp_path / "bars"
+        )
+
+    def test_read_splits_reads_as_no_splits(self, tmp_path: Path) -> None:
+        store = self._legacy_read_only_store(tmp_path)
+
+        assert store.read_splits(["MNST"], as_of=date(2026, 12, 31)) == {}
+
+    def test_read_corporate_actions_reads_as_an_empty_frame(
+        self, tmp_path: Path
+    ) -> None:
+        store = self._legacy_read_only_store(tmp_path)
+
+        actions = store.read_corporate_actions(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31)
+        )
+
+        assert actions.empty
+        assert list(actions.columns) == [
+            "symbol",
+            "ex_date",
+            "kind",
+            "value",
+            "provider",
+            "fetched_at",
+        ]
+
+
+class TestReadRawBars:
+    """The audit read: raw values, straight from Parquet, no DuckDB."""
+
+    def _seed(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAPL", "2025-12-30", 100.0, 101.0, 99.0, 100.0, 1_000),
+                    ("AAPL", "2026-01-05", 100.0, 101.0, 99.0, 100.0, 1_000),
+                    ("AAPL", "2026-03-02", 50.0, 51.0, 49.0, 50.0, 2_000),
+                    ("MSFT", "2026-01-05", 20.0, 21.0, 19.0, 20.0, 3_000),
+                ]
+            )
+        )
+        market_store.write_corporate_actions(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "ex_date": date(2026, 3, 2),
+                        "kind": "split",
+                        "value": 2.0,
+                    }
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+
+    def test_returns_stored_values_untouched_by_any_split(self, market_store):
+        self._seed(market_store)
+
+        raw = market_store.read_raw_bars(["AAPL"])
+
+        # `read_bars` would hand back 50.0 for the pre-split sessions; the
+        # audit has to see what is actually on disk.
+        assert raw["close"].tolist() == pytest.approx([100.0, 100.0, 50.0])
+        assert raw["date"].tolist() == [
+            date(2025, 12, 30),
+            date(2026, 1, 5),
+            date(2026, 3, 2),
+        ]
+
+    def test_bounds_are_inclusive_and_cross_year_partitions(self, market_store):
+        self._seed(market_store)
+
+        raw = market_store.read_raw_bars(["AAPL"], date(2025, 12, 30), date(2026, 1, 5))
+
+        assert raw["date"].tolist() == [date(2025, 12, 30), date(2026, 1, 5)]
+
+    def test_a_window_with_no_stored_row_returns_an_empty_frame(self, market_store):
+        self._seed(market_store)
+
+        raw = market_store.read_raw_bars(["MSFT"], date(2026, 6, 1), date(2026, 6, 30))
+
+        assert raw.empty
+
+    def test_no_symbols_and_no_partitions_both_return_an_empty_frame(
+        self, market_store
+    ):
+        assert market_store.read_raw_bars([]).empty
+        assert market_store.read_raw_bars(["AAPL"]).empty
+
+    def test_an_unmarked_store_is_refused(self, market_store):
+        self._seed(market_store)
+        (market_store.parquet_root / "_format.json").unlink()
+
+        with pytest.raises(BarsFormatError, match="copilot-backfill rebuild"):
+            market_store.read_raw_bars(["AAPL"])
+
+
+class TestStoredSymbols:
+    def test_lists_every_symbol_across_every_partition_once(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MSFT", "2025-12-30", 20.0, 21.0, 19.0, 20.0, 1_000),
+                    ("AAPL", "2026-01-05", 100.0, 101.0, 99.0, 100.0, 1_000),
+                    ("MSFT", "2026-01-05", 20.0, 21.0, 19.0, 20.0, 1_000),
+                ]
+            )
+        )
+
+        assert market_store.stored_symbols() == ("AAPL", "MSFT")
+
+    def test_an_empty_store_lists_nothing(self, market_store):
+        assert market_store.stored_symbols() == ()

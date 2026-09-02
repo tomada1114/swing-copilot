@@ -3,9 +3,20 @@
 Bars are the large, append-heavy time series, so they live in Hive-partitioned
 Parquet (`year=YYYY/data.parquet`) and DuckDB only provides a `read_parquet`
 view over them — never a second copy of the raw rows (`docs/03_basic_design.md`
-5). `write_bars` upserts `(symbol, date)` within each affected year partition
-via write-to-temp-then-rename, so a crash mid-write never corrupts the
-previous partition. Fundamentals are comparatively small structured records,
+5). Stored bars are **raw (as-traded) and immutable**: a re-fetch that lands
+within `_MAX_CORRECTION_RATIO` of a stored close replaces it as a correction,
+and anything further apart quarantines that *symbol* for the whole write
+rather than overwriting history with a second adjustment basis (Issue #413).
+Split adjustment is applied on *read*, as of the caller's `as_of`, from the
+`corporate_actions` table — so what `read_bars` returns depends on the
+requested point in time and never on when the bar was fetched. Each affected
+year partition is still published by write-to-temp-then-rename, so a crash
+mid-write never corrupts the previous partition. A store's basis is recorded
+in `_format.json` beside the partitions; a partitioned store without that
+marker holds pre-Issue-#413 adjusted bars and is refused until
+`copilot-backfill rebuild` has rewritten it.
+
+Fundamentals are comparatively small structured records,
 so they live directly in a DuckDB table, natural-keyed by `accession_no` (the
 one truly unique identifier for an SEC filing; `storage/database.py`'s DDL is
 authoritative over the docstring prose in `docs/04_detailed_design.md` 3.7,
@@ -15,6 +26,7 @@ which loosely paraphrases the key as `(symbol, fiscal_period)`).
 from __future__ import annotations
 
 import io
+import json
 import math
 import uuid
 from dataclasses import asdict, dataclass
@@ -24,11 +36,17 @@ from typing import TYPE_CHECKING
 import duckdb
 import pandas as pd
 
+from swing_copilot.data.adjustments import (
+    SplitEvent,
+    adjust_bars,
+    has_mixed_basis_signature,
+)
+from swing_copilot.data.base import ACTIONS_COLUMNS
 from swing_copilot.exceptions import StorageSchemaError, SwingCopilotError
 from swing_copilot.io_atomic import write_bytes_atomically
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from datetime import date, datetime
 
     from swing_copilot.storage.database import Database
@@ -51,6 +69,18 @@ BARS_COLUMNS = (
 _NUMERIC_BAR_COLUMNS = ("open", "high", "low", "close", "volume")
 #: How many offending bars a rejection message names before summarizing.
 _MAX_REPORTED_NON_FINITE_BARS = 5
+#: The stored-bar columns `read_corporate_actions` mirrors for its own rows.
+CORPORATE_ACTION_COLUMNS = (*ACTIONS_COLUMNS, "provider", "fetched_at")
+#: Marker file recording which basis the partitions hold, written beside them.
+_FORMAT_MARKER_NAME = "_format.json"
+#: Its only accepted content. `basis` is prose for a human reading the file;
+#: `version` is what a future migration would bump.
+_FORMAT_MARKER_PAYLOAD = {"basis": "raw", "version": 2}
+#: How far a re-fetched close may sit from the stored one and still count as
+#: a *correction* rather than a change of adjustment basis. Yahoo revises a
+#: close by fractions of a cent; a split or a dividend re-basing moves it by
+#: percent or more (`design-pit-prices.md` 3).
+_MAX_CORRECTION_RATIO = 0.005
 
 
 class ParquetRootNotFoundError(SwingCopilotError):
@@ -124,6 +154,68 @@ class NonFiniteBarsError(SwingCopilotError):
     atomic: validation runs before the first partition is touched, so a bad
     row in 2025 cannot leave a half-written 2024.
     """
+
+
+class BarsFormatError(SwingCopilotError):
+    """Raised when the bars root's adjustment basis is unknown or wrong.
+
+    Partitions written before Issue #413 hold whatever adjustment basis the
+    provider happened to return that day, and mixing those rows with raw
+    (as-traded) ones would produce a series that is wrong in a way no reader
+    can detect. So a partitioned root without the `_format.json` marker --
+    or with a marker naming a different basis -- is refused outright by every
+    read and write, and only `replace_symbol_bars` (the rebuild path, which
+    overwrites the offending rows wholesale) may proceed without it.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class BarQuarantine:
+    """One symbol whose rows `write_bars` refused, and why."""
+
+    symbol: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class BarWriteResult:
+    """What `write_bars` did, for a caller that reports data quality.
+
+    Returned rather than raised: a quarantined symbol is a fail-soft,
+    per-symbol data-quality event, exactly like a provider's `FetchFailure`,
+    and must not cost the run the other 499 symbols. A caller with nothing to
+    report may ignore the result.
+    """
+
+    quarantined: tuple[BarQuarantine, ...] = ()
+
+
+#: Corporate actions live beside `fundamentals` in DuckDB rather than in the
+#: Parquet bars: they are few, they are keyed by event (not by session), and
+#: every read of them is a lookup joined to a symbol list. `value` carries the
+#: split factor or the cash dividend per share, per `kind`.
+_CREATE_CORPORATE_ACTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    symbol     VARCHAR NOT NULL,
+    ex_date    DATE NOT NULL,
+    kind       VARCHAR NOT NULL CHECK (kind IN ('split', 'dividend')),
+    value      DOUBLE NOT NULL,
+    provider   VARCHAR NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (symbol, ex_date, kind)
+)
+"""
+
+#: Correction upsert (AGENTS.md): a provider that revises a split factor or a
+#: dividend amount must be able to overwrite what it said before.
+_UPSERT_CORPORATE_ACTION = """
+INSERT INTO corporate_actions (symbol, ex_date, kind, value, provider, fetched_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (symbol, ex_date, kind) DO UPDATE SET
+    value = EXCLUDED.value,
+    provider = EXCLUDED.provider,
+    fetched_at = EXCLUDED.fetched_at
+"""
 
 
 _CREATE_FUNDAMENTALS_TABLE = """
@@ -355,6 +447,161 @@ def _reject_non_finite_bars(df: pd.DataFrame) -> None:
     raise NonFiniteBarsError(msg)
 
 
+def _format_marker_path(parquet_root: Path) -> Path:
+    """Where a bars root records the adjustment basis it holds."""
+    return parquet_root / _FORMAT_MARKER_NAME
+
+
+def write_bars_format_marker(parquet_root: Path) -> None:
+    """Stamp `parquet_root` as holding raw (as-traded) bars.
+
+    Written through `io_atomic` like every other replacement in this
+    repository, so a crash mid-write cannot leave a truncated marker that
+    then reads as "wrong basis" and locks the operator out of their own data.
+
+    Args:
+        parquet_root: The bars root; created if it does not exist yet.
+    """
+    parquet_root.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(_FORMAT_MARKER_PAYLOAD, sort_keys=True) + "\n"
+    write_bytes_atomically(_format_marker_path(parquet_root), body.encode("utf-8"))
+
+
+def validate_bars_format(parquet_root: Path) -> None:
+    """Refuse a partitioned bars root that does not hold raw bars.
+
+    An empty (or absent) root is fine — there is nothing there to
+    misinterpret, and the first `write_bars` stamps it.
+
+    Args:
+        parquet_root: The bars root to check.
+
+    Raises:
+        BarsFormatError: The root has partitions but no readable marker
+            naming this basis. The message names the rebuild command, because
+            the only correct repair is re-fetching the affected history.
+    """
+    if not any(parquet_root.glob("year=*/*.parquet")):
+        return
+    marker = _format_marker_path(parquet_root)
+    try:
+        recorded = json.loads(marker.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
+        recorded = None
+    if recorded == _FORMAT_MARKER_PAYLOAD:
+        return
+    msg = (
+        f"価格バーの形式マーカーが読めない、または一致しない: {marker}"
+        f"（期待: {_FORMAT_MARKER_PAYLOAD}、実際: {recorded!r}）。"
+        "Issue #413 以前のパーティションは調整基準が混在した価格を保持しており、"
+        "生値（as-traded）の行と混ぜると誰にも検出できない系列になる。"
+        "`copilot-backfill rebuild` で全履歴を取り直して置き換えること。"
+    )
+    raise BarsFormatError(msg)
+
+
+def _quarantine_reasons(
+    new_rows: pd.DataFrame, existing: pd.DataFrame
+) -> dict[str, str]:
+    """Which symbols in `new_rows` must not be written, and why.
+
+    Two independent quality gates, both per symbol and both fail-closed:
+
+    1. The incoming close series carries a mixed-basis signature — the
+       provider handed over adjusted and unadjusted rows in one response
+       (Issue #413). Checked *before* merging with stored rows, so a clean
+       history cannot mask a broken batch.
+    2. A row overlapping a stored `(symbol, date)` disagrees with it by more
+       than `_MAX_CORRECTION_RATIO`. Raw bars are immutable facts; a real
+       correction is fractions of a percent, and a larger move means the two
+       rows are quoted on different bases. Only `close` is compared: Yahoo
+       revises volume days later as a matter of course, and OHL move with
+       `close` anyway.
+
+    Args:
+        new_rows: The incoming bars, date-normalized.
+        existing: Stored rows for the same symbols, from the affected year
+            partitions. May be empty.
+
+    Returns:
+        `{symbol: reason}` for every symbol that must be skipped.
+    """
+    reasons: dict[str, str] = {}
+    stored_closes = (
+        {}
+        if existing.empty
+        else dict(
+            zip(
+                zip(existing["symbol"], existing["date"], strict=True),
+                existing["close"],
+                strict=True,
+            )
+        )
+    )
+    for symbol, rows in new_rows.groupby("symbol", sort=True):
+        ordered = rows.sort_values("date")
+        if has_mixed_basis_signature(ordered["close"]):
+            reasons[str(symbol)] = (
+                "調整済みと未調整の行が混在した署名を検出した"
+                f"（{ordered['date'].iloc[0]}〜{ordered['date'].iloc[-1]}）"
+            )
+            continue
+        conflict = _first_basis_conflict(ordered, stored_closes)
+        if conflict is not None:
+            reasons[str(symbol)] = conflict
+    return reasons
+
+
+def _first_basis_conflict(
+    ordered: pd.DataFrame, stored_closes: dict[tuple[object, object], float]
+) -> str | None:
+    """The first stored close this batch would overwrite too far, if any."""
+    closes = pd.to_numeric(ordered["close"], errors="coerce")
+    for symbol, bar_date, close in zip(
+        ordered["symbol"], ordered["date"], closes, strict=True
+    ):
+        stored = stored_closes.get((symbol, bar_date))
+        if stored is None or not math.isfinite(stored) or stored == 0.0:
+            continue
+        deviation = abs(close / stored - 1.0)
+        if deviation > _MAX_CORRECTION_RATIO:
+            return (
+                f"既存の生値と{deviation:.2%}乖離する行がある"
+                f"（{bar_date}: 既存 {stored} → 新規 {close}）。"
+                "許容訂正幅を超える差は調整基準の変化なので、"
+                "`copilot-backfill rebuild` で明示的に置き換えること。"
+            )
+    return None
+
+
+def _read_splits_on(
+    conn: duckdb.DuckDBPyConnection, symbols: Sequence[str], as_of: date
+) -> dict[str, tuple[SplitEvent, ...]]:
+    """Read visible splits on an already-open connection.
+
+    A missing `corporate_actions` table reads as "no splits": read-only
+    connections never run DDL, so a database written before Issue #413 must
+    still open for reading rather than failing every query.
+    """
+    placeholders = ",".join("?" for _ in symbols)
+    query = f"""
+        SELECT symbol, ex_date, value
+        FROM corporate_actions
+        WHERE kind = 'split' AND symbol IN ({placeholders}) AND ex_date <= ?
+        ORDER BY symbol, ex_date
+    """  # noqa: S608 - placeholders are bound parameters, not interpolated values
+    try:
+        rows = conn.execute(query, [*symbols, as_of]).fetchall()
+    except duckdb.CatalogException:
+        return {}
+    splits: dict[str, list[SplitEvent]] = {}
+    for symbol, ex_date, value in rows:
+        splits.setdefault(str(symbol), []).append(
+            SplitEvent(ex_date=_as_date(ex_date), factor=float(value))
+        )
+    return {symbol: tuple(events) for symbol, events in splits.items()}
+
+
 def _as_date(value: object) -> date:
     """Normalize a DuckDB date scalar (date or timestamp) to `datetime.date`."""
     return pd.Timestamp(value).date()  # type: ignore[arg-type] # pandas accepts any date-like scalar
@@ -381,10 +628,13 @@ class MarketStore:
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         """Return a DuckDB connection ready to query fundamentals and bars.
 
-        Write connections ensure `fundamentals` and `fundamentals_fetch_log`;
-        read-only connections require those tables to already exist. The
-        `bars` view is (re)created only when at least one bar partition file
-        exists, and is temporary for read-only connections.
+        Write connections ensure `fundamentals`, `fundamentals_fetch_log`
+        and `corporate_actions`; read-only connections require those tables
+        to already exist -- except `corporate_actions`, whose absence every
+        reader treats as "no corporate action recorded" so a database
+        predating Issue #413 still opens. The `bars` view is (re)created only
+        when at least one bar partition file exists, and is temporary for
+        read-only connections.
 
         Returns:
             A connection usable as a context manager.
@@ -393,6 +643,7 @@ class MarketStore:
         if not self._database.read_only:
             conn.execute(_CREATE_FUNDAMENTALS_TABLE)
             conn.execute(_CREATE_FUNDAMENTALS_FETCH_LOG_TABLE)
+            conn.execute(_CREATE_CORPORATE_ACTIONS_TABLE)
             for statement in _ALTER_FUNDAMENTALS_FETCH_LOG_STATEMENTS:
                 conn.execute(statement)
         if self._has_partition_files():
@@ -417,40 +668,163 @@ class MarketStore:
                 msg = "required table 'fundamentals' is missing"
                 raise StorageSchemaError(msg) from exc
 
-    def write_bars(self, df: pd.DataFrame) -> None:
-        """Upsert daily OHLCV rows, partitioned by year, `(symbol, date)`-keyed.
+    def write_bars(self, df: pd.DataFrame) -> BarWriteResult:
+        """Upsert raw daily OHLCV rows, partitioned by year, `(symbol, date)`-keyed.
+
+        Bars are stored as-traded and treated as immutable facts, so this is
+        an upsert only within `_MAX_CORRECTION_RATIO`; a symbol whose incoming
+        rows contradict what is stored, or whose own series carries the
+        mixed-basis signature, is quarantined and simply not written. That is
+        fail-soft per symbol (the return value), not an exception: one
+        provider glitch must not cost a run the other 499 symbols.
 
         Args:
             df: Rows matching `BARS_COLUMNS` (the Parquet schema, including
                 `provider` and `fetched_at` — already stamped by the caller).
+
+        Returns:
+            What was skipped. A caller with nothing to report may ignore it.
 
         Raises:
             NonFiniteBarsError: Any OHLCV value is NaN/±inf. The batch is
                 rejected whole, before any partition file is touched
                 (Issue #227); normalization stays each provider's job
                 (`data/base.py`), and this is the layer under it.
+            BarsFormatError: The root holds partitions written on an unknown
+                adjustment basis (see `validate_bars_format`).
         """
         if df.empty:
-            return
+            return BarWriteResult()
 
         working = df.copy()
         working["date"] = pd.to_datetime(working["date"]).dt.date
         _reject_non_finite_bars(working)
         years = working["date"].map(lambda d: d.year)
+
+        if self._has_partition_files():
+            validate_bars_format(self.parquet_root)
+        else:
+            write_bars_format_marker(self.parquet_root)
+
+        symbols = sorted(set(working["symbol"]))
+        existing = self._read_partition_rows(
+            (int(year) for year in years.unique()), symbols
+        )
+        reasons = _quarantine_reasons(working, existing)
+        if reasons:
+            keep = ~working["symbol"].isin(reasons)
+            working, years = working[keep], years[keep]
+
         for year in sorted(years.unique()):
             self._write_partition(int(year), working[years == year])
+        return BarWriteResult(
+            quarantined=tuple(
+                BarQuarantine(symbol=symbol, reason=reason)
+                for symbol, reason in sorted(reasons.items())
+            )
+        )
+
+    def replace_symbol_bars(self, symbols: Sequence[str], df: pd.DataFrame) -> None:
+        """Replace every stored row of `symbols` with `df`, across all years.
+
+        The rebuild path (`copilot-backfill rebuild`). `write_bars`' immutable
+        -raw gate is deliberately bypassed here and only here: rebuilding is
+        precisely the operator-driven act of accepting a new basis for a
+        symbol's whole history, so "the new rows contradict the stored ones"
+        is the expected state, not a defect. A symbol listed in `symbols` but
+        absent from `df` is erased rather than half-replaced, so a rejected
+        fetch must be left out of `symbols` to preserve its history.
+
+        Args:
+            symbols: Tickers whose stored rows are being replaced wholesale.
+            df: Their new raw rows, matching `BARS_COLUMNS`.
+
+        Raises:
+            NonFiniteBarsError: Any OHLCV value is NaN/±inf. Validated before
+                a partition is touched, exactly as in `write_bars`.
+        """
+        if not symbols:
+            return
+        replaced = set(symbols)
+        working = df.copy()
+        if not working.empty:
+            working["date"] = pd.to_datetime(working["date"]).dt.date
+            _reject_non_finite_bars(working)
+            working = working[working["symbol"].isin(replaced)]
+
+        write_bars_format_marker(self.parquet_root)
+        years = (
+            working["date"].map(lambda d: d.year)
+            if not working.empty
+            else pd.Series(dtype="int64")
+        )
+        touched = {int(year) for year in years.unique()} | {
+            int(path.parent.name.removeprefix("year="))
+            for path in self.parquet_root.glob("year=*/*.parquet")
+        }
+        for year in sorted(touched):
+            new_rows = working[years == year] if not working.empty else working
+            self._replace_partition(year, replaced, new_rows)
+
+    def _partition_file(self, year: int) -> Path:
+        return self.parquet_root / f"year={year}" / "data.parquet"
+
+    def _read_partition_rows(
+        self, years: Iterable[int], symbols: Sequence[str]
+    ) -> pd.DataFrame:
+        """Stored rows for `symbols` in the given year partitions.
+
+        Read straight from Parquet rather than through `read_bars`: the gate
+        compares *raw* stored values, and `read_bars` would hand back
+        as-of-adjusted ones.
+        """
+        wanted = set(symbols)
+        frames = [
+            rows
+            for year in sorted(set(years))
+            if (path := self._partition_file(year)).is_file()
+            and not (rows := pd.read_parquet(path)).empty
+            and not (rows := rows[rows["symbol"].isin(wanted)]).empty
+        ]
+        if not frames:
+            return _empty_bars_frame()
+        combined = pd.concat(frames, ignore_index=True)
+        combined["date"] = pd.to_datetime(combined["date"]).dt.date
+        return combined
 
     def _write_partition(self, year: int, new_rows: pd.DataFrame) -> None:
-        partition_dir = self.parquet_root / f"year={year}"
-        partition_dir.mkdir(parents=True, exist_ok=True)
-        partition_file = partition_dir / "data.parquet"
-
+        partition_file = self._partition_file(year)
         if partition_file.is_file():
             existing = pd.read_parquet(partition_file)
             combined = pd.concat([existing, new_rows], ignore_index=True)
         else:
             combined = new_rows
+        self._publish_partition(partition_file, combined)
 
+    def _replace_partition(
+        self, year: int, replaced: set[str], new_rows: pd.DataFrame
+    ) -> None:
+        """Drop `replaced`'s rows from one partition, then add `new_rows`."""
+        partition_file = self._partition_file(year)
+        frames = []
+        if partition_file.is_file():
+            existing = pd.read_parquet(partition_file)
+            frames.append(existing[~existing["symbol"].isin(replaced)])
+        if not new_rows.empty:
+            frames.append(new_rows)
+        combined = (
+            pd.concat(frames, ignore_index=True) if frames else _empty_bars_frame()
+        )
+        if combined.empty:
+            # Removed rather than written empty: an all-NULL Parquet column
+            # has no usable type, and DuckDB's `read_parquet` union over the
+            # partitions then fails to cast it against the other years.
+            partition_file.unlink(missing_ok=True)
+            return
+        self._publish_partition(partition_file, combined)
+
+    def _publish_partition(self, partition_file: Path, combined: pd.DataFrame) -> None:
+        partition_file.parent.mkdir(parents=True, exist_ok=True)
         combined = combined.drop_duplicates(subset=["symbol", "date"], keep="last")
         combined = combined.sort_values(["symbol", "date"]).reset_index(drop=True)
 
@@ -473,18 +847,32 @@ class MarketStore:
     ) -> pd.DataFrame:
         """Read bars for `symbols` over `[start, end]`, never past `as_of`.
 
+        Bars are stored raw, so every split with `ex_date <= as_of` is applied
+        here, on read: prices divided and volume multiplied for every row
+        dated before the ex-date. A split whose ex-date falls *after* `end`
+        but on or before `as_of` still applies to the whole window — that is
+        what "the prices a reader saw at `as_of`" means, and it is why a
+        forward return computed across a split comes out as a real return
+        rather than a 50% crash. Dividends are recorded but never applied.
+
         Args:
             symbols: Ticker symbols to read.
             start: Inclusive range start.
             end: Inclusive range end.
             as_of: Point-in-time guard — no returned bar is dated after this,
-                regardless of `end`.
+                and no split after it is visible, regardless of `end`.
 
         Returns:
-            Tidy bars (`BARS_COLUMNS`), ordered by symbol then date.
+            Tidy bars (`BARS_COLUMNS`), ordered by symbol then date, on the
+            adjustment basis visible at `as_of`.
+
+        Raises:
+            BarsFormatError: The root holds partitions written on an unknown
+                adjustment basis (see `validate_bars_format`).
         """
         if not symbols or not self._has_partition_files():
             return _empty_bars_frame()
+        validate_bars_format(self.parquet_root)
 
         effective_end = min(end, as_of)
         placeholders = ",".join("?" for _ in symbols)
@@ -496,10 +884,162 @@ class MarketStore:
               AND date <= ?
             ORDER BY symbol, date
         """  # noqa: S608 - placeholders are bound parameters, not interpolated values
+        # One connection for both reads: the splits are only needed to
+        # interpret these very rows, and DuckDB's file lock is exclusive.
         with self.get_connection() as conn:
             result = conn.execute(query, [*symbols, start, effective_end]).df()
+            splits = _read_splits_on(conn, symbols, as_of)
         result["date"] = pd.to_datetime(result["date"]).dt.date
-        return result
+        return adjust_bars(result, splits, as_of)
+
+    def stored_symbols(self) -> tuple[str, ...]:
+        """Every symbol that has at least one stored bar, ascending.
+
+        Read from the Parquet partitions rather than the DuckDB `bars` view,
+        so an audit (`copilot-backfill check`) can enumerate the store without
+        taking DuckDB's exclusive file lock while an operator or the scheduled
+        run holds it.
+
+        Returns:
+            Sorted, de-duplicated tickers; empty when nothing is stored.
+        """
+        symbols: set[str] = set()
+        for path in sorted(self.parquet_root.glob("year=*/*.parquet")):
+            symbols.update(str(value) for value in pd.read_parquet(path)["symbol"])
+        return tuple(sorted(symbols))
+
+    def read_raw_bars(
+        self, symbols: Sequence[str], start: date | None = None, end: date | None = None
+    ) -> pd.DataFrame:
+        """Read stored bars **without** any split adjustment.
+
+        The audit counterpart of `read_bars`: an adjusted series is by
+        construction free of the mixed-basis signature `copilot-backfill
+        check` looks for, so the check has to see the bytes as stored. Like
+        `stored_symbols`, this goes straight to Parquet and never opens
+        DuckDB.
+
+        Args:
+            symbols: Tickers to read; an empty sequence returns an empty frame.
+            start: Inclusive range start, or `None` for "from the beginning".
+            end: Inclusive range end, or `None` for "to the newest stored bar".
+
+        Returns:
+            Tidy raw bars (`BARS_COLUMNS`), ordered by symbol then date.
+
+        Raises:
+            BarsFormatError: The root holds partitions written on an unknown
+                adjustment basis (see `validate_bars_format`).
+        """
+        if not symbols or not self._has_partition_files():
+            return _empty_bars_frame()
+        validate_bars_format(self.parquet_root)
+        years = [
+            int(path.parent.name.removeprefix("year="))
+            for path in self.parquet_root.glob("year=*/*.parquet")
+        ]
+        if start is not None:
+            years = [year for year in years if year >= start.year]
+        if end is not None:
+            years = [year for year in years if year <= end.year]
+        rows = self._read_partition_rows(years, symbols)
+        if rows.empty:
+            return rows
+        if start is not None:
+            rows = rows[rows["date"] >= start]
+        if end is not None:
+            rows = rows[rows["date"] <= end]
+        return rows.sort_values(["symbol", "date"]).reset_index(drop=True)
+
+    def read_splits(
+        self, symbols: Sequence[str], *, as_of: date
+    ) -> dict[str, tuple[SplitEvent, ...]]:
+        """Read each symbol's splits visible at `as_of`.
+
+        Args:
+            symbols: Tickers to look up; an empty sequence returns `{}`
+                without touching the database.
+            as_of: Point-in-time cutoff. A split whose ex-date *is* `as_of`
+                is visible (the session already trades on the new basis); one
+                the day after is not.
+
+        Returns:
+            `{symbol: splits, ascending by ex-date}`, omitting symbols with
+            no visible split. A database with no `corporate_actions` table
+            (one predating Issue #413) reads as "no splits", never as an
+            error.
+        """
+        if not symbols:
+            return {}
+        with self.get_connection() as conn:
+            return _read_splits_on(conn, symbols, as_of)
+
+    def read_corporate_actions(
+        self, symbols: Sequence[str], start: date, end: date
+    ) -> pd.DataFrame:
+        """Read splits *and* dividends with `ex_date` in `[start, end]`.
+
+        The event-level view the tracking ledger and research use; `as_of`
+        filtering is the caller's, because a ledger asks "what happened
+        between these two marks", not "what was visible on one date".
+
+        Args:
+            symbols: Tickers to read; an empty sequence returns an empty
+                frame without touching the database.
+            start: Inclusive ex-date range start.
+            end: Inclusive ex-date range end.
+
+        Returns:
+            `CORPORATE_ACTION_COLUMNS` rows ordered by symbol, ex-date, kind.
+        """
+        empty = pd.DataFrame(columns=list(CORPORATE_ACTION_COLUMNS))
+        if not symbols:
+            return empty
+        placeholders = ",".join("?" for _ in symbols)
+        query = f"""
+            SELECT symbol, ex_date, kind, value, provider, fetched_at
+            FROM corporate_actions
+            WHERE symbol IN ({placeholders}) AND ex_date >= ? AND ex_date <= ?
+            ORDER BY symbol, ex_date, kind
+        """  # noqa: S608 - placeholders are bound parameters, not interpolated values
+        with self.get_connection() as conn:
+            try:
+                return conn.execute(query, [*symbols, start, end]).df()
+            except duckdb.CatalogException:
+                return empty
+
+    def write_corporate_actions(
+        self, df: pd.DataFrame, *, provider: str, fetched_at: datetime
+    ) -> None:
+        """Upsert corporate actions, keyed by `(symbol, ex_date, kind)`.
+
+        One logical write, one transaction: a provider response's actions all
+        land or none do, so a failure halfway through cannot leave a symbol
+        with the split recorded and the dividend missing.
+
+        Args:
+            df: `ACTIONS_COLUMNS` rows (`symbol`, `ex_date`, `kind`,
+                `value`); an empty frame is a no-op.
+            provider: Which source these came from, stamped on every row.
+            fetched_at: When they were fetched, stamped on every row.
+        """
+        if df.empty:
+            return
+        rows = df.copy()
+        rows["ex_date"] = pd.to_datetime(rows["ex_date"]).dt.date
+        with self.get_connection() as conn, self._database.transaction(conn):
+            for row in rows.itertuples(index=False):
+                conn.execute(
+                    _UPSERT_CORPORATE_ACTION,
+                    [
+                        row.symbol,
+                        row.ex_date,
+                        row.kind,
+                        row.value,
+                        provider,
+                        fetched_at,
+                    ],
+                )
 
     def earliest_bar_dates(self, symbols: list[str]) -> dict[str, date]:
         """Return each symbol's oldest stored bar date, for backfill resume.
@@ -516,6 +1056,7 @@ class MarketStore:
         """
         if not symbols or not self._has_partition_files():
             return {}
+        validate_bars_format(self.parquet_root)
 
         placeholders = ",".join("?" for _ in symbols)
         query = f"""

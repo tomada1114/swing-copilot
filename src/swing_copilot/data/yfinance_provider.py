@@ -1,11 +1,21 @@
 """yfinance-backed `DataProvider` for prototyping (P1-P3, CON-02).
 
 Not for production use — yfinance is an unofficial wrapper with no SLA.
-`yfinance.download(..., auto_adjust=True, multi_level_index=True)` returns
-adjusted OHLCV in a `(field, ticker)` MultiIndex-columns DataFrame regardless
-of symbol count; `_normalize` flattens that into the tidy `BARS_COLUMNS`
-schema every `DataProvider` returns, and clamps to `[start, end)` explicitly
-rather than trusting yfinance's own end-date handling.
+`yfinance.download(..., auto_adjust=False, actions=True,
+multi_level_index=True)` returns split-adjusted OHLCV plus `Dividends` and
+`Stock Splits` columns in a `(field, ticker)` MultiIndex-columns DataFrame
+regardless of symbol count; `_normalize` flattens that into the tidy
+`BARS_COLUMNS` schema every `DataProvider` returns, and clamps to
+`[start, end)` explicitly rather than trusting yfinance's own end-date
+handling.
+
+`auto_adjust=False, actions=True` is what makes point-in-time storage
+possible at all: the corporate actions come back in the same request (no
+extra call), and `data/adjustments.unadjust_yahoo_bars` uses the response's
+own `Stock Splits` column to undo Yahoo's split adjustment and emit
+**as-traded** bars. A symbol whose adjustment basis cannot be resolved --
+Issue #413's MNST, whose response mixed adjusted and unadjusted rows -- is
+failed non-retryably rather than stored half-normalized.
 
 `_normalize` also *validates* every OHLCV cell it emits, because a per-symbol
 data-quality problem has to leave here as a `BarFetchResult.failures` entry
@@ -45,20 +55,34 @@ from __future__ import annotations
 import math
 import time
 from collections import Counter
-from datetime import timedelta
-from typing import TYPE_CHECKING, Protocol
+from datetime import date, timedelta
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import pandas as pd
 import yfinance as yf
 
-from swing_copilot.data.base import BARS_COLUMNS, BarFetchResult, FetchFailure
+from swing_copilot.data.adjustments import (
+    NormalizationRejection,
+    SplitEvent,
+    unadjust_yahoo_bars,
+)
+from swing_copilot.data.base import (
+    ACTIONS_COLUMNS,
+    BARS_COLUMNS,
+    BarFetchResult,
+    FetchFailure,
+    empty_actions_frame,
+)
 from swing_copilot.retry import RETRY_DELAYS_SECONDS, is_retryable_external_error
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import date
 
 _REQUIRED_FIELDS = ("Open", "High", "Low", "Close", "Volume")
+#: yfinance's `actions=True` columns, mapped to `ACTIONS_COLUMNS`' `kind`.
+#: Absent from a response only when `actions=True` was not honored (a fake in
+#: a test that predates the switch), which reads as "no corporate action".
+_ACTION_FIELDS = {"Stock Splits": "split", "Dividends": "dividend"}
 _LATEST_BAR_LOOKBACK_DAYS = 10
 _REQUEST_TIMEOUT_SECONDS = 10
 
@@ -159,6 +183,68 @@ def _symbol_bars(
     return rows, None
 
 
+class _ActionRow(TypedDict):
+    """One `ACTIONS_COLUMNS` row, kept typed until it becomes a frame."""
+
+    symbol: str
+    ex_date: date
+    kind: str
+    value: float
+
+
+def _symbol_actions(
+    symbol: str, raw: pd.DataFrame, start: date, end: date
+) -> list[_ActionRow]:
+    """Build one symbol's `ACTIONS_COLUMNS` rows from the response's actions.
+
+    Only called after `_symbol_bars` has cleared the symbol, so the response
+    index is known to be duplicate-free and `.loc[timestamp]` is a scalar.
+
+    Args:
+        symbol: The ticker these actions belong to.
+        raw: The whole `(field, ticker)` MultiIndex response.
+        start: Inclusive range start.
+        end: Exclusive range end.
+
+    Returns:
+        Rows ordered by ex-date then kind, so two runs over one response
+        produce the same frame. A zero value is *no* action, which is how
+        yfinance fills the columns on an ordinary day.
+    """
+    rows: list[_ActionRow] = []
+    for column, kind in _ACTION_FIELDS.items():
+        try:
+            series = raw[(column, symbol)]
+        except KeyError:
+            continue
+        for timestamp in raw.index:
+            ex_date = timestamp.date()
+            if not (start <= ex_date < end):
+                continue
+            value = _finite_value(series.loc[timestamp])
+            if value is None or value == 0.0:
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "ex_date": ex_date,
+                    "kind": kind,
+                    "value": value,
+                }
+            )
+    rows.sort(key=lambda row: (row["ex_date"], row["kind"]))
+    return rows
+
+
+def _splits_from(action_rows: list[_ActionRow]) -> list[SplitEvent]:
+    """The split events among `action_rows`, ascending by ex-date."""
+    return [
+        SplitEvent(ex_date=row["ex_date"], factor=row["value"])
+        for row in action_rows
+        if row["kind"] == "split"
+    ]
+
+
 def _normalize(
     raw: pd.DataFrame, symbols: list[str], start: date, end: date
 ) -> BarFetchResult:
@@ -169,7 +255,8 @@ def _normalize(
         )
         return BarFetchResult(bars=_empty_bars_frame(), failures=empty_failures)
 
-    rows: list[dict[str, object]] = []
+    frames: list[pd.DataFrame] = []
+    action_rows: list[_ActionRow] = []
     failures: list[FetchFailure] = []
 
     for symbol in symbols:
@@ -206,10 +293,31 @@ def _normalize(
                 FetchFailure(symbol=symbol, reason=corrupt_reason, retryable=False)
             )
             continue
-        rows.extend(symbol_rows)
 
-    bars = pd.DataFrame(rows, columns=list(BARS_COLUMNS))
-    return BarFetchResult(bars=bars, failures=tuple(failures))
+        symbol_actions = _symbol_actions(symbol, raw, start, end)
+        unadjusted = unadjust_yahoo_bars(
+            symbol,
+            pd.DataFrame(symbol_rows, columns=list(BARS_COLUMNS)),
+            _splits_from(symbol_actions),
+        )
+        if isinstance(unadjusted, NormalizationRejection):
+            # Also a validation error, and one a refetch cannot fix: the
+            # provider's own history is internally inconsistent (Issue #413).
+            failures.append(
+                FetchFailure(symbol=symbol, reason=unadjusted.reason, retryable=False)
+            )
+            continue
+        if not unadjusted.empty:
+            frames.append(unadjusted)
+        action_rows.extend(symbol_actions)
+
+    bars = pd.concat(frames, ignore_index=True) if frames else _empty_bars_frame()
+    actions = (
+        pd.DataFrame(action_rows, columns=list(ACTIONS_COLUMNS))
+        if action_rows
+        else empty_actions_frame()
+    )
+    return BarFetchResult(bars=bars, failures=tuple(failures), actions=actions)
 
 
 class YFinanceProvider:
@@ -240,6 +348,7 @@ class YFinanceProvider:
 
         remaining_symbols = list(symbols)
         bars: list[pd.DataFrame] = []
+        actions: list[pd.DataFrame] = []
         failures_by_symbol: dict[str, FetchFailure] = {}
 
         for delay in (*RETRY_DELAYS_SECONDS, None):
@@ -248,7 +357,8 @@ class YFinanceProvider:
                     remaining_symbols,
                     start=start,
                     end=end,
-                    auto_adjust=True,
+                    auto_adjust=False,
+                    actions=True,
                     multi_level_index=True,
                     progress=False,
                     timeout=_REQUEST_TIMEOUT_SECONDS,
@@ -271,6 +381,8 @@ class YFinanceProvider:
 
             if not result.bars.empty:
                 bars.append(result.bars)
+            if not result.actions.empty:
+                actions.append(result.actions)
             failed_symbols = {failure.symbol for failure in result.failures}
             for failure in result.failures:
                 failures_by_symbol[failure.symbol] = failure
@@ -288,12 +400,17 @@ class YFinanceProvider:
         merged_bars = (
             pd.concat(bars, ignore_index=True) if bars else _empty_bars_frame()
         )
+        merged_actions = (
+            pd.concat(actions, ignore_index=True) if actions else empty_actions_frame()
+        )
         failures = tuple(
             failures_by_symbol[symbol]
             for symbol in symbols
             if symbol in failures_by_symbol
         )
-        return BarFetchResult(bars=merged_bars, failures=failures)
+        return BarFetchResult(
+            bars=merged_bars, failures=failures, actions=merged_actions
+        )
 
     def get_latest_bars(self, symbols: list[str], as_of: date) -> BarFetchResult:
         """See `DataProvider.get_latest_bars`."""
@@ -311,6 +428,7 @@ class YFinanceProvider:
                     .reset_index(drop=True)
                 ),
                 failures=result.failures,
+                actions=result.actions,
             )
             found_symbols = set(result.bars["symbol"])
 
@@ -329,5 +447,7 @@ class YFinanceProvider:
             for symbol in missing
         )
         return BarFetchResult(
-            bars=result.bars, failures=result.failures + extra_failures
+            bars=result.bars,
+            failures=result.failures + extra_failures,
+            actions=result.actions,
         )

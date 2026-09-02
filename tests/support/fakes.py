@@ -15,7 +15,11 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
-from swing_copilot.data.base import BarFetchResult, FetchFailure
+from swing_copilot.data.base import (
+    BarFetchResult,
+    FetchFailure,
+    empty_actions_frame,
+)
 from swing_copilot.storage.market_store import FundamentalsRecord
 from swing_copilot.text.base import TextItem
 
@@ -55,24 +59,33 @@ class StubDataProvider:
     """
 
     def __init__(
-        self, bars: pd.DataFrame, failures: tuple[FetchFailure, ...] = ()
+        self,
+        bars: pd.DataFrame,
+        failures: tuple[FetchFailure, ...] = (),
+        actions: pd.DataFrame | None = None,
     ) -> None:
         self._bars = bars
         self._failures = failures
+        self._actions = empty_actions_frame() if actions is None else actions
         self.requested_symbols: list[list[str]] = []
+
+    def _result(self) -> BarFetchResult:
+        return BarFetchResult(
+            bars=self._bars, failures=self._failures, actions=self._actions
+        )
 
     def get_daily_bars(
         self, symbols: list[str], start: date, end: date
     ) -> BarFetchResult:
-        """Record `symbols`, then return the fixed bars and failures."""
+        """Record `symbols`, then return the fixed bars, actions and failures."""
         del start, end
         self.requested_symbols.append(list(symbols))
-        return BarFetchResult(bars=self._bars, failures=self._failures)
+        return self._result()
 
     def get_latest_bars(self, symbols: list[str], as_of: date) -> BarFetchResult:
-        """Return the fixed bars and failures, ignoring `symbols`/`as_of`."""
+        """Return the fixed bars, actions and failures, ignoring the arguments."""
         del symbols, as_of
-        return BarFetchResult(bars=self._bars, failures=self._failures)
+        return self._result()
 
 
 class StubNewsClient:

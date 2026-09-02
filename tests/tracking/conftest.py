@@ -100,6 +100,34 @@ def write_bars(market_store: MarketStore, rows: list[dict[str, Any]]) -> None:
     market_store.write_bars(pd.DataFrame(rows))
 
 
+def plant_split(
+    market_store: MarketStore,
+    ex_date: date,
+    factor: float,
+    *,
+    symbol: str = SYMBOL,
+) -> None:
+    """Record a split the way `copilot-daily`'s price step records one.
+
+    Through the production writer rather than a raw INSERT, so the ledger's
+    tests read the same `corporate_actions` rows the pipeline writes.
+    """
+    market_store.write_corporate_actions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "ex_date": ex_date,
+                    "kind": "split",
+                    "value": factor,
+                }
+            ]
+        ),
+        provider="test",
+        fetched_at=_FETCHED_AT,
+    )
+
+
 def plant_broken_bars(market_store: MarketStore, rows: list[dict[str, Any]]) -> None:
     """Persist bar rows carrying a non-finite price, past `write_bars`' guard.
 

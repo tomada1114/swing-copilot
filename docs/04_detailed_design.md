@@ -367,6 +367,11 @@ class Database:
     def connect(self) -> duckdb.DuckDBPyConnection:
         """コンテキストマネージャとして使う接続を返す。"""
 
+    def transaction(self, conn: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection:
+        """1論理書き込み=1トランザクションを守る唯一のプリミティブ（Issue #395）。
+        conn省略時はconnect()した接続を自前でopen/closeし、渡した場合は
+        既に開いている接続をトランザクションで包むだけで閉じない。"""
+
 class MarketStore:
     """Parquet（bars/）とDuckDB上の市場データを扱う論理リポジトリ。"""
 
@@ -409,6 +414,10 @@ class MarketStore:
 
 複数rowのfundamentals/signal/universe snapshot更新は明示的な1トランザクションとし、途中のN件目で失敗を注入して先行rowも残らないことをテストする。snapshotの同日再保存は「追加/更新」ではなく完全置換であり、新snapshotから消えたsymbolを削除する。ParquetとCSVはdestinationと同じdirectoryへ一意なtemp fileを書き、成功時だけ原子的に置換する。書き込み/replace失敗時は従来destinationを保持し、tempをcleanupする。
 
+**トランザクション定型の集約（Issue #395）**: 上記の「1トランザクション」は、`storage/`配下9ファイル20箇所が各々`BEGIN TRANSACTION`/`try`/`except Exception: ROLLBACK; raise`/`else: COMMIT`を手書きすることで守られていた。`record_risk_assessments`がこの定型を書き忘れ不変条件違反を起こした前例（`docs/08_architecture_review_2026-08.md` §4の記録）を踏まえ、`storage/database.py`に`Database.transaction()`と低レベルの`atomic(conn)`を追加し、20箇所すべてをこの1つのプリミティブへ寄せた。`Database.transaction()`は`conn`省略時に自前で`connect()`/`close()`する通常経路、`conn`を渡すと`MarketStore.get_connection()`のようにトランザクション開始前に追加のセットアップ（スキーマ確認・ビュー再作成）を要する呼び出し元や、書くものがあるかを読んでから決める呼び出し元でも同じ接続をラップできる。`atomic(conn)`はその内部実装そのもので、`Database`を持たない呼び出し元（`backfill_verdict_reasons`など、`StateStore.init_schema()`が渡す生の接続に対して動く）が直接使う。`"BEGIN TRANSACTION"`という文字列が`storage/database.py`以外に現れないことは`tests/test_quality_contracts.py`の契約テストで固定されている。
+
+同じIssueで、`storage/database.py`に`fetch_records(conn, query, params)`（カーソルの列名で`dict[str, object]`化する読み取りヘルパー）も追加した。`tracking_records.py`の`_position`・`retro_records.py`の`_narration`・`verdict_records.py`の`_news_supply_from_row`（の呼び出し元2箇所）は、位置インデックス（`row[7]`のような）読み出しから列名ベース（`record["stop_price"]`）へ移行した。列の追加・並べ替えで値が型エラーなく隣の列へずれるリスクが消える代わりに、欠けた列は`KeyError`で、`columns`と行の長さが食い違えば`zip(..., strict=True)`で即座に落ちる。
+
 **非有限OHLCVのstore側防御（Issue #227）**: `write_bars()`は`open`/`high`/`low`/`close`/`volume`のいずれかにNaN/±inf（および数値化できない値）を含むDataFrameを`NonFiniteBarsError`で拒否する。**fail-soft（該当行だけ落として書く）ではなくバッチ全体のfail-fast**を選ぶ。理由は2つある。(1) 同じ値に対するこのパッケージのもう一方の**書き込み**境界である`storage/json_guard.dumps_safe`が、丸めずに例外を投げる契約になっている——行を黙って捨てる実装は「NaNが保存された」という沈黙を「バーが消えた」という沈黙へ移すだけである。fail-softな「記録して続行」（`risk/checks.check_correlation`の`data_quality`警告、`risk/earnings`の`unknown`降格、`pipeline/forward_returns.compute_forward_return`の`None`）は、**既に保存されている**データをどう扱うかを決める**読み出し側**の作法であり、書き込み側の作法ではない。(2) 検証は最初のパーティションに触れる**前**に走るので、複数年にまたがるバッチで後年の1行が不正でも前年が中途半端に書かれることがなく、拒否されたwriteは旧destinationをバイト単位で保持しtemp fileも作らない（3.7の置換契約と同じ性質を、書き込みを始めないことで満たす）。正規化は従来どおり各provider（`data/base.py`）の責務であり、これはその**下**に敷く防御層である——P4でEODHDを足すときに同じフィルタを再実装し忘れても、素通しにはならない。回帰テストは`tests/storage/test_market_store.py::TestWriteBarsRejectsNonFiniteValues`。ガード導入後にstoreへ非有限バーが入る唯一の経路はガード以前に書かれた履歴なので、読み出し側ガードのテストは`tests/conftest.py::plant_non_finite_bars`で`write_bars`を迂回して当時と同じ形の行を置く。
 
 `verdict_outcomes`側も同じ意図で補強した: `replace_verdict_outcomes`は`forward_return_pct`（および測定済みの`benchmark_return_pct`）が有限でないレコードを、トランザクションを開く前に`ValueError`で拒否する。`DOUBLE NOT NULL`は「測定された有限値」を表現できず、DuckDBのNaNはNULLではないため、素通しすると勝ちでも負けでもない行として集計を黙って歪めるからである（Issue #206の記録、防御層はIssue #227）。
@@ -427,6 +436,12 @@ class StateStore:
 
     def start_run(self, run_date: date, mode: RunMode, config_hash: str, *, metadata: Mapping[str, object] | None = None) -> UUID:
         """一意なrun_id、完全SHA-256指紋、再構成metadataをrunsへ記録する。"""
+
+    def insert_run(self, run_id: UUID, run_date: date, mode: RunMode, config_hash: str, *, status: RunStatus, started_at: datetime, finished_at: datetime | None = None, metadata: Mapping[str, object] | None = None) -> None:
+        """status/started_atを含むrunsの全列を呼び出し元が明示して登録する
+        （Issue #395）。start_run()のstatus='running'/started_at=now()固定は
+        変えず、履歴シード・将来のバックフィル向けの独立した書き込み経路として
+        追加した。"""
 
     def record_run_step(self, run_id: UUID, step: str, status: StepStatus, detail: str | None, duration_s: float) -> None:
         """(run_id, step)をupsertする。"""
@@ -467,7 +482,7 @@ def _check_finite(value: object) -> None:
     """
 ```
 
-第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）の既存トランザクション内でこの例外が送出された場合も、既存の`except Exception: ROLLBACK; raise`パターンにより該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`io_atomic.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
+第一防御は`_check_finite()`の事前検査（キー/インデックス経路つき例外）、第二防御は`json.dumps(value, allow_nan=False)`自体（`allow_nan`既定値の`True`だとNaN/Infは例外なく非標準の`NaN`/`Infinity`リテラルとして出力されてしまう）。空dict/空listはそのまま通過する。呼び出し元（`record_signals`/`record_screening_results`等）が`Database.transaction()`で開いたトランザクション内でこの例外が送出された場合も、3.7節の`atomic(conn)`がロールバックして再送出するため該当runの行は一切コミットされない。定性分析のJSONアーティファクトは`storage/`の外（`io_atomic.py::write_json_atomically()`）で書かれるため本ガードの対象外であり、strictスキーマとCON-03検査という別契約（3.15〜3.17節）に従う。`pipeline/daily.py`の設定ハッシュ用`json.dumps`は`storage/`の外であり対象外。
 
 ### 3.9 `screening/base.py`（NFR-07）
 

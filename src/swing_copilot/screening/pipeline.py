@@ -157,7 +157,7 @@ def price_history_lookback_days(required_bars: int) -> int:
 
 
 def strategy_required_bars(
-    strategies_config: StrategiesConfig | dict[str, Any],
+    strategies_config: StrategiesConfig,
     settings: Settings,
     strategy_key: str = "default",
 ) -> int:
@@ -167,7 +167,7 @@ def strategy_required_bars(
     screening step builds its own `ScreeningPipeline`.
 
     Args:
-        strategies_config: Parsed `strategies.yaml`.
+        strategies_config: Validated `strategies.yaml` contents.
         settings: Loaded application settings.
         strategy_key: Which `strategies.yaml` entry will screen.
 
@@ -188,7 +188,7 @@ class ScreeningPipeline:
 
     def __init__(
         self,
-        strategies_config: StrategiesConfig | dict[str, Any],
+        strategies_config: StrategiesConfig,
         market_store: MarketStore | None,
         settings: Settings,
         strategy_key: str = "default",
@@ -196,7 +196,8 @@ class ScreeningPipeline:
         """Create the pipeline for one named strategy.
 
         Args:
-            strategies_config: Parsed `strategies.yaml` (`{"strategies": {...}}`).
+            strategies_config: Validated `strategies.yaml` contents
+                (`load_strategies()`'s return value).
             market_store: Kept for parity with the documented signature; not
                 queried directly here (all data arrives via `ScreeningInput`).
             settings: Loaded application settings, passed through to every
@@ -209,12 +210,7 @@ class ScreeningPipeline:
         """
         self._market_store = market_store
         self.strategy_key = strategy_key
-        typed_config = (
-            strategies_config
-            if isinstance(strategies_config, StrategiesConfig)
-            else StrategiesConfig.model_validate(strategies_config)
-        )
-        spec = typed_config.strategies[strategy_key]
+        spec = strategies_config.strategies[strategy_key]
 
         self._filters, self._signals = build_strategy_components(spec, settings)
         self._candidate_limit = spec.candidate_limit

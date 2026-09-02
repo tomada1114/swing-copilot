@@ -6,6 +6,7 @@ tests/test_e2e_smoke.py.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
@@ -20,7 +21,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from swing_copilot.config import config_snapshot_hash, config_snapshot_sections
+from swing_copilot.config import (
+    StrategiesConfig,
+    config_snapshot_hash,
+    config_snapshot_sections,
+)
 from swing_copilot.data.base import BarFetchResult, FetchFailure
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, RunStatus
@@ -193,33 +198,37 @@ def _member(symbol: str) -> UniverseMember:
     )
 
 
-STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            }
         }
     }
-}
+)
 
 # TestPastDecisionsThreading: a second strategy key, to distinguish "the
 # correct strategy_key threaded through" from "it happened to match the
 # only strategy that exists".
-TWO_STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
-        },
-        "growth_v2": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
-        },
+TWO_STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            },
+            "growth_v2": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            },
+        }
     }
-}
+)
 
 
 @pytest.fixture
@@ -349,24 +358,28 @@ class TestHappyPath:
 class TestRunFingerprintAndMetadata:
     def test_fingerprint_is_canonical_and_covers_settings_strategy_and_key(self, deps):
         canonical = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")
-        reordered = {
-            "strategies": {
-                "default": {
-                    "candidate_limit": 10,
-                    "signals_all": ["trend_sma"],
-                    "filters_all": ["volume_min"],
+        reordered = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "candidate_limit": 10,
+                        "signals_all": ["trend_sma"],
+                        "filters_all": ["volume_min"],
+                    }
                 }
             }
-        }
-        changed_strategy = {
-            "strategies": {
-                "default": {
-                    "filters_all": ["volume_min"],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 9,
+        )
+        changed_strategy = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": ["volume_min"],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 9,
+                    }
                 }
             }
-        }
+        )
         changed_risk = deps.settings.risk.model_copy(
             update={"wide_stop_threshold_pct": 12.0}
         )
@@ -378,6 +391,38 @@ class TestRunFingerprintAndMetadata:
         assert canonical != _config_hash(changed_settings, STRATEGIES_CONFIG, "default")
         assert canonical != _config_hash(
             deps.settings, TWO_STRATEGIES_CONFIG, "growth_v2"
+        )
+
+    def test_config_hash_matches_the_pre_refactor_dict_round_trip_algorithm(self, deps):
+        """Fingerprint stability across #396's typed threading.
+
+        Threading `StrategiesConfig` through typed instead of a
+        `model_dump()`'d dict indexed by `_config_hash` must not move this
+        fingerprint -- it is persisted (`runs.config_hash`) and drives rerun
+        identity.
+        """
+        new_hash = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")
+
+        # Reproduce the pre-#396 shape byte-for-byte: `DailyDependencies.
+        # strategies_config` as a `model_dump()`'d dict, dict-indexed by
+        # `_config_hash` instead of read off the typed model.
+        legacy_strategies_config = STRATEGIES_CONFIG.model_dump()
+        legacy_selected_strategy = legacy_strategies_config["strategies"]["default"]
+        legacy_payload = {
+            "settings": deps.settings.model_dump(mode="json"),
+            "strategy_key": "default",
+            "strategy_spec": legacy_selected_strategy,
+        }
+        legacy_canonical = json.dumps(
+            legacy_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        legacy_hash = hashlib.sha256(legacy_canonical.encode("utf-8")).hexdigest()
+
+        assert new_hash == legacy_hash
+        # Pinned literal: fails loudly if a future change (accidental or not)
+        # ever moves this fingerprint for this exact fixture set.
+        assert new_hash == (
+            "62ff69bea5dbbc313d9084e8ee0d978da9b77a8f5b540453de05e007912f83cc"
         )
 
     def test_run_records_what_its_config_hash_stood_for(self, deps, state_store):
@@ -3228,15 +3273,17 @@ class TestScreeningTruncations:
         # Both symbols pass every filter/signal, so a limit of 1 makes the
         # second one a near-miss: the case that previously survived only in
         # the run directory's `rejections.json`.
-        capped = {
-            "strategies": {
-                "default": {
-                    "filters_all": ["volume_min"],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 1,
+        capped = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": ["volume_min"],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 1,
+                    }
                 }
             }
-        }
+        )
         deps = DailyDependencies(
             data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,

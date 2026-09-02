@@ -29,7 +29,7 @@ from swing_copilot.analysis.export import (
     ANALYSIS_RESULT_FILENAME,
 )
 from swing_copilot.analysis.validate import AnalysisIngestError
-from swing_copilot.config import load_settings
+from swing_copilot.config import StrategiesConfig, load_settings
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
@@ -59,15 +59,17 @@ AS_OF = date(2027, 3, 1)
 LIVE_RUN_DATE = AS_OF - timedelta(days=1)
 SYMBOLS = ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"]
 
-STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            }
         }
     }
-}
+)
 
 
 class FakeClock:

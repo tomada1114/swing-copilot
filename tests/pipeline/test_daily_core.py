@@ -26,7 +26,7 @@ from swing_copilot.config import (
     config_snapshot_hash,
     config_snapshot_sections,
 )
-from swing_copilot.data.base import BarFetchResult, FetchFailure
+from swing_copilot.data.base import FetchFailure
 from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline.daily import (
@@ -58,32 +58,14 @@ from swing_copilot.storage.state_store import StateStore
 from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
+from tests.support.fakes import FixedClock, StubDataProvider
+from tests.support.runs import seed_run
 
 AS_OF = date(2027, 3, 1)
 #: `date.weekday()` value for Friday, named for `TestRunDateResolvesOnlyClosedSessions`.
 _FRIDAY = 4
-
-
-class FakeClock:
-    def today(self):
-        return AS_OF
-
-    def now(self):
-        return datetime(2027, 3, 1, 12, tzinfo=UTC)
-
-
-class FakeDataProvider:
-    def __init__(self, bars: pd.DataFrame, failures: tuple[FetchFailure, ...] = ()):
-        self._bars = bars
-        self._failures = failures
-
-    def get_daily_bars(self, symbols, start, end):
-        del symbols, start, end
-        return BarFetchResult(bars=self._bars, failures=self._failures)
-
-    def get_latest_bars(self, symbols, as_of):
-        del symbols, as_of
-        return BarFetchResult(bars=self._bars, failures=self._failures)
+#: The fixed `now()` every `FixedClock(AS_OF, _NOW)` below returns.
+_NOW = datetime(2027, 3, 1, 12, tzinfo=UTC)
 
 
 class FakeMonotonic:
@@ -250,13 +232,13 @@ def deps(settings, market_store, state_store, tmp_path):
     universe = (_member("AAPL"), _member("MSFT"))
     bars = _bars_for(["AAPL", "MSFT"], AS_OF)
     return DailyDependencies(
-        data_provider=FakeDataProvider(bars),
+        data_provider=StubDataProvider(bars),
         market_store=market_store,
         state_store=state_store,
         settings=settings,
         universe=universe,
         strategies_config=STRATEGIES_CONFIG,
-        clock=FakeClock(),
+        clock=FixedClock(AS_OF, _NOW),
         edgar_client=None,
         output_dir=str(tmp_path / "reports"),
     )
@@ -528,13 +510,13 @@ class TestFatalStepFailure:
             columns=["symbol", "date", "open", "high", "low", "close", "volume"]
         )
         failing_deps = DailyDependencies(
-            data_provider=FakeDataProvider(empty_bars),
+            data_provider=StubDataProvider(empty_bars),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             output_dir=str(tmp_path),
         )
 
@@ -561,13 +543,13 @@ class TestFatalStepFailure:
             columns=["symbol", "date", "open", "high", "low", "close", "volume"]
         )
         failing_deps = DailyDependencies(
-            data_provider=FakeDataProvider(empty_bars),
+            data_provider=StubDataProvider(empty_bars),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             output_dir=str(tmp_path),
         )
         failed_result = run_daily(
@@ -576,13 +558,13 @@ class TestFatalStepFailure:
         assert failed_result.status == RunStatus.FAILED
 
         working_deps = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             output_dir=str(tmp_path),
         )
         retry_result = run_daily(
@@ -611,7 +593,7 @@ class TestAsOfDefaulting:
         """
         early_utc_morning = datetime(AS_OF.year, AS_OF.month, AS_OF.day, 9, tzinfo=UTC)
         deps = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
@@ -631,7 +613,7 @@ class TestAsOfDefaulting:
 class _FixedNowClock:
     """A `Clock` whose `now()`/`today()` are pinned to one instant.
 
-    `FakeClock` (module-level) pins `now()` to a fixed UTC noon regardless of
+    `FixedClock(AS_OF, _NOW)` (module-level) pins `now()` to a fixed UTC noon regardless of
     what it is asked about; the closed-session tests below need `now()` to
     land at exact minute-level offsets from a session's 16:00 ET close, so
     they construct this directly instead.
@@ -683,7 +665,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         self, deps, state_store
     ):
         """A clean empty answer -- no `failures` -- is the legitimate stop."""
-        broken_deps = replace(deps, data_provider=FakeDataProvider(_empty_bars()))
+        broken_deps = replace(deps, data_provider=StubDataProvider(_empty_bars()))
 
         with pytest.raises(PreflightAbort) as exc_info:
             run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
@@ -711,7 +693,7 @@ class TestRunDateResolvesOnlyClosedSessions:
             for symbol in ("AAPL", "MSFT")
         )
         broken_deps = replace(
-            deps, data_provider=FakeDataProvider(_empty_bars(), failures)
+            deps, data_provider=StubDataProvider(_empty_bars(), failures)
         )
 
         with pytest.raises(PreflightAbort) as exc_info:
@@ -779,7 +761,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         )
         broken_deps = replace(
             deps,
-            data_provider=FakeDataProvider(only_todays_bars),
+            data_provider=StubDataProvider(only_todays_bars),
             clock=_FixedNowClock(still_open),
         )
 
@@ -798,7 +780,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
         mid_session_deps = replace(
             deps,
-            data_provider=FakeDataProvider(bars),
+            data_provider=StubDataProvider(bars),
             clock=_FixedNowClock(just_before_close),
         )
 
@@ -814,7 +796,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         )
         bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
         at_close_deps = replace(
-            deps, data_provider=FakeDataProvider(bars), clock=_FixedNowClock(close_at)
+            deps, data_provider=StubDataProvider(bars), clock=_FixedNowClock(close_at)
         )
 
         result = run_daily(DailyRunOptions(is_dry_run=True), at_close_deps)
@@ -830,7 +812,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         bars = _bars_for(["AAPL", "MSFT"], session_date + timedelta(days=1))
         after_close_deps = replace(
             deps,
-            data_provider=FakeDataProvider(bars),
+            data_provider=StubDataProvider(bars),
             clock=_FixedNowClock(just_after_close),
         )
 
@@ -854,7 +836,7 @@ class TestRunDateResolvesOnlyClosedSessions:
         bars = _bars_for(["AAPL", "MSFT"], friday + timedelta(days=1))
         saturday_deps = replace(
             deps,
-            data_provider=FakeDataProvider(bars),
+            data_provider=StubDataProvider(bars),
             clock=_FixedNowClock(saturday_evening_et),
         )
 
@@ -984,19 +966,12 @@ class TestSymbolLimit:
     def test_zero_limit_keeps_open_holdings_in_current_run_fetch_scope(
         self, deps, state_store
     ):
-        class RecordingDataProvider(FakeDataProvider):
-            def __init__(self, bars):
-                super().__init__(bars)
-                self.requested_symbols: list[tuple[str, ...]] = []
-
-            def get_daily_bars(self, symbols, start, end):
-                self.requested_symbols.append(tuple(symbols))
-                return super().get_daily_bars(symbols, start, end)
-
+        # `StubDataProvider` already records every `get_daily_bars` call's
+        # symbols in `requested_symbols` -- no local subclass needed.
         _seed_virtual_position(
             state_store, "AAPL", entry_date=AS_OF - timedelta(days=5)
         )
-        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
+        provider = StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
         zero_limit_deps = replace(deps, data_provider=provider)
 
         result = run_daily(DailyRunOptions(is_dry_run=True, limit=0), zero_limit_deps)
@@ -1012,19 +987,12 @@ class TestSymbolLimit:
         # `_select_symbols()` is the only input to the daily price fetch. A
         # position whose symbol left the S&P 500 snapshot must still get today's
         # bar, otherwise its trailing stop / max-hold checks read stale prices.
-        class RecordingDataProvider(FakeDataProvider):
-            def __init__(self, bars):
-                super().__init__(bars)
-                self.requested_symbols: list[tuple[str, ...]] = []
-
-            def get_daily_bars(self, symbols, start, end):
-                self.requested_symbols.append(tuple(symbols))
-                return super().get_daily_bars(symbols, start, end)
-
+        # `StubDataProvider` already records every `get_daily_bars` call's
+        # symbols in `requested_symbols` -- no local subclass needed.
         _seed_virtual_position(
             state_store, "OLDCO", entry_date=AS_OF - timedelta(days=5)
         )
-        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT", "OLDCO"], AS_OF))
+        provider = StubDataProvider(_bars_for(["AAPL", "MSFT", "OLDCO"], AS_OF))
         full_universe_deps = replace(deps, data_provider=provider)
 
         result = run_daily(DailyRunOptions(is_dry_run=True), full_universe_deps)
@@ -1044,19 +1012,12 @@ class TestSymbolLimit:
     def test_historical_run_excludes_current_positions_at_all_boundaries(
         self, deps, state_store, entry_offset
     ):
-        class RecordingDataProvider(FakeDataProvider):
-            def __init__(self, bars):
-                super().__init__(bars)
-                self.requested_symbols: list[tuple[str, ...]] = []
-
-            def get_daily_bars(self, symbols, start, end):
-                self.requested_symbols.append(tuple(symbols))
-                return super().get_daily_bars(symbols, start, end)
-
+        # `StubDataProvider` already records every `get_daily_bars` call's
+        # symbols in `requested_symbols` -- no local subclass needed.
         _seed_virtual_position(
             state_store, "AAPL", entry_date=AS_OF + timedelta(days=entry_offset)
         )
-        provider = RecordingDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
+        provider = StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF))
         historical_deps = replace(deps, data_provider=provider)
 
         result = run_daily(
@@ -1084,6 +1045,9 @@ class TestSameDayRerunGuard:
 
     def test_existing_success_run_aborts_before_start_run(self, deps, state_store):
         existing_id = uuid4()
+        # `StateStore.insert_run()` has no `report_path` parameter (only
+        # `complete_run()` sets it), and this test's abort-message assertion
+        # below needs one on the pre-existing row, so this seed stays raw SQL.
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
                 "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
@@ -1110,16 +1074,12 @@ class TestSameDayRerunGuard:
         assert count == (1,)
 
     def test_allow_same_day_rerun_bypasses_the_guard(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(uuid4()),
-                    _LIVE_RUN_DATE,
-                    datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
-                ],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            _LIVE_RUN_DATE,
+            started_at=datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+        )
 
         result = run_daily(
             DailyRunOptions(is_dry_run=True, allow_same_day_rerun=True), deps
@@ -1128,30 +1088,26 @@ class TestSameDayRerunGuard:
         assert result.status == RunStatus.SUCCESS
 
     def test_only_failed_or_running_existing_runs_do_not_abort(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            for status in ("failed", "running"):
-                conn.execute(
-                    "INSERT INTO runs (run_id, run_date, mode, config_hash, "
-                    "status, started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-                    [
-                        str(uuid4()),
-                        _LIVE_RUN_DATE,
-                        status,
-                        datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
-                    ],
-                )
+        for status in (RunStatus.FAILED, RunStatus.RUNNING):
+            seed_run(
+                state_store,
+                uuid4(),
+                _LIVE_RUN_DATE,
+                status=status,
+                started_at=datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+            )
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
 
     def test_historical_as_of_applies_the_same_guard(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(uuid4()), AS_OF, datetime(2027, 3, 1, 15, 5, tzinfo=UTC)],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            AS_OF,
+            started_at=datetime(2027, 3, 1, 15, 5, tzinfo=UTC),
+        )
 
         with pytest.raises(PreflightAbort):
             run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -1165,17 +1121,13 @@ class TestSameDayRerunGuard:
         # asking for bars "as of" holiday_run_date + 1 day lands the latest
         # bar exactly on holiday_run_date.
         holiday_run_date = AS_OF - timedelta(days=5)
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(uuid4()),
-                    holiday_run_date,
-                    datetime(2027, 2, 24, 15, 5, tzinfo=UTC),
-                ],
-            )
-        holiday_provider = FakeDataProvider(
+        seed_run(
+            state_store,
+            uuid4(),
+            holiday_run_date,
+            started_at=datetime(2027, 2, 24, 15, 5, tzinfo=UTC),
+        )
+        holiday_provider = StubDataProvider(
             _bars_for(["AAPL", "MSFT"], holiday_run_date + timedelta(days=1))
         )
         holiday_deps = replace(deps, data_provider=holiday_provider)
@@ -1218,12 +1170,7 @@ def _archive_run(
     started_at = datetime(
         run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC
     ) + timedelta(minutes=next(_ARCHIVE_SEQUENCE))
-    with deps.state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-            [str(run_id), run_date, status, started_at],
-        )
+    seed_run(deps.state_store, run_id, run_date, status=status, started_at=started_at)
     return run_id, run_dir
 
 
@@ -1593,13 +1540,13 @@ class TestFundamentalsStepSkipped:
 
         universe = (_member("AAPL"), _member("MSFT"))
         deps_with_edgar = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=FakeEdgarClient(),
             output_dir=str(tmp_path / "reports"),
         )
@@ -1644,13 +1591,13 @@ class TestFundamentalsStepSkipped:
 
         universe = (_member("AAPL"),)
         deps_with_edgar = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=AlwaysFailingEdgarClient(),
             output_dir=str(tmp_path / "reports"),
         )
@@ -1731,7 +1678,7 @@ class TestFundamentalsSameDaySkip:
         universe = (_member("AAPL"),)
         edgar_client = CountingEdgarClient()
         deps_with_edgar = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL"], past_as_of)),
+            data_provider=StubDataProvider(_bars_for(["AAPL"], past_as_of)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
@@ -2189,7 +2136,7 @@ class TestFundamentalsIncrementalRefresh:
         clock=None,
     ):
         return DailyDependencies(
-            data_provider=FakeDataProvider(
+            data_provider=StubDataProvider(
                 _bars_for(list(symbols), AS_OF + timedelta(days=1))
             ),
             market_store=market_store,
@@ -2197,7 +2144,7 @@ class TestFundamentalsIncrementalRefresh:
             settings=settings,
             universe=tuple(_member(symbol) for symbol in symbols),
             strategies_config=STRATEGIES_CONFIG,
-            clock=clock or FakeClock(),
+            clock=clock or FixedClock(AS_OF, _NOW),
             edgar_client=edgar_client,
             output_dir=str(tmp_path / "reports"),
         )
@@ -2451,7 +2398,7 @@ class TestFundamentalsIncrementalRefresh:
                 "FROM fundamentals_fetch_log WHERE symbol = ?",
                 ["AAPL"],
             ).fetchone()
-        assert stamped == (FakeClock().now(), FakeClock().now())
+        assert stamped == (_NOW, _NOW)
 
     def test_the_scheduled_run_records_the_trading_day_it_evaluated(
         self, settings, market_store, state_store, tmp_path
@@ -2476,13 +2423,13 @@ class TestFundamentalsIncrementalRefresh:
         deps = DailyDependencies(
             # `_bars_for(symbols, day)`'s newest bar is `day - 1`, so the
             # newest bar here is the day before the clock's today.
-            data_provider=FakeDataProvider(_bars_for(["AAPL"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=(_member("AAPL"),),
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=edgar_client,
             output_dir=str(tmp_path / "reports"),
         )
@@ -2510,7 +2457,7 @@ class TestFundamentalsIncrementalRefresh:
         for offset in range(_FUNDAMENTALS_REFRESH_INTERVAL_DAYS):
             day = AS_OF + timedelta(days=offset)
             deps = DailyDependencies(
-                data_provider=FakeDataProvider(_bars_for(["AAPL"], day)),
+                data_provider=StubDataProvider(_bars_for(["AAPL"], day)),
                 market_store=market_store,
                 state_store=state_store,
                 settings=settings,
@@ -2926,7 +2873,7 @@ class TestFundamentalsHeldFirstOrder:
 
         def _make(edgar_client, monotonic):
             return DailyDependencies(
-                data_provider=FakeDataProvider(
+                data_provider=StubDataProvider(
                     _bars_for(["AAPL", "MSFT", _HELD_SYMBOL], AS_OF)
                 ),
                 market_store=market_store,
@@ -2934,7 +2881,7 @@ class TestFundamentalsHeldFirstOrder:
                 settings=settings,
                 universe=(_member("AAPL"), _member("MSFT")),
                 strategies_config=STRATEGIES_CONFIG,
-                clock=FakeClock(),
+                clock=FixedClock(AS_OF, _NOW),
                 edgar_client=edgar_client,
                 monotonic=monotonic,
                 output_dir=str(tmp_path / "reports"),
@@ -3120,13 +3067,13 @@ class TestTimeoutBudget:
         # run_started_at=0.0 -> deadline=60.0; index0(AAPL) check=10.0 (ok,
         # fetched); index1(MSFT) check=70.0 (breach, stops before fetching).
         deps_with_edgar = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=SlowEdgarClient(),
             monotonic=FakeMonotonic(0.0, 10.0, 70.0),
             output_dir=str(tmp_path / "reports"),
@@ -3217,13 +3164,13 @@ class TestScreeningRejections:
             ]
         )
         deps = DailyDependencies(
-            data_provider=FakeDataProvider(bars),
+            data_provider=StubDataProvider(bars),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=None,
             output_dir=str(tmp_path / "reports"),
         )
@@ -3285,13 +3232,13 @@ class TestScreeningTruncations:
             }
         )
         deps = DailyDependencies(
-            data_provider=FakeDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
+            data_provider=StubDataProvider(_bars_for(["AAPL", "MSFT"], AS_OF)),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=(_member("AAPL"), _member("MSFT")),
             strategies_config=capped,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             edgar_client=None,
             output_dir=str(tmp_path / "reports"),
         )

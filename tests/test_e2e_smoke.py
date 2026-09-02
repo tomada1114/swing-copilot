@@ -30,7 +30,6 @@ from swing_copilot.analysis.export import (
 )
 from swing_copilot.analysis.validate import AnalysisIngestError
 from swing_copilot.config import StrategiesConfig, load_settings
-from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunMode, RunStatus
 from swing_copilot.pipeline.daily import DailyDependencies, run_daily
 from swing_copilot.report.daily_brief import (
@@ -52,6 +51,13 @@ from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
 from tests.analysis.conftest import input_payload, result_payload
+from tests.support.fakes import (
+    FixedClock,
+    StubCalendarClient,
+    StubDataProvider,
+    StubEdgarClient,
+    StubNewsClient,
+)
 
 AS_OF = date(2027, 3, 1)
 #: A live run (no `--as-of`) dates itself from the newest bar the provider
@@ -72,86 +78,45 @@ STRATEGIES_CONFIG = StrategiesConfig.model_validate(
 )
 
 
-class FakeClock:
-    def today(self):
-        return AS_OF
-
-    def now(self):
-        return datetime(2027, 3, 1, 12, tzinfo=UTC)
+#: The fixed `now()` `FixedClock(AS_OF, _NOW)` below returns.
+_NOW = datetime(2027, 3, 1, 12, tzinfo=UTC)
 
 
-class FakeDataProvider:
-    def __init__(self, bars: pd.DataFrame):
-        self._bars = bars
-        self.requested_symbols: list[list[str]] = []
-
-    def get_daily_bars(self, symbols, start, end):
-        del start, end
-        self.requested_symbols.append(list(symbols))
-        return BarFetchResult(bars=self._bars, failures=())
-
-    def get_latest_bars(self, symbols, as_of):
-        del symbols, as_of
-        return BarFetchResult(bars=self._bars, failures=())
-
-
-class FakeEdgarClient:
-    def fetch_fundamentals(self, symbol, as_of):
-        return [
-            FundamentalsRecord(
-                accession_no=f"acc-{symbol}",
-                symbol=symbol,
-                form="10-Q",
-                fiscal_period_end=AS_OF,
-                filed_at=datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC),
-                revenue=1_000_000.0,
-                net_income=100_000.0,
-                fcf=80_000.0,
-                equity=500_000.0,
-                assets=1_000_000.0,
-                shares=1_000_000.0,
-                source_url=f"https://www.sec.gov/{symbol}",
-                fetched_at=as_of,
-            )
-        ]
-
-    def fetch_filing_texts(self, symbol, form_types, *, as_of, since=None, limit=None):
-        del form_types, since, limit
-        return [
-            TextItem(
-                source_id=f"edgar:{symbol}",
-                symbol=symbol,
-                source_type="filing",
-                published_at=as_of - timedelta(days=1),
-                title=f"10-Q - {symbol}",
-                source_url=f"https://www.sec.gov/{symbol}/10-Q",
-                content_text=f"{symbol} reported steady quarterly results.",
-                fetched_at=as_of,
-            )
-        ]
+def _one_fundamentals_record(symbol: str, as_of: datetime) -> list[FundamentalsRecord]:
+    """A `StubEdgarClient` fundamentals factory, one healthy record per symbol."""
+    return [
+        FundamentalsRecord(
+            accession_no=f"acc-{symbol}",
+            symbol=symbol,
+            form="10-Q",
+            fiscal_period_end=AS_OF,
+            filed_at=datetime.combine(AS_OF, datetime.min.time(), tzinfo=UTC),
+            revenue=1_000_000.0,
+            net_income=100_000.0,
+            fcf=80_000.0,
+            equity=500_000.0,
+            assets=1_000_000.0,
+            shares=1_000_000.0,
+            source_url=f"https://www.sec.gov/{symbol}",
+            fetched_at=as_of,
+        )
+    ]
 
 
-class FakeNewsClient:
-    def fetch_company_news(self, symbol, since, *, as_of):
-        del since
-        return [
-            TextItem(
-                source_id=f"news:{symbol}",
-                symbol=symbol,
-                source_type="news",
-                published_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
-                title=f"{symbol} news",
-                source_url=f"https://example.com/{symbol}",
-                content_text=f"{symbol} announced a new product line.",
-                fetched_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
-            )
-        ]
-
-
-class FakeCalendarClient:
-    def fetch_calendar_events(self, start, end, *, as_of):
-        del start, end, as_of
-        return []
+def _one_filing_text(symbol: str, as_of: datetime) -> list[TextItem]:
+    """A `StubEdgarClient` filing-texts factory, one filing per symbol."""
+    return [
+        TextItem(
+            source_id=f"edgar:{symbol}",
+            symbol=symbol,
+            source_type="filing",
+            published_at=as_of - timedelta(days=1),
+            title=f"10-Q - {symbol}",
+            source_url=f"https://www.sec.gov/{symbol}/10-Q",
+            content_text=f"{symbol} reported steady quarterly results.",
+            fetched_at=as_of,
+        )
+    ]
 
 
 def _uptrending_bars(symbols: list[str], as_of: date, days: int = 260) -> pd.DataFrame:
@@ -223,7 +188,7 @@ def deps(tmp_path):
     settings = load_settings("config/settings.yaml")
 
     return DailyDependencies(
-        data_provider=FakeDataProvider(
+        data_provider=StubDataProvider(
             _uptrending_bars([*SYMBOLS, *MARKET_STRIP_SYMBOLS], AS_OF)
         ),
         market_store=market_store,
@@ -231,10 +196,12 @@ def deps(tmp_path):
         settings=settings,
         universe=tuple(_member(symbol) for symbol in SYMBOLS),
         strategies_config=STRATEGIES_CONFIG,
-        clock=FakeClock(),
-        edgar_client=FakeEdgarClient(),
-        news_client=FakeNewsClient(),
-        calendar_client=FakeCalendarClient(),
+        clock=FixedClock(AS_OF, _NOW),
+        edgar_client=StubEdgarClient(
+            _one_filing_text, fundamentals=_one_fundamentals_record
+        ),
+        news_client=StubNewsClient(),
+        calendar_client=StubCalendarClient(),
         output_dir=str(tmp_path / "reports"),
     )
 

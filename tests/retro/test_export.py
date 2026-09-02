@@ -47,6 +47,7 @@ from swing_copilot.storage.verdict_records import (
 )
 from swing_copilot.text.base import TextItem
 from tests.retro.conftest import bars
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -140,12 +141,7 @@ def _insert_run(
     state_store: StateStore, run_id: UUID, run_date: date, started_at: datetime
 ) -> None:
     """Insert a minimal `runs` row so `get_run_started_at` can resolve it."""
-    with state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-            [str(run_id), run_date, started_at],
-        )
+    seed_run(state_store, run_id, run_date, started_at=started_at)
 
 
 def _outcome(

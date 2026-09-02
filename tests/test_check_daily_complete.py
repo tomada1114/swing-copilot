@@ -2,53 +2,32 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from datetime import UTC, date, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
+from tests.support.runs import seed_run
+from tests.support.script_loader import load_script_module
 
 if TYPE_CHECKING:
-    from types import ModuleType
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+    from pathlib import Path
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 OLDER_RUN_ID = "22222222-2222-4222-8222-222222222222"
 RUN_DATE = date(2026, 8, 19)
 
-
-def _load_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "check_daily_complete", REPO_ROOT / "scripts" / "check_daily_complete.py"
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-check_daily_complete = _load_module()
+check_daily_complete = load_script_module(
+    "check_daily_complete", "scripts/check_daily_complete.py"
+)
 
 
 def _insert_run(
     db: Database, run_id: str, run_date: date, started_at: datetime
 ) -> None:
-    with db.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO runs (run_id, run_date, mode, config_hash, status, started_at)
-            VALUES (?, ?, 'live', 'hash', 'success', ?)
-            """,
-            [run_id, run_date, started_at],
-        )
+    seed_run(StateStore(db), run_id, run_date, started_at=started_at)
 
 
 def _insert_candidates(db: Database, run_id: str, count: int) -> None:

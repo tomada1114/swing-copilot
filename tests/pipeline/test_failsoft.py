@@ -32,7 +32,6 @@ from swing_copilot.analysis.export import (
     HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.config import StrategiesConfig
-from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline import daily_runner
@@ -61,8 +60,16 @@ from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 from tests.analysis.conftest import RUN_ID as ARCHIVED_RUN_ID
 from tests.analysis.conftest import input_payload, result_payload
+from tests.support.fakes import (
+    FixedClock,
+    StubCalendarClient,
+    StubDataProvider,
+    StubNewsClient,
+)
 
 AS_OF = date(2027, 3, 1)
+#: The fixed `now()` every `FixedClock(AS_OF, _NOW)` below returns.
+_NOW = datetime(2027, 3, 1, 12, tzinfo=UTC)
 
 STRATEGIES_CONFIG = StrategiesConfig.model_validate(
     {
@@ -77,49 +84,11 @@ STRATEGIES_CONFIG = StrategiesConfig.model_validate(
 )
 
 
-class FakeClock:
-    def today(self):
-        return AS_OF
-
-    def now(self):
-        return datetime(2027, 3, 1, 12, tzinfo=UTC)
-
-
-class FakeDataProvider:
-    def __init__(self, bars: pd.DataFrame):
-        self._bars = bars
-
-    def get_daily_bars(self, symbols, start, end):
-        del symbols, start, end
-        return BarFetchResult(bars=self._bars, failures=())
-
-    def get_latest_bars(self, symbols, as_of):
-        del symbols, as_of
-        return BarFetchResult(bars=self._bars, failures=())
-
-
 class ExplodingNewsClient:
     def fetch_company_news(self, symbol, since, *, as_of):
         del symbol, since, as_of
         msg = "Finnhub unreachable"
         raise RuntimeError(msg)
-
-
-class FakeNewsClient:
-    def fetch_company_news(self, symbol, since, *, as_of):
-        del since
-        return [
-            TextItem(
-                source_id=f"news:{symbol}",
-                symbol=symbol,
-                source_type="news",
-                published_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
-                title=f"{symbol} news",
-                source_url=f"https://example.com/{symbol}",
-                content_text=f"{symbol} announced a new product line.",
-                fetched_at=datetime.combine(as_of, datetime.min.time(), tzinfo=UTC),
-            )
-        ]
 
 
 class ExplodingCalendarClient:
@@ -129,24 +98,26 @@ class ExplodingCalendarClient:
         raise RuntimeError(msg)
 
 
-class FakeCalendarClient:
-    """Returns one symbol-less macro event, mirroring `FredCalendarClient`."""
+def _one_macro_event(start: date, end: date, as_of: date) -> list[TextItem]:
+    """One symbol-less macro event, mirroring `FredCalendarClient`.
 
-    def fetch_calendar_events(self, start, end, *, as_of):
-        del end, as_of
-        stamp = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
-        return [
-            TextItem(
-                source_id="fred:1:2027-03-05",
-                symbol=None,
-                source_type="calendar",
-                published_at=stamp,
-                title="Employment Situation",
-                source_url="https://fred.stlouisfed.org/release?rid=1",
-                content_text="Scheduled for 2027-03-05: Employment Situation (FRED release 1).",
-                fetched_at=stamp,
-            )
-        ]
+    A `StubCalendarClient` factory (not a fixed list): the event's timestamp
+    is derived from `start`, matching what `FredCalendarClient` itself does.
+    """
+    del end, as_of
+    stamp = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
+    return [
+        TextItem(
+            source_id="fred:1:2027-03-05",
+            symbol=None,
+            source_type="calendar",
+            published_at=stamp,
+            title="Employment Situation",
+            source_url="https://fred.stlouisfed.org/release?rid=1",
+            content_text="Scheduled for 2027-03-05: Employment Situation (FRED release 1).",
+            fetched_at=stamp,
+        )
+    ]
 
 
 class ExplodingPostmortemStateStore(StateStore):
@@ -237,13 +208,13 @@ def state_store(tmp_path):
 def base_deps(settings, market_store, state_store, tmp_path):
     universe = (_member("AAPL"), _member("MSFT"))
     return DailyDependencies(
-        data_provider=FakeDataProvider(_uptrending_bars(["AAPL", "MSFT"], AS_OF)),
+        data_provider=StubDataProvider(_uptrending_bars(["AAPL", "MSFT"], AS_OF)),
         market_store=market_store,
         state_store=state_store,
         settings=settings,
         universe=universe,
         strategies_config=STRATEGIES_CONFIG,
-        clock=FakeClock(),
+        clock=FixedClock(AS_OF, _NOW),
         output_dir=str(tmp_path / "reports"),
     )
 
@@ -375,7 +346,7 @@ class TestAnalysisExportFailureDegrades:
             raise OSError(msg)
 
         monkeypatch.setattr(daily_module, "write_analysis_input", _raise)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -391,7 +362,7 @@ class TestAnalysisExportFailureDegrades:
         self, base_deps, state_store, settings
     ):
         object.__setattr__(settings.technical_signals.volume, "min_avg_volume", 10**12)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -587,7 +558,7 @@ class TestCollectPrecedesTheAnalysisExport:
     ) -> None:
         object.__setattr__(base_deps.settings.schedule, "timeout_minutes", 1)
         monotonic = MutableMonotonic()
-        deps = replace(base_deps, news_client=FakeNewsClient(), monotonic=monotonic)
+        deps = replace(base_deps, news_client=StubNewsClient(), monotonic=monotonic)
 
         def _slow_collect(store: StateStore, reports_root: Path) -> CollectSummary:
             monotonic.value = 999_999.0  # the scan burned the whole budget
@@ -608,7 +579,7 @@ class TestCollectPrecedesTheAnalysisExport:
         self, base_deps: DailyDependencies, state_store: StateStore
     ) -> None:
         _write_archived_run(base_deps.output_dir)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         first = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
         second = run_daily(
@@ -664,7 +635,7 @@ class TestEvaluatePrecedesTheAnalysisExport:
 
         monkeypatch.setattr(daily_module, "evaluate_verdicts", _spy_evaluate)
         monkeypatch.setattr(daily_runner, "_run_step_analysis_export", _spy_export)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -678,7 +649,7 @@ class TestEvaluatePrecedesTheAnalysisExport:
     ) -> None:
         object.__setattr__(base_deps.settings.schedule, "timeout_minutes", 1)
         monotonic = MutableMonotonic()
-        deps = replace(base_deps, news_client=FakeNewsClient(), monotonic=monotonic)
+        deps = replace(base_deps, news_client=StubNewsClient(), monotonic=monotonic)
 
         def _slow_evaluate(*args: object, **kwargs: object) -> EvaluateSummary:
             monotonic.value = 999_999.0  # the evaluation burned the whole budget
@@ -891,7 +862,7 @@ class TestVirtualLedgerPositionsCountAsHeld:
         self, base_deps, state_store
     ):
         _seed_virtual_position(state_store, "NVDA")
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
@@ -907,7 +878,7 @@ class TestVirtualLedgerPositionsCountAsHeld:
         # would redirect the held-first text budget onto every symbol the
         # qualitative layer turned down.
         _seed_virtual_position(state_store, "NVDA", recommendation="skip")
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
@@ -1038,7 +1009,7 @@ class TestOutputFailureContract:
             raise OSError(msg)
 
         monkeypatch.setattr(daily_module, "write_report_context", _raise)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -1059,7 +1030,7 @@ class TestHistoricalReplayMarker:
         # scans. Without the stamp that run cannot tell a replay's export from
         # a live run whose qualitative phase died, and would report the
         # replayed day as a gap for as long as the lookback window reaches it.
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF), deps)
 
@@ -1073,7 +1044,7 @@ class TestHistoricalReplayMarker:
     def test_a_dry_run_replay_is_stamped_too(self, base_deps):
         # `--dry-run` writes into its own tree, but the stamp keys off
         # `--as-of`, not the mode, so both replays are marked the same way.
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -1085,7 +1056,7 @@ class TestHistoricalReplayMarker:
     def test_a_current_day_run_leaves_no_marker(self, base_deps):
         # No `--as-of`: this export is exactly the one a skill session owes an
         # answer to, so stamping it would silence the signal it exists for.
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
@@ -1102,7 +1073,7 @@ class TestHistoricalReplayMarker:
             raise OSError(msg)
 
         monkeypatch.setattr(daily_runner, "write_json_atomically", _raise)
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         with caplog.at_level(logging.ERROR):
             result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -1124,13 +1095,13 @@ class TestMarketFailureIsFatalAndRerunnable:
             columns=["symbol", "date", "open", "high", "low", "close", "volume"]
         )
         failing_deps = DailyDependencies(
-            data_provider=FakeDataProvider(empty_bars),
+            data_provider=StubDataProvider(empty_bars),
             market_store=market_store,
             state_store=state_store,
             settings=settings,
             universe=universe,
             strategies_config=STRATEGIES_CONFIG,
-            clock=FakeClock(),
+            clock=FixedClock(AS_OF, _NOW),
             output_dir=str(tmp_path / "reports"),
         )
 
@@ -1141,7 +1112,7 @@ class TestMarketFailureIsFatalAndRerunnable:
 
         working_deps = replace(
             failing_deps,
-            data_provider=FakeDataProvider(_uptrending_bars(["AAPL"], AS_OF)),
+            data_provider=StubDataProvider(_uptrending_bars(["AAPL"], AS_OF)),
         )
         retried = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), working_deps)
 
@@ -1193,8 +1164,8 @@ class TestCalendarEventsReachAnalysisInput:
     def test_a_collected_calendar_event_reaches_the_run_wide_context(self, base_deps):
         deps = replace(
             base_deps,
-            news_client=FakeNewsClient(),
-            calendar_client=FakeCalendarClient(),
+            news_client=StubNewsClient(),
+            calendar_client=StubCalendarClient(events=_one_macro_event),
         )
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -1210,7 +1181,7 @@ class TestCalendarEventsReachAnalysisInput:
             ]
 
     def test_no_calendar_client_exports_an_empty_calendar_events_list(self, base_deps):
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -1225,7 +1196,7 @@ class TestAnalysisInputFileLocation:
         return json.loads(result.analysis_input_path.read_text(encoding="utf-8"))
 
     def test_exported_file_lands_beside_the_markdown_report(self, base_deps, tmp_path):
-        deps = replace(base_deps, news_client=FakeNewsClient())
+        deps = replace(base_deps, news_client=StubNewsClient())
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
@@ -1266,7 +1237,7 @@ class TestRejectionsArtifactReachesTheRunDirectory:
                 _uptrending_bars(["MSFT"], AS_OF).assign(volume=100),
             ]
         )
-        deps = replace(base_deps, data_provider=FakeDataProvider(bars))
+        deps = replace(base_deps, data_provider=StubDataProvider(bars))
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 

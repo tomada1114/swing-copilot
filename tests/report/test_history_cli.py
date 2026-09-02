@@ -29,6 +29,7 @@ from swing_copilot.screening.base import (
     ScreeningResult,
 )
 from swing_copilot.storage.audit_records import ScreeningRunMeta
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,12 +70,12 @@ def _write_run_archive(tmp_path: Path, run_date: date, *, has_result: bool) -> U
 
 def _insert_run_row(state_store: StateStore, run_id: UUID, run_date: date) -> None:
     """Record the archive's run as a finished deterministic pipeline."""
-    with state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-            [str(run_id), run_date, datetime(2026, 8, 10, 18, 30, tzinfo=UTC)],
-        )
+    seed_run(
+        state_store,
+        run_id,
+        run_date,
+        started_at=datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
+    )
 
 
 def _candidate(symbol: str = "AAPL", rank: int = 1) -> Candidate:

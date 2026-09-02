@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from swing_copilot.models import RunMode
+from swing_copilot.models import RunMode, RunStatus
 from swing_copilot.risk.checks import RiskAssessment
 from swing_copilot.screening.base import (
     Candidate,
@@ -31,6 +31,7 @@ from swing_copilot.storage.history_queries import (
     list_runs,
     run_exists,
 )
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from typing import NoReturn
@@ -59,12 +60,7 @@ def _insert_run(
     started_at: datetime,
 ) -> None:
     """Insert a minimal `runs` row with an explicitly chosen lifecycle state."""
-    with state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-            [str(run_id), run_date, status, started_at],
-        )
+    seed_run(state_store, run_id, run_date, status=status, started_at=started_at)
 
 
 class TestListRuns:
@@ -275,18 +271,19 @@ class TestGetRunByDate:
         self, state_store: StateStore
     ) -> None:
         run_date = date(2026, 7, 20)
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(uuid4()), run_date, datetime(2026, 7, 20, 8, tzinfo=UTC)],
-            )
-            newer_run_id = uuid4()
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(newer_run_id), run_date, datetime(2026, 7, 20, 9, tzinfo=UTC)],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            run_date,
+            started_at=datetime(2026, 7, 20, 8, tzinfo=UTC),
+        )
+        newer_run_id = uuid4()
+        seed_run(
+            state_store,
+            newer_run_id,
+            run_date,
+            started_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
+        )
 
         found = get_run_by_date(state_store._database, run_date)  # noqa: SLF001
 
@@ -302,12 +299,7 @@ class TestGetRunStartedAt:
     def test_known_run_id_returns_its_started_at(self, state_store: StateStore) -> None:
         run_id = uuid4()
         started_at = datetime(2026, 8, 6, 15, 6, 7, tzinfo=UTC)
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(run_id), date(2026, 8, 6), started_at],
-            )
+        seed_run(state_store, run_id, date(2026, 8, 6), started_at=started_at)
 
         found = get_run_started_at(state_store._database, run_id)  # noqa: SLF001
 
@@ -379,6 +371,9 @@ class TestGetSuccessfulRun:
         self, state_store: StateStore
     ) -> None:
         run_id = uuid4()
+        # `StateStore.insert_run()` has no `report_path` parameter (only
+        # `complete_run()` sets it), and this test asserts on it, so this
+        # seed stays raw SQL.
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
                 "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
@@ -401,16 +396,12 @@ class TestGetSuccessfulRun:
     def test_a_null_report_path_is_returned_as_none(
         self, state_store: StateStore
     ) -> None:
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(uuid4()),
-                    date(2026, 8, 7),
-                    datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
-                ],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            date(2026, 8, 7),
+            started_at=datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
+        )
 
         found = get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
 
@@ -418,18 +409,14 @@ class TestGetSuccessfulRun:
         assert found.report_path is None
 
     def test_only_success_status_counts(self, state_store: StateStore) -> None:
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            for status in ("failed", "running", "degraded"):
-                conn.execute(
-                    "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                    "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-                    [
-                        str(uuid4()),
-                        date(2026, 8, 7),
-                        status,
-                        datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
-                    ],
-                )
+        for status in (RunStatus.FAILED, RunStatus.RUNNING, RunStatus.DEGRADED):
+            seed_run(
+                state_store,
+                uuid4(),
+                date(2026, 8, 7),
+                status=status,
+                started_at=datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
+            )
 
         assert (
             get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
@@ -441,25 +428,18 @@ class TestGetSuccessfulRun:
     ) -> None:
         older_id = uuid4()
         newer_id = uuid4()
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(older_id),
-                    date(2026, 8, 6),
-                    datetime(2026, 8, 6, 15, 6, tzinfo=UTC),
-                ],
-            )
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(newer_id),
-                    date(2026, 8, 6),
-                    datetime(2026, 8, 6, 16, 52, tzinfo=UTC),
-                ],
-            )
+        seed_run(
+            state_store,
+            older_id,
+            date(2026, 8, 6),
+            started_at=datetime(2026, 8, 6, 15, 6, tzinfo=UTC),
+        )
+        seed_run(
+            state_store,
+            newer_id,
+            date(2026, 8, 6),
+            started_at=datetime(2026, 8, 6, 16, 52, tzinfo=UTC),
+        )
 
         found = get_successful_run(state_store._database, date(2026, 8, 6))  # noqa: SLF001
 

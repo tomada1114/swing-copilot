@@ -733,9 +733,10 @@ def evaluate_changed_coverage(
 
 def _run_select(base_override: str | None) -> int:
     shape = build_shape()
-    changed = changed_paths(base_override)
+    base = base_override or diff_base()
+    changed = changed_paths(base)
     selection = select(changed.paths, shape)
-    _print_diagnostics(selection, changed, base_override or diff_base())
+    _print_diagnostics(selection, changed, base)
     if selection.is_all:
         print("ALL")
     else:
@@ -746,9 +747,10 @@ def _run_select(base_override: str | None) -> int:
 
 def _run_test(base_override: str | None, extra_pytest_args: list[str]) -> int:
     shape = build_shape()
-    changed = changed_paths(base_override)
+    base = base_override or diff_base()
+    changed = changed_paths(base)
     selection = select(changed.paths, shape)
-    _print_diagnostics(selection, changed, base_override or diff_base())
+    _print_diagnostics(selection, changed, base)
 
     changed_src_files = [
         p

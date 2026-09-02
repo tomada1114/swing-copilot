@@ -30,3 +30,32 @@
 - MetricEntry へのフィールド追加は retro-input-v1 のスキーマ変更であり、_drop_legacy_defaults への登録を誤ると過去アーカイブの input_digest 検証が一斉に失敗する
 - 本数を公表しても、それを読む規律が references/proposal-rules.md に書かれなければ同じ取り違えは再発しうるため、ドキュメント追記を同じ変更に含める必要がある
 - フィールド名や意味の選び方を誤ると、既存の excluded_day_count との関係がかえって読みにくくなる可能性がある
+
+## 適用記録
+
+- PR: [#417](https://github.com/tomada1114/swing-copilot/pull/417)
+- 適用日: 2026-09-02
+- フィールド名: `paired_day_count`（提案が名前を明示していなかったため、実装時にこの名で確定）
+- 検証結果: 検証計画の4項目をすべて実施した。
+  1. `MetricEntry`/`MetricSummary` に `paired_day_count`（既定 `None`）を追加し、
+     `_paired_separation_for` が採用した日次差の本数を設定するよう実装した。
+  2. 3 つの二側日（計 8 行）＋片側のみの 1 日（1 行）の合成 outcome で、
+     `sample_size == 9`（寄与行数）・`paired_day_count == 3`（採用日数）・
+     `excluded_day_count == 1`（除外日数）を検証する単体テストを追加した
+     （`tests/retro/test_aggregate.py::TestPairedSeparation::test_paired_day_count_is_the_days_averaged_not_the_row_count`）。
+     変更前のコードに対して実行すると `AttributeError` で失敗し、変更後は成功することを
+     確認済み。
+  3. `paired_day_count` を `schemas.py` の `_drop_legacy_defaults` に登録した。
+     `reports/retro/2026-07-30` / `2026-08-12` の実ファイルは gitignore 対象で本ワーク
+     ツリーに存在しないため、既存の digest テストと同じ手段
+     （`tests/retro/conftest.py::retro_input_unsigned_payload` を元にした合成ペイロード）
+     で、`paired_day_count` を持たない（RP-002 以前の世代を模した）`separation_paired`
+     ブロックが変更後も自身の digest で検証を通ることを表明した
+     （`tests/retro/test_schemas.py::TestRetroInput::test_a_dossier_written_before_paired_day_count_keeps_its_digest`）。
+     実測した文書は持たない文書と digest が異なること（Issue #276 と同じ「既定値は落とす
+     が実測値は落とさない」契約）も別テストで確認した。
+  4. `uv run pytest tests/retro -q` — 397 passed。`just verify`（lint → docs-check →
+     test-changed）— 459 passed、変更ソース2ファイル（`aggregate.py`/`schemas.py`）とも
+     line+branch coverage 100%。
+- 合否基準の充足: 追加テストは変更前に失敗し変更後に成功、既存アーカイブ相当の digest
+  検証は1件も壊れず、既存の retro テストは退行なし——いずれも満たした。

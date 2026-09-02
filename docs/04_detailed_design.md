@@ -1779,7 +1779,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 |---|---|---|
 | verdict_mix | 窓内`verdicts`（`verdict_outcomes`ではない）のproceed/skip内訳・`proceed_ratio`・distinct run数 | `verdict_count>=20`かつ`proceed_count==0`でフラグ。ホライズンを持たない単一値（`horizon_days`なし）、ベースラインも持たない |
 | **separation**（最重要） | proceed群とskip群の平均forward returnの差（ホライズン別＋重み合成） | n≥40で≤0が持続すればL3検討トリガー。定性レイヤの存在意義そのものを測る。窓全体のプール平均差なので**地合いと交絡しうる**（下記のペアード版を併読する） |
-| separation（ペアード、Issue #190） | run日ごとにproceed平均−skip平均を取ってから日次差を平均。片群しか無い日は除外し`excluded_day_count`に出す | `metric:separation_paired:*`。その日の共通変動が相殺されるので、proceedが強い日に偏っているだけの見かけの優位が消える |
+| separation（ペアード、Issue #190） | run日ごとにproceed平均−skip平均を取ってから日次差を平均。片群しか無い日は除外し`excluded_day_count`に出す。採用した日次差の本数は`paired_day_count`（RP-002） | `metric:separation_paired:*`。その日の共通変動が相殺されるので、proceedが強い日に偏っているだけの見かけの優位が消える |
 | separation（ペアード超過、Issue #190） | 同じペアリングを`forward_return_pct − benchmark_return_pct`で実施 | `metric:separation_paired_excess:*`。`benchmark_return_pct`未計測の行は寄与ゼロではなく除外。3版が一致すればベータ由来でないことの傍証、食い違えばそれ自体が所見 |
 | tracked_performance（Issue #190） | 追跡台帳（3.24）の判断当否の集計結果を`proceed`/`skip`/`all`で層別。勝率・PF・期待値・平均R・保有日数中央値・手仕舞い理由内訳 | `metric:tracked_performance:{proceed,skip,all}`。全レート値は`backtest/metrics.py`の共通関数を通る。損益は%単位（シャドウ建玉に株数の決定は存在しないため$100 notionalへ正規化）。窓は**exit_dateが窓内**の建玉（`verdict_outcomes`と同じ「この期間に満期を迎えた」規則） |
 | proceed重大外し率 | proceedのうち`MISS_SEVERE`の割合 | `settings.retro`ではなくコード定数`PROCEED_SEVERE_MISS_WATCH_RATE=0.15`超でフラグ。同runの全候補（skip含む）のベースラインを併記し、ベースラインより悪ければ水準未満でもフラグ |
@@ -1792,6 +1792,8 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 **散らばり（Issue #190）**: `MetricSummary`/`MetricEntry`は`stderr`・`ci_low`・`ci_high`を、`RateMetricSummary`/`RateMetricEntry`は`ci_low`・`ci_high`（Wilsonスコア区間）を持つ。いずれも両側95%（`CONFIDENCE_LEVEL = 0.95`、モジュール定数であり設定可能値にしない——区間幅を運用中に緩められると、提案がゲートを通るまで広げられてしまう）。separationのプール版はWelchの標準誤差、ペアード版は日次差の平均の標準誤差を使う。観測2件未満では分散が定義できないので`None`＝「散らばりが定義できない」であって「推定が正確」ではない。**重み合成のヘッドラインには区間を出さない**——5日と20日は同じrun・同じ銘柄を測り直した非独立な2つの窓なので、そこから作った区間は実際より狭くなり、実データより確からしく見えてしまう。Wilson区間を選ぶのは、小標本や0/n・n/nといった極値でWald区間が`[0, 0]`のような点に潰れるのを避けるため。
 
 これに合わせてL1（パラメータ調整）の証拠ゲートを「該当集約n≥20**かつ95%信頼区間が0を跨がない**」へ強化する（正本は`.claude/skills/swing-retro/references/proposal-rules.md`）。旧文言の「両ホライズンで方向一致」は独立した2証拠のように読めたが、5日と20日は同じrunを測り直した相関する1証拠であり、それ単独ではL1を通さない。
+
+**ペアード指標のn（RP-002）**: ペアード版2種の`sample_size`は差の計算に寄与した`verdict_outcomes`行数であって、上のWelch/日次差標準誤差から作った両側95%区間の元になった**日次差の本数**ではない。proceedがごく少ない窓（例: run 17日・verdict 148件に対しproceed 6件）では、proceedとskipが同一満期日に揃う日はさらに限られ、`sample_size`だけを読むとL1の床（n≥20）を字面で満たしたように見えて実際の日数はごく薄い、という取り違えが起きうる。`MetricSummary`/`MetricEntry`に`paired_day_count`（ペアード指標のみ、既定`None`）を追加し、`_paired_separation_for`が平均に採用した日次差の本数をそのまま設定する。プール版（`separation`）や重み合成ヘッドラインは元々日次差から作られていないため`None`のまま。既存の`excluded_day_count`（捨てた日数）とは表裏の関係にあり、`sample_size`・`paired_day_count`・`excluded_day_count`の3つを揃って読むことで初めて「何行から」「何日ぶんの差として」「何日を捨てて」その値が作られたかが読める。`retro_input_digest`の`_drop_legacy_defaults`にこのフィールドの既定`None`を登録してあるため、RP-002以前に書かれたdossier（Issue #190の`separation_paired`/`separation_paired_excess`ブロックを含め、当該フィールドを持たない世代）の`input_digest`は変更後も検証を通り続ける。
 
 **P8-120実装時追記（Issue #120）**: separation・proceed重大外し率はいずれも成熟済み`verdict_outcomes`を入力とするため、proceedがゼロの窓では分母を失い`value: null`で沈黙する。proceedが出ないこと自体を測る指標が無いと、skip偏りが強まるほどそれを検知するはずの指標が先に沈黙する自己隠蔽が起きる（定時実行が実際にproceedを1件も出せていなかった事例で発覚）。`verdict_mix`は`verdict_outcomes`ではなく窓内の`verdicts`（`get_verdicts_in_window`）を直接読むため、成熟を待たずに算出でき沈黙しない。専用の`VerdictMixSummary`/`VerdictMixEntry`を使い、`RateMetricSummary`（ベースライン必須）は流用しない——proceedゼロ自体を測る指標にベースラインの概念が無いため。
 

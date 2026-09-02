@@ -37,7 +37,10 @@
 
 n の読み方: `MetricEntry.sample_size` が n。`is_preliminary: true`（既定 20 件未満）は
 「暫定」であり、L1 の床（n≥20）を満たさない。`value: null` は「この窓では測れない」で
-あって「ゼロ」ではない。
+あって「ゼロ」ではない。**ただしペアード指標（`metric:separation_paired:*` /
+`metric:separation_paired_excess:*`、RP-002）は例外**——`sample_size` は差の計算に
+寄与した outcome 行数であって、両側 95% 区間を作った日次差の本数ではない。この 2 指標
+で L1 の n≥20 を判定するときは `sample_size` ではなく `paired_day_count` を見ること。
 
 散らばりの読み方（Issue #190）:
 
@@ -52,6 +55,9 @@ n の読み方: `MetricEntry.sample_size` が n。`is_preliminary: true`（既�
   であり、非独立な 2 ホライズンから作った区間は実際より狭くなるため出していない
 - `excluded_day_count`（ペアード指標のみ）は片群しか無くて捨てた run 日数。3/20 日から
   作った差と 20/20 日から作った差は同じ主張ではない
+- `paired_day_count`（ペアード指標のみ、RP-002）は平均に採用した日次差の本数そのもの。
+  上の「n の読み方」のとおり、ペアード指標の L1 判定はこちらを見る（`sample_size` は
+  行数であって区間の n ではない）
 
 separation の 3 版の読み方:
 

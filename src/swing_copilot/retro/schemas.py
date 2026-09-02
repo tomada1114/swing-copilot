@@ -124,6 +124,11 @@ class MetricEntry(_StrictModel):
     #: side, so a difference averaged over 3 of 20 days cannot pass as one
     #: averaged over 20.
     excluded_day_count: int | None = Field(default=None, ge=0)
+    #: Paired metrics only (RP-002): the number of per-day differences the
+    #: value was averaged over. `sample_size` on a paired row counts
+    #: contributing *outcome rows*, not days -- reading it as the interval's
+    #: n is exactly the mistake this field exists to prevent.
+    paired_day_count: int | None = Field(default=None, ge=0)
 
 
 class RateMetricEntry(_StrictModel):
@@ -593,6 +598,13 @@ _ISSUE_190_OPTIONAL_KEYS = frozenset(
     }
 )
 
+#: RP-002: the paired-metric day count added after retro-input-v1 already had
+#: archived dossiers. Its absent form is `None`, the same "not measured by
+#: this generation" reading as the Issue #190 keys above; kept as a separate
+#: set (rather than folded into `_ISSUE_190_OPTIONAL_KEYS`) so each addition's
+#: originating change stays traceable at the point it is dropped.
+_RP_002_OPTIONAL_KEYS = frozenset({"paired_day_count"})
+
 
 def _drop_legacy_defaults(value: object) -> object:
     """Omit defaults introduced after the original retro-input-v1 contract.
@@ -612,6 +624,8 @@ def _drop_legacy_defaults(value: object) -> object:
                 # Issue #190: dispersion fields on every metric entry, and the
                 # three aggregate blocks added with them.
                 or (key in _ISSUE_190_OPTIONAL_KEYS and child is None)
+                # RP-002: the paired-metric day count.
+                or (key in _RP_002_OPTIONAL_KEYS and child is None)
                 # Issue #191: per-basis hit rates, absent before the field.
                 or (key == "basis_contribution" and child == [])
                 # Issue #189: the L2 gate cross-tab and the per-config split,

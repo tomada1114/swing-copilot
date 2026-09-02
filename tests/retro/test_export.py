@@ -281,6 +281,8 @@ class TestBuildRetroInput:
         by_id = {row.metric_id: row for row in paired}
         assert by_id["metric:separation_paired:5d"].value == pytest.approx(-7.0)
         assert by_id["metric:separation_paired:5d"].excluded_day_count == 0
+        # RP-002: the same one run day is the one paired difference averaged.
+        assert by_id["metric:separation_paired:5d"].paired_day_count == 1
 
     def test_publishes_the_tracking_ledgers_record_per_verdict_side(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path

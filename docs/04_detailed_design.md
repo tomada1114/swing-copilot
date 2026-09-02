@@ -1818,6 +1818,10 @@ src/swing_copilot/retro/
 
 走査窓は`settings.postmortem.lookback_window_days` + 30日で、集約窓（`export`、`lookback_window_days`ちょうど）より広い。報告窓の端にあるrunでも20営業日ホライズンが走査範囲に入るようにするためで、design §5.2の`[as_of − lookback_window_days − 30, as_of]`をそのまま実装している。
 
+**監査列`entry_close`/`maturity_close`（Issue #413）**: `verdict_outcomes`は分類に使った2本の終値も保存する。値は`compute_forward_return_detail`（`compute_forward_return`を`ForwardReturn(run_close, as_of_close, pct)`を返す形に割り出したもの。既存関数は`.pct`を返す薄いラッパで挙動不変）が実際に割った数値そのものであり、**満期日`as_of`基準の分割調整済み値**である——run日に実際に付いた生値ではない。分割を跨ぐ場合、run日の生終値97.23は満期基準では48.615として記録される（そう記録しなければ、監査列が説明するはずの比率と矛盾する）。読み出し専用の監査情報で、いずれの集計にも入らない。NULLは「未記録」（列が存在する前に分類された行）であって0ではなく、`ALTER TABLE ADD COLUMN`の他の多くと同じくバックフィルしない——過去の評価が割った基準こそが修復で変わるものなので、今日再計算した値を当時の値として記録することになるためである。**スキル境界の`retro-input-v1`スキーマには載せない**（3.23.4節。定性レイヤに渡す証拠の形は変えない）。
+
+**修復済みストアでの再評価手順（Issue #413）**: `copilot-backfill rebuild`で価格を是正したあと、`copilot-retro evaluate --as-of <当日>`（`only_pending=False`＝手動実行の既定）を1回実行すると、走査窓`lookback_window_days + 30`日に入る満期スライスが**全件再分類**され、`forward_return_pct`・`classification`・`benchmark_return_pct`と監査列が同時に置き換わる。窓の外にあるrunは再評価されないので、より古いrunを是正したいときは`--as-of`を過去日にして窓を動かす（満期日は`as_of`より後には出ないため、窓を戻せばその時点までの満期スライスだけが対象になる）。台帳側（`verdict_positions`）はこの経路では動かない——そちらは`copilot-track rebuild`（3.24.3-5）が担う別の修復である。
+
 #### 3.23.3 評価フレームワーク
 
 verdictは強気/弱気の方向予測ではなく、**スクリーニング通過済み候補への追加リスク回避フィルタ**である。したがって当否は騰落との単純相関ではなく非対称に定義する。`proceed`の的中は「その後に重大な逆行がなかった」という片側の主張、`skip`の的中は下落（＝損失回避）で、上昇は機会損失として実損を出す`proceed`の外れより軽い失敗として扱う。
@@ -1983,9 +1987,9 @@ src/swing_copilot/tracking/
    `evaluate_exit(open, low, close, stop, days_held, verdict_positions.max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。`max_hold_days`は建玉時に保存した手仕舞いルールの正本であり、設定変更は新規建玉にだけ効く。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
    - ATRは1ポジションにつき1パス（`backtest/exits.py::atr_by_date`）で全セッション分を求め、日ごとに`atr_as_of`を呼び直さない。Wilder平滑は因果的（`adjust=False`）なので値は1日ごとの呼び出しと厳密に一致し、リプレイの計算量が保有日数の2乗にならない。両関数を同じモジュールに置くのは、この一致が黙って壊れないようにするためである。
-   - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は後から訂正バーで引き直されない（過去の引き直しは5のとおりスコープ外の`--rebuild`）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
+   - OHLCが欠損した日をスキップしても`last_marked_date`は進むため、その日は`update`では後から訂正バーで引き直されない（過去の引き直しは5のとおり`copilot-track rebuild`の役目）。一方、バーが1本も無くて前進できないポジションは`last_marked_date`が動かないので毎回のupdateで再試行され、その旨をnoteに出し続ける。
 4. **順序の厳守**: バックテストのエンジンと同じく、**stopの更新はその日の終値確定後**であり翌日から有効になる。したがってd日の手仕舞い判定はd−1日までのstopで行い、d日の終値から計算したstopがd日自身を閉じることはない。
-5. **冪等性**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外。
+5. **冪等性と引き直し**: `last_marked_date`が再開位置なので、同じ`as_of`での再実行は何も変えない。確定済みの`closed`は二度と前進させない。したがって`update`は**過去を引き直さない**——既にマークした日を訂正バーで再評価する経路は`update`側には無く、`copilot-track rebuild`（`tracking/update.py::rebuild_positions`）が担う（Issue #413。**Issue #413以前**: 「訂正バーで過去を引き直す`--rebuild`は現時点でスコープ外」としていたが、供給元の壊れた履歴で確定した誤ストップを修復するには必須になったため導入した）。`rebuild_positions(state_store, market_store, trade_plan, RebuildTarget(symbol, run_id=None), *, as_of)`は、対象銘柄（`run_id`省略時はその銘柄の全建玉、open/closedを問わない）を**マークごと1トランザクションで削除**（`StateStore.delete_verdict_positions`）したうえで`update_tracking`を同じ`as_of`で呼ぶ。`verdicts`行は削除しないので、削除された建玉は`get_untracked_verdicts`に再び現れ、通常の建玉経路（`risk_assessments.entry_price` → 分割の再基準化 → 日次前進）でエントリーから引き直される。**原子性は削除までで、削除と再建玉は別トランザクションである**——再建玉が失敗しても`verdicts`行は残っているため、次の`copilot-track update`が同じ結果を再現する（失われるのは捨てるつもりだった旧数値だけ）。他のopen建玉も同じ`as_of`まで前進するが、`last_marked_date`が再開位置である以上これは冪等で、同一`as_of`ならマークは1本も増えない。戻り値`RebuildResult`は削除した建玉ごとに削除前（status/exit理由/exit日/損益）と再構築後を並べ、再建玉できなかったもの（エントリー価格を解決できない）は`after=None`として報告する。CLIの表示は`docs/reference.md`が正本。
 
 手仕舞いロジックを`backtest/exits.py`から**import**しているのが本節の要点である（再実装禁止）。台帳が毎朝示す「いくらになったら手仕舞いか」がシミュレータの挙動と1 bitでもずれたら、この台帳で集めた材料はバックテストの改善に使えなくなる。ATR期間はエンジンと同じく`trade_plan.exit_atr_period`から渡す（Issue #194で配線。`atr_as_of`/`atr_by_date`は既定値を持たず、呼び出し側が必ず設定値を明示する）。
 

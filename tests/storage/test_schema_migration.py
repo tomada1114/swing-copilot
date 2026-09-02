@@ -28,7 +28,10 @@ from swing_copilot.storage.retro_records import (
     RetroSessionRecord,
 )
 from swing_copilot.storage.state_store import StateStore
-from swing_copilot.storage.verdict_records import backfill_verdict_reasons
+from swing_copilot.storage.verdict_records import (
+    VerdictOutcomeRecord,
+    backfill_verdict_reasons,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -396,6 +399,85 @@ class TestBackfillAtomicity:
             assert conn.execute("SELECT count(*) FROM verdict_reasons").fetchone() == (
                 2,
             )
+
+
+class TestIssue413VerdictOutcomeAuditColumns:
+    """`entry_close`/`maturity_close` on a `verdict_outcomes` created without them."""
+
+    @staticmethod
+    def _legacy_outcome_database(tmp_path: Path) -> StateStore:
+        """A `verdict_outcomes` in its pre-Issue-#413 shape, holding one row."""
+        path = tmp_path / "legacy_outcomes.duckdb"
+        with duckdb.connect(str(path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE verdict_outcomes (
+                    run_id               UUID NOT NULL,
+                    symbol               VARCHAR NOT NULL,
+                    horizon_days         INTEGER NOT NULL,
+                    as_of                DATE NOT NULL,
+                    recommendation       VARCHAR NOT NULL,
+                    forward_return_pct   DOUBLE NOT NULL,
+                    benchmark_return_pct DOUBLE,
+                    classification       VARCHAR NOT NULL,
+                    PRIMARY KEY (run_id, symbol, horizon_days)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO verdict_outcomes VALUES (?, 'MNST', 20, "
+                "DATE '2026-08-26', 'proceed', -50.8, 1.2, 'MISS_SEVERE')",
+                [str(_RUN_ID)],
+            )
+        store = StateStore(Database(path))
+        store.init_schema()
+        return store
+
+    def test_the_columns_are_added_and_the_existing_row_reads_as_not_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        # NULL, never a backfilled number: the basis a past evaluation divided
+        # by is exactly what a store repair changes, so recomputing it today
+        # would record the *new* price as if it had been the old one.
+        store = self._legacy_outcome_database(tmp_path)
+
+        with store.database.connect() as conn:
+            row = conn.execute(
+                "SELECT forward_return_pct, entry_close, maturity_close "
+                "FROM verdict_outcomes"
+            ).fetchone()
+
+        assert row == (-50.8, None, None)
+
+    def test_a_re_evaluation_fills_the_columns_in(self, tmp_path: Path) -> None:
+        # `replace_verdict_outcomes` replaces the slice wholesale, which is
+        # what makes the un-backfilled column reachable after a repair.
+        store = self._legacy_outcome_database(tmp_path)
+
+        store.replace_verdict_outcomes(
+            _RUN_ID,
+            20,
+            [
+                VerdictOutcomeRecord(
+                    run_id=_RUN_ID,
+                    symbol="MNST",
+                    horizon_days=20,
+                    as_of=date(2026, 8, 26),
+                    recommendation="proceed",
+                    forward_return_pct=-1.69,
+                    classification="MISS_MILD",
+                    entry_close=48.615,
+                    maturity_close=47.81,
+                )
+            ],
+        )
+
+        stored = store.get_verdict_outcomes_in_window(
+            date(2026, 8, 26), date(2026, 8, 26)
+        )
+        assert [(row.entry_close, row.maturity_close) for row in stored] == [
+            (48.615, 47.81)
+        ]
 
 
 class TestIssue189LedgersOnAnExistingDatabase:

@@ -438,6 +438,14 @@ INIT_SCHEMA_STATEMENTS = (
         -- unavailable, records NULL ("not measured"), which readers must not
         -- read as a flat benchmark.
         benchmark_return_pct DOUBLE,
+        -- Issue #413: the two closes the classification was actually computed
+        -- from, on the maturity date's own adjustment basis. Audit columns
+        -- only -- nothing reads them back into a metric -- so that "which
+        -- price was this classified at" can be answered after a store repair
+        -- rebases the bars underneath. Nullable: a row evaluated before the
+        -- columns existed records NULL.
+        entry_close        DOUBLE,
+        maturity_close     DOUBLE,
         classification     VARCHAR NOT NULL CHECK (classification IN (
             'HIT','MISS_MILD','MISS_SEVERE','NEUTRAL'
         )),
@@ -687,6 +695,14 @@ ALTER_SCHEMA_STATEMENTS = (
     # fills it in, because `replace_verdict_outcomes` replaces the slice
     # wholesale.
     "ALTER TABLE verdict_outcomes ADD COLUMN IF NOT EXISTS benchmark_return_pct DOUBLE",
+    # Issue #413: the closes the classification was computed from, kept for
+    # audit after a store repair. Not backfilled, and not backfillable: the
+    # basis a past evaluation divided by is exactly what the repair changes,
+    # so recomputing it today would record the *new* number as if it had been
+    # the old one. NULL means "not recorded"; a re-`evaluate` fills it in,
+    # because `replace_verdict_outcomes` replaces the slice wholesale.
+    "ALTER TABLE verdict_outcomes ADD COLUMN IF NOT EXISTS entry_close DOUBLE",
+    "ALTER TABLE verdict_outcomes ADD COLUMN IF NOT EXISTS maturity_close DOUBLE",
     # Issue #192: the ranking key and its components as real columns. The
     # score side IS backfilled, unlike most entries above: `metrics_json`
     # already holds `score`/`score_*` for every row ever written, so the

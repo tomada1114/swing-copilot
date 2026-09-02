@@ -451,7 +451,16 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 扱う。閾値は`settings.postmortem`の既存値を流用し、新しい閾値体系を作らない。
 このコマンドは窓内の満期スライスを**全件**再分類するので、株価が訂正された
 場合の分類の更新もここで起きる（日次ステップ側は未記録のスライスだけを評価
-する。Issue #209）。`--db`の兄弟`bars/`がディレクトリごと無い場合、`evaluate`
+する。Issue #209）。`copilot-backfill rebuild`で調整基準そのものを是正した
+あとも同じで、`copilot-retro evaluate --as-of <当日>`を1回実行すれば走査窓
+（`lookback_window_days` + 30日）に入る満期スライスが全件置き換わる。窓の外の
+runは再評価されないので、より古いrunを是正したいときは`--as-of`を過去日にして
+窓を動かす。各行には分類に使った終値`entry_close`/`maturity_close`も残る
+（Issue #413）——**満期日基準の分割調整済み値**であって、run日に実際に付いた生値
+ではない（比率を実際に割った数値そのものを残さなければ、監査列がその比率と
+矛盾するため）。監査専用でどの集計にも入らず、列が存在する前に分類された行は
+NULL＝「未記録」のまま残る（再評価すれば埋まる）。`research.verdict_outcomes()`
+にそのまま列として出る。`--db`の兄弟`bars/`がディレクトリごと無い場合、`evaluate`
 と`export`は評価を始める前にエラーで落ちる（Issue #221）。バー0件から
 forward returnを計算しても1件も満期にならず、「評価0 slice」が正常終了として
 返ってしまうためである。
@@ -530,6 +539,8 @@ copilot-track list --recommendation all          # skip のシャドウ建玉も
 copilot-track show --symbol AAPL                 # verdict理由・日次マーク
 copilot-track stats                              # 勝率・PF・期待値をverdict区分別に
 copilot-track stats --recommendation skip        # 1区分だけ
+copilot-track rebuild --symbol MNST              # 価格是正後の修復（削除して引き直し）
+copilot-track rebuild --symbol MNST --run-id <UUID>   # 1建玉だけ
 ```
 
 `list`の既定表示は公開用の`proceed`ボードで、`tracking.published_retention_business_days`
@@ -636,6 +647,52 @@ stopと最大保有日数の両方が成立したときは常にstopが優先さ
 開示・ニュースの「保有優先」予算が定性レイヤが落とした銘柄すべてへ向いてしまう。
 `--as-of`指定の再現runは台帳を読まない（現在状態であり時点再現性が無いため）。
 台帳の読み取り失敗はfail-softで、警告を出して仮想側を空としてrunを続行する。
+
+### `rebuild`: 価格を是正したあとの修復
+
+`update`は`last_marked_date`を再開位置として扱い、確定した`closed`を二度と前進
+させない。したがって供給元の壊れた履歴で誤って確定したストップは、`update`を
+何度回しても台帳から消えない。`rebuild`はそのための唯一の経路である（Issue
+#413）。
+
+```bash
+copilot-track rebuild --symbol MNST [--run-id UUID] [--as-of DATE] [--db PATH] [--settings PATH]
+```
+
+`--symbol`は必須。`--run-id`を省略するとその銘柄の**全建玉**（open/closedを
+問わない）が対象になる。`--as-of`を省略したときだけ`update`と同じく
+`SystemClock().today()`を使う。
+
+やることは2段階である。まず対象建玉を**日次マークごと1トランザクションで削除**
+する。`verdicts`行には触れないので、削除された建玉は未追跡verdictとして再び現れ、
+続く`update`相当のリプレイが`risk_assessments.entry_price`から通常どおり建玉し直し、
+分割の再基準化を掛けて`--as-of`まで前進させる。
+
+**削除と再建玉は別トランザクションであり、全体としては原子的ではない。** 途中で
+落ちれば建玉は消えたまま残るが、`verdicts`行が生きているので次の
+`copilot-track update`が同じ結果を再現する——失われるのは、そもそも捨てるつもり
+だった旧数値だけである。
+
+出力は1建玉1行で、削除前と再構築後を並べる（`run_id`は`list`と同じく省略しない）。
+
+```text
+rebuild: MNST 2 建玉を再構築した（as_of 2026-09-02）
+41ea5618-... 2026-08-03 skip  before: stop 2026-08-10 -51.72%  after: stop 2026-08-24 -4.10%
+2b5d65e6-... 2026-08-07 skip  before: stop 2026-08-10 -50.02%  after: open +1.20%
+```
+
+`before`/`after`の損益は、手仕舞い済みなら確定損益、保有中なら最新マークの含み損益
+である。再建玉できなかった建玉（エントリー価格を解決できない）は`after`が
+`建玉されず`になり、理由がnoteとして続く。対象が0件のときは「対象の建玉はない」と
+表示して正常終了する（エラーではない）。対象銘柄以外のopen建玉も同じ`--as-of`まで
+前進するが、`last_marked_date`が再開位置である以上これは冪等で、同じ`--as-of`なら
+マークは1本も増えない。
+
+修復の全体手順は「`just data-pull` → `copilot-backfill rebuild` → `copilot-backfill
+check` → `copilot-retro evaluate --as-of <当日>` → `copilot-track rebuild --symbol X`
+→ `just data-push`」である。`copilot-retro evaluate`が集約側（`verdict_outcomes`）を、
+`copilot-track rebuild`が台帳側（`verdict_positions`）を直す別々の修復で、どちらか
+一方では片側しか是正されない。
 
 retroの`verdict_outcomes`（5/20営業日の2点分類）とは別レイヤである。
 棲み分けの理由は`docs/04_detailed_design.md` 3.24.1にある。

@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import date
 
+    import duckdb
+
     from swing_copilot.storage.database import Database
 
 _UPSERT_POSITION = """
@@ -408,15 +410,58 @@ def delete_orphaned_verdict_positions(
         if not orphans:
             return ()
         with atomic(conn):
-            for run_id, symbol in orphans:
-                for table in ("verdict_position_marks", "verdict_positions"):
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
-                        [str(run_id), symbol],
-                    )
+            _delete_positions(conn, orphans)
     finally:
         conn.close()
     return orphans
+
+
+def _delete_positions(
+    conn: duckdb.DuckDBPyConnection, keys: Sequence[tuple[UUID, str]]
+) -> None:
+    """Delete each `(run_id, symbol)` position and its marks on an open connection.
+
+    Marks first, then the position: the two statements share one caller-owned
+    transaction, so the order only matters for readability, but it keeps the
+    child rows from outliving their parent even if that ever changed.
+
+    Args:
+        conn: A connection already inside a transaction the caller owns.
+        keys: The positions to remove.
+    """
+    for run_id, symbol in keys:
+        for table in ("verdict_position_marks", "verdict_positions"):
+            conn.execute(
+                f"DELETE FROM {table} WHERE run_id = ? AND symbol = ?",  # noqa: S608 - fixed table names
+                [str(run_id), symbol],
+            )
+
+
+def delete_verdict_positions(
+    database: Database, keys: Sequence[tuple[UUID, str]]
+) -> None:
+    """Delete the named tracked positions together with every mark they published.
+
+    The deliberate counterpart to `delete_orphaned_verdict_positions`: that
+    one reconciles the ledger against `verdicts`, this one removes positions
+    an operator named, so `tracking/update.py::rebuild_positions` can replay
+    them from scratch against repaired bars. The `verdicts` rows are left
+    alone, which is what lets the very next `update` reopen them.
+
+    Everything goes in one transaction: a partial delete would leave marks
+    without a position row to explain them, and `list`'s "last close" column
+    would show a price for a position that no longer exists.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        keys: `(run_id, symbol)` identities to remove. Empty is a no-op that
+            opens no transaction. A key naming no stored position deletes
+            nothing rather than failing.
+    """
+    if not keys:
+        return
+    with database.transaction() as conn:
+        _delete_positions(conn, keys)
 
 
 def get_verdict_positions(

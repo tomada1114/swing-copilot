@@ -126,6 +126,12 @@ class _FlakyConnection:
     def close(self) -> None:
         self._conn.close()
 
+    def __enter__(self) -> _FlakyConnection:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
 
 class TestPositionWrites:
     def test_reading_back_a_position_returns_every_stored_field(
@@ -551,3 +557,87 @@ class TestOrphanReconciliation:
             position.symbol for position in state_store.get_verdict_positions()
         } == {SYMBOL, "BBB"}
         assert len(state_store.get_verdict_position_marks(RUN_ID, SYMBOL)) == 1
+
+
+class TestDeliberateDeletion:
+    """`delete_verdict_positions`: the repair path's half (Issue #413).
+
+    Unlike orphan reconciliation, this removes positions whose `verdicts` rows
+    are still there -- which is exactly what lets `tracking/update.py` reopen
+    and replay them against corrected bars.
+    """
+
+    def test_it_removes_the_position_and_its_marks_but_keeps_the_verdict(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(
+            _position(), [_mark(ENTRY_DATE, 100.0), _mark(DAY_1, 102.0)]
+        )
+
+        state_store.delete_verdict_positions([(RUN_ID, SYMBOL)])
+
+        assert state_store.get_verdict_positions() == ()
+        assert state_store.get_verdict_position_marks(RUN_ID, SYMBOL) == ()
+        # The verdict survives, which is what makes the position re-openable.
+        assert state_store.get_untracked_verdicts(DAY_1) != ()
+
+    def test_an_empty_key_list_is_a_no_op(self, state_store: StateStore) -> None:
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+
+        state_store.delete_verdict_positions([])
+
+        assert len(state_store.get_verdict_positions()) == 1
+
+    def test_a_key_naming_no_stored_position_deletes_nothing(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_verdict(state_store)
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+
+        state_store.delete_verdict_positions([(uuid4(), "ZZZ")])
+
+        assert len(state_store.get_verdict_positions()) == 1
+
+    def test_it_leaves_other_positions_alone(self, state_store: StateStore) -> None:
+        _seed_verdicts(state_store, ("proceed", "proceed"))
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+        state_store.upsert_verdict_position(
+            _position(symbol="BBB"),
+            [replace(_mark(ENTRY_DATE, 100.0), symbol="BBB")],
+        )
+
+        state_store.delete_verdict_positions([(RUN_ID, SYMBOL)])
+
+        assert [row.symbol for row in state_store.get_verdict_positions()] == ["BBB"]
+        assert len(state_store.get_verdict_position_marks(RUN_ID, "BBB")) == 1
+
+    def test_a_partial_delete_rolls_back_and_leaves_both_positions_intact(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Call 1 is BEGIN, 2/3 delete the first position's marks and row, 4 is
+        # the second position's marks: a failure there must not leave the
+        # first one gone, or a rebuild would silently drop a position.
+        _seed_verdicts(state_store, ("proceed", "proceed"))
+        state_store.upsert_verdict_position(_position(), [_mark(ENTRY_DATE, 100.0)])
+        state_store.upsert_verdict_position(
+            _position(symbol="BBB"),
+            [replace(_mark(ENTRY_DATE, 100.0), symbol="BBB")],
+        )
+        real_connect = state_store.database.connect
+        monkeypatch.setattr(
+            state_store.database,
+            "connect",
+            lambda: _FlakyConnection(real_connect(), fail_on=4),
+        )
+
+        with pytest.raises(RuntimeError, match="injected failure"):
+            state_store.delete_verdict_positions([(RUN_ID, SYMBOL), (RUN_ID, "BBB")])
+        monkeypatch.undo()
+
+        assert {
+            position.symbol for position in state_store.get_verdict_positions()
+        } == {SYMBOL, "BBB"}
+        assert len(state_store.get_verdict_position_marks(RUN_ID, SYMBOL)) == 1
+        assert len(state_store.get_verdict_position_marks(RUN_ID, "BBB")) == 1

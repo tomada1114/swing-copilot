@@ -14,10 +14,11 @@ Two contracts dominate here:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+import pandas as pd
 import pytest
 
 from swing_copilot.config import PostmortemConfig
@@ -276,6 +277,78 @@ def _benchmark_returns(state_store: StateStore) -> list[float | None]:
                 "WHERE horizon_days = 5 ORDER BY symbol"
             ).fetchall()
         ]
+
+
+def _audit_closes(state_store: StateStore) -> list[tuple[object, object]]:
+    with state_store._database.connect() as conn:  # noqa: SLF001
+        return [
+            (row[0], row[1])
+            for row in conn.execute(
+                "SELECT entry_close, maturity_close FROM verdict_outcomes "
+                "WHERE horizon_days = 5 ORDER BY symbol"
+            ).fetchall()
+        ]
+
+
+class TestEvaluateAuditCloses:
+    """Issue #413: which prices the classification was actually computed at."""
+
+    def test_it_records_both_closes_behind_the_classification(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _audit_closes(state_store) == [
+            (pytest.approx(100.0), pytest.approx(101.5))
+        ]
+
+    def test_a_split_inside_the_horizon_records_the_maturity_basis_not_the_raw_close(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The as-traded run-day close is 97.23; the 2:1 split before maturity
+        # rebases it to 48.615, which is the number the ratio divided. Storing
+        # 97.23 here would make the audit pair contradict its own return --
+        # the exact confusion the columns exist to settle (MNST, Issue #413).
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id, "MNST")
+        market_store.write_bars(bars("MNST", {RUN_DATE: 97.23, MATURITY_5D: 47.81}))
+        market_store.write_corporate_actions(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST"],
+                    "ex_date": [CALENDAR[3]],
+                    "kind": ["split"],
+                    "value": [2.0],
+                }
+            ),
+            provider="test",
+            fetched_at=datetime(2027, 3, 1, tzinfo=UTC),
+        )
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _audit_closes(state_store) == [
+            (pytest.approx(48.615), pytest.approx(47.81))
+        ]
+
+    def test_a_skipped_symbol_writes_no_row_at_all(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The columns never stand in for a missing measurement: a symbol whose
+        # closes are not both available is skipped outright, as before.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+
+        _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _audit_closes(state_store) == []
 
 
 class TestEvaluateMaturityCutoff:

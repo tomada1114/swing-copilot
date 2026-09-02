@@ -1,6 +1,6 @@
 """`copilot-track`: the verdict-tracking ledger's command line.
 
-Four subcommands, in the order a morning review uses them:
+Five subcommands, the first four in the order a morning review uses them:
 
 * `update` opens a virtual position for every new verdict and carries the open
   ones forward to `--as-of`.
@@ -9,6 +9,9 @@ Four subcommands, in the order a morning review uses them:
 * `show` pairs one position with the verdict's reasons and its daily marks.
 * `stats` reports the realized record -- win rate, profit factor, expectancy,
   average R, holding period, exit-reason mix -- stratified by verdict side.
+* `rebuild` is the repair path, run by hand after a price correction: it
+  deletes one symbol's tracked positions and replays them from entry, which
+  `update` deliberately never does (Issue #413).
 
 Since Issue #190 the ledger also shadow-tracks `skip` verdicts, so that
 `stats` can put "buy only the proceeds" next to "buy every screened
@@ -17,9 +20,9 @@ candidate" under identical exit rules. `list` and `show` therefore default to
 morning review that suddenly listed every rejected candidate as a position
 would read as a suggestion to buy them.
 
-`update` is the only write here, and it writes exactly what replaying the
-backtest's exit rules produces against an unconditional entry at the run
-day's reference close -- this ledger measures whether a judgement was right,
+`update` and `rebuild` are the only writes here, and both write exactly what
+replaying the backtest's exit rules produces against an unconditional entry at
+the run day's reference close -- this ledger measures whether a judgement was right,
 not what actually got traded (design decision #327). The human judgement
 memos and manual closes this CLI once accepted were removed in 2026-08: the
 ledger is mechanical, so that the record it holds can be published. Existing
@@ -61,12 +64,17 @@ from swing_copilot.tracking.board import (
     build_board,
     position_records,
 )
-from swing_copilot.tracking.update import update_tracking
+from swing_copilot.tracking.update import (
+    RebuildTarget,
+    rebuild_positions,
+    update_tracking,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
     from swing_copilot.storage.tracking_records import VerdictPosition
+    from swing_copilot.tracking.update import PositionSnapshot, RebuiltPosition
 
 DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 
@@ -152,6 +160,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     stats_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
 
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        help="1銘柄の建玉を削除してエントリーから再リプレイする（価格是正後の修復）",
+    )
+    rebuild_parser.add_argument("--symbol", required=True)
+    rebuild_parser.add_argument(
+        "--run-id",
+        type=UUID,
+        help="1建玉だけを対象にする（省略時はその銘柄の全建玉、open/closed を問わない）",
+    )
+    rebuild_parser.add_argument("--as-of", type=date.fromisoformat)
+    rebuild_parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    rebuild_parser.add_argument("--settings", default=DEFAULT_SETTINGS_PATH)
+
     args = parser.parse_args(argv)
     if (
         args.command == "list"
@@ -202,6 +224,61 @@ def _run_update(
     )
     for note in result.notes:
         console.print(f"[yellow]{note}[/yellow]")
+
+
+def _run_rebuild(
+    state_store: StateStore, args: argparse.Namespace, console: Console
+) -> None:
+    """Rebuild one symbol's tracked positions and print before/after per position.
+
+    The one destructive subcommand: the named positions and their marks are
+    deleted, then reopened from their `verdicts` rows and replayed. It is not
+    atomic end to end -- see `tracking.update.rebuild_positions` -- so an
+    interruption leaves them deleted and the next `update` reopens them.
+    """
+    settings = _load_settings(args.settings)
+    result = rebuild_positions(
+        state_store,
+        _market_store(state_store, args.db),
+        settings.trade_plan,
+        RebuildTarget(symbol=args.symbol, run_id=args.run_id),
+        as_of=_resolve_as_of(args.as_of),
+    )
+    if not result.positions:
+        console.print(f"rebuild: {args.symbol} に対象の建玉はない")
+        return
+    console.print(
+        f"rebuild: {args.symbol} {len(result.positions)} 建玉を再構築した"
+        f"（as_of {result.as_of.isoformat()}）"
+    )
+    for row in result.positions:
+        console.print(_rebuild_line(row))
+    for note in result.update.notes:
+        console.print(f"[yellow]{note}[/yellow]")
+
+
+def _rebuild_line(row: RebuiltPosition) -> str:
+    """One rebuilt position as `<run> <entry> <side>  before: ...  after: ...`."""
+    return (
+        f"{row.run_id} {row.entry_date.isoformat()} {row.recommendation}  "
+        f"before: {_fmt_snapshot(row.before)}  after: {_fmt_snapshot(row.after)}"
+    )
+
+
+def _fmt_snapshot(snapshot: PositionSnapshot | None) -> str:
+    """Render one side of the comparison: exit (or `open`) plus the return.
+
+    `None` is the position the replay did not reopen -- its entry price could
+    not be resolved -- which the accompanying note explains.
+    """
+    if snapshot is None:
+        return "建玉されず"
+    if snapshot.status != OPEN:
+        return (
+            f"{snapshot.exit_reason or _NOT_AVAILABLE} "
+            f"{_fmt_date(snapshot.exit_date)} {_fmt_pct(snapshot.return_pct)}"
+        )
+    return f"open {_fmt_pct(snapshot.return_pct)}"
 
 
 def _fmt_price(value: float | None) -> str:
@@ -490,7 +567,7 @@ def _verdict_reasons(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: dispatch to one of the four subcommands.
+    """CLI entry point: dispatch to one of the five subcommands.
 
     Args:
         argv: Argument vector, defaulting to `sys.argv[1:]`.
@@ -509,6 +586,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_list(state_store, args, console)
     elif args.command == "show":
         _run_show(state_store, args, console)
+    elif args.command == "rebuild":
+        _run_rebuild(state_store, args, console)
     else:
         _run_stats(state_store, args, console)
 

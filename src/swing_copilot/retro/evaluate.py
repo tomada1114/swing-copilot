@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from swing_copilot.pipeline.forward_returns import (
     compute_forward_return,
+    compute_forward_return_detail,
     find_maturity_trading_day,
 )
 from swing_copilot.retro.adoption import keep_adopted_rows
@@ -263,7 +264,16 @@ def _evaluate_slice(
     request: EvaluationRequest,
     notes: list[str],
 ) -> list[VerdictOutcomeRecord] | None:
-    """Classify one `(run, horizon)`; return `None` if it has not matured."""
+    """Classify one `(run, horizon)`; return `None` if it has not matured.
+
+    Each record also carries the two closes the classification was computed
+    from (`entry_close` / `maturity_close`, Issue #413). Those are audit
+    values, not raw prices: both are quoted on the *maturity date's* own
+    adjustment basis, which is what `compute_forward_return` divides, so a
+    run-day close recorded here is the split-adjusted number rather than the
+    dollars that traded that morning. Reading them any other way would make
+    them disagree with the ratio they are meant to explain.
+    """
     run_id = rows[0].run_id
     run_date = rows[0].as_of
     maturity_date = find_maturity_trading_day(
@@ -295,10 +305,14 @@ def _evaluate_slice(
 
     outcomes: list[VerdictOutcomeRecord] = []
     for row in rows:
-        forward_return_pct = compute_forward_return(
+        # The detail form, not the bare ratio: `entry_close`/`maturity_close`
+        # are audit columns recording *which prices this was classified at*,
+        # so they must be the very numbers the ratio divided rather than a
+        # second read that a later store repair could answer differently.
+        forward_return = compute_forward_return_detail(
             market_store, row.symbol, run_date, maturity_date
         )
-        if forward_return_pct is None:
+        if forward_return is None:
             notes.append(
                 f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
                 f"満期日 {maturity_date.isoformat()} までの終値が揃わないためスキップ"
@@ -311,11 +325,13 @@ def _evaluate_slice(
                 horizon_days=horizon_days,
                 as_of=maturity_date,
                 recommendation=row.recommendation,
-                forward_return_pct=forward_return_pct,
+                forward_return_pct=forward_return.pct,
                 benchmark_return_pct=benchmark_return_pct,
+                entry_close=forward_return.run_close,
+                maturity_close=forward_return.as_of_close,
                 classification=classify_verdict_outcome(
                     row.recommendation,
-                    forward_return_pct,
+                    forward_return.pct,
                     neutral_threshold_pct=request.thresholds.neutral_threshold_pct,
                     severe_threshold_pct=request.thresholds.severe_threshold_pct,
                 ),

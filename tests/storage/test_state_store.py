@@ -962,6 +962,29 @@ class TestRecordCandidates:
             count = conn.execute("SELECT count(*) FROM candidates").fetchone()
         assert count == (2,)
 
+    def test_rolls_back_entirely_when_a_later_row_fails(self, state_store):
+        # One run's candidate set is one logical write (AGENTS.md, Issue
+        # #405): inject a failure after the first row has been inserted --
+        # a second candidate reusing the same rank violates `candidates`'
+        # `UNIQUE (run_id, strategy_key, rank)` -- and assert the first row
+        # did not survive on its own.
+        run_id = uuid4()
+        first = Candidate(
+            symbol="AAPL", as_of=date(2026, 7, 20), signal_names=(), metrics={}, rank=1
+        )
+        second = Candidate(
+            symbol="MSFT", as_of=date(2026, 7, 20), signal_names=(), metrics={}, rank=1
+        )
+
+        with pytest.raises(duckdb.Error):
+            state_store.record_candidates([first, second], run_id, "default")
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            count = conn.execute(
+                "SELECT count(*) FROM candidates WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert count == (0,)
+
 
 class _FlakyRejectionConnection:
     """Wraps a real connection; raises on the Nth `INSERT INTO screening_rejections`.

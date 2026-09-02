@@ -226,6 +226,21 @@ def evidence_id_space(retro_input: RetroInput) -> frozenset[str]:
     # its ID out of the space made that argument unwritable -- the skill is
     # told to read the metric first and could not then cite it.
     ids.add(aggregates.verdict_mix.metric_id)
+    # RP-001 (Issue #190): the paired separation versions and the tracked
+    # ledger's realized record are citable populations `swing-retro`'s
+    # SKILL.md tells the skill to read before writing a proposal -- the
+    # pooled `separation` above can be confounded by the day's market move,
+    # and the paired/excess versions are how a proposal shows the effect
+    # survives that confound. Leaving their IDs out of the space made that
+    # argument unwritable: a proposal citing them was withheld fail-closed.
+    for paired_group in (
+        aggregates.separation_paired,
+        aggregates.separation_paired_excess,
+    ):
+        if paired_group is not None:
+            ids.update(entry.metric_id for entry in paired_group)
+    if aggregates.tracked_performance is not None:
+        ids.update(entry.metric_id for entry in aggregates.tracked_performance)
     # Issue #189: the L2 gate rows and the per-configuration split are the two
     # newest citable populations. An L2 proposal argues from the gate row, and
     # a "the change helped/hurt" claim argues from one configuration's own

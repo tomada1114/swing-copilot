@@ -692,6 +692,37 @@ class TestBuildRetroInput:
 
         assert document.basis_contribution[0].basis_id in evidence_id_space(document)
 
+    def test_every_metric_id_the_dossier_publishes_is_citable_evidence(
+        self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        """RP-001 (Issue #190): metric IDs registered in the evidence space.
+
+        Paired separation and `tracked_performance` were added to the dossier
+        but never registered in the evidence space, so a proposal citing them
+        was withheld -- even though `swing-retro`'s SKILL.md instructs reading
+        all three separation versions and `tracked_performance` before
+        writing one.
+        """
+        document = build_retro_input(
+            _deps(populated_store, market_store), _request(tmp_path)
+        )
+        aggregates = document.aggregates
+        assert aggregates.separation_paired is not None
+        assert aggregates.separation_paired_excess is not None
+        assert aggregates.tracked_performance is not None
+
+        published = {
+            *(row.metric_id for row in aggregates.separation),
+            *(row.metric_id for row in aggregates.separation_paired),
+            *(row.metric_id for row in aggregates.separation_paired_excess),
+            *(row.metric_id for row in aggregates.tracked_performance),
+            *(row.metric_id for row in aggregates.proceed_severe_miss_rate),
+            *(row.metric_id for row in aggregates.skip_hit_rate),
+            aggregates.verdict_mix.metric_id,
+        }
+        assert published  # sanity: the dossier actually published these rows
+        assert published <= evidence_id_space(document)
+
     def test_builds_a_dossier_for_the_severe_miss_only(
         self, populated_store: StateStore, market_store: MarketStore, tmp_path: Path
     ) -> None:

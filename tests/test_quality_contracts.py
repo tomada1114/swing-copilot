@@ -664,3 +664,301 @@ def _collected_test_nodes(test_path: Path) -> set[str]:
                 ):
                     nodes.add(f"{relative_path}::{node.name}::{method.name}")
     return nodes
+
+
+# --------------------------------------------------------------------------- #
+#  Issue #394: cross-cutting primitives (atomic replacement, exception base,
+#  strict schema base) get exactly one implementation each, mechanically
+#  enforced -- not just documented in AGENTS.md and hoped for.
+# --------------------------------------------------------------------------- #
+
+_IO_ATOMIC_MODULE = PROJECT_ROOT / "src/swing_copilot/io_atomic.py"
+_STRICT_MODEL_MODULE = PROJECT_ROOT / "src/swing_copilot/strict_model.py"
+#: `config.py` keeps its own pre-existing `_StrictModel` (and the
+#: `StrategiesConfig` family built on it) as this test's one allowlisted
+#: exception. Issue #396 owns `StrategiesConfig` end to end and is already
+#: in flight against this same file; folding it into `StrictModel` here would
+#: collide with that work rather than avoid it. Tracked as a follow-up once
+#: #396 lands, not silently forgotten.
+_STRICT_SCHEMA_ALLOWLIST = frozenset({PROJECT_ROOT / "src/swing_copilot/config.py"})
+#: `os.replace`/`os.rename`/`tempfile.mkstemp`/`tempfile.NamedTemporaryFile`/
+#: `shutil.move`, as `(module, attribute)` pairs -- the primitives every
+#: self-implemented atomic replace in this repository has been built from so
+#: far, matched either as `<module>.<attribute>(...)` or as a bare call after
+#: `from <module> import <attribute>`.
+_ATOMIC_REPLACEMENT_CALLS = frozenset(
+    {
+        ("os", "replace"),
+        ("os", "rename"),
+        ("tempfile", "mkstemp"),
+        ("tempfile", "NamedTemporaryFile"),
+        ("shutil", "move"),
+    }
+)
+
+#: `Path.replace(target)` / `Path.rename(target)` -- the method-style form of
+#: the same hand-rolled atomic swap. Not distinguishable from `str.replace`
+#: or `datetime.replace` by name alone, so the signature does the work
+#: instead: both `Path` methods take exactly one positional argument and no
+#: keywords, `str.replace` always takes at least two positional arguments,
+#: and `datetime.replace` takes only keyword arguments.
+_PATHLIKE_REPLACEMENT_METHODS = frozenset({"replace", "rename"})
+
+#: Issue #394 F1: a hand-rolled atomic replace this AST walk would otherwise
+#: catch, kept as-is and named here explicitly -- never as an accidental
+#: blind spot -- because routing it through `io_atomic` would be the wrong
+#: fix. Each entry is `(file, enclosing function name)`.
+_ATOMIC_REPLACEMENT_ALLOWLIST = frozenset(
+    {
+        # `_download_verified` streams a downloaded object straight into a
+        # staging file beside its destination and only verifies + publishes
+        # it (`Path.replace`) afterwards. `data/`/`reports/` objects can be
+        # large, so routing this through `io_atomic.write_bytes_atomically`
+        # (which takes the whole body as an already-materialized `bytes`)
+        # would mean holding it in memory twice for no benefit; the function
+        # already gives the same same-directory-temp-file +
+        # atomic-rename + cleanup-on-failure contract by hand.
+        (PROJECT_ROOT / "scripts/data_sync.py", "_download_verified"),
+        # `_rename_source_directory` renames the whole `src/<package>`
+        # directory once, when a fork of this template bootstraps itself
+        # into a new project. It is not a file-content replacement of
+        # operator data -- the invariant this guard exists to police -- and
+        # `shutil.move` on a directory isn't something `io_atomic` (which
+        # only ever replaces one file's bytes) can do at all. Out of Issue
+        # #394's scope; tracked as a follow-up rather than silently exempted.
+        (PROJECT_ROOT / "scripts/bootstrap.py", "_rename_source_directory"),
+    }
+)
+
+
+def _iter_scanned_source_files() -> list[Path]:
+    """Every `src/` and `scripts/` module the Issue #394 contracts scan."""
+    return sorted((PROJECT_ROOT / "src").rglob("*.py")) + sorted(
+        (PROJECT_ROOT / "scripts").rglob("*.py")
+    )
+
+
+class _AtomicReplacementVisitor(ast.NodeVisitor):
+    """Collect hand-rolled atomic-replace calls, keyed by enclosing function.
+
+    A plain `ast.walk` (the previous implementation) cannot tell an
+    allowlisted call apart from any other call to the same method name, and
+    cannot tell `tmp.replace(dest)` apart from `str.replace(old, new)` at
+    all. Walking with a function-stack lets both distinctions be made without
+    losing which function a violation lives in.
+    """
+
+    def __init__(self, source_path: Path) -> None:
+        self._source_path = source_path
+        self._function_stack: list[str] = []
+        self._imported_names: dict[str, tuple[str, str]] = {}
+        self.violations: list[str] = []
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module in {"os", "tempfile", "shutil"}:
+            for alias in node.names:
+                self._imported_names[alias.asname or alias.name] = (
+                    node.module,
+                    alias.name,
+                )
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._function_stack.append(node.name)
+        self.generic_visit(node)
+        self._function_stack.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        description = self._describe(node)
+        if description is not None and not self._is_allowlisted():
+            self.violations.append(
+                f"{self._source_path.relative_to(PROJECT_ROOT)}:{node.lineno} "
+                f"{description}"
+            )
+        self.generic_visit(node)
+
+    def _is_allowlisted(self) -> bool:
+        enclosing = self._function_stack[-1] if self._function_stack else None
+        return (self._source_path, enclosing) in _ATOMIC_REPLACEMENT_ALLOWLIST
+
+    def _describe(self, node: ast.Call) -> str | None:
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and (func.value.id, func.attr) in _ATOMIC_REPLACEMENT_CALLS
+        ):
+            return f"{func.value.id}.{func.attr}(...)"
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in _PATHLIKE_REPLACEMENT_METHODS
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return f"<path-like>.{func.attr}(...)"
+        if (
+            isinstance(func, ast.Name)
+            and func.id in self._imported_names
+            and self._imported_names[func.id] in _ATOMIC_REPLACEMENT_CALLS
+        ):
+            module, attribute = self._imported_names[func.id]
+            return f"{module}.{attribute}(...) (imported as {func.id!r})"
+        return None
+
+
+def test_only_io_atomic_replaces_files_in_place():
+    """Issue #394: an atomic replace must go through `swing_copilot.io_atomic`.
+
+    `os.replace`/`os.rename`, the two low-level `tempfile` staging APIs, and
+    `shutil.move` -- called directly, via `from <module> import <name>`, or
+    (for `os.replace`/`os.rename`) via the method-style `Path.replace(...)`/
+    `Path.rename(...)` -- are how every self-reimplementation of atomic
+    replacement in this repository has looked so far -- not just the three
+    the issue's own manual survey named (`backtest/cli.py`,
+    `report/markdown_report.py`, `scripts/data_sync.py`), but also
+    `universe.py`, `storage/market_store.py`, and
+    `backtest/candidate_stream.py`, which only this AST walk caught, and
+    `scripts/data_sync.py`'s own `_download_verified` (`Path.replace`, not
+    `os.replace`), which only the method-style match catches. Banning the
+    primitive calls outside one file -- and outside the two functions
+    `_ATOMIC_REPLACEMENT_ALLOWLIST` names, each with its own reason -- is what
+    makes a future self-implementation fail loudly instead of shipping
+    unnoticed, the way the old
+    `test_no_package_reaches_into_analysis_for_atomic_writes` (which only
+    checked *imports*, not self-implementation) let this one through.
+    """
+    violations: list[str] = []
+    for source_path in _iter_scanned_source_files():
+        if source_path == _IO_ATOMIC_MODULE:
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        visitor = _AtomicReplacementVisitor(source_path)
+        visitor.visit(tree)
+        violations.extend(visitor.violations)
+
+    assert not violations, (
+        "atomic replacement belongs in swing_copilot.io_atomic, not a "
+        "self-implementation: " + ", ".join(violations)
+    )
+
+
+def test_every_error_class_derives_from_the_package_base():
+    """Issue #394: every `*Error` in `src/`/`scripts/` derives from `SwingCopilotError`.
+
+    AGENTS.md's "Error Handling" convention applies to `src/**/*.py` *and*
+    `scripts/**/*.py`: "Define a package-level base exception; derive all
+    specific errors from it." A class that instead derives straight from a
+    builtin (`OSError`, `RuntimeError`, a bare `Exception`) slips past any
+    `except SwingCopilotError` handler written to catch every domain failure
+    -- which is exactly what happened to `LatestMarkdownUpdateError`,
+    `DataSyncError`, and `scripts/check_daily_complete.py`'s
+    `IncompleteRunError` before this issue.
+
+    The class graph is keyed by `(module, class name)`, not bare class name:
+    duplicate class names already exist across this repository's modules
+    (`_StrictModel`, `_HttpGet`, `_EdgarClientLike`, `LedgerRow`), so a bare
+    name would let one module's definition silently overwrite another's in
+    the graph -- and a base name is resolved only within its own defining
+    module, matching how Python itself would resolve it (nothing here
+    derives from an `*Error` imported from a different module today; a base
+    name is otherwise either `SwingCopilotError` itself, handled as the
+    global terminal case, or a builtin that correctly fails to resolve).
+    """
+    #: `source_path -> {class name: base names}`, one dict per module so a
+    #: base name is only ever looked up inside the module that used it.
+    classes_by_module: dict[Path, dict[str, list[str]]] = {}
+    locations: dict[tuple[Path, str], str] = {}
+    for source_path in _iter_scanned_source_files():
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        module_classes: dict[str, list[str]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            base_names = [base.id for base in node.bases if isinstance(base, ast.Name)]
+            base_names += [
+                base.attr for base in node.bases if isinstance(base, ast.Attribute)
+            ]
+            module_classes[node.name] = base_names
+            locations.setdefault(
+                (source_path, node.name),
+                f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno}",
+            )
+        classes_by_module[source_path] = module_classes
+
+    def _derives_from_package_base(
+        source_path: Path, name: str, seen: frozenset[str]
+    ) -> bool:
+        if name == "SwingCopilotError":
+            return True
+        if name in seen:
+            return False  # a base cycle; never true for a real class graph.
+        return any(
+            _derives_from_package_base(source_path, base, seen | {name})
+            for base in classes_by_module[source_path].get(name, [])
+        )
+
+    violations = sorted(
+        f"{locations[(source_path, class_name)]} {class_name}"
+        for source_path, module_classes in classes_by_module.items()
+        for class_name in module_classes
+        if class_name.endswith("Error")
+        and not _derives_from_package_base(source_path, class_name, frozenset())
+    )
+
+    assert not violations, (
+        "every *Error in src/ and scripts/ must derive from "
+        "swing_copilot.exceptions.SwingCopilotError: " + ", ".join(violations)
+    )
+
+
+def test_strict_schema_config_is_declared_once():
+    """Issue #394: a skill-boundary schema's `extra="forbid"` has one home.
+
+    `StrictModel` (`src/swing_copilot/strict_model.py`) is that home. A
+    module that instead re-declares `ConfigDict(extra="forbid")` for its own
+    schemas can silently drift from it -- adding a field to one strict base
+    and not the other is exactly how the pre-#394 duplication among
+    `analysis/schemas.py`, `analysis/slices.py`, and `retro/schemas.py` grew.
+    """
+    violations: list[str] = []
+    for source_path in _iter_scanned_source_files():
+        if source_path == _STRICT_MODEL_MODULE or source_path in (
+            _STRICT_SCHEMA_ALLOWLIST
+        ):
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        violations.extend(
+            f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ConfigDict"
+            and _declares_extra_forbid(node)
+        )
+
+    assert not violations, (
+        'extra="forbid" belongs in swing_copilot.strict_model.StrictModel, not a '
+        "re-declaration: " + ", ".join(violations)
+    )
+
+
+def _declares_extra_forbid(config_dict_call: ast.Call) -> bool:
+    """Whether a `ConfigDict(...)` call passes `extra="forbid"`."""
+    return any(
+        keyword.arg == "extra"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value == "forbid"
+        for keyword in config_dict_call.keywords
+    )

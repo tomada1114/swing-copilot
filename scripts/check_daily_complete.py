@@ -54,12 +54,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from swing_copilot import research
+from swing_copilot.exceptions import SwingCopilotError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REPORTS_DIR = REPO_ROOT / "reports"
 
 
-class IncompleteRunError(Exception):
+class IncompleteRunError(SwingCopilotError):
     """The most recent run owes a qualitative analysis that is not there."""
 
 

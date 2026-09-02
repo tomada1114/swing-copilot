@@ -92,10 +92,8 @@ import argparse
 import fnmatch
 import hashlib
 import json
-import os
 import shutil
 import sys
-import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -105,13 +103,16 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import (
     AwareDatetime,
-    BaseModel,
     ConfigDict,
     SecretStr,
     ValidationError,
     field_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.io_atomic import write_bytes_atomically
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -140,7 +141,7 @@ _CREDENTIAL_FIELDS = ("r2_account_id", "r2_access_key_id", "r2_secret_access_key
 _REPORTS_RUN_MD_PARTS = 2  # "<date>/<run_id>.md"
 
 
-class DataSyncError(RuntimeError):
+class DataSyncError(SwingCopilotError):
     """A sync failure that should stop the command with a readable message."""
 
 
@@ -223,19 +224,17 @@ class R2Settings(BaseSettings):
 # --------------------------------------------------------------------------- #
 
 
-class FileEntry(BaseModel):
+class FileEntry(StrictModel):
     """One synced object's content fingerprint."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     sha256: str
     size: int
 
 
-class Manifest(BaseModel):
+class Manifest(StrictModel):
     """The bucket's commit record, written last by every `push`."""
-
-    model_config = ConfigDict(extra="forbid")
 
     generation: int
     updated_at: AwareDatetime
@@ -247,7 +246,7 @@ class Manifest(BaseModel):
         return sum(entry.size for entry in self.files.values())
 
 
-class SyncState(BaseModel):
+class SyncState(StrictModel):
     """The generation this working copy last pulled.
 
     `reports_window` defaults to `None` so a state file written before this
@@ -257,8 +256,6 @@ class SyncState(BaseModel):
     collection and append-only guard must tolerate keys this copy never
     fetched.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     generation: int
     reports_window: int | None = None
@@ -722,34 +719,28 @@ def write_state(
             working copy's `reports/` tree, or `None` for a full tree.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
+    destination = data_dir / STATE_FILE_NAME
     body = SyncState(
         generation=generation, reports_window=reports_window
     ).model_dump_json(indent=2)
-    _replace_atomically(data_dir / STATE_FILE_NAME, body.encode("utf-8"))
+    write_bytes_atomically(
+        destination,
+        body.encode("utf-8"),
+        temporary_path=_make_temporary_path(destination),
+    )
 
 
-def _replace_atomically(destination: Path, body: bytes) -> None:
-    """Write `body` through a temporary file in the destination directory."""
-    descriptor, name = _make_temporary(destination)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(body)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _make_temporary(destination: Path) -> tuple[int, str]:
-    """Open a hidden temporary file beside `destination`, on the same device.
+def _make_temporary_path(destination: Path) -> Path:
+    """A unique, hidden staging path beside `destination`, on the same device.
 
     Hidden (leading dot) so a leftover is skipped by `_is_excluded` rather
     than mistaken for a synced artifact, and beside the destination so that
-    `Path.replace` is a same-filesystem atomic rename.
+    the eventual replace is a same-filesystem atomic rename. Randomly
+    suffixed -- unlike `io_atomic`'s own deterministic `.{name}.tmp` -- so two
+    temporary files for the same destination (a retried `pull` racing a
+    leftover from an earlier crash) never collide.
     """
-    return tempfile.mkstemp(
-        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
-    )
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
 
 
 # --------------------------------------------------------------------------- #
@@ -826,16 +817,27 @@ def _download_verified(
     checked against the manifest's size and sha256, and is moved into place
     with `Path.replace`. A mismatch -- the signature of a `push` that died
     before writing its manifest -- raises, leaving the previous local file
-    untouched and no temporary file behind.
+    untouched and no temporary file behind. This streaming stage-then-verify
+    shape (rather than `io_atomic.write_bytes_atomically`, which needs the
+    whole body already in memory) is deliberate for `data/`/`reports/`
+    objects that can be large; it is named as an explicit exemption in
+    `tests/test_quality_contracts.py`'s `_ATOMIC_REPLACEMENT_ALLOWLIST`
+    rather than left an accidental blind spot.
+
+    The staging file is created mode `0600` before anything is written to
+    it, and that mode carries through `Path.replace` onto `destination` --
+    matching `tempfile.mkstemp`'s owner-only default, so a pulled artifact
+    (the DuckDB trading history, the run archive) never becomes
+    group/world-readable the way plain `Path.open("wb")` (`0666 & ~umask`)
+    would leave it.
 
     Raises:
         DataSyncError: When the downloaded bytes disagree with the manifest.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = _make_temporary(destination)
-    os.close(descriptor)
-    temporary = Path(name)
+    temporary = _make_temporary_path(destination)
     try:
+        temporary.touch(mode=0o600, exist_ok=False)
         store.download(key, temporary)
         size = temporary.stat().st_size
         digest = _sha256(temporary)

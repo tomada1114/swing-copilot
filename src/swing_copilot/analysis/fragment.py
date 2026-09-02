@@ -34,7 +34,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Final, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import Field, model_validator
 
 from swing_copilot.analysis.schemas import (
     FilingAnalysis,
@@ -51,6 +51,7 @@ from swing_copilot.analysis.validate import (
     calendar_source_bodies,
     verify_symbol_analysis,
 )
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,7 +84,7 @@ _ABSENT_ASSESSMENT: Final = ScreeningAssessment(summary="")
 _ABSENT_VERDICT: Final = Verdict(recommendation="skip")
 
 
-class AnalysisFragment(BaseModel):
+class AnalysisFragment(StrictModel):
     """One expert's `analysis_work/<kind>-<SYMBOL>.json`.
 
     The three identity fields are copied verbatim from `analysis_input.json`.
@@ -103,15 +104,13 @@ class AnalysisFragment(BaseModel):
     never declared, so it is required rather than optional.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     run_id: UUID
     as_of: date
     input_digest: Sha256Digest
     symbol: NonBlankText
     ac_check: NonBlankText
     news_summary: NewsSummary | None = None
-    filing_analyses: list[FilingAnalysis] = []
+    filing_analyses: list[FilingAnalysis] = Field(default_factory=list)
     #: `source_id` -> `filing_body_digest(text)` for every filing the expert
     #: was given, copied verbatim from its `slice-filings-<SYMBOL>.json`.
     #: Filings the expert read but wrote nothing about are included on purpose:

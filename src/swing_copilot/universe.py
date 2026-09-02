@@ -13,7 +13,6 @@ from __future__ import annotations
 import csv
 import dataclasses
 import io
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ import pandas as pd
 
 from swing_copilot import __version__
 from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.retry import retry_external_call
 
 if TYPE_CHECKING:
@@ -147,25 +147,11 @@ def _read_snapshot(snapshot_path: Path) -> list[UniverseMember] | None:
 
 def _write_snapshot(snapshot_path: Path, members: Sequence[UniverseMember]) -> None:
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            newline="",
-            encoding="utf-8",
-            dir=snapshot_path.parent,
-            prefix=f".{snapshot_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            tmp_path = Path(handle.name)
-            writer = csv.DictWriter(handle, fieldnames=_SNAPSHOT_FIELDS)
-            writer.writeheader()
-            writer.writerows(dataclasses.asdict(member) for member in members)
-        tmp_path.replace(snapshot_path)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=_SNAPSHOT_FIELDS)
+    writer.writeheader()
+    writer.writerows(dataclasses.asdict(member) for member in members)
+    write_text_atomically(snapshot_path, buffer.getvalue())
 
 
 def _fetch_and_write_snapshot(options: UniverseFetchOptions) -> list[UniverseMember]:

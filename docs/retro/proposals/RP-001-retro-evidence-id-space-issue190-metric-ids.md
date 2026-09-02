@@ -2,7 +2,7 @@
 
 - 提案日: 2026-09-02
 - level: L2
-- status: proposed
+- status: applied
 - proposal_key: `retro:evidence_id_space:issue190_metric_ids`
 - 対象: `src/swing_copilot/retro/validate.py の evidence_id_space、および .claude/skills/swing-retro/references/result-schema.md の証拠 ID 表`
 - 証拠の種類: qualitative
@@ -31,3 +31,15 @@ SKILL.md は separation を 3 版とも読むこと、tracked_performance を pr
 - 証拠空間を広げることは、実効日数の少ないペアード指標を字面のゲート通過だけで根拠にする余地も同時に広げる。RP-2（日次差の本数の公表）と併せて適用しない限り、L1 の床が見かけ上通りやすくなる副作用がありうる
 - 過去の retro_result を再 ingest した場合、以前は非表示だった項目が表示されるようになるため、既存の retro_report.md との差分が生じうる
 - 証拠空間の定義が広がることで、どの ID が引用可能かをスキル側が正しく把握できているかの検証負担が増える
+
+## 適用記録
+
+- 日付: 2026-09-02
+- PR: [#416](https://github.com/tomada1114/swing-copilot/pull/416)（`feat/rp-001-evidence-id-space`、`fix/retro-ledger-committed-test`（PR #415）マージ後の `origin/main` から分岐）
+- 実装: `evidence_id_space()`（`src/swing_copilot/retro/validate.py`）へ `aggregates.separation_paired` / `separation_paired_excess` / `tracked_performance` の各 `metric_id` を追加。`.claude/skills/swing-retro/references/result-schema.md` の証拠 ID 表へ対応する 2 行を追記。`docs/04_detailed_design.md` §3.23 の証拠ID空間節へ注記を追加
+- 検証（verification_plan どおり実行）:
+  1. 回帰テスト `tests/retro/test_export.py::TestBuildRetroInput::test_every_metric_id_the_dossier_publishes_is_citable_evidence` を追加し、変更前に `AssertionError`（`metric:tracked_performance:*` / `metric:separation_paired:*` / `metric:separation_paired_excess:*` が証拠空間に無いことによる失敗）で失敗すること、変更後に成功することを確認した
+  2. `uv run pytest tests/retro -q` → 393 passed
+  3. `just verify`（lint / docs-check / test-changed） → 全て成功（`src/swing_copilot/retro/validate.py` の変更行カバレッジ 100.0%、455 passed）
+  - 合否基準（提案どおり）を全て満たした: 追加テストが変更前に失敗し変更後に成功、既存 retro テストの退行なし、`retro_input.json` のスキーマ・`input_digest` は無変更（`RetroInput` / `export.py` は今回変更していない）
+- 他の欠落確認: `news_supply` / `verdict_mix` / `aggregates_by_config` は確認した限り既に `evidence_id_space()` に登録済みで、他に欠落している公表 metric ファミリーは見つからなかった（RP-001 の対象外のため変更せず）

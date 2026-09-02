@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from swing_copilot.storage.market_store import (
+    BARS_FORMAT_MARKER_NAME,
+    BarsFormatError,
+    validate_bars_format,
+)
 from tests.support.script_loader import load_script_module
 
 if TYPE_CHECKING:
@@ -22,6 +27,8 @@ FIXED_NOW = datetime(2026, 8, 19, 23, 0, tzinfo=UTC)
 DUCKDB_KEY = "data/copilot.duckdb"
 BARS_2024_KEY = "data/bars/year=2024/data.parquet"
 BARS_2025_KEY = "data/bars/year=2025/data.parquet"
+BARS_MARKER_KEY = f"data/bars/{BARS_FORMAT_MARKER_NAME}"
+MARKER_BODY = b'{"basis": "raw", "version": 2}\n'
 
 REPORT_RUN_ID = "33333333-3333-4333-8333-333333333333"
 REPORT_RUN_DATE = "2026-08-19"
@@ -372,6 +379,48 @@ def test_sync_state_file_is_not_part_of_the_synced_set(tmp_path):
 
     assert (data_dir / data_sync.STATE_FILE_NAME).is_file()
     assert not [key for key in store.objects if data_sync.STATE_FILE_NAME in key]
+
+
+def test_bars_format_marker_travels_with_its_partitions_to_a_fresh_mirror(tmp_path):
+    """The marker must sync, or every fresh runner refuses the store it pulled.
+
+    `MarketStore` fails closed on a partitioned bars root whose adjustment
+    -basis marker is missing (Issue #413), and the scheduled run always starts
+    from an empty checkout. Mirroring the Parquet files without `_format.json`
+    would therefore publish a store that no CI run can read, with an error
+    telling the operator to run the rebuild they had just run.
+    """
+    origin = make_workspace(tmp_path, "origin")
+    _write(origin / "bars" / BARS_FORMAT_MARKER_NAME, MARKER_BODY)
+    store = FakeObjectStore()
+
+    push_report = push(store, origin)
+
+    assert BARS_MARKER_KEY in push_report.uploaded
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    pull_report = pull(store, mirror)
+
+    assert BARS_MARKER_KEY in pull_report.downloaded
+    # The end-to-end invariant, not merely "a file arrived": the store itself
+    # accepts the mirrored tree.
+    validate_bars_format(mirror / "bars")
+
+
+def test_a_mirror_without_the_bars_format_marker_is_rejected_by_the_store(tmp_path):
+    """The counterfactual that pins why the test above matters."""
+    origin = make_workspace(tmp_path, "origin")
+    store = FakeObjectStore()
+    push(store, origin)
+
+    mirror = tmp_path / "mirror" / "data"
+    mirror.mkdir(parents=True)
+    pull(store, mirror)
+
+    assert BARS_MARKER_KEY not in store.objects
+    with pytest.raises(BarsFormatError):
+        validate_bars_format(mirror / "bars")
 
 
 # --------------------------------------------------------------------------- #

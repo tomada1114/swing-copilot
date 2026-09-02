@@ -72,7 +72,10 @@ _MAX_REPORTED_NON_FINITE_BARS = 5
 #: The stored-bar columns `read_corporate_actions` mirrors for its own rows.
 CORPORATE_ACTION_COLUMNS = (*ACTIONS_COLUMNS, "provider", "fetched_at")
 #: Marker file recording which basis the partitions hold, written beside them.
-_FORMAT_MARKER_NAME = "_format.json"
+#: Public because `scripts/data_sync.py` has to mirror it to R2 alongside the
+#: partitions: a bars tree that arrives on a fresh runner without its marker
+#: reads as an unmigrated store and fails every `read_bars`/`write_bars`.
+BARS_FORMAT_MARKER_NAME = "_format.json"
 #: Its only accepted content. `basis` is prose for a human reading the file;
 #: `version` is what a future migration would bump.
 _FORMAT_MARKER_PAYLOAD = {"basis": "raw", "version": 2}
@@ -449,7 +452,7 @@ def _reject_non_finite_bars(df: pd.DataFrame) -> None:
 
 def _format_marker_path(parquet_root: Path) -> Path:
     """Where a bars root records the adjustment basis it holds."""
-    return parquet_root / _FORMAT_MARKER_NAME
+    return parquet_root / BARS_FORMAT_MARKER_NAME
 
 
 def write_bars_format_marker(parquet_root: Path) -> None:

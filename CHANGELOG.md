@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`_rebase_position`）から `corporate_actions` のイベント駆動へ置き換えた。`research.bars()`
   は既定で生値を返し、`as_of` を渡すと当時見えた価格を再現する。**既存ストアは
   `copilot-backfill rebuild` で全履歴を再構築する必要がある**（pull → rebuild → check → push）
+- `scripts/data_sync.py` の同期対象に `data/bars/_format.json` を加えた（Issue #413）。
+  これまで `data/` 側は `*.duckdb` と `bars/**/*.parquet` だけを運んでいたため、生値へ移行した
+  ストアを push しても形式マーカーだけが R2 に載らず、空チェックアウトから `pull` する定時実行
+  には毎回マーカー無しのパーティションが降ってくる——`BarsFormatError` で価格ステップ（fatal）が
+  落ち、しかもエラーはすでに実行済みの `copilot-backfill rebuild` を案内する行き止まりになる。
+  マーカー名は `BARS_FORMAT_MARKER_NAME` として `market_store` から公開し、同期側と共有する
 
 ### Added
 

@@ -3,7 +3,9 @@
 The R2 bucket is the source of truth for two local trees, synced together as
 one commit:
 
-- `data/`: `copilot.duckdb` and the `data/bars/year=YYYY/*.parquet` Hive tree.
+- `data/`: `copilot.duckdb`, the `data/bars/year=YYYY/*.parquet` Hive tree, and
+  that tree's `_format.json` adjustment-basis marker (without it a pulled
+  bars tree reads as an unmigrated store and fails every price step).
 - `reports/`: the daily run archive only -- `reports/<date>/<run_id>.md` and
   everything under `reports/<date>/<run_id>/` (the `analysis_input.json` /
   `analysis_result.json` pair `copilot-retro collect` needs). Local/derived
@@ -112,6 +114,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.io_atomic import write_bytes_atomically
+from swing_copilot.storage.market_store import BARS_FORMAT_MARKER_NAME
 from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
@@ -417,11 +420,23 @@ def _is_uuid(value: str) -> bool:
 
 
 def _has_data_sync_shape(relative: PurePosixPath) -> bool:
-    """Whether a `data/`-relative path is one of the two synced artifacts."""
+    """Whether a `data/`-relative path is one of the synced artifacts.
+
+    The bars tree's `_format.json` travels with its partitions on purpose
+    (Issue #413): it records the adjustment basis those partitions hold, and
+    `MarketStore` fails closed on a partitioned root whose marker is missing.
+    Mirroring the Parquet files without it would hand every fresh runner a
+    store it must refuse to read.
+    """
     parts = relative.parts
     if len(parts) == 1:
         return relative.suffix == ".duckdb"
-    return parts[0] == BARS_DIR_NAME and relative.suffix == ".parquet"
+    if parts[0] != BARS_DIR_NAME:
+        return False
+    return relative.suffix == ".parquet" or parts == (
+        BARS_DIR_NAME,
+        BARS_FORMAT_MARKER_NAME,
+    )
 
 
 def _has_reports_sync_shape(relative: PurePosixPath) -> bool:

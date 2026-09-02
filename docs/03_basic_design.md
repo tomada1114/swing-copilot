@@ -384,7 +384,7 @@ swing-copilotは目的別に2層のデータストアを使い分ける。単一
 データの正本はCloudflare R2のプライベートバケットであり、ワークスペースの`data/`・`reports/`はその作業コピーである。GitHub Actionsのランナーは実行ごとに破棄されるため、**永続化はR2への書き戻しで完了する**。同期は`scripts/data_sync.py`（`pull`／`push`／`status`、justfileの`data-pull`／`data-push`／`data-status`）が担い、DuckDBファイルは常にバイト列として転送する（同期のためにDuckDBとして開かない）。`manifest.json`・`generation`・同期状態ファイルはいずれも`data/`と`reports/`で共有する1組であり、2つのツリーは常に1回のpushで一緒にコミットされる（Issue #370）。
 
 - 同期対象（R2が正本）:
-    - `data/`（Parquet: `bars/`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない
+    - `data/`（Parquet: `bars/`とその形式マーカー`bars/_format.json`、DuckDB: `copilot.duckdb`）。`copilot_dry_run.duckdb`と`*.bak-*`は同期しない。**マーカーはパーティションと必ず一緒に運ぶ**——`MarketStore`はマーカーの無いパーティション済みルートを未移行ストアとしてfail-fastするので（3.7節、Issue #413）、Parquetだけをミラーすると毎回空チェックアウトから始まる定時実行が、自分でpullしたストアを読めずに落ちる
     - `reports/<run_date>/<run_id>.md`（run別生成Markdown）と`reports/<run_date>/<run_id>/`配下（`analysis_input.json`・`analysis_result.json`・`report_context.json`等、`copilot-retro collect`がverdict取り込みに読む日次runアーカイブ一式）
 - 同期対象外（ローカル／ランナー限り）: `reports/latest.md`（最新runの便宜コピー）、`reports/backtests/`・`reports/dry_run/`・`reports/assets/`・`reports/retro/`（バックテスト・dry-run・静的アセット・retroの成果物で、日次runアーカイブではない）。GitHub Actions上の実行は`reports/`全体をworkflow artifactとしても保存する（14日保持）
 - 定性分析でverdictsテーブルを埋める`copilot-retro collect`（設計判断D2、`docs/goal-prompts/swing-copilot-retrospective/decisions.md`）は、日次job内でR2への書き戻し直前に一度実行する。無人実行経路でこれを走らせる場所が存在しなかったことが、直近1か月分のverdict欠落（Issue #370）の原因だった

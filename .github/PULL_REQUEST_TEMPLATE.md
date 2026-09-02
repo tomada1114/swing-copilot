@@ -10,7 +10,7 @@
 
 ## Checklist
 
-- [ ] Full local verification passes on the committed tree (`just verify`)
+- [ ] Fast local verification passes on the committed tree (`just verify`; CI runs the full gate)
 - [ ] Applicable domain invariants in `AGENTS.md` have regression coverage
 - [ ] Documentation updated (if applicable)
 - [ ] No breaking changes (or documented in description)

@@ -15,22 +15,29 @@ mypy strict, pytest, DuckDB, and Parquet.
 ## Quick Reference
 
 ```bash
-just install   # Install all dependency groups and git hooks
-just fmt       # Apply ruff fixes and formatting (mutating)
-just lint      # Ruff lint/format check + mypy strict
-just test      # Pytest (parallel, `-n auto`) with line and branch coverage >= 95%
-just dashboard # Serve the read-only decision-history dashboard (http://127.0.0.1:8787)
-just docs      # Serve docs locally
-just docs-check # Build MkDocs with --strict
-just build     # Build distribution packages
-just smoke     # Build and verify the wheel in a temp environment
-just check     # Apply formatting, then run lint and tests
-just verify    # Non-mutating release gate: lint, docs-check, smoke, test
+just install     # Install all dependency groups and git hooks
+just fmt         # Apply ruff fixes and formatting (mutating)
+just lint        # Ruff lint/format check + mypy strict
+just test        # Pytest (parallel, `-n auto`) with line and branch coverage >= 95%
+just test-changed # Only the tests this diff can affect, + >=90% coverage on changed files
+just dashboard   # Serve the read-only decision-history dashboard (http://127.0.0.1:8787)
+just docs        # Serve docs locally
+just docs-check  # Build MkDocs with --strict
+just build       # Build distribution packages
+just smoke       # Build and verify the wheel in a temp environment
+just check       # Apply formatting, then run lint and tests
+just verify      # Fast pre-PR gate: lint, docs-check, test-changed (diff-scoped)
+just verify-full # Full non-mutating release gate: lint, docs-check, smoke, test
 ```
 
 Without Just, use the corresponding `uv run` commands in `justfile`. During
 development, run the narrowest relevant pytest target first; run `just verify`
-before a PR or completion claim.
+before a PR (CI runs the full gate on every PR regardless, including the
+repo-wide 95% coverage floor and the wheel smoke test — `just verify`
+deliberately does not duplicate those locally; a selection gap that lets
+something through locally and fails in CI is fixed as a rule-table gap in
+`scripts/diff_gate.py`, in the same PR). Run `just verify-full` before a
+release or a direct-to-main completion claim.
 
 ## Architecture
 
@@ -191,7 +198,7 @@ the divergence, and update the stale canonical source or request a decision.
 - Anything that changes behavior, public API, storage schema, or configuration
   semantics goes through a branch and a pull request.
 - Direct-to-`main` does not relax the quality gates: run the matching checks
-  (`just verify` before a completion claim on code changes) either way.
+  (`just verify-full` before a completion claim on code changes) either way.
 - This is the workflow for human/agent development. It does not apply to the
   P8 retrospective apply flow, which is required to be one proposal per PR.
 

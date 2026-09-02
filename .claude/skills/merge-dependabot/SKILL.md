@@ -137,13 +137,17 @@ uv lock
 git add uv.lock && git commit -m "deps: regenerate uv.lock"
 ```
 
-Verify locally before pushing:
+Verify locally before pushing. A dependency bump changes `uv.lock`, which
+`just verify`'s diff-scoped test selection always treats as full-suite-only
+(too broad a blast radius to scope), but it does not run the wheel smoke test
+that catches a broken install from a new dependency version — use the full
+gate here instead:
 
 ```bash
-just verify     # lint + test + strict docs build + wheel smoke
+just verify-full     # lint + test + strict docs build + wheel smoke
 ```
 
-If `just verify` fails, fix it on the branch if the fix is mechanical (a lint rule
+If `just verify-full` fails, fix it on the branch if the fix is mechanical (a lint rule
 renamed by a new ruff, a new mypy error). If it needs a judgement call, stop and
 report — do not merge around it.
 

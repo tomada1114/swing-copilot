@@ -139,6 +139,32 @@ jobs:
         with:
           config: typos.toml
 
+  docs:
+    name: Docs (strict build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --group docs --locked
+
+      # `docs/reference.md` is `::: swing_copilot` (mkdocstrings,
+      # `show_source: true`), so a docstring anywhere in `src/` can break this
+      # build -- and `.github/workflows/docs.yml` only runs `mkdocs build
+      # --strict` on push to main, i.e. after the PR that broke it already
+      # merged. This job closes that gap: it runs on every PR regardless of
+      # whether the contributor ran `just verify` locally first.
+      - name: Build docs strictly
+        run: uv run mkdocs build --strict
+
   build:
     name: Build & Smoke Test
     runs-on: ubuntu-latest

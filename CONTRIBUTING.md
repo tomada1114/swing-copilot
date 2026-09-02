@@ -33,8 +33,12 @@ just fmt
 # Lint + type check
 just lint
 
-# Run tests
+# Run the whole suite, with the repo-wide 95% coverage gate
 just test
+
+# Run only the tests this diff can affect, with a 90% coverage gate on the
+# changed source files only
+just test-changed
 
 # Build and verify the wheel in an isolated temp environment
 just smoke
@@ -42,8 +46,14 @@ just smoke
 # Mutating development check (format → lint → test)
 just check
 
-# Non-mutating PR/release gate (lint + test + strict docs + wheel smoke)
+# Fast, non-mutating pre-PR gate (lint + strict docs + test-changed).
+# CI runs the full gate (95% repo-wide coverage, wheel smoke test, and more)
+# on every PR regardless, so this deliberately does not duplicate it locally.
 just verify
+
+# Full non-mutating gate, no diff scoping (lint + strict docs + wheel smoke +
+# the whole suite) — for a release or a direct-to-main completion claim
+just verify-full
 ```
 
 **Without Just**, run the equivalent commands:
@@ -55,6 +65,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src scripts tests
 uv run pytest -n auto --cov=swing_copilot --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=95
+uv run python scripts/diff_gate.py test  # instead of the pytest line above, for a diff-scoped run
 uv run mkdocs build --strict
 uv build && uv run python scripts/smoke_test.py
 ```

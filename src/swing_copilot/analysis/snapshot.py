@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     TypeAdapter,
     ValidationError,
     model_validator,
@@ -33,6 +31,7 @@ from swing_copilot.documents import read_json_document
 from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import RunStatus
 from swing_copilot.report.daily_brief import DailyBrief
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from typing import Any
@@ -46,10 +45,8 @@ CONTEXT_SCHEMA_VERSION = "report-context-v4"
 _BRIEF_ADAPTER: TypeAdapter[DailyBrief] = TypeAdapter(DailyBrief)
 
 
-class _ReportContextDocument(BaseModel):
+class _ReportContextDocument(StrictModel):
     """Strict serialized envelope for an archived report context."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["report-context-v4"]
     run_id: UUID

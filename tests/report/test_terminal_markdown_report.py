@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -860,15 +861,15 @@ def test_latest_replace_failure_preserves_previous_latest_and_cleans_temp(
 ) -> None:
     latest = tmp_path / "latest.md"
     latest.write_text("previous", encoding="utf-8")
-    original_replace = Path.replace
+    original_replace = os.replace
 
-    def fail_latest_replace(self: Path, target: Path) -> Path:
-        if self.name == ".latest.md.tmp":
+    def fail_latest_replace(source: str | Path, target: str | Path) -> None:
+        if Path(source).name == ".latest.md.tmp":
             message = "simulated latest replacement failure"
             raise OSError(message)
-        return original_replace(self, target)
+        original_replace(source, target)
 
-    monkeypatch.setattr(Path, "replace", fail_latest_replace)
+    monkeypatch.setattr("swing_copilot.io_atomic.os.replace", fail_latest_replace)
 
     with pytest.raises(OSError, match="simulated latest replacement failure"):
         write_markdown_report(_brief(), RunStatus.SUCCESS, tmp_path)

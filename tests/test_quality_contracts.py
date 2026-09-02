@@ -664,3 +664,169 @@ def _collected_test_nodes(test_path: Path) -> set[str]:
                 ):
                     nodes.add(f"{relative_path}::{node.name}::{method.name}")
     return nodes
+
+
+# --------------------------------------------------------------------------- #
+#  Issue #394: cross-cutting primitives (atomic replacement, exception base,
+#  strict schema base) get exactly one implementation each, mechanically
+#  enforced -- not just documented in AGENTS.md and hoped for.
+# --------------------------------------------------------------------------- #
+
+_IO_ATOMIC_MODULE = PROJECT_ROOT / "src/swing_copilot/io_atomic.py"
+_STRICT_MODEL_MODULE = PROJECT_ROOT / "src/swing_copilot/strict_model.py"
+#: `config.py` keeps its own pre-existing `_StrictModel` (and the
+#: `StrategiesConfig` family built on it) as this test's one allowlisted
+#: exception. Issue #396 owns `StrategiesConfig` end to end and is already
+#: in flight against this same file; folding it into `StrictModel` here would
+#: collide with that work rather than avoid it. Tracked as a follow-up once
+#: #396 lands, not silently forgotten.
+_STRICT_SCHEMA_ALLOWLIST = frozenset({PROJECT_ROOT / "src/swing_copilot/config.py"})
+#: `os.replace`/`tempfile.mkstemp`/`tempfile.NamedTemporaryFile`, as
+#: `(module, attribute)` pairs -- the three primitives every self-implemented
+#: atomic replace in this repository has been built from so far.
+_ATOMIC_REPLACEMENT_CALLS = frozenset(
+    {
+        ("os", "replace"),
+        ("tempfile", "mkstemp"),
+        ("tempfile", "NamedTemporaryFile"),
+    }
+)
+
+
+def _iter_scanned_source_files() -> list[Path]:
+    """Every `src/` and `scripts/` module the Issue #394 contracts scan."""
+    return sorted((PROJECT_ROOT / "src").rglob("*.py")) + sorted(
+        (PROJECT_ROOT / "scripts").rglob("*.py")
+    )
+
+
+def test_only_io_atomic_replaces_files_in_place():
+    """Issue #394: an atomic replace must go through `swing_copilot.io_atomic`.
+
+    `os.replace` and the two low-level `tempfile` staging APIs are how every
+    self-reimplementation of atomic replacement in this repository has looked
+    so far -- not just the three the issue's own manual survey named
+    (`backtest/cli.py`, `report/markdown_report.py`, `scripts/data_sync.py`),
+    but also `universe.py`, `storage/market_store.py`, and
+    `backtest/candidate_stream.py`, which only this AST walk caught. Banning
+    the primitive calls outside one file is what makes a future
+    self-implementation fail loudly instead of shipping unnoticed, the way
+    the old `test_no_package_reaches_into_analysis_for_atomic_writes` (which
+    only checked *imports*, not self-implementation) let this one through.
+    """
+    violations: list[str] = []
+    for source_path in _iter_scanned_source_files():
+        if source_path == _IO_ATOMIC_MODULE:
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        violations.extend(
+            f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno} "
+            f"{node.func.value.id}.{node.func.attr}(...)"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and (node.func.value.id, node.func.attr) in _ATOMIC_REPLACEMENT_CALLS
+        )
+
+    assert not violations, (
+        "atomic replacement belongs in swing_copilot.io_atomic, not a "
+        "self-implementation: " + ", ".join(violations)
+    )
+
+
+def test_every_error_class_derives_from_the_package_base():
+    """Issue #394: every `*Error` in `src/`/`scripts/` derives from `SwingCopilotError`.
+
+    AGENTS.md's "Error Handling" convention applies to `src/**/*.py` *and*
+    `scripts/**/*.py`: "Define a package-level base exception; derive all
+    specific errors from it." A class that instead derives straight from a
+    builtin (`OSError`, `RuntimeError`, a bare `Exception`) slips past any
+    `except SwingCopilotError` handler written to catch every domain failure
+    -- which is exactly what happened to `LatestMarkdownUpdateError`,
+    `DataSyncError`, and `scripts/check_daily_complete.py`'s
+    `IncompleteRunError` before this issue.
+    """
+    bases_by_name: dict[str, list[str]] = {}
+    locations: dict[str, str] = {}
+    for source_path in _iter_scanned_source_files():
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            base_names = [base.id for base in node.bases if isinstance(base, ast.Name)]
+            base_names += [
+                base.attr for base in node.bases if isinstance(base, ast.Attribute)
+            ]
+            bases_by_name[node.name] = base_names
+            locations.setdefault(
+                node.name, f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+            )
+
+    def _derives_from_package_base(name: str, seen: frozenset[str]) -> bool:
+        if name == "SwingCopilotError":
+            return True
+        if name in seen:
+            return False  # a base cycle; never true for a real class graph.
+        return any(
+            _derives_from_package_base(base, seen | {name})
+            for base in bases_by_name.get(name, [])
+        )
+
+    violations = [
+        f"{locations[name]} {name}"
+        for name in sorted(bases_by_name)
+        if name.endswith("Error") and not _derives_from_package_base(name, frozenset())
+    ]
+
+    assert not violations, (
+        "every *Error in src/ and scripts/ must derive from "
+        "swing_copilot.exceptions.SwingCopilotError: " + ", ".join(violations)
+    )
+
+
+def test_strict_schema_config_is_declared_once():
+    """Issue #394: a skill-boundary schema's `extra="forbid"` has one home.
+
+    `StrictModel` (`src/swing_copilot/strict_model.py`) is that home. A
+    module that instead re-declares `ConfigDict(extra="forbid")` for its own
+    schemas can silently drift from it -- adding a field to one strict base
+    and not the other is exactly how the pre-#394 duplication among
+    `analysis/schemas.py`, `analysis/slices.py`, and `retro/schemas.py` grew.
+    """
+    violations: list[str] = []
+    for source_path in _iter_scanned_source_files():
+        if source_path == _STRICT_MODEL_MODULE or source_path in (
+            _STRICT_SCHEMA_ALLOWLIST
+        ):
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        violations.extend(
+            f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ConfigDict"
+            and _declares_extra_forbid(node)
+        )
+
+    assert not violations, (
+        'extra="forbid" belongs in swing_copilot.strict_model.StrictModel, not a '
+        "re-declaration: " + ", ".join(violations)
+    )
+
+
+def _declares_extra_forbid(config_dict_call: ast.Call) -> bool:
+    """Whether a `ConfigDict(...)` call passes `extra="forbid"`."""
+    return any(
+        keyword.arg == "extra"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value == "forbid"
+        for keyword in config_dict_call.keywords
+    )

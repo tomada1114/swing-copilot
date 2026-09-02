@@ -14,8 +14,8 @@ which loosely paraphrases the key as `(symbol, fiscal_period)`).
 
 from __future__ import annotations
 
+import io
 import math
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +24,7 @@ import duckdb
 import pandas as pd
 
 from swing_copilot.exceptions import StorageSchemaError, SwingCopilotError
+from swing_copilot.io_atomic import write_bytes_atomically
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -452,18 +453,9 @@ class MarketStore:
         combined = combined.drop_duplicates(subset=["symbol", "date"], keep="last")
         combined = combined.sort_values(["symbol", "date"]).reset_index(drop=True)
 
-        with tempfile.NamedTemporaryFile(
-            dir=partition_dir,
-            prefix=".data.parquet.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            tmp_file = Path(handle.name)
-        try:
-            combined.to_parquet(tmp_file, index=False)
-            tmp_file.replace(partition_file)
-        finally:
-            tmp_file.unlink(missing_ok=True)
+        buffer = io.BytesIO()
+        combined.to_parquet(buffer, index=False)
+        write_bytes_atomically(partition_file, buffer.getvalue())
 
     def read_bars(
         self, symbols: list[str], start: date, end: date, as_of: date

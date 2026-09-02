@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, date, datetime
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 import pytest
@@ -22,6 +21,9 @@ from swing_copilot.storage.market_store import (
     ParquetRootNotFoundError,
     resolve_parquet_root,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _bars(rows: list[tuple[str, str, float, float, float, float, int]]) -> pd.DataFrame:
@@ -126,13 +128,13 @@ class TestWriteAndReadBars:
             msg = "replace failed"
             raise OSError(msg)
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _boom)
 
         with pytest.raises(OSError, match="replace failed"):
             market_store.write_bars(corrected)
 
         assert partition_file.read_bytes() == previous_bytes
-        assert list(partition_dir.glob(".data.parquet.*.tmp")) == []
+        assert list(partition_dir.glob(".data.parquet.tmp")) == []
 
     def test_as_of_excludes_future_dated_bars(self, market_store):
         market_store.write_bars(

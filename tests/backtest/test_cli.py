@@ -19,7 +19,6 @@ from swing_copilot.backtest.cli import (
     DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
-    _atomic_write,
     _compose_dependencies,
     _entry_grid_output_path,
     _grid_output_path,
@@ -61,6 +60,7 @@ from swing_copilot.backtest.sensitivity import (
     entry_limit_grid_values,
 )
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.risk.checks import EarningsGuardInput
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
@@ -351,28 +351,20 @@ class TestMissingDataSymbols:
 
 
 class TestAtomicWrite:
-    def test_writes_content(self, tmp_path):
-        path = tmp_path / "report.md"
-        _atomic_write(path, "hello")
-        assert path.read_text(encoding="utf-8") == "hello"
+    """Issue #394: the CLI writes its reports through the shared writer.
 
-    def test_failure_preserves_previous_destination_and_cleans_up_tmp(
-        self, tmp_path, monkeypatch
-    ):
-        path = tmp_path / "report.md"
-        path.write_text("original", encoding="utf-8")
+    The atomic-replace contract itself (temp file in the same directory,
+    old file preserved and temp cleaned up on failure) is pinned once, at its
+    dependency-zero home in `tests/test_io_atomic.py`. This just has to prove
+    the CLI has not quietly grown its own copy again.
+    """
 
-        def _boom(self, _target):
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr(Path, "replace", _boom)
-
-        with pytest.raises(OSError, match="disk full"):
-            _atomic_write(path, "new content")
-
-        assert path.read_text(encoding="utf-8") == "original"
-        assert list(tmp_path.glob(".report.md.*.tmp")) == []
+    def test_report_writing_calls_the_shared_atomic_text_writer(self):
+        # `cli_module.write_text_atomically` would work at runtime too, but
+        # `cli.py` never declares it in `__all__`, so mypy strict's implicit
+        # re-export check rejects the static attribute access; `vars()`
+        # sidesteps that without weakening what the assertion proves.
+        assert vars(cli_module)["write_text_atomically"] is write_text_atomically
 
 
 class TestRenderTerminal:

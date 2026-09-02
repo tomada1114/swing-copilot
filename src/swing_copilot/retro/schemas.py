@@ -26,8 +26,6 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Self, cast
 from uuid import UUID
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     JsonValue,
     StringConstraints,
@@ -44,6 +42,7 @@ from swing_copilot.analysis.schemas import (
     SourceId,
     canonical_json_digest,
 )
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -72,10 +71,14 @@ EvidenceBasis = Literal["quantitative", "qualitative", "mixed"]
 _VERIFICATION_PLAN_REQUIRED_LEVELS = frozenset({"L1", "L2"})
 
 
-class _StrictModel(BaseModel):
-    """Base for the dossier: reject unknown fields at every level."""
+class _StrictModel(StrictModel):
+    """Base for the dossier: reject unknown fields at every level.
 
-    model_config = ConfigDict(extra="forbid")
+    `StrictModel` (Issue #394) is the one place that declares
+    `extra="forbid"`; this stays a real subclass (not a bare alias) so
+    ruff's `runtime-evaluated-base-classes` still traces every subclass
+    below back to `pydantic.BaseModel`.
+    """
 
 
 class EvaluationSettings(_StrictModel):
@@ -382,7 +385,7 @@ class SurpriseDossier(_StrictModel):
     #: Worst close-to-close drawdown from the run's close inside the evaluated
     #: window; `None` when the bars needed to compute it are missing.
     max_adverse_return_pct: float | None
-    input_filing_coverage: list[ArchivedFilingCoverage] = []
+    input_filing_coverage: list[ArchivedFilingCoverage] = Field(default_factory=list)
     #: The news supply this verdict was made under (Issue #154). `None` when
     #: the archive predates the measurement -- the material for telling a
     #: `sufficient` grade that was still too thin from one that held up.
@@ -512,7 +515,7 @@ class RetroInput(_StrictModel):
     #: Hit rate per evidence kind (Issue #191). Defaults to empty so
     #: `retro_input.json` documents archived before it existed keep parsing;
     #: empty there means "not computed", not "no verdict cited anything".
-    basis_contribution: list[BasisContributionEntry] = []
+    basis_contribution: list[BasisContributionEntry] = Field(default_factory=list)
     input_coverage: InputCoverageSummary | None = None
     #: Issue #189: the L2 qualitative gate's inputs and verdict, computed from
     #: the persisted narrations of earlier retrospectives. `None` means no
@@ -522,7 +525,9 @@ class RetroInput(_StrictModel):
     #: Issue #189: the window's separation split by the configuration each run
     #: executed under. Empty means "not computed" (a dossier from before the
     #: field, or a window with no run at all), never "one configuration".
-    aggregates_by_config: list[ConfigVersionAggregateEntry] = []
+    aggregates_by_config: list[ConfigVersionAggregateEntry] = Field(
+        default_factory=list
+    )
     surprises: SurpriseBundle
     config_snapshot: ConfigSnapshot
     proposals_ledger: ProposalsLedger

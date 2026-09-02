@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
     format_verdict,
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
 _DISCLAIMER = "本レポートは情報提供のみを目的とし、投資助言ではありません。最終判断は自身で行ってください。"
 
 
-class LatestMarkdownUpdateError(OSError):
+class LatestMarkdownUpdateError(SwingCopilotError, OSError):
     """The immutable run archive exists, but `latest.md` could not be updated."""
 
     def __init__(self, report_path: Path, cause: OSError) -> None:
@@ -148,9 +150,9 @@ def write_markdown_report(
     dated_dir.mkdir(parents=True, exist_ok=True)
     content = render_markdown(brief, status)
     report_path = dated_dir / f"{brief.run_id}.md"
-    _atomic_write(report_path, content)
+    write_text_atomically(report_path, content)
     try:
-        _atomic_write(root / "latest.md", content)
+        write_text_atomically(root / "latest.md", content)
     except OSError as exc:
         raise LatestMarkdownUpdateError(report_path, exc) from exc
     return report_path
@@ -433,16 +435,6 @@ def _signal_performance_row(row: SignalPerformanceRow) -> str:
         f"| {row.signal_name} | {row.true_positive_count} | "
         f"{row.false_positive_count} | {row.neutral_count} | {hit_rate} | {row.n} |"
     )
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(path)
-    except OSError:
-        tmp_path.unlink(missing_ok=True)
-        raise
 
 
 def _number(value: float | None, *, digits: int = 2) -> str:

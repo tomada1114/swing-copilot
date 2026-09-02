@@ -2,6 +2,34 @@
 
 ::: swing_copilot
 
+## 横断プリミティブ（Issue #394）
+
+リポジトリ全体の不変条件（原子的置換・例外基底・スキル境界のstrictスキーマ）は
+それぞれ1箇所にしか実装されない。この集約は`tests/test_quality_contracts.py`の
+AST契約テスト3本（`test_only_io_atomic_replaces_files_in_place` /
+`test_every_error_class_derives_from_the_package_base` /
+`test_strict_schema_config_is_declared_once`）で機械的に強制されており、
+`src/`・`scripts/`のどこかが自前実装を書き足すとテストが落ちる。
+
+- **原子的置換**（`swing_copilot.io_atomic`）: `write_text_atomically()` /
+  `write_json_atomically()` / `write_json_batch_atomically()`に加え、
+  bytes版の`write_bytes_atomically(destination, body, *, temporary_path=None)`
+  を持つ。`temporary_path`は既定の`.{name}.tmp`の代わりに使う一時ファイルパスで、
+  `destination.parent`直下でなければならない。GC判定が特定の一時ファイル命名
+  （隠しファイル＋乱数サフィックス）に依存する呼び出し元
+  （`scripts/data_sync.py`）のためのフックである。
+- **例外基底**（`swing_copilot.exceptions.SwingCopilotError`）: `src/`・`scripts/`の
+  `*Error`はすべてこれを継承する。多重継承（例:
+  `report/markdown_report.py`の`LatestMarkdownUpdateError(SwingCopilotError, OSError)`）
+  で、既存の`except OSError`にも`except SwingCopilotError`にも応答できる。
+- **strictスキーマ基底**（`swing_copilot.strict_model.StrictModel`）: 依存ゼロ
+  （pydanticのみ）で`model_config = ConfigDict(extra="forbid")`を宣言する唯一の
+  場所。`analysis_input.json`・`analysis_result.json`・スライス・断片・
+  `retro_input.json`/`retro_result.json`など、スキルとの往復スキーマは
+  すべてこれを継承する。追加の設定（`frozen=True`など）はサブクラス側の
+  `model_config`で足せる——pydanticは`model_config`を継承チェーンに沿って
+  マージするため、`extra="forbid"`は明示しなくても引き継がれる。
+
 ## リサーチ読み取りAPI（`swing_copilot.research`）
 
 蓄積された判断履歴（verdict・当否・スコア内訳・追跡台帳・レジーム・落選理由）を

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
-if TYPE_CHECKING:
-    from types import ModuleType
+from tests.support.script_loader import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDERS = (
@@ -21,17 +18,6 @@ PLACEHOLDERS = (
     "tomada",
     "tmasuyama1114@gmail.com",
 )
-
-
-def _load_bootstrap_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "bootstrap", REPO_ROOT / "scripts" / "bootstrap.py"
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _copy_tracked_files(destination: Path) -> None:
@@ -52,7 +38,7 @@ def _copy_tracked_files(destination: Path) -> None:
 
 def test_bootstrap_replaces_all_placeholders(tmp_path):
     _copy_tracked_files(tmp_path)
-    bootstrap = _load_bootstrap_module()
+    bootstrap = load_script_module("bootstrap", "scripts/bootstrap.py")
 
     module_name = bootstrap.bootstrap(
         tmp_path,
@@ -79,7 +65,7 @@ def test_bootstrap_replaces_all_placeholders(tmp_path):
 
 def test_bootstrap_rejects_invalid_package_name(tmp_path):
     _copy_tracked_files(tmp_path)
-    bootstrap = _load_bootstrap_module()
+    bootstrap = load_script_module("bootstrap", "scripts/bootstrap.py")
 
     with pytest.raises(SystemExit):
         bootstrap.bootstrap(

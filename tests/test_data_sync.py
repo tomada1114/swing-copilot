@@ -2,38 +2,21 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import stat
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.support.script_loader import load_script_module
+
 if TYPE_CHECKING:
-    from types import ModuleType
+    from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load_data_sync() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "data_sync", REPO_ROOT / "scripts" / "data_sync.py"
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # `dataclasses` resolves annotations through `sys.modules[cls.__module__]`,
-    # so a spec-loaded module has to be registered before it executes.
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-data_sync = _load_data_sync()
+data_sync = load_script_module("data_sync", "scripts/data_sync.py")
 
 FIXED_NOW = datetime(2026, 8, 19, 23, 0, tzinfo=UTC)
 DUCKDB_KEY = "data/copilot.duckdb"
@@ -1661,8 +1644,12 @@ def test_importing_the_module_does_not_require_the_optional_boto3_group(monkeypa
     # whole test file does -- must not reach for boto3.
     monkeypatch.setitem(sys.modules, "boto3", None)
     monkeypatch.setitem(sys.modules, "botocore", None)
+    # `load_script_module` is memoized on `sys.modules["data_sync"]`; drop the
+    # entry so this actually re-executes the module with boto3 blocked,
+    # instead of just handing back the module already loaded at collection.
+    monkeypatch.delitem(sys.modules, "data_sync", raising=False)
 
-    reloaded = _load_data_sync()
+    reloaded = load_script_module("data_sync", "scripts/data_sync.py")
 
     assert reloaded.BUCKET_NAME == data_sync.BUCKET_NAME
 

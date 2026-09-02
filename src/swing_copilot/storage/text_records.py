@@ -25,46 +25,39 @@ def record_text_items(database: Database, items: Sequence[TextItem]) -> None:
     """Upsert text items by `source_id`, correcting same-key reruns."""
     if not items:
         return
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for item in items:
-                conn.execute(
-                    """
-                    INSERT INTO text_items (
-                        source_id, symbol, source_type, published_at, title,
-                        source_url, content_text, fetched_at, related_symbols,
-                        category
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (source_id) DO UPDATE SET
-                        symbol = EXCLUDED.symbol,
-                        source_type = EXCLUDED.source_type,
-                        published_at = EXCLUDED.published_at,
-                        title = EXCLUDED.title,
-                        source_url = EXCLUDED.source_url,
-                        content_text = EXCLUDED.content_text,
-                        fetched_at = EXCLUDED.fetched_at,
-                        related_symbols = EXCLUDED.related_symbols,
-                        category = EXCLUDED.category
-                    """,
-                    [
-                        item.source_id,
-                        item.symbol,
-                        item.source_type,
-                        item.published_at,
-                        item.title,
-                        item.source_url,
-                        item.content_text,
-                        item.fetched_at,
-                        ",".join(item.related_symbols) or None,
-                        item.category,
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+    with database.transaction() as conn:
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO text_items (
+                    source_id, symbol, source_type, published_at, title,
+                    source_url, content_text, fetched_at, related_symbols,
+                    category
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_id) DO UPDATE SET
+                    symbol = EXCLUDED.symbol,
+                    source_type = EXCLUDED.source_type,
+                    published_at = EXCLUDED.published_at,
+                    title = EXCLUDED.title,
+                    source_url = EXCLUDED.source_url,
+                    content_text = EXCLUDED.content_text,
+                    fetched_at = EXCLUDED.fetched_at,
+                    related_symbols = EXCLUDED.related_symbols,
+                    category = EXCLUDED.category
+                """,
+                [
+                    item.source_id,
+                    item.symbol,
+                    item.source_type,
+                    item.published_at,
+                    item.title,
+                    item.source_url,
+                    item.content_text,
+                    item.fetched_at,
+                    ",".join(item.related_symbols) or None,
+                    item.category,
+                ],
+            )
 
 
 def latest_filing_dates(

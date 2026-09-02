@@ -25,10 +25,11 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
+from swing_copilot.storage.database import atomic, fetch_records
 from swing_copilot.storage.json_guard import dumps_safe
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     import duckdb
 
@@ -368,17 +369,16 @@ def _news_supply_columns(
     )
 
 
-def _news_supply_from_row(
-    collected_items: int | None,
-    exported_items: int | None,
-    symbol_mention_items: int | None,
-    level: str | None,
-) -> NewsSupplyRecord | None:
-    """Rebuild the supply block, or `None` when the row never recorded one.
+def _news_supply_from_row(record: Mapping[str, object]) -> NewsSupplyRecord | None:
+    """Rebuild the supply block from a row's `news_supply_*` columns, by name.
 
     `level` is the discriminator: `_news_supply_columns` writes all four
     together or none of them, so a row with a level has the counts too.
     """
+    level = record["news_supply_level"]
+    collected_items = record["news_supply_collected_items"]
+    exported_items = record["news_supply_exported_items"]
+    symbol_mention_items = record["news_supply_symbol_mention_items"]
     if (
         level is None
         or collected_items is None
@@ -387,10 +387,10 @@ def _news_supply_from_row(
     ):
         return None
     return NewsSupplyRecord(
-        collected_items=collected_items,
-        exported_items=exported_items,
-        symbol_mention_items=symbol_mention_items,
-        level=level,
+        collected_items=cast("int", collected_items),
+        exported_items=cast("int", exported_items),
+        symbol_mention_items=cast("int", symbol_mention_items),
+        level=cast("str", level),
     )
 
 
@@ -463,92 +463,83 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
     _reject_foreign_run(run_id, (record.run_id for record in sources))
     _reject_foreign_run(run_id, (record.run_id for record in coverages))
 
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
-            conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
-            # Issue #192: the normalized projection is replaced with the
-            # document it projects. Deleting it here rather than per symbol is
-            # what keeps a re-ingest that dropped a symbol from leaving that
-            # symbol's reasons behind as orphans.
-            conn.execute("DELETE FROM verdict_reasons WHERE run_id = ?", [str(run_id)])
+    with database.transaction() as conn:
+        conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
+        conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
+        # Issue #192: the normalized projection is replaced with the
+        # document it projects. Deleting it here rather than per symbol is
+        # what keeps a re-ingest that dropped a symbol from leaving that
+        # symbol's reasons behind as orphans.
+        conn.execute("DELETE FROM verdict_reasons WHERE run_id = ?", [str(run_id)])
+        conn.execute(
+            "DELETE FROM verdict_reason_sources WHERE run_id = ?", [str(run_id)]
+        )
+        conn.execute(
+            "DELETE FROM analysis_source_coverage WHERE run_id = ?",
+            [str(run_id)],
+        )
+        conn.execute("DELETE FROM verdict_collections WHERE run_id = ?", [str(run_id)])
+        if records.document_digest is not None:
             conn.execute(
-                "DELETE FROM verdict_reason_sources WHERE run_id = ?", [str(run_id)]
+                _INSERT_VERDICT_COLLECTION,
+                [str(run_id), records.document_digest],
             )
+        for verdict in verdicts:
             conn.execute(
-                "DELETE FROM analysis_source_coverage WHERE run_id = ?",
-                [str(run_id)],
+                _INSERT_VERDICT,
+                [
+                    str(verdict.run_id),
+                    verdict.symbol,
+                    verdict.as_of,
+                    verdict.strategy_key,
+                    verdict.recommendation,
+                    dumps_safe(
+                        [
+                            {
+                                "text": reason.text,
+                                "source_ids": list(reason.source_ids),
+                                "basis": reason.basis,
+                            }
+                            for reason in verdict.reasons
+                        ]
+                    ),
+                    verdict.no_trade,
+                    *_news_supply_columns(verdict.news_supply),
+                ],
             )
+            _insert_reason_rows(
+                conn, str(verdict.run_id), verdict.symbol, verdict.reasons
+            )
+        for source in sources:
             conn.execute(
-                "DELETE FROM verdict_collections WHERE run_id = ?", [str(run_id)]
+                _INSERT_VERDICT_SOURCE,
+                [
+                    str(source.run_id),
+                    source.symbol,
+                    source.source_id,
+                    source.source_type,
+                ],
             )
-            if records.document_digest is not None:
-                conn.execute(
-                    _INSERT_VERDICT_COLLECTION,
-                    [str(run_id), records.document_digest],
-                )
-            for verdict in verdicts:
-                conn.execute(
-                    _INSERT_VERDICT,
-                    [
-                        str(verdict.run_id),
-                        verdict.symbol,
-                        verdict.as_of,
-                        verdict.strategy_key,
-                        verdict.recommendation,
-                        dumps_safe(
-                            [
-                                {
-                                    "text": reason.text,
-                                    "source_ids": list(reason.source_ids),
-                                    "basis": reason.basis,
-                                }
-                                for reason in verdict.reasons
-                            ]
-                        ),
-                        verdict.no_trade,
-                        *_news_supply_columns(verdict.news_supply),
-                    ],
-                )
-                _insert_reason_rows(
-                    conn, str(verdict.run_id), verdict.symbol, verdict.reasons
-                )
-            for source in sources:
-                conn.execute(
-                    _INSERT_VERDICT_SOURCE,
-                    [
-                        str(source.run_id),
-                        source.symbol,
-                        source.source_id,
-                        source.source_type,
-                    ],
-                )
-            for coverage in coverages:
-                conn.execute(
-                    _INSERT_ANALYSIS_COVERAGE,
-                    [
-                        str(coverage.run_id),
-                        coverage.symbol,
-                        coverage.source_id,
-                        coverage.original_chars,
-                        coverage.exported_chars,
-                        coverage.is_truncated,
-                        coverage.selection_mode,
-                        coverage.exhibit_truncated,
-                        dumps_safe(
-                            [
-                                {"name": name, "status": status}
-                                for name, status in coverage.sections
-                            ]
-                        ),
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
+        for coverage in coverages:
+            conn.execute(
+                _INSERT_ANALYSIS_COVERAGE,
+                [
+                    str(coverage.run_id),
+                    coverage.symbol,
+                    coverage.source_id,
+                    coverage.original_chars,
+                    coverage.exported_chars,
+                    coverage.is_truncated,
+                    coverage.selection_mode,
+                    coverage.exhibit_truncated,
+                    dumps_safe(
+                        [
+                            {"name": name, "status": status}
+                            for name, status in coverage.sections
+                        ]
+                    ),
+                ],
+            )
 
 
 def _insert_reason_rows(
@@ -614,17 +605,11 @@ def backfill_verdict_reasons(conn: duckdb.DuckDBPyConnection) -> int:
     if not rows:
         return 0
     written = 0
-    conn.execute("BEGIN TRANSACTION")
-    try:
+    with atomic(conn):
         for run_id, symbol, reasons_json in rows:
             reasons = _reasons_from_json(str(reasons_json))
             _insert_reason_rows(conn, str(run_id), str(symbol), reasons)
             written += len(reasons)
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
     return written
 
 
@@ -792,32 +777,25 @@ def replace_verdict_outcomes(
         msg = f"verdict outcome returns must be finite: {', '.join(non_finite)}"
         raise ValueError(msg)
 
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
+    with database.transaction() as conn:
+        conn.execute(
+            "DELETE FROM verdict_outcomes WHERE run_id = ? AND horizon_days = ?",
+            [str(run_id), horizon_days],
+        )
+        for outcome in outcomes:
             conn.execute(
-                "DELETE FROM verdict_outcomes WHERE run_id = ? AND horizon_days = ?",
-                [str(run_id), horizon_days],
+                _INSERT_VERDICT_OUTCOME,
+                [
+                    str(outcome.run_id),
+                    outcome.symbol,
+                    outcome.horizon_days,
+                    outcome.as_of,
+                    outcome.recommendation,
+                    outcome.forward_return_pct,
+                    outcome.benchmark_return_pct,
+                    outcome.classification,
+                ],
             )
-            for outcome in outcomes:
-                conn.execute(
-                    _INSERT_VERDICT_OUTCOME,
-                    [
-                        str(outcome.run_id),
-                        outcome.symbol,
-                        outcome.horizon_days,
-                        outcome.as_of,
-                        outcome.recommendation,
-                        outcome.forward_return_pct,
-                        outcome.benchmark_return_pct,
-                        outcome.classification,
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
 
 
 def get_verdicts_in_window(
@@ -838,7 +816,8 @@ def get_verdicts_in_window(
         evaluation order.
     """
     with database.connect() as conn:
-        rows = conn.execute(
+        records = fetch_records(
+            conn,
             """
             SELECT run_id, symbol, as_of, recommendation,
                    news_supply_collected_items, news_supply_exported_items,
@@ -848,16 +827,16 @@ def get_verdicts_in_window(
             ORDER BY as_of, run_id, symbol
             """,
             [window_start, as_of],
-        ).fetchall()
+        )
     return tuple(
         VerdictRow(
-            run_id=UUID(str(row[0])),
-            symbol=row[1],
-            as_of=row[2],
-            recommendation=row[3],
-            news_supply=_news_supply_from_row(row[4], row[5], row[6], row[7]),
+            run_id=UUID(str(record["run_id"])),
+            symbol=cast("str", record["symbol"]),
+            as_of=cast("date", record["as_of"]),
+            recommendation=cast("str", record["recommendation"]),
+            news_supply=_news_supply_from_row(record),
         )
-        for row in rows
+        for record in records
     )
 
 
@@ -917,7 +896,8 @@ def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, .
         Rows ordered by symbol, empty for a run that was never collected.
     """
     with database.connect() as conn:
-        rows = conn.execute(
+        records = fetch_records(
+            conn,
             """
             SELECT run_id, symbol, as_of, strategy_key, recommendation,
                    reasons_json, no_trade, news_supply_collected_items,
@@ -928,19 +908,19 @@ def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, .
             ORDER BY symbol
             """,
             [str(run_id)],
-        ).fetchall()
+        )
     return tuple(
         VerdictRecord(
-            run_id=UUID(str(row[0])),
-            symbol=row[1],
-            as_of=row[2],
-            strategy_key=row[3],
-            recommendation=row[4],
-            reasons=_reasons_from_json(row[5]),
-            no_trade=row[6],
-            news_supply=_news_supply_from_row(row[7], row[8], row[9], row[10]),
+            run_id=UUID(str(record["run_id"])),
+            symbol=cast("str", record["symbol"]),
+            as_of=cast("date", record["as_of"]),
+            strategy_key=cast("str", record["strategy_key"]),
+            recommendation=cast("str", record["recommendation"]),
+            reasons=_reasons_from_json(str(record["reasons_json"])),
+            no_trade=cast("bool", record["no_trade"]),
+            news_supply=_news_supply_from_row(record),
         )
-        for row in rows
+        for record in records
     )
 
 

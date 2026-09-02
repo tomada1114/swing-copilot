@@ -533,34 +533,27 @@ class MarketStore:
         """
         if not records:
             return
-        with self.get_connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for record in records:
-                    values = asdict(record)
-                    conn.execute(
-                        _UPSERT_FUNDAMENTALS,
-                        [
-                            values["accession_no"],
-                            values["symbol"],
-                            values["form"],
-                            values["fiscal_period_end"],
-                            values["filed_at"],
-                            values["revenue"],
-                            values["net_income"],
-                            values["fcf"],
-                            values["equity"],
-                            values["assets"],
-                            values["shares"],
-                            values["source_url"],
-                            values["fetched_at"],
-                        ],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
+        with self.get_connection() as conn, self._database.transaction(conn):
+            for record in records:
+                values = asdict(record)
+                conn.execute(
+                    _UPSERT_FUNDAMENTALS,
+                    [
+                        values["accession_no"],
+                        values["symbol"],
+                        values["form"],
+                        values["fiscal_period_end"],
+                        values["filed_at"],
+                        values["revenue"],
+                        values["net_income"],
+                        values["fcf"],
+                        values["equity"],
+                        values["assets"],
+                        values["shares"],
+                        values["source_url"],
+                        values["fetched_at"],
+                    ],
+                )
 
     def get_latest_fundamentals(
         self, symbol: str, as_of: date
@@ -655,24 +648,17 @@ class MarketStore:
         """
         if not stamps:
             return
-        with self.get_connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for stamp in stamps:
-                    conn.execute(
-                        _UPSERT_FUNDAMENTALS_FETCH_LOG,
-                        [
-                            stamp.symbol,
-                            stamp.last_fetched_at,
-                            stamp.fetched_through,
-                            stamp.consecutive_empty,
-                        ],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
+        with self.get_connection() as conn, self._database.transaction(conn):
+            for stamp in stamps:
+                conn.execute(
+                    _UPSERT_FUNDAMENTALS_FETCH_LOG,
+                    [
+                        stamp.symbol,
+                        stamp.last_fetched_at,
+                        stamp.fetched_through,
+                        stamp.consecutive_empty,
+                    ],
+                )
 
     def read_latest_filing_dates(
         self, symbols: Sequence[str], forms: Sequence[str], as_of: date

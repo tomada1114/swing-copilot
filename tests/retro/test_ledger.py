@@ -269,14 +269,23 @@ class TestRecordProposals:
 
 
 class TestCommittedLedger:
-    """P8-33's committed empty ledger must stay the header `ingest` generates.
+    """The committed ledger's header must stay the one `ingest` generates.
 
-    The ledger is initialized in the repository so a first retrospective does
-    not have to create it, but that only helps if the committed bytes are the
-    ones `record_proposals` would have written (E32.1). Two hand-maintained
-    copies of the same header would drift, and the drift would only surface as
-    a malformed table after a real ingest.
+    The ledger was initialized in the repository so a first retrospective did
+    not have to create it, and `copilot-retro ingest` appends a row per
+    recorded proposal from then on (D10). What must not drift is the header:
+    two hand-maintained copies of it would only surface as a malformed table
+    after a real ingest (E32.1). The rows below the header are the accumulated
+    history and are checked for shape, not for absence.
     """
+
+    @staticmethod
+    def _header(lines: list[str]) -> list[str]:
+        """Every line before the first proposal row."""
+        for index, line in enumerate(lines):
+            if re.match(r"\| RP-\d", line):
+                return lines[:index]
+        return lines
 
     def test_matches_the_header_record_proposals_generates(
         self, tmp_path: Path
@@ -287,13 +296,15 @@ class TestCommittedLedger:
 
         committed = COMMITTED_LEDGER.read_text(encoding="utf-8").splitlines()
 
-        assert generated[: len(committed)] == committed
-        # The only line the generation added is the proposal row itself: the
-        # committed file is the whole header, not a truncated prefix of it.
-        assert _ledger_rows(generated_path) == generated[len(committed) :]
+        assert self._header(committed) == self._header(generated)
+        # Everything the committed file holds below the header is proposal
+        # rows: no stray prose between or after them that a later append
+        # would land beneath.
+        header_length = len(self._header(committed))
+        assert committed[header_length:] == _ledger_rows(COMMITTED_LEDGER)
 
-    def test_is_parsed_as_an_existing_ledger_with_no_rows(self) -> None:
+    def test_is_parsed_as_an_existing_ledger_whose_rows_all_parse(self) -> None:
         state = read_ledger(COMMITTED_LEDGER)
 
         assert state.exists
-        assert state.rows == ()
+        assert len(state.rows) == len(_ledger_rows(COMMITTED_LEDGER))

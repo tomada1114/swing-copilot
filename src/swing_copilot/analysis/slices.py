@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from swing_copilot.analysis.fragment import PAYLOAD_FIELD_BY_KIND, FragmentKind
 from swing_copilot.analysis.schemas import (
@@ -65,6 +65,7 @@ from swing_copilot.analysis.schemas import (
 )
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.io_atomic import write_json_batch_atomically
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -139,17 +140,21 @@ class SliceExportError(SwingCopilotError):
     """Raised when slices cannot be cut from the given document at all."""
 
 
-class _StrictModel(BaseModel):
-    """Reject unknown fields, like both directions of the analysis contract."""
+class _StrictModel(StrictModel):
+    """Reject unknown fields, like both directions of the analysis contract.
 
-    model_config = ConfigDict(extra="forbid")
+    `StrictModel` (Issue #394) is the one place that declares
+    `extra="forbid"`; this stays a real subclass (not a bare alias) so
+    ruff's `runtime-evaluated-base-classes` still traces every subclass
+    below back to `pydantic.BaseModel`.
+    """
 
 
 class SliceContext(_StrictModel):
     """The run-wide blocks one expert is given, or nothing at all."""
 
     market_regime: str | None = None
-    calendar_events: list[CalendarEventInput] = []
+    calendar_events: list[CalendarEventInput] = Field(default_factory=list)
 
 
 class SliceFiling(_StrictModel):

@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
+from swing_copilot.storage.database import fetch_records
 from swing_copilot.storage.json_guard import dumps_safe
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import date, datetime
     from uuid import UUID
 
@@ -149,42 +150,35 @@ def replace_retro_session(
         )
         raise ValueError(msg)
 
-    with database.connect() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
+    with database.transaction() as conn:
+        conn.execute(
+            _UPSERT_SESSION,
+            [
+                session.retro_as_of,
+                session.window_start,
+                session.input_digest,
+                session.generated_at,
+                session.outcome_count,
+                session.proposal_count,
+            ],
+        )
+        conn.execute(
+            "DELETE FROM retro_narrations WHERE retro_as_of = ?",
+            [session.retro_as_of],
+        )
+        for narration in narrations:
             conn.execute(
-                _UPSERT_SESSION,
+                _INSERT_NARRATION,
                 [
-                    session.retro_as_of,
-                    session.window_start,
-                    session.input_digest,
-                    session.generated_at,
-                    session.outcome_count,
-                    session.proposal_count,
+                    narration.retro_as_of,
+                    narration.surprise_id,
+                    str(narration.run_id),
+                    narration.symbol,
+                    narration.failure_class,
+                    narration.narrative,
+                    dumps_safe(list(narration.evidence_refs)),
                 ],
             )
-            conn.execute(
-                "DELETE FROM retro_narrations WHERE retro_as_of = ?",
-                [session.retro_as_of],
-            )
-            for narration in narrations:
-                conn.execute(
-                    _INSERT_NARRATION,
-                    [
-                        narration.retro_as_of,
-                        narration.surprise_id,
-                        str(narration.run_id),
-                        narration.symbol,
-                        narration.failure_class,
-                        narration.narrative,
-                        dumps_safe(list(narration.evidence_refs)),
-                    ],
-                )
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
 
 
 def get_failure_class_history(
@@ -235,23 +229,24 @@ def get_retro_narrations(
 ) -> tuple[RetroNarrationRecord, ...]:
     """Read back one retrospective's narrations, ordered by `surprise_id`."""
     with database.connect() as conn:
-        rows = conn.execute(
+        records = fetch_records(
+            conn,
             "SELECT retro_as_of, surprise_id, run_id, symbol, failure_class, "
             "narrative, evidence_refs_json FROM retro_narrations "
             "WHERE retro_as_of = ? ORDER BY surprise_id",
             [retro_as_of],
-        ).fetchall()
-    return tuple(_narration(row) for row in rows)
+        )
+    return tuple(_narration(record) for record in records)
 
 
-# Any: DuckDB rows are untyped tuples.
-def _narration(row: tuple[Any, ...]) -> RetroNarrationRecord:
+def _narration(record: Mapping[str, object]) -> RetroNarrationRecord:
+    """Rebuild a `RetroNarrationRecord` from a row, read by column name."""
     return RetroNarrationRecord(
-        retro_as_of=row[0],
-        surprise_id=row[1],
-        run_id=row[2],
-        symbol=row[3],
-        failure_class=row[4],
-        narrative=row[5],
-        evidence_refs=tuple(json.loads(row[6])),
+        retro_as_of=cast("date", record["retro_as_of"]),
+        surprise_id=str(record["surprise_id"]),
+        run_id=cast("UUID", record["run_id"]),
+        symbol=str(record["symbol"]),
+        failure_class=str(record["failure_class"]),
+        narrative=str(record["narrative"]),
+        evidence_refs=tuple(json.loads(cast("str", record["evidence_refs_json"]))),
     )

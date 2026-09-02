@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
@@ -60,6 +59,7 @@ from swing_copilot.backtest.sensitivity import (
 from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, StorageSchemaError, SwingCopilotError
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
     MarketStore,
@@ -265,27 +265,6 @@ def _missing_data_symbols(
     bars = market_store.read_bars(list(symbols), start, end, as_of=end)
     present = set(bars["symbol"].unique()) if not bars.empty else set()
     return sorted(set(symbols) - present)
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    """Write `content` via a same-directory temp file + `os.replace` (REQ-008)."""
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp_file:
-            tmp_path = Path(tmp_file.name)
-            tmp_file.write(content)
-        tmp_path.replace(path)
-    except OSError:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        raise
 
 
 def _fmt_ratio(value: float | None) -> str:
@@ -1335,7 +1314,7 @@ def _run_backtest_command(
 
     output_path = _output_path(args)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(output_path, markdown_text)
+    write_text_atomically(output_path, markdown_text)
     sys.stdout.write(f"\nReport written to {output_path}\n")
 
 
@@ -1403,7 +1382,9 @@ def _run_grid_command(
 
     output_path = _grid_output_path(args)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(output_path, render_grid_markdown(grid_result, meta, gray_threshold))
+    write_text_atomically(
+        output_path, render_grid_markdown(grid_result, meta, gray_threshold)
+    )
     sys.stdout.write(f"\nReport written to {output_path}\n")
 
 
@@ -1455,7 +1436,7 @@ def _run_entry_grid_command(
 
     output_path = _entry_grid_output_path(args)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(output_path, render_entry_grid_markdown(results, meta))
+    write_text_atomically(output_path, render_entry_grid_markdown(results, meta))
     sys.stdout.write(f"\nReport written to {output_path}\n")
 
 

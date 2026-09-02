@@ -10,6 +10,7 @@ import pytest
 
 from swing_copilot.analysis import export
 from swing_copilot.io_atomic import (
+    write_bytes_atomically,
     write_json_atomically,
     write_json_batch_atomically,
     write_text_atomically,
@@ -109,6 +110,99 @@ class TestFailureIsAllOrNothing:
 
         assert json.loads(destination.read_text(encoding="utf-8")) == {"previous": True}
         assert list(tmp_path.glob(".*.tmp")) == []
+
+    def test_a_failed_bytes_write_preserves_the_previous_file_and_leaves_no_temp(
+        self, tmp_path, monkeypatch
+    ):
+        destination = tmp_path / "data.parquet"
+        destination.write_bytes(b"previous-bytes")
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", self._explode)
+
+        with pytest.raises(OSError, match="disk full"):
+            write_bytes_atomically(destination, b"next-bytes")
+
+        assert destination.read_bytes() == b"previous-bytes"
+        assert list(tmp_path.glob(".*.tmp")) == []
+
+
+class TestBytesWriter:
+    """Issue #394: the bytes-body sibling of `write_text_atomically`."""
+
+    def test_writes_the_given_bytes(self, tmp_path):
+        destination = tmp_path / "data.parquet"
+
+        write_bytes_atomically(destination, b"\x00\x01payload")
+
+        assert destination.read_bytes() == b"\x00\x01payload"
+
+    def test_a_rerun_replaces_the_previous_content(self, tmp_path):
+        destination = tmp_path / "data.parquet"
+        write_bytes_atomically(destination, b"generation-1")
+
+        write_bytes_atomically(destination, b"generation-2")
+
+        assert destination.read_bytes() == b"generation-2"
+
+    def test_default_temporary_path_sits_beside_the_destination(
+        self, tmp_path, monkeypatch
+    ):
+        destination = tmp_path / "data.parquet"
+        seen: list[tuple[Path, Path]] = []
+
+        def _record(source: str | Path, target: str | Path) -> None:
+            seen.append((Path(source), Path(target)))
+            Path(source).unlink()
+
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _record)
+
+        write_bytes_atomically(destination, b"body")
+
+        (source, target) = seen[0]
+        assert source == tmp_path / ".data.parquet.tmp"
+        assert target == destination
+
+    def test_a_caller_supplied_temporary_path_is_used_instead_of_the_default(
+        self, tmp_path
+    ):
+        destination = tmp_path / "data.parquet"
+        temporary_path = tmp_path / ".data.parquet.deadbeef.tmp"
+
+        write_bytes_atomically(destination, b"body", temporary_path=temporary_path)
+
+        assert destination.read_bytes() == b"body"
+        assert not temporary_path.exists()
+
+    def test_a_temporary_path_outside_the_destination_directory_is_rejected(
+        self, tmp_path
+    ):
+        destination = tmp_path / "nested" / "data.parquet"
+        destination.parent.mkdir()
+        temporary_path = tmp_path / ".data.parquet.tmp"
+
+        with pytest.raises(ValueError, match="temporary_path must be in"):
+            write_bytes_atomically(destination, b"body", temporary_path=temporary_path)
+
+        assert not destination.exists()
+        assert not temporary_path.exists()
+
+    def test_a_failed_replace_with_a_caller_supplied_temporary_path_cleans_it_up(
+        self, tmp_path, monkeypatch
+    ):
+        destination = tmp_path / "data.parquet"
+        destination.write_bytes(b"previous")
+        temporary_path = tmp_path / ".data.parquet.deadbeef.tmp"
+
+        def _explode(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _explode)
+
+        with pytest.raises(OSError, match="disk full"):
+            write_bytes_atomically(destination, b"next", temporary_path=temporary_path)
+
+        assert destination.read_bytes() == b"previous"
+        assert not temporary_path.exists()
 
 
 class TestSerializedForm:

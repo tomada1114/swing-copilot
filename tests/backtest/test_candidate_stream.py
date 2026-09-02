@@ -12,7 +12,6 @@ import dataclasses
 import hashlib
 import json
 from datetime import date, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -46,6 +45,8 @@ from swing_copilot.universe import UniverseMember
 from tests.backtest.conftest import bar_row, bars_frame, flat_bars
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from swing_copilot.config import Settings
 
 #: Raw shape, kept alongside the typed `STRATEGIES_CONFIG` so
@@ -716,16 +717,16 @@ class TestAtomicSave:
         save_candidate_stream(original, path)
         before = path.read_bytes()
 
-        def _boom(self, _target):
+        def _boom(_source, _destination):
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _boom)
         replacement = CandidateStream(cache_key="other", candidates_by_day={})
 
         with pytest.raises(OSError, match="disk full"):
             save_candidate_stream(replacement, path)
 
         assert path.read_bytes() == before
-        assert list(tmp_path.glob(".candidates.parquet.*.tmp")) == []
+        assert list(tmp_path.glob(".candidates.parquet.tmp")) == []
         assert load_candidate_stream(path) == original

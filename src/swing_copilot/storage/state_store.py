@@ -214,6 +214,66 @@ class StateStore:
             )
         return run_id
 
+    # PLR0913: one field per `runs` column this write path lets a caller
+    # specify explicitly (that is the whole point -- unlike `start_run`,
+    # nothing here is fixed), all but the first four keyword-only.
+    def insert_run(  # noqa: PLR0913
+        self,
+        run_id: UUID,
+        run_date: date,
+        mode: RunMode,
+        config_hash: str,
+        *,
+        status: RunStatus,
+        started_at: datetime,
+        finished_at: datetime | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        """Register a fully specified `runs` row (historical seed / backfill).
+
+        Unlike `start_run`, every lifecycle field is caller-supplied instead
+        of `start_run`'s fixed `status='running'` / `started_at=now()` --
+        `start_run` itself is unchanged, since altering how it derives those
+        would change production behavior. This is a second, independent
+        write path onto the same table, for callers that already know a
+        run's full historical state: a test seeding a `runs` row at an
+        arbitrary point in its lifecycle without reaching into the private
+        DuckDB connection (Issue #395's motivation; #398 migrates the
+        existing hand-written `INSERT INTO runs` tests onto this), and a
+        future backfill that replays a run whose real timestamps are already
+        known.
+
+        Args:
+            run_id: The run's identity.
+            run_date: Evaluation market date for this run.
+            mode: Whether this run is `live` or `dry_run`.
+            config_hash: Full SHA-256 fingerprint of the effective configuration.
+            status: The run's lifecycle status.
+            started_at: When the run started.
+            finished_at: When the run finished, or `None` for a run still
+                `running`.
+            metadata: Canonical, non-secret run metadata; `None` writes `{}`.
+        """
+        with self._database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runs (
+                    run_id, run_date, mode, config_hash, metadata_json, status,
+                    started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(run_id),
+                    run_date,
+                    mode.value,
+                    config_hash,
+                    dumps_safe(metadata if metadata is not None else {}),
+                    status.value,
+                    started_at,
+                    finished_at,
+                ],
+            )
+
     def complete_run(
         self,
         run_id: UUID,
@@ -268,29 +328,22 @@ class StateStore:
         Returns:
             The `run_id`s marked stale, oldest `started_at` first.
         """
-        with self._database.connect() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                stale_rows = conn.execute(
-                    "SELECT run_id FROM runs WHERE status = 'running' "
-                    "AND started_at < ? AND run_id != ? ORDER BY started_at",
-                    [cutoff, str(new_run_id)],
-                ).fetchall()
-                for (run_id,) in stale_rows:
-                    conn.execute(
-                        """
-                        UPDATE runs
-                        SET status = 'failed', completed_at = now(),
-                            error_summary = ?
-                        WHERE run_id = ?
-                        """,
-                        [f"marked stale by run {new_run_id}", run_id],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
+        with self._database.transaction() as conn:
+            stale_rows = conn.execute(
+                "SELECT run_id FROM runs WHERE status = 'running' "
+                "AND started_at < ? AND run_id != ? ORDER BY started_at",
+                [cutoff, str(new_run_id)],
+            ).fetchall()
+            for (run_id,) in stale_rows:
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'failed', completed_at = now(),
+                        error_summary = ?
+                    WHERE run_id = ?
+                    """,
+                    [f"marked stale by run {new_run_id}", run_id],
+                )
         return [run_id for (run_id,) in stale_rows]
 
     def record_run_step(
@@ -350,35 +403,28 @@ class StateStore:
             snapshot_date: The as-of date this snapshot represents.
             members: Universe membership to persist.
         """
-        with self._database.connect() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
+        with self._database.transaction() as conn:
+            conn.execute(
+                "DELETE FROM universe_membership WHERE snapshot_date = ?",
+                [snapshot_date],
+            )
+            for member in members:
                 conn.execute(
-                    "DELETE FROM universe_membership WHERE snapshot_date = ?",
-                    [snapshot_date],
+                    """
+                    INSERT INTO universe_membership (
+                        snapshot_date, symbol, source_symbol, company_name,
+                        gics_sector, source
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        snapshot_date,
+                        member.symbol,
+                        member.source_symbol,
+                        member.company_name,
+                        member.gics_sector,
+                        _UNIVERSE_SOURCE,
+                    ],
                 )
-                for member in members:
-                    conn.execute(
-                        """
-                        INSERT INTO universe_membership (
-                            snapshot_date, symbol, source_symbol, company_name,
-                            gics_sector, source
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            snapshot_date,
-                            member.symbol,
-                            member.source_symbol,
-                            member.company_name,
-                            member.gics_sector,
-                            _UNIVERSE_SOURCE,
-                        ],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
 
     def get_latest_universe_membership(
         self, as_of: date | None = None

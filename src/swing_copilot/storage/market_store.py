@@ -14,8 +14,9 @@ which loosely paraphrases the key as `(symbol, fiscal_period)`).
 
 from __future__ import annotations
 
+import io
 import math
-import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ import duckdb
 import pandas as pd
 
 from swing_copilot.exceptions import StorageSchemaError, SwingCopilotError
+from swing_copilot.io_atomic import write_bytes_atomically
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -452,18 +454,19 @@ class MarketStore:
         combined = combined.drop_duplicates(subset=["symbol", "date"], keep="last")
         combined = combined.sort_values(["symbol", "date"]).reset_index(drop=True)
 
-        with tempfile.NamedTemporaryFile(
-            dir=partition_dir,
-            prefix=".data.parquet.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            tmp_file = Path(handle.name)
-        try:
-            combined.to_parquet(tmp_file, index=False)
-            tmp_file.replace(partition_file)
-        finally:
-            tmp_file.unlink(missing_ok=True)
+        buffer = io.BytesIO()
+        combined.to_parquet(buffer, index=False)
+        # A unique staging path, not `io_atomic`'s own deterministic
+        # `.{name}.tmp`: two writers targeting the same year partition at
+        # once (e.g. two `write_bars` calls racing) must never stage into
+        # the same temporary file, or one could publish the other's
+        # partially-written body.
+        temporary_path = partition_file.with_name(
+            f".{partition_file.name}.{uuid.uuid4().hex}.tmp"
+        )
+        write_bytes_atomically(
+            partition_file, buffer.getvalue(), temporary_path=temporary_path
+        )
 
     def read_bars(
         self, symbols: list[str], start: date, end: date, as_of: date
@@ -533,34 +536,27 @@ class MarketStore:
         """
         if not records:
             return
-        with self.get_connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for record in records:
-                    values = asdict(record)
-                    conn.execute(
-                        _UPSERT_FUNDAMENTALS,
-                        [
-                            values["accession_no"],
-                            values["symbol"],
-                            values["form"],
-                            values["fiscal_period_end"],
-                            values["filed_at"],
-                            values["revenue"],
-                            values["net_income"],
-                            values["fcf"],
-                            values["equity"],
-                            values["assets"],
-                            values["shares"],
-                            values["source_url"],
-                            values["fetched_at"],
-                        ],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
+        with self.get_connection() as conn, self._database.transaction(conn):
+            for record in records:
+                values = asdict(record)
+                conn.execute(
+                    _UPSERT_FUNDAMENTALS,
+                    [
+                        values["accession_no"],
+                        values["symbol"],
+                        values["form"],
+                        values["fiscal_period_end"],
+                        values["filed_at"],
+                        values["revenue"],
+                        values["net_income"],
+                        values["fcf"],
+                        values["equity"],
+                        values["assets"],
+                        values["shares"],
+                        values["source_url"],
+                        values["fetched_at"],
+                    ],
+                )
 
     def get_latest_fundamentals(
         self, symbol: str, as_of: date
@@ -655,24 +651,17 @@ class MarketStore:
         """
         if not stamps:
             return
-        with self.get_connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for stamp in stamps:
-                    conn.execute(
-                        _UPSERT_FUNDAMENTALS_FETCH_LOG,
-                        [
-                            stamp.symbol,
-                            stamp.last_fetched_at,
-                            stamp.fetched_through,
-                            stamp.consecutive_empty,
-                        ],
-                    )
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            else:
-                conn.execute("COMMIT")
+        with self.get_connection() as conn, self._database.transaction(conn):
+            for stamp in stamps:
+                conn.execute(
+                    _UPSERT_FUNDAMENTALS_FETCH_LOG,
+                    [
+                        stamp.symbol,
+                        stamp.last_fetched_at,
+                        stamp.fetched_through,
+                        stamp.consecutive_empty,
+                    ],
+                )
 
     def read_latest_filing_dates(
         self, symbols: Sequence[str], forms: Sequence[str], as_of: date

@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import math
-import tempfile
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -37,6 +37,7 @@ from pandas.api.types import is_numeric_dtype
 
 from swing_copilot.backtest.policy import REGIME_SYMBOLS
 from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.io_atomic import write_bytes_atomically
 from swing_copilot.screening.base import Candidate, ScreeningInput
 from swing_copilot.screening.pipeline import (
     ScreeningPipeline,
@@ -48,6 +49,7 @@ from swing_copilot.storage.json_guard import dumps_safe
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import date
+    from pathlib import Path
 
     from swing_copilot.backtest.runner import BacktestDependencies, BacktestRequest
     from swing_copilot.storage.market_store import MarketStore
@@ -362,10 +364,18 @@ def save_candidate_stream(stream: CandidateStream, path: Path) -> None:
 
     The cache key travels in the Parquet schema metadata, so a loaded stream
     can be validated against freshly computed inputs without re-screening.
-    Writing goes through a same-directory temp file and `os.replace`, matching
+    The Parquet bytes are staged in memory and then written through
+    `io_atomic.write_bytes_atomically`, matching
     `storage/market_store.py::_write_partition`: a failed write leaves any
     previous cache untouched and removes the temporary file. The parent
     directory must already exist; the caller owns creating it.
+
+    `--candidate-cache` (`backtest/cli.py`) exists precisely so the same
+    path can be shared across separate `copilot-backtest` invocations, so
+    the staging path is unique per call rather than `io_atomic`'s own
+    deterministic `.{name}.tmp`: two processes racing a cache miss on the
+    same destination must never stage into the same temporary file, or one
+    could publish the other's partially-written body.
 
     Args:
         stream: The stream to persist.
@@ -377,18 +387,22 @@ def save_candidate_stream(stream: CandidateStream, path: Path) -> None:
         OSError: The write or the replacement failed.
     """
     table = _stream_table(stream)
-    with tempfile.NamedTemporaryFile(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        tmp_file = Path(handle.name)
-    try:
-        pq.write_table(table, tmp_file)
-        tmp_file.replace(path)
-    finally:
-        tmp_file.unlink(missing_ok=True)
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer)
+    write_bytes_atomically(
+        path, buffer.getvalue(), temporary_path=_unique_temporary_path(path)
+    )
+
+
+def _unique_temporary_path(destination: Path) -> Path:
+    """A same-directory staging path unique to this call, not just this name.
+
+    `io_atomic`'s own default `.{name}.tmp` is deterministic, which is fine
+    when only one writer ever targets a destination -- it is not fine here,
+    where a shared `--candidate-cache` path can be written by two concurrent
+    `copilot-backtest` processes.
+    """
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
 
 
 def load_candidate_stream(path: Path) -> CandidateStream:

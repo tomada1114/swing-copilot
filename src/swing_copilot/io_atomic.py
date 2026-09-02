@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
+    "write_bytes_atomically",
     "write_json_atomically",
     "write_json_batch_atomically",
     "write_text_atomically",
@@ -125,6 +126,49 @@ def write_text_atomically(destination: Path, content: str) -> None:
     tmp_path = _temporary_path(destination)
     try:
         tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, destination)  # noqa: PTH105 - atomic replace by design
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def write_bytes_atomically(
+    destination: Path,
+    body: bytes,
+    *,
+    temporary_path: Path | None = None,
+) -> None:
+    """Replace `destination` with `body`, all-or-nothing.
+
+    The same guarantee `write_text_atomically` gives, for content that is
+    already bytes rather than text (a Parquet/CSV buffer, or
+    `scripts/data_sync.py`'s local sync-state JSON, which it already renders
+    to bytes itself).
+
+    Args:
+        destination: Final path to (re)write. Its directory must exist.
+        body: The complete bytes to write.
+        temporary_path: Staging path to use instead of the default
+            `.{name}.tmp` beside `destination`. Must be in
+            `destination.parent`, so the final rename stays a same-directory
+            (and so same-filesystem) atomic replace. Exists for a caller
+            whose own garbage collection depends on a specific temp-name
+            convention -- `scripts/data_sync.py`'s hidden, randomly-suffixed
+            temporary files, which its `_is_excluded` keys on.
+
+    Raises:
+        OSError: Writing or replacing failed. The previous destination is
+            left untouched and the temporary artifact is removed.
+        ValueError: `temporary_path` is not in `destination.parent`.
+    """
+    tmp_path = (
+        _temporary_path(destination) if temporary_path is None else temporary_path
+    )
+    if tmp_path.parent != destination.parent:
+        msg = f"temporary_path must be in {destination.parent}, got {tmp_path.parent}"
+        raise ValueError(msg)
+    try:
+        tmp_path.write_bytes(body)
         os.replace(tmp_path, destination)  # noqa: PTH105 - atomic replace by design
     except OSError:
         tmp_path.unlink(missing_ok=True)

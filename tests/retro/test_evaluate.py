@@ -230,12 +230,16 @@ class TestEvaluateBenchmarkReturn:
         self, market_store: MarketStore, state_store: StateStore
     ) -> None:
         run_id = uuid4()
-        _seed_calendar(market_store)
         _seed_verdict(state_store, run_id)
         # Benchmark 100 -> 102 over the same 5 sessions: +2.0%. The symbol
         # gains 1.5%, so it actually *lagged* -- the reading the raw
-        # forward return alone cannot give.
-        market_store.write_bars(bars(BENCHMARK, {MATURITY_5D: 102.0}))
+        # forward return alone cannot give. The calendar carries the maturity
+        # close from the start rather than overwriting a stored 100.0: a 2%
+        # revision is past what `write_bars` accepts as a correction, and it
+        # would quarantine the benchmark outright (Issue #413).
+        market_store.write_bars(
+            bars(BENCHMARK, dict.fromkeys(CALENDAR, 100.0) | {MATURITY_5D: 102.0})
+        )
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
 
         _evaluate(market_store, state_store, CALENDAR[10])
@@ -429,8 +433,12 @@ class TestEvaluateIdempotence:
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
         _evaluate(market_store, state_store, CALENDAR[10])
 
-        # The maturity close is revised down sharply.
-        market_store.write_bars(bars("AAPL", {MATURITY_5D: 95.0}))
+        # The maturity close is revised down sharply -- far past the 0.5%
+        # `write_bars` accepts as a correction, so the repaired history
+        # arrives through the rebuild path the operator actually uses.
+        market_store.replace_symbol_bars(
+            ["AAPL"], bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 95.0})
+        )
         _evaluate(market_store, state_store, CALENDAR[10])
 
         rows = _outcome_rows(state_store, 5)
@@ -545,7 +553,9 @@ class TestOnlyPendingScope:
         _seed_verdict(state_store, run_id)
         market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
         self._pending_only(market_store, state_store, CALENDAR[10])
-        market_store.write_bars(bars("AAPL", {MATURITY_5D: 90.0}))
+        market_store.replace_symbol_bars(
+            ["AAPL"], bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 90.0})
+        )
 
         _evaluate(market_store, state_store, CALENDAR[10])
 

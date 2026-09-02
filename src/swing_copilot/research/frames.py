@@ -25,13 +25,20 @@ from typing import TYPE_CHECKING
 import duckdb
 import pandas as pd
 
+from swing_copilot.data.adjustments import adjust_bars
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
-from swing_copilot.storage.market_store import BARS_COLUMNS, DEFAULT_PARQUET_ROOT
+from swing_copilot.storage.market_store import (
+    BARS_COLUMNS,
+    DEFAULT_PARQUET_ROOT,
+    MarketStore,
+    validate_bars_format,
+)
 from swing_copilot.storage.state_store import StateStore
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import date
 
 
 class ResearchError(SwingCopilotError):
@@ -243,6 +250,9 @@ def regime_snapshots(db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFrame:
 def bars(
     symbols: Sequence[str] | None = None,
     parquet_root: Path | str = DEFAULT_PARQUET_ROOT,
+    *,
+    as_of: date | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
 ) -> pd.DataFrame:
     """Daily OHLCV bars straight from the Parquet partitions.
 
@@ -250,18 +260,36 @@ def bars(
     shared database file not at all — the safest possible way to pull price
     history while anything else is running.
 
+    Stored bars are **raw** (as-traded), which is the default here: they are
+    the prices that actually printed, and they never change. To see instead
+    what a reader saw on some past date — the basis a screening run or a
+    forward return worked on — pass `as_of`, which applies every split with
+    `ex_date <= as_of` exactly as `MarketStore.read_bars` does. That reads
+    the splits from `db_path`, briefly and read-only.
+
     Args:
         symbols: Restrict to these tickers; `None` returns every symbol.
         parquet_root: Root directory of the `year=YYYY` bar partitions.
+        as_of: Adjust to this point in time; `None` (the default) returns raw
+            bars. Rows are *not* filtered by it — that stays the caller's, so
+            "the whole history on August's basis" is expressible.
+        db_path: DuckDB file holding `corporate_actions`. Only opened when
+            `as_of` is given.
 
     Returns:
         Tidy bars (`BARS_COLUMNS` plus the `year` hive partition), ordered by
         symbol then date; empty (with the bar columns) when no partition
         files exist yet.
+
+    Raises:
+        BarsFormatError: The partitions predate the raw-bar storage model
+            (Issue #413) and their adjustment basis is unknown.
+        ResearchError: `as_of` was given but `db_path` does not exist.
     """
     root = Path(parquet_root)
     if not any(root.glob("year=*/*.parquet")):
         return pd.DataFrame(columns=list(BARS_COLUMNS))
+    validate_bars_format(root)
 
     glob = str(root / "year=*" / "*.parquet")
     sql = "SELECT * FROM read_parquet(?, hive_partitioning=true) ORDER BY symbol, date"
@@ -274,4 +302,15 @@ def bars(
         )
         params.extend(symbols)
     with duckdb.connect() as conn:
-        return conn.execute(sql, params).df()
+        raw = conn.execute(sql, params).df()
+    if as_of is None or raw.empty:
+        return raw
+
+    path = Path(db_path)
+    if not path.exists():
+        msg = f"database file not found: {path}"
+        raise ResearchError(msg)
+    raw["date"] = pd.to_datetime(raw["date"]).dt.date
+    store = MarketStore(Database(path, read_only=True), root)
+    splits = store.read_splits(sorted(set(raw["symbol"])), as_of=as_of)
+    return adjust_bars(raw, splits, as_of)

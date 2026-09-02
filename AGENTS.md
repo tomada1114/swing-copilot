@@ -117,6 +117,13 @@ the divergence, and update the stale canonical source or request a decision.
 
 - Natural-key reruns must incorporate corrected input; do not use
   `ON CONFLICT DO NOTHING` where correction is expected.
+- Daily price bars are the one deliberate exception: stored rows are raw
+  (as-traded, unadjusted) and immutable. A re-fetched row within 0.5% of the
+  stored value replaces it; a larger deviation, or a mixed-adjustment-basis
+  signature, quarantines that symbol's batch fail-closed instead (nothing
+  written, existing rows untouched).
+- Splits/dividends adjust prices only on read, as of the caller's `as_of`;
+  dividends are recorded but never applied to price.
 - A logical multi-row DuckDB write is one transaction: all rows commit or all
   roll back. Tests inject a failure after at least one successful statement.
 - A snapshot replacement must also remove members absent from the replacement.

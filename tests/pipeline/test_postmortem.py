@@ -292,8 +292,13 @@ class TestRunPostmortemStepRerunCorrection:
         assert first_rows[0][1] == TRUE_POSITIVE
 
         # Corrected price data: the as_of close is revised down sharply.
-        # 100 -> 95.0: -5.0% -> FALSE_POSITIVE_SEVERE (< -2%).
-        market_store.write_bars(_bars("AAPL", {AS_OF: 95.0}))
+        # 100 -> 95.0: -5.0% -> FALSE_POSITIVE_SEVERE (< -2%). A move that
+        # large is a change of basis, not a correction, so `write_bars` now
+        # quarantines it (Issue #413); the operator's repair path is a
+        # wholesale rebuild of the symbol, which is what lands here.
+        market_store.replace_symbol_bars(
+            ["AAPL"], _bars("AAPL", {run_date_5d: 100.0, AS_OF: 95.0})
+        )
 
         run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
         second_rows = _signal_outcome_rows(state_store, "AAPL", 5)
@@ -587,8 +592,12 @@ class TestRunPostmortemStepControlGroups:
         _seed_control_group_run(market_store, state_store, run_date_5d)
         run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
 
-        # Corrected bar for the rejected symbol, then an identical rerun.
-        market_store.write_bars(_bars("GONE", {AS_OF: 22.0}))
+        # Corrected bars for the rejected symbol, then an identical rerun.
+        # 19.0 -> 22.0 is past `write_bars`' immutability tolerance, so the
+        # repair arrives the way a real one does: a rebuild of that symbol.
+        market_store.replace_symbol_bars(
+            ["GONE"], _bars("GONE", {run_date_5d: 20.0, AS_OF: 22.0})
+        )
         run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
 
         rows = _universe_return_rows(state_store, 5)

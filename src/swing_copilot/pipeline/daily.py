@@ -531,15 +531,26 @@ def _run_step_prices(
         result = prefetched
     if result.bars.empty:
         return _StepOutcome(False, "no price data returned for any symbol")
-    deps.market_store.write_bars(
-        _stamp_bars(result.bars, deps.provider_name, deps.clock.now())
+    fetched_at = deps.clock.now()
+    # Actions first: `write_bars` stores raw prices and `read_bars` adjusts
+    # them from `corporate_actions`, so a split recorded after its own bars
+    # would leave the very next read on the pre-split basis.
+    deps.market_store.write_corporate_actions(
+        result.actions, provider=deps.provider_name, fetched_at=fetched_at
     )
-    detail = (
-        f"failed symbols: {[f.symbol for f in result.failures]}"
-        if result.failures
-        else None
+    write_result = deps.market_store.write_bars(
+        _stamp_bars(result.bars, deps.provider_name, fetched_at)
     )
-    return _StepOutcome(True, detail)
+    details = []
+    if result.failures:
+        details.append(f"failed symbols: {[f.symbol for f in result.failures]}")
+    if write_result.quarantined:
+        # Fail-soft exactly like a per-symbol fetch failure: the other symbols
+        # were written, and a quarantined one keeps whatever it already had.
+        details.append(
+            f"quarantined symbols: {[q.symbol for q in write_result.quarantined]}"
+        )
+    return _StepOutcome(True, "; ".join(details) or None)
 
 
 @dataclass(frozen=True, slots=True)

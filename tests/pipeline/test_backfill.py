@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
 
-from swing_copilot.data.base import BarFetchResult, FetchFailure
+from swing_copilot.data.base import ACTIONS_COLUMNS, BarFetchResult, FetchFailure
 from swing_copilot.pipeline.backfill import (
     CHUNK_SLEEP_SECONDS,
     COVERAGE_TOLERANCE_DAYS,
+    REBUILD_START,
     SYMBOL_CHUNK_SIZE,
     BarsBackfillDeps,
     FundamentalsBackfillDeps,
     backfill_bars,
     backfill_fundamentals,
+    check_bars,
+    rebuild_bars,
 )
 from swing_copilot.pipeline.backfill import main as backfill_main
 from swing_copilot.pipeline.daily import _select_symbols
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import (
+    BarWriteResult,
     FundamentalsRecord,
     MarketStore,
     NonFiniteBarsError,
@@ -82,12 +87,26 @@ class _RecordingProvider:
         *,
         failing_symbols: frozenset[str] = frozenset(),
         non_finite_symbols: frozenset[str] = frozenset(),
+        rows_by_symbol: dict[str, list[dict[str, object]]] | None = None,
+        splits: tuple[tuple[str, date, float], ...] = (),
     ) -> None:
         self.calls: list[tuple[list[str], date, date]] = []
         self._failing_symbols = failing_symbols
         #: Symbols returned with a NaN close, standing in for a provider whose
         #: own normalization does not drop them (`data/base.py`'s contract).
         self._non_finite_symbols = non_finite_symbols
+        #: Full per-symbol histories, for the rebuild path; symbols absent
+        #: from it fall back to the single `_START` row.
+        self._rows_by_symbol = rows_by_symbol or {}
+        self._splits = splits
+
+    def _rows_for(self, symbol: str) -> list[dict[str, object]]:
+        if symbol in self._rows_by_symbol:
+            return self._rows_by_symbol[symbol]
+        row = _bar_row(symbol, _START)
+        if symbol in self._non_finite_symbols:
+            row = row | {"close": float("nan")}
+        return [row]
 
     def get_daily_bars(
         self, symbols: list[str], start: date, end: date
@@ -95,22 +114,27 @@ class _RecordingProvider:
         self.calls.append((list(symbols), start, end))
         succeeded = [s for s in symbols if s not in self._failing_symbols]
         bars = pd.DataFrame(
-            [
-                _bar_row(symbol, _START)
-                | (
-                    {"close": float("nan")}
-                    if symbol in self._non_finite_symbols
-                    else {}
-                )
-                for symbol in succeeded
-            ]
+            [row for symbol in succeeded for row in self._rows_for(symbol)]
         )
         failures = tuple(
             FetchFailure(symbol=symbol, reason="no data returned", retryable=True)
             for symbol in symbols
             if symbol in self._failing_symbols
         )
-        return BarFetchResult(bars=bars, failures=failures)
+        actions = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "ex_date": ex_date,
+                    "kind": "split",
+                    "value": factor,
+                }
+                for symbol, ex_date, factor in self._splits
+                if symbol in succeeded
+            ],
+            columns=list(ACTIONS_COLUMNS),
+        )
+        return BarFetchResult(bars=bars, failures=failures, actions=actions)
 
     def get_latest_bars(self, symbols: list[str], as_of: date) -> BarFetchResult:
         """Never used by the backfill path; present only to satisfy the port."""
@@ -119,18 +143,32 @@ class _RecordingProvider:
 
 
 class _CountingStore:
-    """Wraps a real `MarketStore` to count `write_bars` calls."""
+    """Wraps a real `MarketStore` to count and order its write calls."""
 
     def __init__(self, inner: MarketStore) -> None:
         self._inner = inner
         self.write_calls: list[pd.DataFrame] = []
+        self.action_calls: list[pd.DataFrame] = []
+        #: The order the two writers were invoked in, which is itself a
+        #: contract: splits have to be recorded before the bars they re-base.
+        self.call_order: list[str] = []
 
     def earliest_bar_dates(self, symbols: list[str]) -> dict[str, date]:
         return self._inner.earliest_bar_dates(symbols)
 
-    def write_bars(self, df: pd.DataFrame) -> None:
+    def write_bars(self, df: pd.DataFrame) -> BarWriteResult:
         self.write_calls.append(df.copy())
-        self._inner.write_bars(df)
+        self.call_order.append("bars")
+        return self._inner.write_bars(df)
+
+    def write_corporate_actions(
+        self, df: pd.DataFrame, *, provider: str, fetched_at: datetime
+    ) -> None:
+        self.action_calls.append(df.copy())
+        self.call_order.append("actions")
+        self._inner.write_corporate_actions(
+            df, provider=provider, fetched_at=fetched_at
+        )
 
 
 @pytest.fixture
@@ -833,3 +871,409 @@ class TestBackfillCli:
                     "AAA",
                 ]
             )
+
+
+def _stored_row(symbol: str, day: date, close: float = 10.5) -> dict[str, object]:
+    """A row as it sits in Parquet: the provider's shape plus the stamps."""
+    return {
+        **_bar_row(symbol, day),
+        "close": close,
+        "provider": "yfinance",
+        "fetched_at": _NOW,
+    }
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, float]]:
+    """Every file under `root` with its size and mtime, for a no-write proof."""
+    return {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+class TestBackfillBarsCorporateActions:
+    """Issue #413: the splits a response reports are persisted beside the bars."""
+
+    def test_records_the_actions_before_the_bars_they_rebase(
+        self, market_store: MarketStore
+    ) -> None:
+        # Order is the contract: `read_bars` adjusts from `corporate_actions`,
+        # so a split written after its own history would be invisible to the
+        # very next read.
+        counting = _CountingStore(market_store)
+        provider = _RecordingProvider(splits=(("AAA", date(2024, 6, 3), 2.0),))
+
+        backfill_bars(_deps(provider, counting, []), ["AAA"], _START, _END)
+
+        assert counting.call_order == ["actions", "bars"]
+        assert market_store.read_splits(["AAA"], as_of=_END)["AAA"][0].factor == 2.0
+
+    def test_reports_the_symbols_the_store_quarantined(
+        self, market_store: MarketStore
+    ) -> None:
+        # A re-fetch that contradicts a stored raw close by more than the
+        # correction tolerance is a change of basis, not a correction: the
+        # symbol is skipped, the rest of the batch is written, and the
+        # operator is told — the same fail-soft shape as a fetch failure.
+        stored_day = date(2025, 6, 2)
+        market_store.write_bars(
+            pd.DataFrame(
+                [_stored_row("AAA", stored_day), _stored_row("BBB", stored_day)]
+            )
+        )
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [{**_bar_row("AAA", stored_day), "close": 20.0}],
+                "BBB": [{**_bar_row("BBB", stored_day), "close": 10.53}],
+            }
+        )
+
+        result = backfill_bars(
+            _deps(provider, market_store, []), ["AAA", "BBB"], _START, _END
+        )
+
+        assert result.quarantined_symbols == ("AAA",)
+        stored = market_store.read_raw_bars(["AAA", "BBB"])
+        assert stored["close"].tolist() == pytest.approx([10.5, 10.53])
+
+
+class TestRebuildBars:
+    """Issue #413: the one sanctioned way to change a stored symbol's basis."""
+
+    def _deps_for(
+        self, provider: _RecordingProvider, store: MarketStore
+    ) -> BarsBackfillDeps:
+        return _deps(provider, store, [])
+
+    def test_replaces_the_symbols_rows_in_every_year_partition(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2019, 1, 2)),
+                    _stored_row("AAA", date(2020, 1, 2)),
+                ]
+            )
+        )
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [{**_bar_row("AAA", date(2021, 1, 4)), "close": 20.0}]
+            }
+        )
+
+        result = rebuild_bars(self._deps_for(provider, market_store), ["AAA"])
+
+        assert result.replaced_symbols == ("AAA",)
+        # Not merged with what was there: the 2019 and 2020 rows are gone.
+        stored = market_store.read_raw_bars(["AAA"])
+        assert stored["date"].tolist() == [date(2021, 1, 4)]
+        assert stored["close"].tolist() == pytest.approx([20.0])
+
+    def test_requests_the_whole_history_up_to_tomorrow(
+        self, market_store: MarketStore
+    ) -> None:
+        provider = _RecordingProvider()
+
+        rebuild_bars(self._deps_for(provider, market_store), ["AAA"])
+
+        _, start, end = provider.calls[0]
+        assert start == REBUILD_START
+        # The provider's end is exclusive, so today's own bar is included.
+        assert end == _NOW.date() + timedelta(days=1)
+
+    def test_a_rejected_symbol_keeps_the_rows_it_already_had(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2019, 1, 2)),
+                    _stored_row("BBB", date(2019, 1, 2)),
+                ]
+            )
+        )
+        provider = _RecordingProvider(
+            failing_symbols=frozenset({"BBB"}),
+            rows_by_symbol={
+                "AAA": [{**_bar_row("AAA", date(2021, 1, 4)), "close": 20.0}]
+            },
+        )
+
+        result = rebuild_bars(self._deps_for(provider, market_store), ["AAA", "BBB"])
+
+        assert (result.replaced_symbols, result.rejected_symbols) == (
+            ("AAA",),
+            ("BBB",),
+        )
+        # Old rows are better than none: a symbol whose response could not be
+        # normalized is left exactly as it was, and named in the result.
+        assert market_store.read_raw_bars(["BBB"])["date"].tolist() == [
+            date(2019, 1, 2)
+        ]
+
+    def test_stamps_the_format_marker_onto_an_unmigrated_store(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(pd.DataFrame([_stored_row("AAA", date(2019, 1, 2))]))
+        marker = market_store.parquet_root / "_format.json"
+        marker.unlink()
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [{**_bar_row("AAA", date(2021, 1, 4)), "close": 20.0}]
+            }
+        )
+
+        rebuild_bars(self._deps_for(provider, market_store), ["AAA"])
+
+        assert json.loads(marker.read_text(encoding="utf-8")) == {
+            "basis": "raw",
+            "version": 2,
+        }
+
+    def test_upserts_the_corporate_actions_it_fetched(
+        self, market_store: MarketStore
+    ) -> None:
+        provider = _RecordingProvider(splits=(("AAA", date(2020, 6, 1), 2.0),))
+
+        rebuild_bars(self._deps_for(provider, market_store), ["AAA"])
+
+        splits = market_store.read_splits(["AAA"], as_of=date(2026, 12, 31))["AAA"]
+        assert [(split.ex_date, split.factor) for split in splits] == [
+            (date(2020, 6, 1), 2.0)
+        ]
+
+
+class TestCheckBars:
+    """The read-only audit: never writes, and names the session to look at."""
+
+    def _plant(self, market_store: MarketStore, closes: dict[date, float]) -> None:
+        """Plant a series past `write_bars`' gate, the way a bad day left one."""
+        market_store.replace_symbol_bars(
+            ["AAA"],
+            pd.DataFrame(
+                [_stored_row("AAA", day, close) for day, close in closes.items()]
+            ),
+        )
+
+    def _series(self, closes: list[float]) -> dict[date, float]:
+        return {
+            date(2026, 7, 1) + timedelta(days=offset): close
+            for offset, close in enumerate(closes)
+        }
+
+    def test_reports_ok_for_a_single_basis_store(
+        self, market_store: MarketStore
+    ) -> None:
+        self._plant(market_store, self._series([100.0, 101.0, 99.0, 100.0]))
+
+        result = check_bars(market_store, [])
+
+        assert (result.format_problem, result.findings) == (None, ())
+        assert result.scanned_symbols == ("AAA",)
+
+    def test_names_the_first_session_quoted_on_the_other_basis(
+        self, market_store: MarketStore
+    ) -> None:
+        # The Issue #413 shape: one adjusted row dropped into an otherwise
+        # unadjusted series. The jump down and the jump back multiply to 1.
+        self._plant(market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]))
+
+        result = check_bars(market_store, ["AAA"])
+
+        assert result.format_problem is None
+        assert [(f.symbol, f.first_jump_date) for f in result.findings] == [
+            ("AAA", date(2026, 7, 3))
+        ]
+
+    def test_a_symbol_with_no_stored_rows_is_simply_not_a_finding(
+        self, market_store: MarketStore
+    ) -> None:
+        self._plant(market_store, self._series([100.0, 101.0]))
+
+        result = check_bars(market_store, ["AAA", "ZZZ"])
+
+        assert result.scanned_symbols == ("AAA", "ZZZ")
+        assert result.findings == ()
+
+    def test_reports_a_store_that_predates_the_raw_bar_model(
+        self, market_store: MarketStore
+    ) -> None:
+        self._plant(market_store, self._series([100.0, 101.0]))
+        (market_store.parquet_root / "_format.json").unlink()
+
+        result = check_bars(market_store, ["AAA"])
+
+        assert result.format_problem is not None
+        assert "copilot-backfill rebuild" in result.format_problem
+        # The scan is not attempted at all: those partitions cannot be read
+        # as raw, so any finding from them would be meaningless.
+        assert result.findings == ()
+
+    def test_writes_nothing_at_all(
+        self, market_store: MarketStore, tmp_path: Path
+    ) -> None:
+        self._plant(market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]))
+        before = _tree_snapshot(tmp_path)
+
+        check_bars(market_store, [])
+
+        assert _tree_snapshot(tmp_path) == before
+        # Not even the DuckDB file: the audit must be safe to run while the
+        # scheduled job holds the store's exclusive lock.
+        assert not (tmp_path / "copilot.duckdb").exists()
+
+
+class TestRebuildAndCheckCli:
+    def test_rebuild_reports_replaced_and_rejected_symbols(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        provider = _RecordingProvider(failing_symbols=frozenset({"BBB"}))
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        backfill_main(
+            [
+                "rebuild",
+                "--db",
+                str(tmp_path / "copilot.duckdb"),
+                "--symbols",
+                "aaa,bbb",
+            ]
+        )
+
+        out = capsys.readouterr().out
+        assert "rebuild: 対象 2 銘柄 / 置換 1 / 拒否 1 / 書き込み 1 行" in out
+        assert "既存行を維持した銘柄: BBB" in out
+
+    def test_rebuild_exits_non_zero_and_writes_no_marker_when_all_fail(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Nothing was replaced, so the store still holds whatever basis it
+        # had — stamping it "raw" would bless history nobody rebuilt.
+        provider = _RecordingProvider(failing_symbols=frozenset({"AAA"}))
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            backfill_main(
+                [
+                    "rebuild",
+                    "--db",
+                    str(tmp_path / "copilot.duckdb"),
+                    "--symbols",
+                    "AAA",
+                ]
+            )
+
+        assert excinfo.value.code == 1
+        assert "全銘柄の取得に失敗" in capsys.readouterr().err
+        assert not (tmp_path / "bars" / "_format.json").exists()
+
+    def test_check_prints_ok_for_a_clean_store(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1), 100.0),
+                    _stored_row("AAA", date(2026, 7, 2), 101.0),
+                ]
+            )
+        )
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "形式マーカー: ok" in out
+        assert "check: ok（対象 1 銘柄、混在署名なし）" in out
+
+    def test_check_lists_every_symbol_with_a_mixed_basis_series(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.replace_symbol_bars(
+            ["AAA"],
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1) + timedelta(days=offset), close)
+                    for offset, close in enumerate([100.0, 100.0, 50.0, 100.0, 100.0])
+                ]
+            ),
+        )
+
+        backfill_main(
+            ["check", "--db", str(tmp_path / "copilot.duckdb"), "--symbols", "aaa"]
+        )
+
+        out = capsys.readouterr().out
+        assert "混在署名 1 銘柄" in out
+        assert "混在署名: AAA（最初のジャンプ 2026-07-03）" in out
+
+
+class TestBarsCliQuarantineReport:
+    def test_bars_command_names_the_symbols_the_store_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        stored_day = date(2025, 6, 2)
+        store.write_bars(pd.DataFrame([_stored_row("AAA", stored_day)]))
+        provider = _RecordingProvider(
+            rows_by_symbol={"AAA": [{**_bar_row("AAA", stored_day), "close": 20.0}]}
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        backfill_main(
+            [
+                "bars",
+                "--start",
+                "2019-01-01",
+                "--end",
+                "2026-07-30",
+                "--db",
+                str(tmp_path / "copilot.duckdb"),
+                "--symbols",
+                "AAA",
+            ]
+        )
+
+        assert "隔離した銘柄: AAA" in capsys.readouterr().out
+
+
+class TestCheckCliUnmigratedStore:
+    def test_check_reports_the_missing_marker_and_stops(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_bars(pd.DataFrame([_stored_row("AAA", date(2026, 7, 1))]))
+        (tmp_path / "bars" / "_format.json").unlink()
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "形式マーカー: NG" in out
+        assert "copilot-backfill rebuild" in out
+        assert "混在署名" not in out

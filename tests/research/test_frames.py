@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import duckdb
@@ -21,8 +22,11 @@ import pytest
 
 from swing_copilot import research
 from swing_copilot.storage.database import Database
-from swing_copilot.storage.market_store import MarketStore
+from swing_copilot.storage.market_store import BarsFormatError, MarketStore
 from tests.support.runs import seed_run
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 RUN_DATE = date(2027, 2, 1)
 
@@ -505,3 +509,81 @@ class TestBars:
         assert df.empty
         assert "symbol" in df.columns
         assert "close" in df.columns
+
+    def test_as_of_returns_the_split_adjusted_basis_of_that_date(self, tmp_path):
+        root, db_path = tmp_path / "parquet", tmp_path / "copilot.duckdb"
+        store = self._store_with_a_split(root, db_path)
+
+        raw = research.bars(["MNST"], parquet_root=root)
+        adjusted = research.bars(
+            ["MNST"], parquet_root=root, as_of=date(2026, 8, 12), db_path=db_path
+        )
+
+        assert list(raw["close"]) == pytest.approx([90.0, 45.5])
+        assert list(adjusted["close"]) == pytest.approx([45.0, 45.5])
+        assert list(adjusted["volume"]) == [2000, 2000]
+        assert store.read_splits(["MNST"], as_of=date(2026, 8, 12))["MNST"]
+
+    def test_an_as_of_before_the_ex_date_still_reads_raw(self, tmp_path):
+        root, db_path = tmp_path / "parquet", tmp_path / "copilot.duckdb"
+        self._store_with_a_split(root, db_path)
+
+        adjusted = research.bars(
+            ["MNST"], parquet_root=root, as_of=date(2026, 8, 10), db_path=db_path
+        )
+
+        assert list(adjusted["close"]) == pytest.approx([90.0, 45.5])
+
+    def test_as_of_against_a_missing_database_is_a_research_error(self, tmp_path):
+        root, db_path = tmp_path / "parquet", tmp_path / "copilot.duckdb"
+        self._store_with_a_split(root, db_path)
+
+        with pytest.raises(research.ResearchError, match="not found"):
+            research.bars(
+                ["MNST"],
+                parquet_root=root,
+                as_of=date(2026, 8, 12),
+                db_path=tmp_path / "absent.duckdb",
+            )
+
+    def test_partitions_without_a_format_marker_are_refused(self, tmp_path):
+        root, db_path = tmp_path / "parquet", tmp_path / "copilot.duckdb"
+        self._store_with_a_split(root, db_path)
+        (root / "_format.json").unlink()
+
+        with pytest.raises(BarsFormatError, match="rebuild"):
+            research.bars(["MNST"], parquet_root=root)
+
+    @staticmethod
+    def _store_with_a_split(root: Path, db_path: Path) -> MarketStore:
+        """A raw two-bar history around a 2026-08-11 2:1 split."""
+        store = MarketStore(Database(db_path), root)
+        stamp = datetime(2026, 8, 12, 21, 0, tzinfo=UTC)
+        store.write_bars(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST", "MNST"],
+                    "date": [date(2026, 8, 10), date(2026, 8, 11)],
+                    "open": [90.0, 45.0],
+                    "high": [91.0, 46.0],
+                    "low": [89.0, 44.0],
+                    "close": [90.0, 45.5],
+                    "volume": [1000, 2000],
+                    "provider": ["test", "test"],
+                    "fetched_at": [stamp, stamp],
+                }
+            )
+        )
+        store.write_corporate_actions(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST"],
+                    "ex_date": [date(2026, 8, 11)],
+                    "kind": ["split"],
+                    "value": [2.0],
+                }
+            ),
+            provider="test",
+            fetched_at=stamp,
+        )
+        return store

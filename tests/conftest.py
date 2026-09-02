@@ -15,6 +15,7 @@ import pytest
 
 from swing_copilot.config import Secrets, Settings, load_settings
 from swing_copilot.storage.database import Database
+from swing_copilot.storage.market_store import write_bars_format_marker
 from swing_copilot.storage.state_store import StateStore
 from tests.support.script_loader import load_script_module
 
@@ -275,6 +276,11 @@ def plant_non_finite_bars(market_store: MarketStore, df: pd.DataFrame) -> None:
     """
     working = df.copy()
     working["date"] = pd.to_datetime(working["date"]).dt.date
+    # The format marker too, or the partition this plants would read as
+    # pre-Issue-#413 history and every later read/write would refuse it. The
+    # guard being bypassed here is the *finite* one, not the storage-model
+    # one: these rows are as-traded, they are merely broken.
+    write_bars_format_marker(market_store.parquet_root)
     years = working["date"].map(lambda bar_date: bar_date.year)
     for year in sorted(years.unique()):
         # Deliberately the unvalidated half of `write_bars`: re-implementing

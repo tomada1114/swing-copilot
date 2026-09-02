@@ -14,7 +14,6 @@ from uuid import uuid4
 
 import pytest
 
-from swing_copilot.storage.tracking_records import VerdictPosition, VerdictPositionMark
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 from swing_copilot.tracking.board import build_board, position_records
 from swing_copilot.tracking.update import update_tracking
@@ -32,6 +31,7 @@ from tests.tracking.conftest import (
     bar,
     flat_prelude,
     plant_broken_bars,
+    plant_split,
     seed_risk,
     seed_risk_limit_price,
     seed_verdict,
@@ -44,20 +44,6 @@ if TYPE_CHECKING:
     from swing_copilot.config import Settings, TradePlanConfig
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.storage.state_store import StateStore
-
-
-def _scaled(rows: list[dict[str, Any]], ratio: float) -> list[dict[str, Any]]:
-    """Rescale a batch of OHLC rows the way `auto_adjust=True` rewrites history."""
-    return [
-        {
-            **row,
-            "open": row["open"] * ratio,
-            "high": row["high"] * ratio,
-            "low": row["low"] * ratio,
-            "close": row["close"] * ratio,
-        }
-        for row in rows
-    ]
 
 
 class _FlakyConnection:
@@ -920,27 +906,60 @@ class TestDataQuality:
 
 
 class TestSplitRebase:
+    """REQ-008: the ledger re-bases from split *events*, never a price ratio.
+
+    Stored bars are as-traded and `read_bars` applies every split visible at
+    `as_of`, so a position's frozen `entry_price` / `stop_price` and its
+    published marks have to be divided by the same factor before any session
+    is replayed. Each scenario plants the split through
+    `market_store.write_corporate_actions`, exactly as the price step does.
+    """
+
+    def _split_day_bar(self, close: float) -> dict[str, Any]:
+        """DAY_1 as it actually traded, on the post-split basis.
+
+        The range is 2% of the close, which is exactly what the flat
+        prelude's 2.00-wide range becomes once `read_bars` re-bases it, so
+        ATR -- and therefore the trailing stop -- is unmoved by the split
+        itself and every assertion below is about the rebase alone.
+        """
+        return bar(
+            DAY_1,
+            open_price=close,
+            high=close * 1.01,
+            low=close * 0.99,
+            close=close,
+        )
+
+    def _open_at_entry(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        config: TradePlanConfig,
+        *,
+        stop_price: float | None = RISK_STOP,
+        sessions: int = 20,
+    ) -> None:
+        """Seed a verdict and carry it to an open position marked on ENTRY_DATE."""
+        seed_verdict(state_store)
+        seed_risk(state_store, stop_price=stop_price)
+        write_bars(market_store, flat_prelude(sessions=sessions))
+        update_tracking(state_store, market_store, config, as_of=ENTRY_DATE)
+
     def test_a_two_for_one_split_rebases_the_position_and_prevents_a_false_stop(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        self._open_at_entry(state_store, market_store, backtest_config)
 
-        # The next run re-fetches the whole 400-day window with
-        # auto_adjust=True: a 2-for-1 split rewrites every stored session,
-        # including the entry date, to half its pre-split dollars. Without
-        # rebasing, the stale stop (95.0) would gap-fill against day 1's
-        # post-split low (49.5) -- a false stop the split did not earn.
-        write_bars(market_store, _scaled(flat_prelude(), 0.5))
-        write_bars(
-            market_store,
-            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
-        )
+        # The split lands on DAY_1, so the stored prelude keeps its as-traded
+        # 100.00 and `read_bars(as_of=DAY_1)` hands it back at 50.00. Without
+        # rebasing, the stale 95.00 stop would gap-fill against DAY_1's 49.50
+        # low -- a false stop the split did not earn.
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
 
         result = update_tracking(
             state_store, market_store, backtest_config, as_of=DAY_1
@@ -957,131 +976,53 @@ class TestSplitRebase:
         assert [mark.stop_price for mark in marks] == pytest.approx([47.5, 47.5])
         assert any(
             f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
-            and "価格再調整を検出" in note
-            and "0.500000" in note
+            and "株式分割" in note
+            and f"ex_date={DAY_1.isoformat()}" in note
+            and "factor=2" in note
             and "100.000000" in note
             and "50.000000" in note
             for note in result.notes
         )
 
-    def test_a_dividend_sized_drift_does_not_rebase(
+    def test_a_reverse_split_scales_the_frozen_prices_up(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        self._open_at_entry(state_store, market_store, backtest_config)
 
-        # ~5% drift from an ex-dividend adjustment: well under the 10%
-        # threshold that separates dividend noise from an actual split.
-        write_bars(
-            market_store,
-            [bar(ENTRY_DATE, open_price=95.0, high=96.0, low=94.0, close=95.0)],
-        )
+        # A 1-for-10 reverse split: one new share for ten old ones, so the
+        # frozen dollars are divided by 0.1, i.e. multiplied by ten.
+        plant_split(market_store, DAY_1, 0.1)
+        write_bars(market_store, [self._split_day_bar(1000.0)])
 
-        result = update_tracking(
-            state_store, market_store, backtest_config, as_of=ENTRY_DATE
-        )
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
 
         position = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert position is not None
-        assert position.entry_price == FLAT_CLOSE
-        assert position.stop_price == RISK_STOP
-        assert not any("価格再調整を検出" in note for note in result.notes)
-
-    def test_exactly_ten_percent_deviation_does_not_rebase(
-        self,
-        state_store: StateStore,
-        market_store: MarketStore,
-        backtest_config: TradePlanConfig,
-    ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        write_bars(
-            market_store,
-            [bar(ENTRY_DATE, open_price=90.0, high=91.0, low=89.0, close=90.0)],
-        )
-
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
-        assert position.entry_price == FLAT_CLOSE
-        assert position.stop_price == RISK_STOP
-
-    def test_just_over_ten_percent_deviation_rebases(
-        self,
-        state_store: StateStore,
-        market_store: MarketStore,
-        backtest_config: TradePlanConfig,
-    ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        write_bars(
-            market_store,
-            [bar(ENTRY_DATE, open_price=89.99, high=90.99, low=88.99, close=89.99)],
-        )
-
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
-        assert position.entry_price == pytest.approx(89.99)
-
-    def test_a_reverse_split_scales_up_by_the_full_ratio(
-        self,
-        state_store: StateStore,
-        market_store: MarketStore,
-        backtest_config: TradePlanConfig,
-    ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        # A 1-for-10 reverse split: the entry-day close now reads 10x higher.
-        write_bars(
-            market_store,
-            [bar(ENTRY_DATE, open_price=1000.0, high=1010.0, low=990.0, close=1000.0)],
-        )
-
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
-        assert position is not None
+        assert position.status == "open"
         assert position.entry_price == pytest.approx(1000.0)
         assert position.stop_price == pytest.approx(RISK_STOP * 10.0)
 
-    def test_stop_price_none_is_rebased_but_stays_none(
+    def test_stop_price_none_is_left_none_by_the_rebase(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
         # Too few sessions for ATR(14): the seeded position opens with no
-        # stop at all, the same path REQ-006 exercises.
-        seed_verdict(state_store)
-        seed_risk(state_store, stop_price=None)
-        write_bars(market_store, flat_prelude(sessions=5))
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        # stop at all, the same path REQ-006 exercises. "No stop was ever
+        # set" is not a dollar figure, so no factor applies to it.
+        self._open_at_entry(
+            state_store, market_store, backtest_config, stop_price=None, sessions=5
+        )
         opened = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert opened is not None
         assert opened.stop_price is None
 
-        write_bars(market_store, _scaled(flat_prelude(sessions=5), 0.5))
-        write_bars(
-            market_store,
-            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
-        )
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
 
         update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
 
@@ -1093,80 +1034,75 @@ class TestSplitRebase:
         assert marks[0].close == pytest.approx(50.0)
         assert marks[0].stop_price is None
 
-    def test_missing_entry_date_bar_skips_the_rebase_check(
+    def test_a_rerun_at_the_same_as_of_does_not_apply_the_split_twice(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
-        # The risk assessment prices the entry directly, so the position
-        # opens without any bar ever having been written for ENTRY_DATE.
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        # Idempotence is carried entirely by `last_marked_date`: replaying
+        # DAY_1 moves it onto the ex-date, and the rule is exclusive there.
+        self._open_at_entry(state_store, market_store, backtest_config)
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
 
         result = update_tracking(
-            state_store, market_store, backtest_config, as_of=DAY_2
+            state_store, market_store, backtest_config, as_of=DAY_1
         )
 
         position = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert position is not None
-        assert position.entry_price == FLAT_CLOSE
-        assert position.stop_price == RISK_STOP
-        assert any(
-            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
-            and "entry_dateのバーが参照窓に無い" in note
-            for note in result.notes
-        )
+        assert position.last_marked_date == DAY_1
+        assert position.entry_price == pytest.approx(50.0)
+        assert position.stop_price == pytest.approx(47.5)
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.close for mark in marks] == pytest.approx([50.0, 50.0])
+        assert not any("株式分割" in note for note in result.notes)
 
-    def test_entry_price_at_or_below_zero_skips_without_a_zero_division(
+    def test_a_split_already_behind_the_last_mark_is_not_applied(
         self,
         state_store: StateStore,
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
-        # Not reachable through normal seeding (which refuses entry_price<=0
-        # outright); constructed directly to prove the guard against a
-        # zero-division on data that predates it.
-        seed_verdict(state_store)
-        state_store.upsert_verdict_position(
-            VerdictPosition(
-                run_id=RUN_ID,
-                symbol=SYMBOL,
-                strategy_key="default",
-                recommendation="proceed",
-                no_trade=False,
-                entry_date=ENTRY_DATE,
-                entry_price=0.0,
-                stop_price=None,
-                days_held=0,
-                status="open",
-                last_marked_date=ENTRY_DATE,
-            ),
-            [
-                VerdictPositionMark(
-                    run_id=RUN_ID,
-                    symbol=SYMBOL,
-                    as_of_date=ENTRY_DATE,
-                    close=0.0,
-                    stop_price=None,
-                    unrealized_return_pct=0.0,
-                )
-            ],
-        )
+        # An ex-date at or before `last_marked_date` is already reflected in
+        # the frozen figures -- the entry close was quoted on that basis.
+        self._open_at_entry(state_store, market_store, backtest_config)
+        plant_split(market_store, ENTRY_DATE - timedelta(days=30), 2.0)
+        write_bars(market_store, [self._split_day_bar(100.0)])
 
         result = update_tracking(
-            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+            state_store, market_store, backtest_config, as_of=DAY_1
         )
 
         position = state_store.get_verdict_position(RUN_ID, SYMBOL)
         assert position is not None
-        assert position.entry_price == 0.0
-        assert any(
-            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
-            and "entry_priceが0以下" in note
-            for note in result.notes
+        assert position.entry_price == pytest.approx(FLAT_CLOSE)
+        assert position.stop_price == pytest.approx(RISK_STOP)
+        assert not any("株式分割" in note for note in result.notes)
+
+    def test_a_factor_of_one_changes_nothing(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        # A provider occasionally reports a 1-for-1 "split". Dividing by one
+        # is a no-op, so nothing is rewritten and nothing is announced.
+        self._open_at_entry(state_store, market_store, backtest_config)
+        plant_split(market_store, DAY_1, 1.0)
+        write_bars(market_store, [self._split_day_bar(100.0)])
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=DAY_1
         )
+
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        assert position.entry_price == pytest.approx(FLAT_CLOSE)
+        assert position.stop_price == pytest.approx(RISK_STOP)
+        assert not any("株式分割" in note for note in result.notes)
 
     def test_a_closed_position_is_never_rebased(
         self,
@@ -1174,10 +1110,7 @@ class TestSplitRebase:
         market_store: MarketStore,
         backtest_config: TradePlanConfig,
     ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        self._open_at_entry(state_store, market_store, backtest_config)
         # Close it the only way the ledger closes anything: a session that
         # trades through the trailing stop.
         write_bars(
@@ -1197,10 +1130,10 @@ class TestSplitRebase:
         assert closed_before is not None
         assert closed_before.status == "closed"
 
-        write_bars(market_store, _scaled(flat_prelude(), 0.5))
+        plant_split(market_store, DAY_2, 2.0)
         write_bars(
             market_store,
-            [bar(DAY_2, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+            [bar(DAY_2, open_price=47.0, high=47.5, low=46.5, close=47.0)],
         )
 
         update_tracking(state_store, market_store, backtest_config, as_of=DAY_2)
@@ -1241,20 +1174,33 @@ class TestSplitRebase:
         write_bars(market_store, flat_prelude(symbol=other_symbol))
         update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
 
-        # Only SYMBOL's entry-day bar gets rewritten -- BBB never split.
+        # Only SYMBOL split -- BBB kept trading around 100.
+        plant_split(market_store, DAY_1, 2.0)
         write_bars(
             market_store,
-            [bar(ENTRY_DATE, open_price=50.0, high=50.5, low=49.5, close=50.0)],
+            [
+                self._split_day_bar(50.0),
+                bar(
+                    DAY_1,
+                    open_price=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.0,
+                    symbol=other_symbol,
+                ),
+            ],
         )
 
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
 
         split_position = state_store.get_verdict_position(RUN_ID, SYMBOL)
         other_position = state_store.get_verdict_position(RUN_ID, other_symbol)
         assert split_position is not None
         assert other_position is not None
         assert split_position.entry_price == pytest.approx(50.0)
-        assert other_position.entry_price == FLAT_CLOSE
+        assert split_position.stop_price == pytest.approx(RISK_STOP / 2.0)
+        assert other_position.entry_price == pytest.approx(FLAT_CLOSE)
+        assert other_position.stop_price == pytest.approx(RISK_STOP)
 
     def test_a_write_failure_during_rebase_leaves_the_pre_rebase_values_intact(
         self,
@@ -1263,16 +1209,9 @@ class TestSplitRebase:
         backtest_config: TradePlanConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        seed_verdict(state_store)
-        seed_risk(state_store)
-        write_bars(market_store, flat_prelude())
-        update_tracking(state_store, market_store, backtest_config, as_of=ENTRY_DATE)
-
-        write_bars(market_store, _scaled(flat_prelude(), 0.5))
-        write_bars(
-            market_store,
-            [bar(DAY_1, open_price=50.0, high=50.5, low=49.5, close=50.0)],
-        )
+        self._open_at_entry(state_store, market_store, backtest_config)
+        plant_split(market_store, DAY_1, 2.0)
+        write_bars(market_store, [self._split_day_bar(50.0)])
 
         # fail_on=3: BEGIN(1), the position row's UPDATE(2) succeeds, then the
         # first mark write(3) fails -- proving the already-applied position

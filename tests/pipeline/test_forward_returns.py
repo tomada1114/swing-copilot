@@ -326,3 +326,60 @@ class TestComputeForwardReturn:
         plant_non_finite_bars(market_store, _bars("BROKEN", prices))
 
         assert compute_forward_return(market_store, "BROKEN", run_date, end) is None
+
+
+class TestForwardReturnAcrossASplit:
+    """Issue #413: a split inside the horizon must not read as a -50% day.
+
+    No production change was needed for this — `read_bars` now returns the
+    basis visible at the maturity date, so both endpoints of the ratio are
+    quoted the same way. The test exists because the arithmetic silently
+    depended on that and nothing pinned it.
+    """
+
+    def test_a_split_between_run_date_and_maturity_yields_the_real_return(
+        self, market_store: MarketStore
+    ) -> None:
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 26)
+        # As-traded: 97.23 before the 2:1, 47.81 after -- economically about
+        # -1.7%, not the -50.8% a mixed basis produced.
+        market_store.write_bars(_bars("MNST", {run_date: 97.23, maturity: 47.81}))
+        market_store.write_corporate_actions(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST"],
+                    "ex_date": [date(2026, 8, 11)],
+                    "kind": ["split"],
+                    "value": [2.0],
+                }
+            ),
+            provider="test",
+            fetched_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+
+        assert compute_forward_return(
+            market_store, "MNST", run_date, maturity
+        ) == pytest.approx((47.81 - 97.23 / 2) / (97.23 / 2) * 100)
+
+    def test_before_the_ex_date_matures_the_return_is_computed_raw(
+        self, market_store: MarketStore
+    ) -> None:
+        """Same rows, a maturity before the split: no adjustment applies."""
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 10)
+        market_store.write_bars(_bars("MNST", {run_date: 97.23, maturity: 90.36}))
+        market_store.write_corporate_actions(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST"],
+                    "ex_date": [date(2026, 8, 11)],
+                    "kind": ["split"],
+                    "value": [2.0],
+                }
+            ),
+            provider="test",
+            fetched_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+
+        assert compute_forward_return(
+            market_store, "MNST", run_date, maturity
+        ) == pytest.approx((90.36 - 97.23) / 97.23 * 100)

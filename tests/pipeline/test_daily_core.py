@@ -337,6 +337,123 @@ class TestHappyPath:
         assert row == ("CASH_PRIORITY", "INSUFFICIENT")
 
 
+class TestPriceStepRawBars:
+    """Issue #413: the price step stores raw bars plus the split calendar."""
+
+    def _price_step_detail(self, state_store, run_id):
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            return conn.execute(
+                "SELECT status, detail FROM run_steps "
+                "WHERE run_id = ? AND step = '1_prices'",
+                [str(run_id)],
+            ).fetchone()
+
+    def test_records_the_fetched_splits_so_the_same_runs_read_is_adjusted(
+        self, deps, market_store
+    ):
+        # Actions are written *before* the bars, which is the whole point:
+        # a split recorded afterwards would be invisible to the very next
+        # read, and the run's own screening would see two bases at once.
+        ex_date = AS_OF - timedelta(days=100)
+        actions = pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "ex_date": ex_date,
+                    "kind": "split",
+                    "value": 2.0,
+                }
+            ]
+        )
+        bars = _bars_for(["AAPL", "MSFT"], AS_OF)
+        deps_with_split = replace(
+            deps, data_provider=StubDataProvider(bars, actions=actions)
+        )
+
+        run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps_with_split)
+
+        splits = market_store.read_splits(["AAPL"], as_of=AS_OF)["AAPL"]
+        assert [(split.ex_date, split.factor) for split in splits] == [(ex_date, 2.0)]
+        # Stored raw, halved on read: the row before the ex-date came back at
+        # half its as-traded close, and the ex-date's own row is untouched.
+        stored = market_store.read_raw_bars(
+            ["AAPL"], ex_date - timedelta(days=1), ex_date
+        )
+        adjusted = market_store.read_bars(
+            ["AAPL"], ex_date - timedelta(days=1), ex_date, AS_OF
+        )
+        assert adjusted["close"].tolist() == pytest.approx(
+            [stored["close"].tolist()[0] / 2.0, stored["close"].tolist()[1]]
+        )
+
+    def test_a_quarantined_symbol_is_reported_without_failing_the_run(
+        self, deps, market_store, state_store
+    ):
+        # The store refuses a re-fetch that contradicts a stored raw close by
+        # more than the correction tolerance. That is per-symbol data quality,
+        # exactly like a fetch failure: the run keeps the other symbols and
+        # says so in the step's detail.
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "MSFT",
+                        "date": AS_OF - timedelta(days=5),
+                        "open": 500.0,
+                        "high": 501.0,
+                        "low": 499.0,
+                        "close": 500.0,
+                        "volume": 2_000_000,
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                ]
+            )
+        )
+
+        result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
+
+        status, detail = self._price_step_detail(state_store, result.run_id)
+        assert status == "success"
+        assert detail == "quarantined symbols: ['MSFT']"
+        # The other symbol was written, and MSFT kept the row it had.
+        assert not market_store.read_raw_bars(["AAPL"]).empty
+        assert market_store.read_raw_bars(["MSFT"])["close"].tolist() == [500.0]
+
+    def test_failed_and_quarantined_symbols_are_reported_side_by_side(
+        self, deps, market_store, state_store
+    ):
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "MSFT",
+                        "date": AS_OF - timedelta(days=5),
+                        "open": 500.0,
+                        "high": 501.0,
+                        "low": 499.0,
+                        "close": 500.0,
+                        "volume": 2_000_000,
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                ]
+            )
+        )
+        failing = StubDataProvider(
+            _bars_for(["AAPL", "MSFT"], AS_OF),
+            failures=(FetchFailure(symbol="GOOG", reason="no data", retryable=True),),
+        )
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True),
+            replace(deps, data_provider=failing),
+        )
+
+        _status, detail = self._price_step_detail(state_store, result.run_id)
+        assert detail == "failed symbols: ['GOOG']; quarantined symbols: ['MSFT']"
+
+
 class TestRunFingerprintAndMetadata:
     def test_fingerprint_is_canonical_and_covers_settings_strategy_and_key(self, deps):
         canonical = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")

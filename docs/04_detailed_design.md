@@ -250,8 +250,11 @@ class FetchFailure:
 
 @dataclass(frozen=True, slots=True)
 class BarFetchResult:
-    bars: pd.DataFrame
+    bars: pd.DataFrame          # raw OHLCV（企業行動未調整。symbol, date, open, high, low, close, volume）
     failures: tuple[FetchFailure, ...]
+    actions: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=ACTIONS_COLUMNS)
+    )  # symbol, ex_date, kind('split'|'dividend'), value。既定は空で既存呼び出し互換（Issue #413）
 
 class DataProvider(Protocol):
     """日足株価データ取得の契約。"""
@@ -262,7 +265,11 @@ class DataProvider(Protocol):
         """
         指定シンボル・期間の日足OHLCVを取得する。
         bars列: symbol, date, open, high, low, close, volume。
-        OHLCは企業行動調整済みで統一する。失敗は副作用フィールドではなく
+        OHLCは生値（as-traded、企業行動未調整）で統一する（Issue #413。
+        以前はここに「企業行動調整済みで統一する」と書かれていたが、
+        供給元の調整済み系列が内部で不整合を起こしうるため、調整は
+        read_bars(..., as_of)側の純関数へ移した）。分割・配当イベントは
+        BarFetchResult.actionsで別途返す。失敗は副作用フィールドではなく
         BarFetchResult.failuresで返す。
         """
 
@@ -282,8 +289,17 @@ class YFinanceProvider(DataProvider):
         銘柄群をバッチ取得する（500銘柄バッチ、NFR-03: 35分以内の実現方針）。
         個別銘柄の取得失敗（例外・空データ）はバッチ結果から除外し、
         BarFetchResult.failuresへ追加した上で処理を継続する。
-        yfinance.download(..., auto_adjust=True, multi_level_index=True) の結果を
-        正規化し、調整済みOHLCだけを共通スキーマへ格納する。
+        yfinance.download(..., auto_adjust=False, actions=True,
+        multi_level_index=True) の結果を正規化し、生OHLCVと企業行動
+        イベント（Stock Splits/Dividends列）を共通スキーマへ格納する
+        （Issue #413。以前はauto_adjust=Trueで調整済みOHLCだけを
+        格納していた）。Yahooの`Close`は「分割調整済み・配当未調整」が
+        仕様だが、調整し損ねた行が応答の中に混ざることがある
+        （MNST 2026-08-11 2:1分割の履歴で確認、Issue #413）。
+        `data/adjustments.py::unadjust_yahoo_bars`が応答内の
+        Stock Splitsを使って生値へ戻し、調整基準の混在を解消できない
+        銘柄は`FetchFailure(retryable=False)`として拒否する
+        （validation errorとして扱いretryしない、fail-closed）。
         """
 ```
 
@@ -384,15 +400,58 @@ class MarketStore:
     def __init__(self, database: Database, parquet_root: Path = Path("data/bars")):
         ...
 
-    def write_bars(self, df: pd.DataFrame) -> None:
+    def write_bars(self, df: pd.DataFrame) -> BarWriteResult:
         """
-        日足OHLCVをyear=YYYYパーティションへ原子的に反映する。
-        対象パーティション内で(symbol,date)を重複排除し、同じ自然キーは新しい取得値で
-        置換してデータ訂正を取り込む。temp file作成後のrenameで中断時の破損を防ぐ。
+        日足の生（as-traded）OHLCVをyear=YYYYパーティションへ原子的に反映する
+        （Issue #413。戻り値は後方互換のため無視してよい）。
+        既存行と(symbol,date)が重なる行は、生closeの差が0.5%以内なら
+        訂正として置換し、0.5%を超える差、または新規行の系列が調整基準の
+        混在署名（分割相当のジャンプに続く逆ジャンプ）を示す銘柄は、
+        その銘柄のバッチを書かずに隔離する
+        （`BarWriteResult.quarantined: tuple[BarQuarantine, ...]`。
+        既存行は不変）。パーティションが1つも無ければ形式マーカー
+        （`_format.json`: `{"basis":"raw","version":2}`）を書いてから
+        書き込み、パーティションがありマーカーが無い/内容が異なれば
+        `BarsFormatError`（`copilot-backfill rebuild`を案内）で拒否する。
+        temp file作成後のrenameで中断時の破損を防ぐ。
         """
 
     def read_bars(self, symbols: list[str], start: date, end: date, as_of: date) -> pd.DataFrame:
-        """DuckDB経由でas_of以前の指定範囲の日足を読み出す。"""
+        """
+        Parquetから生値を読み、`corporate_actions`のうち
+        `date < ex_date <= as_of`を満たす分割の係数の積`cum`を、
+        当該行より前の日付にだけ純関数として掛けて返す
+        （価格は`/cum`、出来高は`*cum`。Issue #413）。分割が1件も
+        無い銘柄・`ex_date > as_of`の分割は効かない（PIT）。配当は
+        `corporate_actions`に記録されるがここでは適用しない
+        （価格リターン基準、3.24.3節参照）。パーティションがあり
+        マーカーが無ければ`BarsFormatError`。
+        """
+
+    def write_corporate_actions(
+        self, df: pd.DataFrame, *, provider: str, fetched_at: datetime
+    ) -> None:
+        """`(symbol, ex_date, kind)`を自然キーに1トランザクションで訂正upsertする。"""
+
+    def read_splits(
+        self, symbols: Sequence[str], *, as_of: date
+    ) -> dict[str, tuple[SplitEvent, ...]]:
+        """銘柄ごとの`ex_date <= as_of`の分割イベントを返す（読み出し調整の入力）。"""
+
+    def read_corporate_actions(
+        self, symbols: Sequence[str], start: date, end: date
+    ) -> pd.DataFrame:
+        """`ex_date`が`[start, end]`に入る分割・配当を両kindとも返す（台帳・researchが利用）。"""
+
+    def read_raw_bars(
+        self, symbols: Sequence[str], start: date | None = None, end: date | None = None
+    ) -> pd.DataFrame:
+        """Parquetから生値をそのまま読む（調整なし、マーカー検証あり）。
+        `copilot-backfill check`が混在署名の走査に使う唯一の読み出し経路。"""
+
+    def stored_symbols(self) -> frozenset[str]:
+        """ストアに実在する銘柄集合を返す（ユニバースは参照しない）。
+        `copilot-backfill check`が`--symbols`省略時の対象を決めるのに使う。"""
 
     def upsert_fundamentals(self, records: list["FundamentalsRecord"]) -> None:
         """fundamentalsへaccession_noで訂正可能なupsertを1transactionで行う。"""
@@ -423,6 +482,8 @@ class MarketStore:
 **トランザクション定型の集約（Issue #395）**: 上記の「1トランザクション」は、`storage/`配下9ファイル20箇所が各々`BEGIN TRANSACTION`/`try`/`except Exception: ROLLBACK; raise`/`else: COMMIT`を手書きすることで守られていた。`record_risk_assessments`がこの定型を書き忘れ不変条件違反を起こした前例（`docs/08_architecture_review_2026-08.md` §4の記録）を踏まえ、`storage/database.py`に`Database.transaction()`と低レベルの`atomic(conn)`を追加し、20箇所すべてをこの1つのプリミティブへ寄せた。`Database.transaction()`は`conn`省略時に自前で`connect()`/`close()`する通常経路、`conn`を渡すと`MarketStore.get_connection()`のようにトランザクション開始前に追加のセットアップ（スキーマ確認・ビュー再作成）を要する呼び出し元や、書くものがあるかを読んでから決める呼び出し元でも同じ接続をラップできる。`atomic(conn)`はその内部実装そのもので、`Database`を持たない呼び出し元（`backfill_verdict_reasons`など、`StateStore.init_schema()`が渡す生の接続に対して動く）が直接使う。`"BEGIN TRANSACTION"`という文字列が`storage/database.py`以外に現れないことは`tests/test_quality_contracts.py`の契約テストで固定されている。
 
 同じIssueで、`storage/database.py`に`fetch_records(conn, query, params)`（カーソルの列名で`dict[str, object]`化する読み取りヘルパー）も追加した。`tracking_records.py`の`_position`・`retro_records.py`の`_narration`・`verdict_records.py`の`_news_supply_from_row`（の呼び出し元2箇所）は、位置インデックス（`row[7]`のような）読み出しから列名ベース（`record["stop_price"]`）へ移行した。列の追加・並べ替えで値が型エラーなく隣の列へずれるリスクが消える代わりに、欠けた列は`KeyError`で、`columns`と行の長さが食い違えば`zip(..., strict=True)`で即座に落ちる。
+
+**生バーの不変性・企業行動テーブル・整合性ゲート（Issue #413）**: 供給元（yfinance）が調整済み系列を返す前提は、Yahooが分割を履歴全体へ一様に適用しない場合があるという実例（MNST 2026-08-11 2:1分割）で崩れた。1回の悪い応答が全期間の基準を書き換えるのを防ぐため、`write_bars()`はOHLCVを生値（as-traded）として不変に扱う。銘柄ごとに(a)新規行の系列が調整基準の混在署名（`has_mixed_basis_signature`: 分割相当のジャンプに続く逆ジャンプ）を示さないこと、(b)既存行と重なる`(symbol, date)`の生closeの差が0.5%以内であることを検査し、いずれかに違反した銘柄は書かずに`BarWriteResult.quarantined`へ積む（既存行は不変。3.19節の`NonFiniteBarsError`と同じ「バッチ単位で落とす」流儀で、こちらは銘柄単位）。分割・配当は`corporate_actions(symbol, ex_date, kind, value, provider, fetched_at)`（`fundamentals`と同居するDuckDBテーブル、主キー`(symbol, ex_date, kind)`）へ`write_corporate_actions()`が1トランザクションで訂正upsertし、`read_bars(..., as_of)`は生値に`read_splits()`で引いた`ex_date <= as_of`の分割係数の積を掛けて返す（価格は`/`、出来高は`*`。窓外・`as_of`より後の分割も正しく効く／効かない。配当は保存するが価格には掛けない——3.24.3節参照）。ストアの保存基準を表す形式マーカー`data/bars/_format.json`（`{"basis":"raw","version":2}`）を導入し、パーティションはあるがマーカーが無い/内容が違う未移行ストアへの`read_bars`/`write_bars`は`BarsFormatError`（`SwingCopilotError`派生）でfail-fastし、`copilot-backfill rebuild`（3.25節）を案内する。**このマーカーは`scripts/data_sync.py`の同期対象に含める**（`_has_data_sync_shape`が`bars/_format.json`だけを`.parquet`以外の例外として通す。名前は`BARS_FORMAT_MARKER_NAME`を両者で共有し、綴りが割れないようにする）——定時実行は毎回空のチェックアウトから`pull`するので、Parquetだけを同期するとマーカーの無いストアが手元に降ってきて、上のfail-fastが「`rebuild`しろ」と言い続ける（すでにrebuild済みなのに）行き止まりになる。混在署名の判定は`data/adjustments.py::has_mixed_basis_signature`（真偽値、書き込みゲート用）と、それが最初に検出したジャンプの日付を返す報告用の対`first_mixed_basis_jump(closes) -> int | None`（インデックス。`copilot-backfill check`の一覧表示が使う）の2関数に分かれる。`copilot-daily`（`pipeline/daily.py::_run_step_prices`）は隔離結果を`_StepOutcome.detail`へ`failed symbols: [...]; quarantined symbols: [...]`として`"; "`で連結して残す（隔離はrunを失敗にしないfail-soft）。（**Issue #413以前**: `write_bars`は`(symbol,date)`の無条件upsertで、OHLCは「常に同一の調整基準」という前提のもと`auto_adjust=True`の調整済み値をそのまま保存していた。）
 
 **非有限OHLCVのstore側防御（Issue #227）**: `write_bars()`は`open`/`high`/`low`/`close`/`volume`のいずれかにNaN/±inf（および数値化できない値）を含むDataFrameを`NonFiniteBarsError`で拒否する。**fail-soft（該当行だけ落として書く）ではなくバッチ全体のfail-fast**を選ぶ。理由は2つある。(1) 同じ値に対するこのパッケージのもう一方の**書き込み**境界である`storage/json_guard.dumps_safe`が、丸めずに例外を投げる契約になっている——行を黙って捨てる実装は「NaNが保存された」という沈黙を「バーが消えた」という沈黙へ移すだけである。fail-softな「記録して続行」（`risk/checks.check_correlation`の`data_quality`警告、`risk/earnings`の`unknown`降格、`pipeline/forward_returns.compute_forward_return`の`None`）は、**既に保存されている**データをどう扱うかを決める**読み出し側**の作法であり、書き込み側の作法ではない。(2) 検証は最初のパーティションに触れる**前**に走るので、複数年にまたがるバッチで後年の1行が不正でも前年が中途半端に書かれることがなく、拒否されたwriteは旧destinationをバイト単位で保持しtemp fileも作らない（3.7の置換契約と同じ性質を、書き込みを始めないことで満たす）。正規化は従来どおり各provider（`data/base.py`）の責務であり、これはその**下**に敷く防御層である——P4でEODHDを足すときに同じフィルタを再実装し忘れても、素通しにはならない。回帰テストは`tests/storage/test_market_store.py::TestWriteBarsRejectsNonFiniteValues`。ガード導入後にstoreへ非有限バーが入る唯一の経路はガード以前に書かれた履歴なので、読み出し側ガードのテストは`tests/conftest.py::plant_non_finite_bars`で`write_bars`を迂回して当時と同じ形の行を置く。
 
@@ -1622,6 +1683,8 @@ def main(argv: list[str] | None = None) -> None:
 
 **目的**: `HORIZON_DAYS = (5, 20)`（営業日、固定値、config化しない——roadmapの構造的選択であり閾値ではない）の各horizonについて、`as_of`から遡ったその営業日を`_find_target_trading_day()`（この取引カレンダー由来は`backtest/runner.py::_trading_days()`と同じ、ベンチマーク銘柄=`settings.backtest.benchmark`のバー実在日を代替に使う。専用の取引カレンダーモジュールはこのリポジトリに存在しない）で特定し、`storage/history_queries.py::get_run_by_date()`（新規）でその日のrunを検索、あればその`get_run_detail()`の全候補について`(as_ofの終値 - run_dateの終値) / run_dateの終値 × 100`をforward returnとして計算・分類し`signal_outcomes`へ永続化する。同一`(run_id, horizon_days)`の結果はDELETEと再INSERTを1トランザクションで行う完全置換とし、訂正後に価格欠損となった候補の古い結果も削除する。runが見つからない・価格データが欠損している場合は例外にせずそのhorizonのみスキップし、パイプライン全体は継続する（roadmapのNO_PRIOR_RUNフォールバック）。
 
+**価格の訂正・調整基準の是正との関係（Issue #413）**: 上記のforward return計算は`MarketStore.read_bars(..., as_of=...)`を経由する`pipeline/forward_returns.py`の共有関数を使う。保存済み生値への0.5%以内の訂正（`write_bars`が自動的に取り込む）も、`copilot-backfill rebuild`による調整基準の是正（分割の混在解消）も、どちらも`read_bars`の返り値を通じて次回のpostmortem実行にそのまま反映される——本ステップ自体を`--rebuild`のように特別扱いする必要はなく、完全置換のセマンティクスが両者を区別なく吸収する（3.23.2節の`verdict_outcomes`と同じ理屈）。
+
 **分類境界**（`classify_forward_return()`）: Issue #20の文言（「`|return| < 0.5%`はNEUTRAL」「`>0.5%`はTRUE_POSITIVE」）は厳密に読むと`+0.5%`・`-0.5%`ちょうどの帰属先が未定義になる。両方ともNEUTRAL側（`<=`）に倒すことで新しい閾値を発明せずギャップを解消した。`-2%`ちょうどはFALSE_POSITIVE_MILD（`-2%超の下落`のみSEVERE、閉区間として読む）。閾値は`settings.postmortem`（`neutral_threshold_pct=0.5`, `severe_threshold_pct=2.0`、いずれも要検証）。
 
 **集計**（`compute_signal_performance()`）: `signal_outcomes`の各行は`signal_names`（複数同時ヒットありうる）の全シグナル名へ同じ実現結果を按分する（バグではなく意図的——その日その候補が複数シグナルに同時該当したという事実自体は全シグナルに帰属する）。`hit_rate`の分子分母は`horizon_5d_weight=0.6`/`horizon_20d_weight=0.4`で重み付けし、NEUTRALは分子分母どちらにも算入しない（ノイズ除外）ため重み付け後のTP+FPが0のシグナルは`hit_rate=None`。TP/FP/NEUTRALの表示件数`n`は生の（重み付けしない）出現回数で、`n < preliminary_sample_threshold`（既定20）のシグナルは「(暫定)」を付す。`lookback_window_days`（既定90）でscope。
@@ -1741,9 +1804,9 @@ src/swing_copilot/retro/
 
 3テーブルとも**新規テーブル**なので`INIT_SCHEMA_STATEMENTS`の`CREATE TABLE IF NOT EXISTS`だけでマイグレーションは足りる（`ALTER_SCHEMA_STATEMENTS`への追加は不要）。本番DBでは空で始まるが、それは保持すべき履歴がどこにも書かれていなかったからであり、テーブルを先に用意する理由そのものである。分析ビューは`v_retro_narrations`（narration × run × verdict）と`v_run_configs`（run × 設定値。台帳導入前の run は`snapshot_hash`/`sections_json`が NULL＝「未記録」であって「設定が空」ではない）を追加する。
 
-`evaluate`は`(run_id, horizon_days)`単位の完全置換で、`replace_signal_outcomes`と同じパターン。株価訂正後の再実行で分類が更新される。複数行書き込みは全コミットか全ロールバック。`--db`から`bars/`を解決する際は`resolve_parquet_root()`のfail-fast検証を通す（3.19節のIssue #221追記）——根ごと無いDBコピーへ向けると、forward returnをバー0件から計算して1件も満期にならず、「評価0 slice」を正常終了として返すためである。`export`も同じ`_market_store()`を通る。
+`evaluate`は`(run_id, horizon_days)`単位の完全置換で、`replace_signal_outcomes`と同じパターン。保存済み生値への0.5%以内の訂正、または`copilot-backfill rebuild`による調整基準の是正のいずれの後も、再実行で分類が更新される（`read_bars`が`as_of`時点の分割調整を掛け直すため。この2つは「訂正」と「調整基準の変更」という別の事象だが、`evaluate`の再実行という届け方は共通——3.7節参照）。複数行書き込みは全コミットか全ロールバック。`--db`から`bars/`を解決する際は`resolve_parquet_root()`のfail-fast検証を通す（3.19節のIssue #221追記）——根ごと無いDBコピーへ向けると、forward returnをバー0件から計算して1件も満期にならず、「評価0 slice」を正常終了として返すためである。`export`も同じ`_market_store()`を通る。
 
-**Issue #209実装時追記（`only_pending`）**: `EvaluationRequest.only_pending`が評価範囲の切り替えである。既定（`False`、手動の`copilot-retro evaluate` / `prepare`）は窓内の満期スライスを全件再分類し、**株価訂正が`verdict_outcomes`へ届く経路はこちら**。日次ステップだけが`True`を渡し、`verdict_outcomes`に記録済みの`(symbol, recommendation)`集合が当該runのverdictと完全一致するスライスを飛ばす（`EvaluateSummary.recorded_slice_count`に計上）。エクスポートの手前へ移した以上、そこでのコストは「新たに満期を迎えた分」に比例させる必要があるためである。verdictが訂正された場合（銘柄の増減、`proceed`↔`skip`の反転）は集合が一致しなくなるので必ず再分類され、bar欠損で1銘柄落ちたスライスも一致しないまま再試行され続ける。
+**Issue #209実装時追記（`only_pending`）**: `EvaluationRequest.only_pending`が評価範囲の切り替えである。既定（`False`、手動の`copilot-retro evaluate` / `prepare`）は窓内の満期スライスを全件再分類し、**保存済み価格への訂正、および`copilot-backfill rebuild`で調整基準を是正した後の再評価が`verdict_outcomes`へ届く経路はこちらだけ**である（日次ステップの`only_pending=True`は新規に満期を迎えた分にしか触れないため、rebuild後の是正を反映するには手動`copilot-retro evaluate --as-of <日付>`（`only_pending=False`）を明示的に実行する必要がある——これが修復済みストアを集約へ届ける唯一の経路であることは3.7節・3.25節の運用手順とも一致する）。日次ステップだけが`True`を渡し、`verdict_outcomes`に記録済みの`(symbol, recommendation)`集合が当該runのverdictと完全一致するスライスを飛ばす（`EvaluateSummary.recorded_slice_count`に計上）。エクスポートの手前へ移した以上、そこでのコストは「新たに満期を迎えた分」に比例させる必要があるためである。verdictが訂正された場合（銘柄の増減、`proceed`↔`skip`の反転）は集合が一致しなくなるので必ず再分類され、bar欠損で1銘柄落ちたスライスも一致しないまま再試行され続ける。
 
 #### 3.23.2 満期セマンティクスと`as_of`の意味（決定D7・重要）
 
@@ -1915,7 +1978,7 @@ src/swing_copilot/tracking/
    - 建玉の判定に使うのは`verdicts.recommendation`だけであり、`risk_assessments.status`は見ない。本レイヤが測るのは定性レイヤの判断の質であって、その候補をリスク層が最終的にどう扱ったか（セクター上限での`rejected`等）は、その判断を追跡する価値を変えないからである。
    - **孤児の削除**: 建玉に先立ち、対応する`verdicts`行が**存在しない**`verdict_positions`をマーク・ノートごと1トランザクションで削除する。`copilot-ingest-analysis`の再取り込みはrunのverdictを丸ごと置き換える（`replace_run_verdicts`）ため、分析対象から外れた銘柄の建玉が残り、取り消された判断の損益を出し続けてしまう。台帳は`verdicts`の派生状態なので、源泉が消えたら派生も消す。削除した銘柄はnoteに出す。
    - **区分の追随**（Issue #190）: `proceed`↔`skip`の訂正は孤児では**ない**。両側を同一ルールで追跡している以上、建玉日もエントリー価格も出口ルールも変わらないのでリプレイは依然として正しく、削除すれば訂正のたびにskip側の標本が痩せる。`sync_verdict_position_recommendations`が該当行の`recommendation`だけを`verdicts`側へ追随させ、変更をnoteに出す。
-2. **株式分割の再基準化**（P8-116、`_rebase_position`）: 日次runは価格履歴400暦日を毎回`auto_adjust=True`で再取得するため、株式分割が起きるとbars側は全期間が調整後の値へ書き換わる一方、`verdict_positions.entry_price`/`stop_price`は絶対ドル値のまま凍結されている。各openポジションについて、保存済み`entry_price`と再取得済みbarsの`entry_date`終値を比較し比率`r = bar_close / entry_price`を求め、`abs(r − 1) > 0.10`（排他的。ちょうど10%は再基準化しない）なら株式分割とみなして`entry_price`・`stop_price`（`None`ならそのまま）・そのポジションの`verdict_position_marks`全行の`close`/`stop_price`を`r`倍する。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って手仕舞い判定されることはない。10%という閾値は、`auto_adjust=True`が配当も調整するため配当のたびに過去barsがわずかに再スケールされる（米国大型株の四半期配当は概ね2%未満）ことと、最小の株式分割（3対2=33%低下、5対4=20%低下）は確実に超えることから選んだ。`entry_date`のバーが参照窓に無い場合、または`entry_price`が0以下の場合は判定をスキップしnoteに残す。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。再基準化を実施した場合は比率とentry_priceの前後をnoteに記録する。
+2. **株式分割の再基準化（イベント駆動、Issue #413）**（P8-116、`_rebase_position`）: bars側が生（as-traded）値として不変保存されるため、比率検知はもはや使えない——entry日の行は二度と書き換わらないので、比率検知は永遠に発火しないか、発火してはいけない訂正で誤発火する。代わりに`market_store.read_splits([symbol], as_of=as_of)`で分割イベントを引き、各openポジションについて`position.last_marked_date < ex_date <= as_of`を満たし**かつそのポジションに`ex_date`以降のセッション（保存済みバー）が1本以上ある**分割の`factor`の積`cum`を求める（後者を満たさない分割は今回スキップされ、当該銘柄のバーが再び届いた回のupdateで初めて適用される）。上場廃止でバーの供給が止まった銘柄が、以後のupdateのたびに同じ分割で繰り返し再基準化されることを防ぐための条件である。`cum != 1`なら`entry_price`・`stop_price`（`None`ならそのまま）を`cum`で割り、そのポジションの`verdict_position_marks`全行の`close`/`stop_price`も同じく`cum`で割る（noteに「株式分割（ex_date, factor）により再基準化」と記録）。**日次前進（次項）より前**に行うため、再基準化前の基準でストップが誤って手仕舞い判定されることはない。**冪等性**は`last_marked_date`がex_date以上へ進めば同じ分割が二度と掛からないことで保たれ、同一`as_of`の再実行でも二重適用しない。`closed`なポジションは対象外（本フローがopenしか読まないため自然に除外される）。（**Issue #413以前**: 日次runが価格履歴400暦日を毎回`auto_adjust=True`で再取得すれば株式分割時にbars側が全期間書き換わるという前提のもと、保存済み`entry_price`と再取得済みbarsの`entry_date`終値の比率`r = bar_close / entry_price`が`abs(r − 1) > 0.10`（配当調整によるノイズを避ける閾値）なら分割とみなす比率検知ヒューリスティックだった。実際には書き換わるのは400日ローリング窓の内側だけで窓外は凍結されるうえ、Yahooの応答自体が調整済み/未調整の行を混在させて返す場合があり（MNST 2026-08-11 2:1分割、Issue #413）、entry日の行が調整されないまま比率検知が発火せず台帳が誤ストップする事例が実際に発生した——この前提が崩れたため、比率検知そのものを撤廃した。）
 3. **日次前進**: 各openポジションについて`last_marked_date`の翌取引日から`as_of`までを1日ずつ進める。取引日列は当該銘柄の保存済みバーの日付であり、OHLCが欠損した日はスキップしてnoteに残す（fail-soft）。各日で
    `evaluate_exit(open, low, close, stop, days_held, verdict_positions.max_hold_days)`（`backtest/exits.py`）を評価し、手仕舞いなら`status='closed'`と`realized_return_pct=(exit−entry)/entry×100`を確定して打ち切り、そうでなければ`days_held += 1`のうえ`next_trailing_stop`でstopをラチェット更新する。`max_hold_days`は建玉時に保存した手仕舞いルールの正本であり、設定変更は新規建玉にだけ効く。
    - バーは全対象銘柄をまとめて1回だけ読み、`MarketStore.read_bars`（接続とビューを毎回作り直す）をポジション数だけ繰り返さない。ATRのウォームアップ窓は銘柄ごとに`entry_date − 90日`へ切り戻す——Wilder平滑は与えた履歴すべてに依存するため、まとめ読みで窓が広がるとstopがバックテストとずれる。
@@ -1939,6 +2002,10 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 日次runが取る価格履歴は400暦日のローリング窓であり、複数レジーム（2020年暴落・2022年弱気・2021/2023-24強気）をまたぐバックテストには足りない。`pipeline/backfill.py`（`copilot-backfill`）は、その履歴を一度だけまとめて取り込む一回限りのツールである。日次経路とは独立に置き、既存のアダプタ（`YFinanceProvider`・`EdgarClient`）とリポジトリ（`MarketStore`）を通す——生の`yf.download`を直接叩く経路を作らないのは、タイムアウト・リトライ・レート制限の契約を迂回しないためである。
 
 チャンク分割（50銘柄）とチャンク間スリープ（2秒）はyfinance側にレート制限が無いことへの配慮で、`write_bars`の呼び出しを最後の1回に集約するのは年パーティション全書き直しのコストを銘柄数に比例させないためである。レジューム条件は「既存バーの最古日が`--start`以前」であり、後年上場の銘柄は毎回再取得される（銘柄単位の「取得済みだが空」台帳を持たない割り切り）。操作面は`docs/reference.md`が正本。
+
+**`rebuild`/`check`サブコマンド（Issue #413、生バー化への復旧経路）**: `copilot-backfill rebuild [--db PATH] [--settings PATH] [--symbols A,B] [--limit N]`は対象銘柄（`--symbols`省略時はユニバース全体、`--limit`で決定論的サンプルに絞れる）の全履歴を再取得し、`write_bars`の重複不変ゲートを経由せず、全yearパーティションから当該銘柄の既存行を削除したうえで生値を書き直す。調整基準の混在を解消できなかった銘柄は既存行を残したまま結果に列挙し（`rebuild: 対象 N 銘柄 / 置換 R / 拒否 J / 書き込み W 行`に続けて`既存行を維持した銘柄: ...`）、解消できた銘柄は`corporate_actions`を全履歴分upsertする。**形式マーカー（`_format.json`）は少なくとも1銘柄を実際に置換できたときだけ書く**——全銘柄が拒否された場合はストアを未移行のまま残し、`rebuild: 全銘柄の取得に失敗したため置き換えは行われませんでした。`で終了コード1を返す（1行も置き換えていないのに「移行済み」を騙るマーカーを書かないため）。既存パーティションにマーカーが無い未移行ストアでも動く必要があるため、`rebuild`は（置換が1件以上あった場合を除き）マーカー検査を迂回する。`copilot-backfill bars`にも同じ隔離結果が`隔離した銘柄: ...`として出力へ加わった。
+
+`copilot-backfill check [--db PATH] [--symbols A,B]`は読み出し専用で、`--settings`も`--limit`も持たない——`--symbols`省略時はユニバースではなく`MarketStore.stored_symbols()`（ストアに実在する銘柄）を対象にする。`MarketStore.read_raw_bars()`で生値をそのまま読み、マーカーが揃っていれば`形式マーカー: ok（basis=raw, version=2）`、無ければ`形式マーカー: NG`とその`BarsFormatError`本文を出す。続けて全対象銘柄の生系列に混在署名（`has_mixed_basis_signature`）が無ければ`check: ok（対象 N 銘柄、混在署名なし）`、あれば`check: 対象 N 銘柄 / 混在署名 K 銘柄`に続けて該当銘柄ごとに`混在署名: SYM（最初のジャンプ YYYY-MM-DD）`（`first_mixed_basis_jump`が返す最初のジャンプ日）を1行ずつ列挙する。何も書き込まない。全銘柄`rebuild`は`data/`のR2 generationを進める操作なので実行前に確認を取り、定時実行と重ならない時間帯にpull→`rebuild`→`check`→pushを1セットで行う（`AGENTS.md`の運用節を参照）。
 
 **`NonFiniteBarsError`の終了規約（Issue #250、#249へ統合）**: `_EXIT_POLICY`は`NonFiniteBarsError`も変換対象に含め、`copilot-backfill`はstderr 1行＋終了コード1で落ちる（トレースバックにしない）。#221が`ParquetRootNotFoundError`について確立した「操作者が読む1行＋exit 1」の規約に揃えたものである。**fail-fastのまま**である点が要点で、3.7節のバッチ全体拒否をfail-softへ戻さない——1行も書かれていないので終了コード0は「取り込んだ」という嘘になり、`copilot-backfill ... && copilot-backtest ...`のような連結を通してしまう。既存の「全銘柄の取得に失敗した」`BackfillError`と同じ扱いである。`write_bars`を呼ぶもう1つの経路である`copilot-daily`（`pipeline/daily.py::_run_step_prices`）は、`daily_runner.py`のfatal stepsループが`except Exception`で`RunStatus.FAILED`＋終了コード1へ変換済みなので変更不要であり、`NonFiniteBarsError`を送出しうるCLIはこの2つだけである（他CLIの`MarketStore`利用は読み出しのみ）。
 
@@ -1987,7 +2054,7 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 | provider | string | 取得元（例: `yfinance`） |
 | fetched_at | timestamp with time zone | 取得日時（UTC） |
 
-`open/high/low/close`はすべて同じ企業行動調整基準で保存する。raw OHLCとadjusted closeを混在させない。`(symbol,date)`を自然キーとし、再取得値は対象yearパーティションを原子的に再構築して反映する。
+`open/high/low/close`はすべて生値（as-traded、企業行動未調整）で保存する不変のバーである（Issue #413。**以前は「すべて同じ企業行動調整基準で保存し、raw OHLCとadjusted closeを混在させない」としていたが、供給元の調整済み系列自体が内部で不整合を起こしうるため、調整済みで統一する方針そのものを撤回した**）。`(symbol,date)`を自然キーとし、既存行との差が0.5%以内の再取得値だけを対象yearパーティションの原子的再構築で訂正として反映する。0.5%を超える差、または調整基準の混在署名を示す銘柄は書き込まず隔離する（3.7節）。分割・配当は下記`corporate_actions`テーブルに保存し、`read_bars(..., as_of)`が読み出し時に分割だけを掛ける。ストア全体の保存基準は`data/bars/_format.json`（`{"basis":"raw","version":2}`）が表す。
 
 ### 4.2 DuckDB（`data/copilot.duckdb`）
 
@@ -2010,6 +2077,19 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     shares             DOUBLE,
     source_url         VARCHAR NOT NULL,
     fetched_at         TIMESTAMPTZ NOT NULL
+);
+
+-- 分割・配当イベント（Issue #413）。read_bars(..., as_of)が読み出し時に
+-- ex_date <= as_of の split だけを純関数として掛ける。配当は保存するが
+-- 価格には掛けない（3.24.3節）。fundamentalsと同じ書き込み境界でupsertする。
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    symbol       VARCHAR NOT NULL,
+    ex_date      DATE NOT NULL,
+    kind         VARCHAR NOT NULL CHECK (kind IN ('split', 'dividend')),
+    value        DOUBLE NOT NULL,   -- split: factor（2:1なら2.0）、dividend: 1株あたり現金
+    provider     VARCHAR NOT NULL,
+    fetched_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (symbol, ex_date, kind)
 );
 
 -- 銘柄ごとの増分リフレッシュ判定用ブックキーピング。2列は別々の事実を持つ:

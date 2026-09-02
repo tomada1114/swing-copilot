@@ -231,6 +231,27 @@ class TestTableAccessors:
         assert regime.iloc[0]["gate_verdict"] == "CAUTION"
         assert regime.iloc[0]["run_date"] == pd.Timestamp(RUN_DATE)
 
+    def test_verdict_outcomes_carry_the_audit_closes(self, state_store, tmp_path):
+        # Issue #413: `SELECT *`, so a research question about "which price
+        # was this classified at" needs no new accessor.
+        run_id = uuid4()
+        _insert_run(state_store, run_id)
+        _insert_verdict(state_store, run_id)
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
+                "as_of, recommendation, forward_return_pct, classification, "
+                "entry_close, maturity_close) "
+                "VALUES (?, 'MNST', 20, '2027-03-01', 'proceed', -1.69, "
+                "'MISS_MILD', 48.615, 47.81)",
+                [str(run_id)],
+            )
+
+        outcomes = research.verdict_outcomes(db_path=tmp_path / "copilot.duckdb")
+
+        assert outcomes.iloc[0]["entry_close"] == pytest.approx(48.615)
+        assert outcomes.iloc[0]["maturity_close"] == pytest.approx(47.81)
+
     def test_tracked_positions_carry_the_verdict_recommendation(
         self, state_store, tmp_path
     ):

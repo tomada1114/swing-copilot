@@ -679,6 +679,61 @@ class TestReplaceVerdictOutcomes:
         stored = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
         assert [row.benchmark_return_pct for row in stored] == [None]
 
+    def test_round_trips_the_closes_the_classification_was_computed_from(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #413: audit columns, so a repaired store can still answer
+        # "which prices was this classified at" for the rows written before
+        # the repair.
+        run_id = uuid4()
+        outcome = replace(
+            _outcome(run_id, "MNST"), entry_close=48.615, maturity_close=47.81
+        )
+
+        state_store.replace_verdict_outcomes(run_id, 5, [outcome])
+
+        stored = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
+        assert [(row.entry_close, row.maturity_close) for row in stored] == [
+            (48.615, 47.81)
+        ]
+
+    def test_unrecorded_closes_round_trip_as_none(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+
+        stored = state_store.get_verdict_outcomes_in_window(AS_OF, AS_OF)
+        assert [(row.entry_close, row.maturity_close) for row in stored] == [
+            (None, None)
+        ]
+
+    @pytest.mark.parametrize(
+        ("entry_close", "maturity_close"),
+        [
+            pytest.param(float("nan"), 47.81, id="entry"),
+            pytest.param(48.615, float("inf"), id="maturity"),
+        ],
+    )
+    def test_a_non_finite_audit_close_is_rejected_before_the_slice_is_touched(
+        self, state_store: StateStore, entry_close: float, maturity_close: float
+    ) -> None:
+        # DuckDB's NaN is not NULL, so a stored NaN would read back as "this
+        # is the price it was classified at" rather than "not recorded".
+        run_id = uuid4()
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "KEPT")])
+        broken = replace(
+            _outcome(run_id, "AAPL"),
+            entry_close=entry_close,
+            maturity_close=maturity_close,
+        )
+
+        with pytest.raises(ValueError, match="must be finite"):
+            state_store.replace_verdict_outcomes(run_id, 5, [broken])
+
+        assert _rows(state_store, "SELECT symbol FROM verdict_outcomes") == [("KEPT",)]
+
     def test_rerun_with_corrected_prices_updates_rather_than_duplicates(
         self, state_store: StateStore
     ) -> None:

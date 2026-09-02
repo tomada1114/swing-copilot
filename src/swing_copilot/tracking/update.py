@@ -25,8 +25,11 @@ clock, no network. Bars are whatever `copilot-daily`'s price step already
 persisted, and a symbol without them is reported as data quality rather than
 guessed at: a position that has no bars at all is retried on every update
 until one arrives, while a single unusable session inside an otherwise good
-history is skipped and noted (design 3.24.3-2; replaying already-marked days
-against corrected bars is the out-of-scope `--rebuild`, 3.24.3-4).
+history is skipped and noted (design 3.24.3-3). `update_tracking` never
+revisits an already-marked session -- `last_marked_date` is a resume point --
+so replaying a position against corrected bars is a separate, explicit act:
+`rebuild_positions` below deletes the position and reopens it from its
+`verdicts` row (design 3.24.3-5, `copilot-track rebuild`).
 
 A position's `entry_price` and `stop_price` are frozen in the dollars that
 traded on the day it opened, while `MarketStore.read_bars` hands back prices
@@ -66,6 +69,7 @@ from swing_copilot.storage.tracking_records import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import date
+    from uuid import UUID
 
     import pandas as pd
 
@@ -191,6 +195,189 @@ def update_tracking(
         advanced_count=advanced_count,
         closed_count=closed_count,
         notes=tuple(notes),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildTarget:
+    """Which tracked positions one `rebuild_positions` call covers.
+
+    `symbol` is required and `run_id` optional on purpose: a repair is always
+    about one symbol's prices, and naming a single position is the narrowing
+    step, not the normal case.
+    """
+
+    symbol: str
+    run_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSnapshot:
+    """One position's headline figures, for the before/after comparison.
+
+    `return_pct` is the realized result on a closed position and the latest
+    mark's unrealized figure on an open one -- the number the ledger would
+    show for it either way, which is what a reader compares across a rebuild.
+    `None` means an open position with no mark at all (no bars ever arrived).
+    """
+
+    status: str
+    entry_price: float
+    exit_date: date | None
+    exit_reason: str | None
+    return_pct: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class RebuiltPosition:
+    """One deleted-and-replayed position, before and after.
+
+    `after` is `None` when the position did not come back: `update_tracking`
+    reopens from the `verdicts` row, so this means the entry price could no
+    longer be resolved (its `risk_assessments` row and its entry-day bar are
+    both gone), and the note explaining it is on `RebuildResult.update`.
+    """
+
+    run_id: UUID
+    symbol: str
+    entry_date: date
+    recommendation: str
+    before: PositionSnapshot
+    after: PositionSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildResult:
+    """What one `rebuild_positions` call replaced.
+
+    Empty `positions` means the target matched nothing -- a legitimate no-op
+    (nothing was deleted and no replay was run), not an error.
+    """
+
+    target: RebuildTarget
+    as_of: date
+    positions: tuple[RebuiltPosition, ...]
+    update: TrackingUpdateResult
+
+
+def rebuild_positions(
+    state_store: StateStore,
+    market_store: MarketStore,
+    trade_plan: TradePlanConfig,
+    target: RebuildTarget,
+    *,
+    as_of: date,
+) -> RebuildResult:
+    """Delete the targeted positions and replay them from entry against stored bars.
+
+    The repair path for a ledger built on prices that have since been
+    corrected (Issue #413). `update_tracking` deliberately never revisits an
+    already-marked session -- `last_marked_date` is a resume point, and a
+    closed position is never advanced again -- so a stop that fired at a price
+    nothing ever traded at stays in the ledger forever unless the position is
+    rebuilt. Deleting it puts its `verdicts` row back in
+    `get_untracked_verdicts`, and the ordinary open-and-advance path then
+    reproduces it from `risk_assessments.entry_price` against today's bars.
+
+    **This is not one transaction, and cannot be.** The delete commits, then
+    the replay runs as its own set of writes. A failure in between leaves the
+    positions deleted -- recoverable, because the `verdicts` rows are
+    untouched, so the next `copilot-track update` reopens them exactly as this
+    replay would have. What is lost in that window is only the old figures,
+    which were the ones being discarded anyway.
+
+    Every other open position advances to the same `as_of` as a side effect of
+    the shared replay. That is idempotent by construction (`last_marked_date`
+    is the resume point), so a rerun at the same `as_of` adds no marks.
+
+    Args:
+        state_store: Ledger to rebuild, and the verdict source it reopens from.
+        market_store: Stored bars; nothing is fetched.
+        trade_plan: Shared plan values used by production advice and the
+            simulator.
+        target: The symbol, and optionally the single run, to rebuild.
+        as_of: Inclusive point-in-time cutoff for the replay, exactly as
+            `update_tracking` uses it.
+
+    Returns:
+        The before/after figures per rebuilt position, plus the replay's own
+        counts and notes. `positions` is empty when nothing matched.
+    """
+    selected = tuple(
+        position
+        for position in state_store.get_verdict_positions()
+        if position.symbol == target.symbol
+        and (target.run_id is None or position.run_id == target.run_id)
+    )
+    if not selected:
+        return RebuildResult(
+            target=target,
+            as_of=as_of,
+            positions=(),
+            update=TrackingUpdateResult(0, 0, 0, ()),
+        )
+
+    marks_before = state_store.get_latest_verdict_position_marks()
+    before = {
+        (position.run_id, position.symbol): _snapshot(position, marks_before)
+        for position in selected
+    }
+    state_store.delete_verdict_positions(
+        [(position.run_id, position.symbol) for position in selected]
+    )
+
+    update = update_tracking(state_store, market_store, trade_plan, as_of=as_of)
+
+    marks_after = state_store.get_latest_verdict_position_marks()
+    rebuilt = {
+        (position.run_id, position.symbol): position
+        for position in state_store.get_verdict_positions()
+    }
+    return RebuildResult(
+        target=target,
+        as_of=as_of,
+        positions=tuple(
+            _rebuilt(position, before, rebuilt, marks_after) for position in selected
+        ),
+        update=update,
+    )
+
+
+def _rebuilt(
+    position: VerdictPosition,
+    before: Mapping[tuple[UUID, str], PositionSnapshot],
+    rebuilt: Mapping[tuple[UUID, str], VerdictPosition],
+    marks_after: Mapping[tuple[UUID, str], VerdictPositionMark],
+) -> RebuiltPosition:
+    """Pair one position's pre-delete figures with what the replay produced."""
+    key = (position.run_id, position.symbol)
+    after = rebuilt.get(key)
+    return RebuiltPosition(
+        run_id=position.run_id,
+        symbol=position.symbol,
+        entry_date=position.entry_date,
+        recommendation=position.recommendation,
+        before=before[key],
+        after=None if after is None else _snapshot(after, marks_after),
+    )
+
+
+def _snapshot(
+    position: VerdictPosition,
+    marks: Mapping[tuple[UUID, str], VerdictPositionMark],
+) -> PositionSnapshot:
+    """Reduce one position to the figures a rebuild report compares."""
+    mark = marks.get((position.run_id, position.symbol))
+    return PositionSnapshot(
+        status=position.status,
+        entry_price=position.entry_price,
+        exit_date=position.exit_date,
+        exit_reason=position.exit_reason,
+        return_pct=(
+            position.realized_return_pct
+            if position.status == CLOSED
+            else (None if mark is None else mark.unrealized_return_pct)
+        ),
     )
 
 

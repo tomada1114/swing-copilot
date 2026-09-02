@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pandas as pd
 import pytest
 
 from swing_copilot.clock import SystemClock
@@ -428,6 +429,137 @@ class TestStatsCommand:
         main(["stats", "--db", str(db_path)])
 
         assert "実際に提案された建玉ではない" in capsys.readouterr().out
+
+
+class TestRebuildCommand:
+    """The repair path (Issue #413): delete one symbol's positions and replay."""
+
+    def _stopped_out(self, db_path: Path) -> None:
+        """Close the seeded position against a corrupted DAY_2 gap-down."""
+        _close_by_stop(db_path)
+
+    def _repair(self, db_path: Path) -> None:
+        """Replace the symbol's whole history the way `backfill rebuild` does."""
+        market_store = MarketStore(
+            Database(db_path), parquet_root=db_path.parent / "bars"
+        )
+        market_store.replace_symbol_bars(
+            [SYMBOL],
+            pd.DataFrame(
+                [
+                    *flat_prelude(),
+                    bar(DAY_1, open_price=101.0, high=103.0, low=101.0, close=102.0),
+                    bar(DAY_2, open_price=102.0, high=104.0, low=102.0, close=103.0),
+                ]
+            ),
+        )
+
+    def test_it_prints_a_before_after_line_per_rebuilt_position(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._stopped_out(db_path)
+        self._repair(db_path)
+
+        main(
+            [
+                "rebuild",
+                "--symbol",
+                SYMBOL,
+                "--as-of",
+                DAY_2.isoformat(),
+                "--db",
+                str(db_path),
+            ]
+        )
+
+        out = capsys.readouterr().out
+        assert f"rebuild: {SYMBOL} 1 建玉を再構築した" in out
+        assert DAY_2.isoformat() in out
+        assert "before: stop" in out
+        assert "-10.00%" in out
+        assert "after: open +3.00%" in out
+        rebuilt = _store(db_path).get_verdict_position(RUN_ID, SYMBOL)
+        assert rebuilt is not None
+        assert rebuilt.status == "open"
+
+    def test_a_run_id_narrows_the_target(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._stopped_out(db_path)
+        self._repair(db_path)
+
+        main(
+            [
+                "rebuild",
+                "--symbol",
+                SYMBOL,
+                "--run-id",
+                str(RUN_ID),
+                "--as-of",
+                DAY_2.isoformat(),
+                "--db",
+                str(db_path),
+            ]
+        )
+
+        assert str(RUN_ID) in capsys.readouterr().out
+
+    def test_an_unmatched_symbol_says_so_and_exits_zero(
+        self, db_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["rebuild", "--symbol", "ZZZ", "--db", str(db_path)])
+
+        assert "ZZZ に対象の建玉はない" in capsys.readouterr().out
+
+    def test_an_omitted_as_of_falls_back_to_the_system_clock(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stopped_out(db_path)
+        self._repair(db_path)
+        monkeypatch.setattr(SystemClock, "today", lambda _self: DAY_1)
+
+        main(["rebuild", "--symbol", SYMBOL, "--db", str(db_path)])
+
+        rebuilt = _store(db_path).get_verdict_position(RUN_ID, SYMBOL)
+        assert rebuilt is not None
+        assert rebuilt.last_marked_date == DAY_1
+
+    def test_a_db_without_its_sibling_bars_root_fails_before_deleting_anything(
+        self, tmp_path: Path
+    ) -> None:
+        # Same Issue #221 guard as `update`, and it matters more here: the
+        # delete is not undone by the replay finding no prices.
+        copied = tmp_path / "copy"
+        copied.mkdir()
+        path = copied / "copilot.duckdb"
+        state_store = StateStore(Database(path))
+        state_store.init_schema()
+        seed_verdict(state_store)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["rebuild", "--symbol", SYMBOL, "--db", str(path)])
+
+        assert "Parquetディレクトリが見つかりません" in str(excinfo.value)
+
+    def test_an_unreadable_settings_file_exits_with_its_message(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "nope.yaml"
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "rebuild",
+                    "--symbol",
+                    SYMBOL,
+                    "--db",
+                    str(db_path),
+                    "--settings",
+                    str(missing),
+                ]
+            )
+
+        assert str(missing) in str(excinfo.value)
 
 
 def test_the_console_script_entry_point_is_this_module_main() -> None:

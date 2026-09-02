@@ -167,8 +167,9 @@ _INSERT_VERDICT_COLLECTION = """
 _INSERT_VERDICT_OUTCOME = """
     INSERT INTO verdict_outcomes (
         run_id, symbol, horizon_days, as_of, recommendation,
-        forward_return_pct, benchmark_return_pct, classification
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        forward_return_pct, benchmark_return_pct, entry_close, maturity_close,
+        classification
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -275,6 +276,15 @@ class VerdictOutcomeRecord:
     #: measured" -- a row classified before the column existed, or one whose
     #: benchmark bars were missing -- and must never be read as a flat market.
     benchmark_return_pct: float | None = None
+    #: The run-day and maturity-day closes this classification was actually
+    #: computed from (Issue #413), both quoted on the *maturity date's*
+    #: adjustment basis -- the numbers `compute_forward_return` divided, not
+    #: the as-traded prices of those two sessions. Audit only: no aggregate
+    #: reads them, they exist so that "which price was this classified at"
+    #: survives a later store repair that rebases the bars. `None` means the
+    #: row predates the columns.
+    entry_close: float | None = None
+    maturity_close: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -732,6 +742,23 @@ def get_analysis_source_coverages_in_window(
     )
 
 
+def _has_only_finite_measurements(outcome: VerdictOutcomeRecord) -> bool:
+    """Whether every number this row measures is a usable finite value.
+
+    Covers the audit closes as well as the two returns: DuckDB stores `NaN`
+    in a `DOUBLE` column without it being `NULL`, so a non-finite audit close
+    would read back as "this is the price it was classified at" rather than
+    as "not recorded".
+    """
+    measurements = (
+        outcome.forward_return_pct,
+        outcome.benchmark_return_pct,
+        outcome.entry_close,
+        outcome.maturity_close,
+    )
+    return all(value is None or math.isfinite(value) for value in measurements)
+
+
 def replace_verdict_outcomes(
     database: Database,
     run_id: UUID,
@@ -748,7 +775,8 @@ def replace_verdict_outcomes(
 
     Raises:
         ValueError: A record's `run_id`/`horizon_days` disagrees with the
-            replacement scope, or a return is not a finite number.
+            replacement scope, or one of its measured numbers (either return,
+            either audit close) is not finite.
     """
     if any(
         outcome.run_id != run_id or outcome.horizon_days != horizon_days
@@ -767,11 +795,7 @@ def replace_verdict_outcomes(
     non_finite = [
         f"{outcome.symbol}@{outcome.as_of}"
         for outcome in outcomes
-        if not math.isfinite(outcome.forward_return_pct)
-        or (
-            outcome.benchmark_return_pct is not None
-            and not math.isfinite(outcome.benchmark_return_pct)
-        )
+        if not _has_only_finite_measurements(outcome)
     ]
     if non_finite:
         msg = f"verdict outcome returns must be finite: {', '.join(non_finite)}"
@@ -793,6 +817,8 @@ def replace_verdict_outcomes(
                     outcome.recommendation,
                     outcome.forward_return_pct,
                     outcome.benchmark_return_pct,
+                    outcome.entry_close,
+                    outcome.maturity_close,
                     outcome.classification,
                 ],
             )
@@ -863,7 +889,8 @@ def get_verdict_outcomes_in_window(
         rows = conn.execute(
             """
             SELECT run_id, symbol, horizon_days, as_of, recommendation,
-                   forward_return_pct, classification, benchmark_return_pct
+                   forward_return_pct, classification, benchmark_return_pct,
+                   entry_close, maturity_close
             FROM verdict_outcomes
             WHERE as_of >= ? AND as_of <= ?
             ORDER BY as_of, run_id, symbol, horizon_days
@@ -880,6 +907,8 @@ def get_verdict_outcomes_in_window(
             forward_return_pct=row[5],
             classification=row[6],
             benchmark_return_pct=row[7],
+            entry_close=row[8],
+            maturity_close=row[9],
         )
         for row in rows
     )

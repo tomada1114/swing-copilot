@@ -12,11 +12,17 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import pandas as pd
 import pytest
 
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 from swing_copilot.tracking.board import build_board, position_records
-from swing_copilot.tracking.update import update_tracking
+from swing_copilot.tracking.update import (
+    RebuildTarget,
+    TrackingUpdateResult,
+    rebuild_positions,
+    update_tracking,
+)
 from tests.tracking.conftest import (
     DAY_1,
     DAY_2,
@@ -1338,3 +1344,224 @@ class TestExitAtrPeriod:
         seeded = state_store.get_verdict_position(short_run_id, "BBB")
         assert seeded is not None
         assert seeded.stop_price == pytest.approx(RISK_STOP)
+
+
+class TestRebuildPositions:
+    """`copilot-track rebuild`: replay a position that `update` never revisits.
+
+    `update_tracking` treats `last_marked_date` as a resume point and never
+    advances a closed position again, so a stop that fired at a price the
+    store has since corrected stays in the ledger forever. Rebuilding deletes
+    the position and lets the ordinary open-and-advance path reproduce it
+    (Issue #413).
+    """
+
+    def _stopped_out(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        config: TradePlanConfig,
+        *,
+        symbol: str = SYMBOL,
+        run_id: object = RUN_ID,
+    ) -> None:
+        """Open a position and close it on DAY_1 against a corrupted low."""
+        seed_verdict(state_store, run_id=run_id, symbol=symbol)  # type: ignore[arg-type]
+        seed_risk(state_store, run_id=run_id, symbol=symbol)  # type: ignore[arg-type]
+        write_bars(market_store, flat_prelude(symbol=symbol))
+        # A day that never traded: the mixed-basis half-price row Issue #413
+        # actually stored, which gap-fills at the open, far under the stop.
+        write_bars(
+            market_store,
+            [
+                bar(
+                    DAY_1,
+                    open_price=50.0,
+                    high=50.5,
+                    low=49.5,
+                    close=50.0,
+                    symbol=symbol,
+                )
+            ],
+        )
+        update_tracking(state_store, market_store, config, as_of=DAY_1)
+
+    def _repair_day_1(self, market_store: MarketStore, *, symbol: str = SYMBOL) -> None:
+        """Replace the whole history the way `copilot-backfill rebuild` does."""
+        market_store.replace_symbol_bars(
+            [symbol],
+            pd.DataFrame(
+                [
+                    *flat_prelude(symbol=symbol),
+                    bar(
+                        DAY_1,
+                        open_price=100.0,
+                        high=102.0,
+                        low=100.0,
+                        close=101.0,
+                        symbol=symbol,
+                    ),
+                ]
+            ),
+        )
+
+    def test_it_reopens_a_closed_position_and_reaches_a_different_exit(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        self._stopped_out(state_store, market_store, backtest_config)
+        closed = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert closed is not None
+        assert closed.status == "closed"
+        self._repair_day_1(market_store)
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL),
+            as_of=DAY_1,
+        )
+
+        rebuilt = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert rebuilt is not None
+        assert rebuilt.status == "open"
+        assert rebuilt.exit_reason is None
+        assert rebuilt.entry_price == pytest.approx(FLAT_CLOSE)
+        # Marks were replaced, not appended to the pre-rebuild series.
+        marks = state_store.get_verdict_position_marks(RUN_ID, SYMBOL)
+        assert [mark.as_of_date for mark in marks] == [ENTRY_DATE, DAY_1]
+        assert [mark.close for mark in marks] == pytest.approx([100.0, 101.0])
+        assert len(result.positions) == 1
+        row = result.positions[0]
+        assert (row.before.status, row.before.exit_reason) == ("closed", "stop")
+        assert row.before.return_pct == pytest.approx(-50.0)
+        assert row.after is not None
+        assert row.after.status == "open"
+        assert row.after.return_pct == pytest.approx(1.0)
+
+    def test_a_run_id_narrows_the_rebuild_to_one_position(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        self._stopped_out(state_store, market_store, backtest_config)
+        seed_verdict(state_store, run_id=OTHER_RUN_ID)
+        seed_risk(state_store, run_id=OTHER_RUN_ID)
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+        self._repair_day_1(market_store)
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL, run_id=OTHER_RUN_ID),
+            as_of=DAY_1,
+        )
+
+        assert [row.run_id for row in result.positions] == [OTHER_RUN_ID]
+        # The un-targeted position keeps the figures the corrupted bar gave it.
+        untouched = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert untouched is not None
+        assert untouched.status == "closed"
+
+    def test_an_unmatched_target_is_a_no_op_that_deletes_nothing(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        self._stopped_out(state_store, market_store, backtest_config)
+        before = state_store.get_verdict_position(RUN_ID, SYMBOL)
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol="ZZZ"),
+            as_of=DAY_1,
+        )
+
+        assert result.positions == ()
+        assert result.update == TrackingUpdateResult(0, 0, 0, ())
+        assert state_store.get_verdict_position(RUN_ID, SYMBOL) == before
+
+    def test_another_symbols_open_position_gains_no_marks_at_the_same_as_of(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        # The shared replay advances every open position, which is idempotent:
+        # a bystander already marked through `as_of` must come out untouched.
+        self._stopped_out(state_store, market_store, backtest_config)
+        seed_verdict(state_store, run_id=OTHER_RUN_ID, symbol="BBB")
+        seed_risk(state_store, run_id=OTHER_RUN_ID, symbol="BBB")
+        write_bars(market_store, flat_prelude(symbol="BBB"))
+        write_bars(
+            market_store,
+            [
+                bar(
+                    DAY_1,
+                    open_price=100.0,
+                    high=101.0,
+                    low=99.5,
+                    close=100.5,
+                    symbol="BBB",
+                )
+            ],
+        )
+        update_tracking(state_store, market_store, backtest_config, as_of=DAY_1)
+        bystander = state_store.get_verdict_position(OTHER_RUN_ID, "BBB")
+        bystander_marks = state_store.get_verdict_position_marks(OTHER_RUN_ID, "BBB")
+        self._repair_day_1(market_store)
+
+        rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL),
+            as_of=DAY_1,
+        )
+
+        assert state_store.get_verdict_position(OTHER_RUN_ID, "BBB") == bystander
+        assert (
+            state_store.get_verdict_position_marks(OTHER_RUN_ID, "BBB")
+            == bystander_marks
+        )
+
+    def test_a_position_whose_entry_price_is_gone_is_reported_as_not_reopened(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        # Neither `risk_assessments.entry_price` nor an entry-day bar: the
+        # replay cannot reopen it, and the report has to say so rather than
+        # silently showing one fewer row than it deleted.
+        self._stopped_out(state_store, market_store, backtest_config)
+        with state_store.database.connect() as conn:
+            conn.execute("UPDATE risk_assessments SET entry_price = NULL")
+        market_store.replace_symbol_bars(
+            [SYMBOL],
+            pd.DataFrame(
+                [bar(DAY_1, open_price=101.0, high=102.0, low=100.0, close=101.0)]
+            ),
+        )
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL),
+            as_of=DAY_1,
+        )
+
+        assert [row.after for row in result.positions] == [None]
+        assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
+        assert any(
+            "エントリー価格を解決できない" in note for note in result.update.notes
+        )

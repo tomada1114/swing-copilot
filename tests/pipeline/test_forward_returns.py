@@ -16,6 +16,7 @@ import pytest
 
 from swing_copilot.pipeline.forward_returns import (
     compute_forward_return,
+    compute_forward_return_detail,
     find_maturity_trading_day,
     find_target_trading_day,
 )
@@ -383,3 +384,76 @@ class TestForwardReturnAcrossASplit:
         assert compute_forward_return(
             market_store, "MNST", run_date, maturity
         ) == pytest.approx((90.36 - 97.23) / 97.23 * 100)
+
+
+class TestComputeForwardReturnDetail:
+    """Issue #413: the same computation, with the two closes it divided.
+
+    `retro/evaluate.py` records those closes as audit columns, so they have to
+    be the very numbers behind the ratio -- not a second read of the store,
+    which a later repair could answer differently.
+    """
+
+    def test_it_reports_both_endpoint_closes_and_the_matching_ratio(
+        self, market_store: MarketStore
+    ) -> None:
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 5)
+        market_store.write_bars(_bars("AAA", {run_date: 100.0, maturity: 101.5}))
+
+        detail = compute_forward_return_detail(market_store, "AAA", run_date, maturity)
+
+        assert detail is not None
+        assert (detail.run_close, detail.as_of_close) == (100.0, 101.5)
+        assert detail.pct == pytest.approx(1.5)
+
+    def test_the_wrapper_returns_exactly_the_details_own_pct(
+        self, market_store: MarketStore
+    ) -> None:
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 5)
+        market_store.write_bars(_bars("AAA", {run_date: 137.0, maturity: 121.25}))
+
+        detail = compute_forward_return_detail(market_store, "AAA", run_date, maturity)
+
+        assert detail is not None
+        assert compute_forward_return(market_store, "AAA", run_date, maturity) == (
+            detail.pct
+        )
+
+    def test_the_closes_are_quoted_on_the_maturity_dates_basis(
+        self, market_store: MarketStore
+    ) -> None:
+        # The as-traded run-day close was 97.23; a 2:1 split before maturity
+        # means the audited entry close is the rebased 48.615 -- the number
+        # the ratio actually divided, which is the whole point of recording it.
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 26)
+        market_store.write_bars(_bars("MNST", {run_date: 97.23, maturity: 47.81}))
+        market_store.write_corporate_actions(
+            pd.DataFrame(
+                {
+                    "symbol": ["MNST"],
+                    "ex_date": [date(2026, 8, 11)],
+                    "kind": ["split"],
+                    "value": [2.0],
+                }
+            ),
+            provider="test",
+            fetched_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+
+        detail = compute_forward_return_detail(market_store, "MNST", run_date, maturity)
+
+        assert detail is not None
+        assert detail.run_close == pytest.approx(48.615)
+        assert detail.as_of_close == pytest.approx(47.81)
+
+    def test_an_unusable_endpoint_yields_none_like_the_wrapper(
+        self, market_store: MarketStore
+    ) -> None:
+        run_date, maturity = date(2026, 7, 29), date(2026, 8, 5)
+        market_store.write_bars(_bars("AAA", {run_date: 100.0}))
+
+        assert (
+            compute_forward_return_detail(market_store, "AAA", run_date, maturity)
+            is None
+        )
+        assert compute_forward_return(market_store, "AAA", run_date, maturity) is None

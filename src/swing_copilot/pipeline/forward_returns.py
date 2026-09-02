@@ -23,6 +23,7 @@ They are inverses on the same calendar, and the round-trip tests in
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -124,10 +125,39 @@ def find_maturity_trading_day(
     return trading_days[horizon_days]
 
 
+@dataclass(frozen=True, slots=True)
+class ForwardReturn:
+    """One forward return together with the two closes it was computed from.
+
+    Both closes are quoted on `as_of`'s own adjustment basis -- they are the
+    numbers the ratio actually divided, not the as-traded prices of those two
+    sessions. A split between the endpoints therefore shows up as a rebased
+    `run_close`, which is exactly what makes the pair auditable after a later
+    store repair moves that basis (Issue #413).
+    """
+
+    run_close: float
+    as_of_close: float
+    pct: float
+
+
 def compute_forward_return(
     market_store: MarketStore, symbol: str, run_date: date, as_of: date
 ) -> float | None:
     """Return `(close(as_of) - close(run_date)) / close(run_date) * 100`, or `None`.
+
+    Thin wrapper over `compute_forward_return_detail` for the callers that
+    only need the ratio; the two can never disagree, because this is the
+    detail's own `pct`.
+    """
+    detail = compute_forward_return_detail(market_store, symbol, run_date, as_of)
+    return None if detail is None else detail.pct
+
+
+def compute_forward_return_detail(
+    market_store: MarketStore, symbol: str, run_date: date, as_of: date
+) -> ForwardReturn | None:
+    """Return the forward return and its two endpoint closes, or `None`.
 
     `read_bars`' own `as_of` clamp already guarantees no bar dated after
     `as_of` is ever considered (REQ-006, look-ahead prevention) -- this is
@@ -160,4 +190,8 @@ def compute_forward_return(
         return None
     if run_close == 0:
         return None
-    return (as_of_close - run_close) / run_close * 100
+    return ForwardReturn(
+        run_close=run_close,
+        as_of_close=as_of_close,
+        pct=(as_of_close - run_close) / run_close * 100,
+    )

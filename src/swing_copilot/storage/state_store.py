@@ -761,6 +761,14 @@ class StateStore:
         """
         return tracking_records.delete_orphaned_verdict_positions(self._database)
 
+    def delete_verdict_positions(self, keys: Sequence[tuple[UUID, str]]) -> None:
+        """Delete the named tracked positions and their marks in one transaction.
+
+        Args:
+            keys: `(run_id, symbol)` identities to remove. Empty is a no-op.
+        """
+        tracking_records.delete_verdict_positions(self._database, keys)
+
     def get_verdict_positions(
         self,
         status: str | None = None,

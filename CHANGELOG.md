@@ -57,6 +57,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   置換し、`corporate_actions` を upsert、形式マーカーを書く。正規化できない銘柄は旧行を維持して
   列挙）と `copilot-backfill check [--symbols A,B]`（read-only。形式マーカーと各銘柄の調整基準
   混在署名を報告）を追加した（Issue #413）
+- `copilot-track rebuild --symbol X [--run-id UUID] [--as-of DATE]` を追加した（Issue #413）。
+  指定銘柄の仮想建玉（`--run-id` 省略時は open/closed を問わず全件）を日次マークごと 1
+  トランザクションで削除し、`verdicts` 行からエントリー価格を引き直して `--as-of` まで再リプレイ
+  する。価格を是正しても `update` は `last_marked_date` を再開位置として過去を引き直さないため、
+  壊れた履歴で確定した誤ストップを台帳から消す唯一の経路である。削除と再建玉は別トランザクション
+  で、途中で落ちても `verdicts` が残るので次の `update` が同じ結果を再現する。出力は 1 建玉 1 行の
+  before/after 比較。`docs/04_detailed_design.md` 3.24.3-5 が「スコープ外」としていた `--rebuild`
+  の実装にあたる
+- `verdict_outcomes` に監査列 `entry_close` / `maturity_close` を追加した（Issue #413）。
+  `copilot-retro evaluate` が分類に使った 2 本の終値——**満期日 as_of 基準の分割調整済み値**、
+  つまり forward return が実際に割った数値そのもの——を残すので、ストアを修復したあとでも
+  「どの価格で分類されたか」を後から確認できる。既存行は NULL（＝未記録）のままで、
+  バックフィルしない（過去の評価が割った基準こそ修復で変わるものなので、今日再計算した値を
+  当時の値として記録することになる）。再評価すれば埋まる。スキル境界の `retro-input-v1`
+  スキーマは変えていない。`pipeline/forward_returns.py` に
+  `compute_forward_return_detail()`（`ForwardReturn(run_close, as_of_close, pct)`）を足し、
+  既存の `compute_forward_return()` はその `.pct` を返すラッパにした（挙動不変）
 - 戦略別ランキング成分の**機構**を追加した（Issue #251 段階1）。`ScoreWeights` に
   `pivot_proximity`（`vcp_pivot` と終値の距離。ピボット丁度で 1.0、上下どちらへ 5%
   離れると 0.0）、`rs_percentile`（`minervini_rs_percentile`/100）、`criteria_met`

@@ -14,14 +14,11 @@ from swing_copilot.data.earnings_finnhub import (
     _real_http_get,
 )
 from tests.conftest import ThrottleTimeline
+from tests.support.fakes import FixedClock
 
-
-class FakeClock:
-    def today(self) -> date:
-        return date(2026, 7, 21)
-
-    def now(self) -> datetime:
-        return datetime(2026, 7, 21, 12, tzinfo=UTC)
+_AS_OF = date(2026, 7, 21)
+#: The fixed `now()` every `FixedClock(_AS_OF, _NOW)` below returns.
+_NOW = datetime(2026, 7, 21, 12, tzinfo=UTC)
 
 
 def _payload(earnings_date: str = "2026-07-28") -> dict[str, object]:
@@ -37,7 +34,9 @@ def test_normalizes_earliest_matching_event_and_query_parameters():
         captured.update(url=url, params=params)
         return _payload()
 
-    client = FinnhubEarningsClient("test-key", http_get=fake_get, clock=FakeClock())
+    client = FinnhubEarningsClient(
+        "test-key", http_get=fake_get, clock=FixedClock(_AS_OF, _NOW)
+    )
 
     event = client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
 
@@ -65,7 +64,7 @@ def test_filters_event_dates_at_inclusive_end_boundary(earnings_date, expected_d
     client = FinnhubEarningsClient(
         "test-key",
         http_get=lambda _url, _params: _payload(earnings_date),
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
     )
 
     event = client.fetch_next_earnings(
@@ -86,7 +85,7 @@ def test_non_list_calendar_fails_instead_of_reading_as_no_earnings():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=lambda _url, _params: {"earningsCalendar": {"symbol": "AAPL"}},
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
     )
 
     with pytest.raises(TypeError, match="earningsCalendar response must be a list"):
@@ -111,7 +110,7 @@ def test_unusable_calendar_items_are_skipped_without_hiding_a_real_event():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=lambda _url, _params: payload,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
     )
 
     event = client.fetch_next_earnings("AAPL", date(2026, 7, 21), date(2026, 8, 20))
@@ -132,7 +131,7 @@ def test_no_events_for_the_symbol_reads_as_an_empty_window():
                 {"symbol": "MSFT", "date": "2026-07-28", "hour": "amc"}
             ]
         },
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
     )
 
     assert (
@@ -149,7 +148,7 @@ def test_rate_limit_does_not_sleep_once_the_interval_has_already_elapsed():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=lambda _url, _params: _payload(),
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=lambda: next(times),
             sleep_fn=throttle_sleeps.append,
@@ -176,7 +175,7 @@ def test_timeout_retries_to_total_attempt_ceiling_with_deterministic_backoff():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=timeout_get,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=lambda: 10.0,
             sleep_fn=lambda _seconds: None,
@@ -211,7 +210,7 @@ def test_rate_limit_is_applied_before_every_retry_attempt():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=flaky_get,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=lambda: next(times),
             sleep_fn=throttle_sleeps.append,
@@ -247,7 +246,7 @@ def test_successive_requests_are_issued_at_least_one_interval_apart():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=timed_get,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=timeline.clock,
             sleep_fn=timeline.sleep,
@@ -283,7 +282,7 @@ def test_retried_attempts_keep_the_minimum_issue_interval():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=flaky_get,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=timeline.clock,
             sleep_fn=timeline.sleep,
@@ -313,7 +312,7 @@ def test_client_error_is_not_retried():
     client = FinnhubEarningsClient(
         "test-key",
         http_get=bad_request,
-        clock=FakeClock(),
+        clock=FixedClock(_AS_OF, _NOW),
         timing=EarningsTiming(
             rate_clock=lambda: 10.0,
             sleep_fn=lambda _seconds: None,

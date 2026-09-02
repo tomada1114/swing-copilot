@@ -150,6 +150,13 @@ def _legacy_database(tmp_path: Path) -> Path:
     with duckdb.connect(str(path)) as conn:
         for statement in _LEGACY_DDL:
             conn.execute(statement)
+        # Out of scope for Issue #398's `StateStore.insert_run()` migration
+        # on purpose: this row is written against `_LEGACY_DDL`'s
+        # pre-Issue-#192 `runs` shape (no `metadata_json` column, positional
+        # values only), over a raw `duckdb.connect` -- not a `Database`/
+        # `StateStore` at all -- so there is no post-migration schema for
+        # `insert_run()` to write into yet. That is exactly the shape this
+        # test module exists to exercise.
         conn.execute(
             "INSERT INTO runs VALUES (?, DATE '2026-07-21', 'live', 'cfg', "
             "'success', now(), NULL, NULL, NULL)",

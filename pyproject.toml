@@ -168,7 +168,9 @@ convention = "google"
 [tool.ruff.lint.flake8-type-checking]
 # Pydantic evaluates annotations at runtime, so names used only in a model's
 # field annotations must stay as real imports, not TYPE_CHECKING-only ones.
-runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+# `StrictModel` (Issue #394) is the skill-boundary schemas' one `BaseModel`
+# subclass, so it needs the same treatment as `pydantic.BaseModel` itself.
+runtime-evaluated-base-classes = ["pydantic.BaseModel", "swing_copilot.strict_model.StrictModel"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [

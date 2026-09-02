@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 import httpx
@@ -206,7 +205,7 @@ class TestGetSp500Universe:
             msg = "replace failed"
             raise OSError(msg)
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        monkeypatch.setattr("swing_copilot.io_atomic.os.replace", _boom)
 
         with pytest.raises(OSError, match="replace failed"):
             get_sp500_universe(
@@ -218,7 +217,7 @@ class TestGetSp500Universe:
             )
 
         assert snapshot_path.read_bytes() == previous_bytes
-        assert list(tmp_path.glob(".universe_snapshot.csv.*.tmp")) == []
+        assert list(tmp_path.glob(".universe_snapshot.csv.tmp")) == []
 
     def test_falls_back_to_snapshot_when_fetch_fails(self, tmp_path):
         snapshot_path = tmp_path / "universe_snapshot.csv"

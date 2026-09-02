@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
@@ -19,7 +20,6 @@ from swing_copilot.backtest.cli import (
     DEFAULT_STRATEGIES_PATH,
     BacktestCliError,
     ReportMeta,
-    _atomic_write,
     _compose_dependencies,
     _entry_grid_output_path,
     _grid_output_path,
@@ -61,6 +61,7 @@ from swing_copilot.backtest.sensitivity import (
     entry_limit_grid_values,
 )
 from swing_copilot.config import StrategiesConfig, load_settings, load_strategies
+from swing_copilot.io_atomic import write_text_atomically
 from swing_copilot.risk.checks import EarningsGuardInput
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
@@ -351,28 +352,96 @@ class TestMissingDataSymbols:
 
 
 class TestAtomicWrite:
-    def test_writes_content(self, tmp_path):
-        path = tmp_path / "report.md"
-        _atomic_write(path, "hello")
-        assert path.read_text(encoding="utf-8") == "hello"
+    """Issue #394: the CLI writes its reports through the shared writer.
 
-    def test_failure_preserves_previous_destination_and_cleans_up_tmp(
-        self, tmp_path, monkeypatch
+    The atomic-replace contract itself (temp file in the same directory,
+    old file preserved and temp cleaned up on failure) is pinned once, at its
+    dependency-zero home in `tests/test_io_atomic.py`. This class has to
+    prove two more things a name-binding check alone cannot: that the CLI
+    has not quietly grown its own copy of that contract, and that its
+    report-write path actually calls through the shared writer at runtime --
+    `_run_backtest_command` reverting to a bare `output_path.write_text(...)`
+    while leaving the now-unused import in place would still satisfy the
+    binding check below.
+    """
+
+    def test_report_writing_calls_the_shared_atomic_text_writer(self):
+        # `cli_module.write_text_atomically` would work at runtime too, but
+        # `cli.py` never declares it in `__all__`, so mypy strict's implicit
+        # re-export check rejects the static attribute access; `vars()`
+        # sidesteps that without weakening what the assertion proves.
+        assert vars(cli_module)["write_text_atomically"] is write_text_atomically
+
+    @pytest.mark.usefixtures("two_symbol_universe")
+    def test_report_write_goes_through_the_shared_writer_at_runtime(
+        self, seeded_db, tmp_path, monkeypatch
     ):
-        path = tmp_path / "report.md"
-        path.write_text("original", encoding="utf-8")
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "report.md"
+        calls: list[Path] = []
+        real_write_text_atomically = write_text_atomically
 
-        def _boom(self, _target):
+        def _spy(destination: Path, content: str) -> None:
+            calls.append(destination)
+            real_write_text_atomically(destination, content)
+
+        monkeypatch.setattr(cli_module, "write_text_atomically", _spy)
+
+        main(
+            [
+                "--strategy",
+                "default",
+                "--start",
+                days[0].isoformat(),
+                "--end",
+                days[-1].isoformat(),
+                "--db",
+                str(db_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+        assert calls == [output_path]
+        assert "# Backtest: default" in output_path.read_text(encoding="utf-8")
+
+    @pytest.mark.usefixtures("two_symbol_universe")
+    def test_a_mid_write_failure_leaves_the_previous_report_and_cleans_up_the_temp_file(
+        self, seeded_db, tmp_path, monkeypatch
+    ):
+        db_path, days = seeded_db
+        output_path = tmp_path / "out" / "report.md"
+        output_path.parent.mkdir(parents=True)
+        output_path.write_text("previous report", encoding="utf-8")
+
+        def _boom(_source: Path, _target: Path) -> None:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        # `write_text_atomically` itself is exercised for real -- only the
+        # `os.replace` it depends on is made to fail -- so this proves the
+        # CLI's report write inherits `io_atomic`'s actual cleanup-on-failure
+        # behavior, not a hand-rolled stand-in for it.
+        monkeypatch.setattr(os, "replace", _boom)
 
         with pytest.raises(OSError, match="disk full"):
-            _atomic_write(path, "new content")
+            main(
+                [
+                    "--strategy",
+                    "default",
+                    "--start",
+                    days[0].isoformat(),
+                    "--end",
+                    days[-1].isoformat(),
+                    "--db",
+                    str(db_path),
+                    "--output",
+                    str(output_path),
+                ]
+            )
 
-        assert path.read_text(encoding="utf-8") == "original"
-        assert list(tmp_path.glob(".report.md.*.tmp")) == []
+        assert output_path.read_text(encoding="utf-8") == "previous report"
+        assert list(output_path.parent.glob(".report.md.tmp")) == []
 
 
 class TestRenderTerminal:

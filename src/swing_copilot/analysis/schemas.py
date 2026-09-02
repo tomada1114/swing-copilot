@@ -23,13 +23,14 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Literal, Self, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from swing_copilot.analysis.evidence import (
     MAX_EVIDENCE_QUOTE_CHARS,
     MIN_EVIDENCE_QUOTE_CHARS,
     normalize_evidence_text,
 )
+from swing_copilot.strict_model import StrictModel
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -114,10 +115,14 @@ def _canonicalize_for_digest(value: object, field_name: str | None = None) -> ob
     return value
 
 
-class _StrictModel(BaseModel):
-    """Base for both directions of the contract: reject unknown fields."""
+class _StrictModel(StrictModel):
+    """Both directions of the contract reject unknown fields.
 
-    model_config = ConfigDict(extra="forbid")
+    `StrictModel` (Issue #394) is the one place that declares
+    `extra="forbid"`; this stays a real subclass (not a bare alias) so
+    ruff's `runtime-evaluated-base-classes` still traces every subclass
+    below back to `pydantic.BaseModel`.
+    """
 
 
 class _ArchiveReadableModel(_StrictModel):
@@ -298,7 +303,7 @@ class FilingCoverage(_StrictModel):
     is_truncated: bool
     selection_mode: FilingSelectionMode
     exhibit_truncated: bool = False
-    sections: list[FilingSectionCoverage] = []
+    sections: list[FilingSectionCoverage] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _verify_lengths(self) -> Self:
@@ -429,7 +434,7 @@ class AnalysisContextBlocks(_ArchiveReadableModel):
     _RETIRED_FIELDS: ClassVar[frozenset[str]] = frozenset({"performance_summary"})
 
     market_regime: str | None
-    calendar_events: list[CalendarEventInput] = []
+    calendar_events: list[CalendarEventInput] = Field(default_factory=list)
 
 
 class AnalysisInput(_StrictModel):
@@ -527,9 +532,9 @@ class SourcedFact(_StrictModel):
 class NewsSummary(_StrictModel):
     """Structured news interpretation for one symbol."""
 
-    facts: list[SourcedFact] = []
-    interpretation: list[str] = []
-    risk_flags: list[str] = []
+    facts: list[SourcedFact] = Field(default_factory=list)
+    interpretation: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
 
 
 class FilingAnalysis(_StrictModel):
@@ -541,18 +546,18 @@ class FilingAnalysis(_StrictModel):
     """
 
     source_id: SourceId
-    facts: list[SourcedFact] = []
-    interpretation: list[str] = []
-    red_flags: list[str] = []
-    yoy_changes: list[str] = []
+    facts: list[SourcedFact] = Field(default_factory=list)
+    interpretation: list[str] = Field(default_factory=list)
+    red_flags: list[str] = Field(default_factory=list)
+    yoy_changes: list[str] = Field(default_factory=list)
 
 
 class ScreeningAssessment(_StrictModel):
     """Qualitative reading of why a candidate survived deterministic screening."""
 
     summary: str
-    strengths: list[str] = []
-    concerns: list[str] = []
+    strengths: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
 
 
 #: The closed set of evidence kinds a verdict reason may be tagged with
@@ -597,7 +602,7 @@ class VerdictReason(_StrictModel):
     """
 
     text: NonBlankText
-    source_ids: list[SourceId] = []
+    source_ids: list[SourceId] = Field(default_factory=list)
     basis: VerdictBasis | None = None
 
 
@@ -605,7 +610,7 @@ class Verdict(_StrictModel):
     """The skill's qualitative go/no-go, which never edits screening numbers."""
 
     recommendation: Literal["proceed", "skip"]
-    reasons: list[VerdictReason] = []
+    reasons: list[VerdictReason] = Field(default_factory=list)
 
 
 class SymbolAnalysis(_StrictModel):
@@ -613,7 +618,7 @@ class SymbolAnalysis(_StrictModel):
 
     symbol: str
     news_summary: NewsSummary | None = None
-    filing_analyses: list[FilingAnalysis] = []
+    filing_analyses: list[FilingAnalysis] = Field(default_factory=list)
     screening_assessment: ScreeningAssessment
     verdict: Verdict
 
@@ -633,7 +638,7 @@ class AnalysisResult(_StrictModel):
     strategy_key: NonBlankText
     input_digest: Sha256Digest
     generated_by: str
-    symbols: list[SymbolAnalysis] = []
+    symbols: list[SymbolAnalysis] = Field(default_factory=list)
     no_trade: bool = False
     no_trade_reason: NonBlankText | None = None
 

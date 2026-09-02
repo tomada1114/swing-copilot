@@ -22,17 +22,19 @@ import pytest
 from swing_copilot import research
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
+from tests.support.runs import seed_run
 
 RUN_DATE = date(2027, 2, 1)
 
 
 def _insert_run(store, run_id, run_date=RUN_DATE, status="success"):
-    with store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-            [str(run_id), run_date, status, datetime(2027, 2, 1, 15, 0, tzinfo=UTC)],
-        )
+    seed_run(
+        store,
+        run_id,
+        run_date,
+        status=status,
+        started_at=datetime(2027, 2, 1, 15, 0, tzinfo=UTC),
+    )
 
 
 def _insert_universe(store, snapshot_date, sector="Information Technology"):

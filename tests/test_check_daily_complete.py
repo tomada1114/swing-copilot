@@ -9,6 +9,7 @@ import pytest
 
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.state_store import StateStore
+from tests.support.runs import seed_run
 from tests.support.script_loader import load_script_module
 
 if TYPE_CHECKING:
@@ -26,14 +27,7 @@ check_daily_complete = load_script_module(
 def _insert_run(
     db: Database, run_id: str, run_date: date, started_at: datetime
 ) -> None:
-    with db.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO runs (run_id, run_date, mode, config_hash, status, started_at)
-            VALUES (?, ?, 'live', 'hash', 'success', ?)
-            """,
-            [run_id, run_date, started_at],
-        )
+    seed_run(StateStore(db), run_id, run_date, started_at=started_at)
 
 
 def _insert_candidates(db: Database, run_id: str, count: int) -> None:

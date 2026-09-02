@@ -59,6 +59,7 @@ from swing_copilot.storage.tracking_records import VerdictPosition
 from swing_copilot.text.base import TextItem
 from swing_copilot.universe import UniverseMember
 from tests.support.fakes import FixedClock, StubDataProvider
+from tests.support.runs import seed_run
 
 AS_OF = date(2027, 3, 1)
 #: `date.weekday()` value for Friday, named for `TestRunDateResolvesOnlyClosedSessions`.
@@ -1044,6 +1045,9 @@ class TestSameDayRerunGuard:
 
     def test_existing_success_run_aborts_before_start_run(self, deps, state_store):
         existing_id = uuid4()
+        # `StateStore.insert_run()` has no `report_path` parameter (only
+        # `complete_run()` sets it), and this test's abort-message assertion
+        # below needs one on the pre-existing row, so this seed stays raw SQL.
         with state_store._database.connect() as conn:  # noqa: SLF001
             conn.execute(
                 "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
@@ -1070,16 +1074,12 @@ class TestSameDayRerunGuard:
         assert count == (1,)
 
     def test_allow_same_day_rerun_bypasses_the_guard(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(uuid4()),
-                    _LIVE_RUN_DATE,
-                    datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
-                ],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            _LIVE_RUN_DATE,
+            started_at=datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+        )
 
         result = run_daily(
             DailyRunOptions(is_dry_run=True, allow_same_day_rerun=True), deps
@@ -1088,30 +1088,26 @@ class TestSameDayRerunGuard:
         assert result.status == RunStatus.SUCCESS
 
     def test_only_failed_or_running_existing_runs_do_not_abort(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            for status in ("failed", "running"):
-                conn.execute(
-                    "INSERT INTO runs (run_id, run_date, mode, config_hash, "
-                    "status, started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-                    [
-                        str(uuid4()),
-                        _LIVE_RUN_DATE,
-                        status,
-                        datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
-                    ],
-                )
+        for status in (RunStatus.FAILED, RunStatus.RUNNING):
+            seed_run(
+                state_store,
+                uuid4(),
+                _LIVE_RUN_DATE,
+                status=status,
+                started_at=datetime(2027, 2, 28, 15, 5, tzinfo=UTC),
+            )
 
         result = run_daily(DailyRunOptions(is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
 
     def test_historical_as_of_applies_the_same_guard(self, deps, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [str(uuid4()), AS_OF, datetime(2027, 3, 1, 15, 5, tzinfo=UTC)],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            AS_OF,
+            started_at=datetime(2027, 3, 1, 15, 5, tzinfo=UTC),
+        )
 
         with pytest.raises(PreflightAbort):
             run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
@@ -1125,16 +1121,12 @@ class TestSameDayRerunGuard:
         # asking for bars "as of" holiday_run_date + 1 day lands the latest
         # bar exactly on holiday_run_date.
         holiday_run_date = AS_OF - timedelta(days=5)
-        with state_store._database.connect() as conn:  # noqa: SLF001
-            conn.execute(
-                "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-                "started_at) VALUES (?, ?, 'live', 'cfg', 'success', ?)",
-                [
-                    str(uuid4()),
-                    holiday_run_date,
-                    datetime(2027, 2, 24, 15, 5, tzinfo=UTC),
-                ],
-            )
+        seed_run(
+            state_store,
+            uuid4(),
+            holiday_run_date,
+            started_at=datetime(2027, 2, 24, 15, 5, tzinfo=UTC),
+        )
         holiday_provider = StubDataProvider(
             _bars_for(["AAPL", "MSFT"], holiday_run_date + timedelta(days=1))
         )
@@ -1178,12 +1170,7 @@ def _archive_run(
     started_at = datetime(
         run_date.year, run_date.month, run_date.day, 18, tzinfo=UTC
     ) + timedelta(minutes=next(_ARCHIVE_SEQUENCE))
-    with deps.state_store._database.connect() as conn:  # noqa: SLF001
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-            [str(run_id), run_date, status, started_at],
-        )
+    seed_run(deps.state_store, run_id, run_date, status=status, started_at=started_at)
     return run_id, run_dir
 
 

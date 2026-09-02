@@ -23,6 +23,7 @@ from swing_copilot.report.incomplete_runs import (
     IncompleteRunKind,
     find_incomplete_runs,
 )
+from tests.support.runs import seed_run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,17 +82,13 @@ def _insert_run(
     started_at: datetime | None = None,
 ) -> None:
     """Insert a minimal `runs` row with an explicitly chosen status."""
-    with _database(state_store).connect() as conn:
-        conn.execute(
-            "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
-            "started_at) VALUES (?, ?, 'live', 'cfg', ?, ?)",
-            [
-                str(run_id),
-                run_date,
-                status,
-                started_at or datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
-            ],
-        )
+    seed_run(
+        state_store,
+        run_id,
+        run_date,
+        status=status,
+        started_at=started_at or datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
+    )
 
 
 class TestAnalysisMissing:

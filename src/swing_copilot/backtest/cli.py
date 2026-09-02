@@ -1143,7 +1143,7 @@ def _compose_dependencies(
         market_store=market_store,
         universe=universe,
         settings=settings,
-        strategies_config=strategies.model_dump(),
+        strategies_config=strategies,
     )
     return deps, sample, missing_data_symbols
 

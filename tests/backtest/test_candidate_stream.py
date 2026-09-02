@@ -8,6 +8,9 @@ refuses to be reused once anything screening reads has moved.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from swing_copilot.backtest.candidate_stream import (
+    CACHE_KEY_VERSION,
     CandidateStream,
     CandidateStreamError,
     CandidateStreamMismatchError,
@@ -33,6 +37,7 @@ from swing_copilot.backtest.runner import (
     BacktestRequest,
     run_backtest,
 )
+from swing_copilot.config import StrategiesConfig
 from swing_copilot.screening.base import Candidate, ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.storage.database import Database
@@ -43,7 +48,10 @@ from tests.backtest.conftest import bar_row, bars_frame, flat_bars
 if TYPE_CHECKING:
     from swing_copilot.config import Settings
 
-STRATEGIES_CONFIG = {
+#: Raw shape, kept alongside the typed `STRATEGIES_CONFIG` so
+#: `test_a_strategy_spec_change_changes_the_key` can splice a variant without
+#: reaching back into an already-validated model's fields.
+_STRATEGIES_CONFIG_DICT = {
     "strategies": {
         "trend": {
             "filters_all": [],
@@ -57,6 +65,7 @@ STRATEGIES_CONFIG = {
         },
     }
 }
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(_STRATEGIES_CONFIG_DICT)
 
 #: Enough history for the 200-day SMA `ranking_metrics` needs, plus the window.
 _HISTORY_DAYS = 240
@@ -350,6 +359,54 @@ class TestCacheKeyContract:
     def _key(self, request_, deps):
         return compute_cache_key(request_, deps, load_market_frame(request_, deps))
 
+    def test_cache_key_matches_the_pre_refactor_dict_round_trip_algorithm(
+        self, request_, deps
+    ):
+        """Fingerprint stability across #396's typed threading.
+
+        Threading `StrategiesConfig` through typed instead of a
+        `model_dump()`'d dict re-validated at the point of use must not move
+        this fingerprint -- the cached candidate streams on disk key off it.
+        """
+        frame = load_market_frame(request_, deps)
+        new_key = compute_cache_key(request_, deps, frame)
+
+        # Reproduce the pre-#396 shape byte-for-byte: `BacktestDependencies.
+        # strategies_config` round-tripped through `model_dump()` then
+        # `StrategiesConfig.model_validate()` at the point of use.
+        legacy_strategies = StrategiesConfig.model_validate(
+            deps.strategies_config.model_dump()
+        )
+        legacy_payload = {
+            "version": CACHE_KEY_VERSION,
+            "strategy_key": request_.strategy_key,
+            "strategy_spec": legacy_strategies.strategies[
+                request_.strategy_key
+            ].model_dump(),
+            "technical_signals": deps.settings.technical_signals.model_dump(),
+            "fundamental_filters": deps.settings.fundamental_filters.model_dump(),
+            "universe": sorted(
+                json.dumps(dataclasses.asdict(member), sort_keys=True, default=str)
+                for member in deps.universe
+            ),
+            "symbols": sorted(request_.symbols),
+            "start": request_.start.isoformat(),
+            "end": request_.end.isoformat(),
+            "benchmark_symbol": frame.benchmark_symbol,
+            "bars_digest": frame.bars_digest,
+            "fundamentals_digest": frame.fundamentals_digest,
+        }
+        legacy_canonical = json.dumps(legacy_payload, sort_keys=True, default=str)
+        legacy_key = hashlib.blake2b(legacy_canonical.encode("utf-8")).hexdigest()
+
+        assert new_key == legacy_key
+        # Pinned literal: fails loudly if a future change (accidental or not)
+        # ever moves this fingerprint for this exact fixture set.
+        assert new_key == (
+            "b699b16916c9f12052482a5acc2c2d11cbf842f55c791362891ab4e37df0e52"
+            "a8fcce572cc9ab1818297741b5dd83bcd8619b0b3d739d279c8cf2d3bec91b631"
+        )
+
     @pytest.mark.parametrize(
         ("section", "update"),
         [
@@ -429,16 +486,18 @@ class TestCacheKeyContract:
 
     def test_a_strategy_spec_change_changes_the_key(self, request_, deps, baseline):
         expected_key, _frame = baseline
-        varied_config = {
-            "strategies": {
-                **STRATEGIES_CONFIG["strategies"],
-                "trend": {
-                    "filters_all": [],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 2,
-                },
+        varied_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    **_STRATEGIES_CONFIG_DICT["strategies"],
+                    "trend": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 2,
+                    },
+                }
             }
-        }
+        )
 
         varied_deps = BacktestDependencies(
             deps.market_store, deps.universe, deps.settings, varied_config

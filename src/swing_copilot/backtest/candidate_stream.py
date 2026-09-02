@@ -36,7 +36,6 @@ import pyarrow.parquet as pq
 from pandas.api.types import is_numeric_dtype
 
 from swing_copilot.backtest.policy import REGIME_SYMBOLS
-from swing_copilot.config import StrategiesConfig
 from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.screening.base import Candidate, ScreeningInput
 from swing_copilot.screening.pipeline import (
@@ -232,15 +231,12 @@ def compute_cache_key(
         KeyError: `request.strategy_key` is not present in the strategies
             configuration.
     """
-    # `BacktestDependencies.strategies_config` is declared as parsed YAML, but
-    # `ScreeningPipeline` also accepts an already-typed `StrategiesConfig`;
-    # `model_validate` handles both, so the spec dumped here is always the one
-    # the pipeline will actually run.
-    strategies = StrategiesConfig.model_validate(deps.strategies_config)
     payload = {
         "version": CACHE_KEY_VERSION,
         "strategy_key": request.strategy_key,
-        "strategy_spec": strategies.strategies[request.strategy_key].model_dump(),
+        "strategy_spec": deps.strategies_config.strategies[
+            request.strategy_key
+        ].model_dump(),
         "technical_signals": deps.settings.technical_signals.model_dump(),
         "fundamental_filters": deps.settings.fundamental_filters.model_dump(),
         "universe": sorted(

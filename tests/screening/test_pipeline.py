@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pytest
 
-from swing_copilot.config import ScoreWeights, load_strategies
+from swing_copilot.config import ScoreWeights, StrategiesConfig, load_strategies
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -60,15 +60,17 @@ def _member(symbol: str) -> UniverseMember:
     )
 
 
-STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            }
         }
     }
-}
+)
 
 
 def _uptrend_bars(
@@ -157,15 +159,17 @@ class TestAndSemantics:
         data = ScreeningInput(
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
-        strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": [],
-                    "signals_all": [],
-                    "candidate_limit": 10,
+        strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": [],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
 
         pipeline = ScreeningPipeline(
             strategies_config, market_store=None, settings=settings
@@ -177,15 +181,17 @@ class TestAndSemantics:
 
 class TestCandidateAggregationAndRanking:
     def test_multiple_signal_hits_aggregate_into_one_candidate(self, settings):
-        strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": [],
-                    "signals_all": ["trend_sma", "pullback_rsi"],
-                    "candidate_limit": 10,
+        strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma", "pullback_rsi"],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         rally = [100.0 + i for i in range(60)]
         pullback = [rally[-1] - i * 2 for i in range(1, 11)]
         closes = rally + pullback
@@ -227,15 +233,17 @@ class TestCandidateAggregationAndRanking:
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
 
-        strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": [],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 10,
+        strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         pipeline = ScreeningPipeline(
             strategies_config, market_store=None, settings=settings
         )
@@ -255,15 +263,17 @@ class TestCandidateAggregationAndRanking:
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
 
-        strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": [],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 10,
+        strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         pipeline = ScreeningPipeline(
             strategies_config, market_store=None, settings=settings
         )
@@ -305,15 +315,17 @@ class TestCandidateAggregationAndRanking:
             data = ScreeningInput(
                 as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
             )
-            strategies_config = {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": ["always_hit_short_history_test_signal"],
-                        "candidate_limit": 10,
+            strategies_config = StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": [],
+                            "signals_all": ["always_hit_short_history_test_signal"],
+                            "candidate_limit": 10,
+                        }
                     }
                 }
-            }
+            )
             pipeline = ScreeningPipeline(
                 strategies_config, market_store=None, settings=settings
             )
@@ -441,7 +453,9 @@ def _score_pipeline(
     }
     if ranking is not None:
         strategy["ranking"] = ranking
-    strategies_config = {"strategies": {"default": strategy}}
+    strategies_config = StrategiesConfig.model_validate(
+        {"strategies": {"default": strategy}}
+    )
     pipeline = ScreeningPipeline(
         strategies_config, market_store=None, settings=settings
     )
@@ -802,15 +816,17 @@ class TestExtensibility:
                 ]
 
         try:
-            strategies_config = {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": ["always_hit_test_signal"],
-                        "candidate_limit": 10,
+            strategies_config = StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": [],
+                            "signals_all": ["always_hit_test_signal"],
+                            "candidate_limit": 10,
+                        }
                     }
                 }
-            }
+            )
             bars = _uptrend_bars("AAPL")
             universe = (_member("AAPL"),)
             data = ScreeningInput(
@@ -837,15 +853,17 @@ class TestExtensibility:
             )
 
     def test_unregistered_filter_key_raises_key_error(self, settings):
-        bad_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": ["does_not_exist"],
-                    "signals_all": [],
-                    "candidate_limit": 10,
+        bad_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": ["does_not_exist"],
+                        "signals_all": [],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         with pytest.raises(KeyError):
             ScreeningPipeline(bad_config, market_store=None, settings=settings)
 
@@ -859,15 +877,15 @@ def test_registry_contains_default_strategy_building_blocks():
 
 def test_fresh_process_registers_builtin_components_without_test_side_effects():
     code = """
-from swing_copilot.config import Settings
+from swing_copilot.config import Settings, StrategiesConfig
 from swing_copilot.screening.pipeline import ScreeningPipeline
 
 ScreeningPipeline(
-    {"strategies": {"default": {
+    StrategiesConfig.model_validate({"strategies": {"default": {
         "filters_all": ["volume_min"],
         "signals_all": ["trend_sma"],
         "candidate_limit": 10,
-    }}},
+    }}}),
     market_store=None,
     settings=Settings(),
 )
@@ -990,15 +1008,17 @@ class TestRunWithRejections:
         data = ScreeningInput(
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
-        strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": [],
-                    "signals_all": [],
-                    "candidate_limit": 10,
+        strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": [],
+                        "signals_all": [],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         pipeline = ScreeningPipeline(
             strategies_config, market_store=None, settings=settings
         )
@@ -1028,15 +1048,17 @@ class TestCandidateLimitTruncationIsRecorded:
     @staticmethod
     def _pipeline(settings: Settings, candidate_limit: int) -> ScreeningPipeline:
         return ScreeningPipeline(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": ["volume_min"],
-                        "signals_all": ["trend_sma"],
-                        "candidate_limit": candidate_limit,
+            StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": ["volume_min"],
+                            "signals_all": ["trend_sma"],
+                            "candidate_limit": candidate_limit,
+                        }
                     }
                 }
-            },
+            ),
             market_store=None,
             settings=settings,
         )
@@ -1126,15 +1148,17 @@ class TestNoLookAheadFromUnslicedBars:
         )
         universe = tuple(_member(symbol) for symbol in ("AAA", "BBB"))
         pipeline = ScreeningPipeline(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": ["trend_sma"],
-                        "candidate_limit": 10,
+            StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": [],
+                            "signals_all": ["trend_sma"],
+                            "candidate_limit": 10,
+                        }
                     }
                 }
-            },
+            ),
             market_store=None,
             settings=settings,
         )
@@ -1182,15 +1206,17 @@ class TestRunMatchesRunWithRejections:
             bars=bars,
         )
         pipeline = ScreeningPipeline(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": ["trend_sma"],
-                        "candidate_limit": 10,
+            StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": [],
+                            "signals_all": ["trend_sma"],
+                            "candidate_limit": 10,
+                        }
                     }
                 }
-            },
+            ),
             market_store=None,
             settings=settings,
         )
@@ -1207,15 +1233,17 @@ class TestRequiredBars:
     @staticmethod
     def _pipeline(settings: Settings, signals: list[str]) -> ScreeningPipeline:
         return ScreeningPipeline(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": signals,
-                        "candidate_limit": 10,
+            StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": [],
+                            "signals_all": signals,
+                            "candidate_limit": 10,
+                        }
                     }
                 }
-            },
+            ),
             market_store=None,
             settings=settings,
         )
@@ -1249,15 +1277,17 @@ class TestRequiredBars:
         assert price_history_lookback_days(pipeline.required_bars) == 770
 
     def test_strategy_required_bars_matches_the_pipeline_property(self, settings):
-        config = {
-            "strategies": {
-                "vcp": {
-                    "filters_all": [],
-                    "signals_all": ["vcp_breakout"],
-                    "candidate_limit": 10,
+        config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "vcp": {
+                        "filters_all": [],
+                        "signals_all": ["vcp_breakout"],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
 
         assert (
             strategy_required_bars(config, settings, "vcp")
@@ -1325,7 +1355,9 @@ def _component_candidates(
     if case.ranking is not None:
         strategy["ranking"] = case.ranking
     pipeline = ScreeningPipeline(
-        {"strategies": {"default": strategy}}, market_store=None, settings=settings
+        StrategiesConfig.model_validate({"strategies": {"default": strategy}}),
+        market_store=None,
+        settings=settings,
     )
     monkeypatch.setattr(
         "swing_copilot.screening.pipeline.ranking_metrics",

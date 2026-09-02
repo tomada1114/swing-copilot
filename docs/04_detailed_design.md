@@ -579,7 +579,7 @@ class ScreeningPipeline:
     FILTER_REGISTRY / SIGNAL_REGISTRY から該当クラスをインスタンス化して合成する。
     """
 
-    def __init__(self, strategies_config: dict, market_store: "MarketStore"):
+    def __init__(self, strategies_config: "StrategiesConfig", market_store: "MarketStore"):
         ...
 
     def run(self, data: ScreeningInput) -> list[Candidate]:

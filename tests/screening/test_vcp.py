@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pytest
 
+from swing_copilot.config import StrategiesConfig
 from swing_copilot.screening.base import ScreeningInput, SignalHit
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.screening.technical_signals import VcpBreakoutSignal
@@ -306,14 +307,16 @@ def test_vcp_pipeline_classifies_a_non_hit_without_an_exception(
         fundamentals=pd.DataFrame(),
         bars=bars,
     )
-    strategies = {
-        "strategies": {
-            "vcp": {
-                "filters_all": [],
-                "signals_all": ["vcp_breakout"],
-                "candidate_limit": 10,
+    strategies = StrategiesConfig.model_validate(
+        {
+            "strategies": {
+                "vcp": {
+                    "filters_all": [],
+                    "signals_all": ["vcp_breakout"],
+                    "candidate_limit": 10,
+                }
             }
         }
-    }
+    )
 
     assert ScreeningPipeline(strategies, None, settings, "vcp").run(data) == []

@@ -13,20 +13,23 @@ from swing_copilot.backtest.runner import (
     BacktestRequest,
     run_backtest,
 )
+from swing_copilot.config import StrategiesConfig
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import MarketStore
 from swing_copilot.universe import UniverseMember
 from tests.backtest.conftest import bar_row, bars_frame, flat_bars
 
-STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": [],
-            "signals_all": [],
-            "candidate_limit": 10,
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": [],
+                "signals_all": [],
+                "candidate_limit": 10,
+            }
         }
     }
-}
+)
 
 
 def _with_provider_columns(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -172,15 +175,17 @@ def test_run_backtest_loads_pre_start_screening_warmup(settings, tmp_path):
             source_symbol="AAPL",
         ),
     )
-    strategies = {
-        "strategies": {
-            "warmup": {
-                "filters_all": [],
-                "signals_all": ["trend_sma"],
-                "candidate_limit": 10,
+    strategies = StrategiesConfig.model_validate(
+        {
+            "strategies": {
+                "warmup": {
+                    "filters_all": [],
+                    "signals_all": ["trend_sma"],
+                    "candidate_limit": 10,
+                }
             }
         }
-    }
+    )
     deps = BacktestDependencies(store, universe, settings, strategies)
 
     result = run_backtest(

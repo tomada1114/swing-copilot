@@ -25,9 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
-
-from pydantic import ValidationError
+from typing import TYPE_CHECKING, Protocol
 
 from swing_copilot import __version__
 from swing_copilot.analysis.export import (
@@ -104,7 +102,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from swing_copilot.clock import Clock
-    from swing_copilot.config import Settings
+    from swing_copilot.config import Settings, StrategiesConfig
     from swing_copilot.data.base import BarFetchResult, DataProvider
     from swing_copilot.data.earnings import EarningsCalendarClient
     from swing_copilot.models import DailyRunResult
@@ -227,7 +225,7 @@ class DailyDependencies:
     state_store: StateStore
     settings: Settings
     universe: tuple[UniverseMember, ...]
-    strategies_config: dict[str, Any]  # Any: arbitrary-depth parsed YAML
+    strategies_config: StrategiesConfig  # validated once at composition
     clock: Clock
     # The exact persisted universe snapshot selected for this run. Manual
     # inclusions/exclusions are already reflected in `universe` and therefore
@@ -340,25 +338,24 @@ def _canonical_json(payload: object) -> str:
 
 
 def _config_hash(
-    settings: Settings, strategies_config: dict[str, Any], strategy_key: str
+    settings: Settings, strategies_config: StrategiesConfig, strategy_key: str
 ) -> str:
     """Return the full effective-run fingerprint required for reconstruction.
 
     `Settings` and `StrategiesConfig` have already passed their strict
-    Pydantic validation in the composition root. The pipeline receives the
-    model-dumped selected strategy so the same exact values drive both the
-    fingerprint and `ScreeningPipeline` without preserving a second config
-    representation.
+    Pydantic validation in the composition root. The fingerprint is computed
+    from a fresh `model_dump(mode="json")` of the selected strategy rather
+    than from a second, separately-carried representation.
     """
     try:
-        selected_strategy = strategies_config["strategies"][strategy_key]
-    except (KeyError, TypeError) as exc:
+        selected_strategy = strategies_config.strategies[strategy_key]
+    except KeyError as exc:
         msg = f"strategy {strategy_key!r} is missing from validated strategies"
         raise ConfigError(msg) from exc
     payload = {
         "settings": settings.model_dump(mode="json"),
         "strategy_key": strategy_key,
-        "strategy_spec": selected_strategy,
+        "strategy_spec": selected_strategy.model_dump(mode="json"),
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
@@ -506,15 +503,15 @@ def _stamp_bars(
 def _screening_lookback_days(deps: DailyDependencies) -> int:
     """Calendar days of price history the configured strategy screens over.
 
-    A broken strategy configuration (unknown key, unregistered component,
-    invalid shape) stays the screening step's fatal error to report; the
-    price fetch falls back to the floor lookback instead of failing first.
+    A broken strategy configuration (unknown key, unregistered component)
+    stays the screening step's fatal error to report; the price fetch falls
+    back to the floor lookback instead of failing first.
     """
     try:
         required = strategy_required_bars(
             deps.strategies_config, deps.settings, deps.strategy_key
         )
-    except KeyError, ValidationError:
+    except KeyError:
         return PRICE_HISTORY_LOOKBACK_DAYS
     return price_history_lookback_days(required)
 

@@ -31,6 +31,7 @@ from swing_copilot.analysis.export import (
     ANALYSIS_RESULT_FILENAME,
     HISTORICAL_REPLAY_FILENAME,
 )
+from swing_copilot.config import StrategiesConfig
 from swing_copilot.data.base import BarFetchResult
 from swing_copilot.models import DailyRunOptions, RunStatus
 from swing_copilot.pipeline import daily as daily_module
@@ -63,15 +64,17 @@ from tests.analysis.conftest import input_payload, result_payload
 
 AS_OF = date(2027, 3, 1)
 
-STRATEGIES_CONFIG = {
-    "strategies": {
-        "default": {
-            "filters_all": ["volume_min"],
-            "signals_all": ["trend_sma"],
-            "candidate_limit": 10,
+STRATEGIES_CONFIG = StrategiesConfig.model_validate(
+    {
+        "strategies": {
+            "default": {
+                "filters_all": ["volume_min"],
+                "signals_all": ["trend_sma"],
+                "candidate_limit": 10,
+            }
         }
     }
-}
+)
 
 
 class FakeClock:
@@ -1150,15 +1153,17 @@ class TestScreeningFailureIsFatalAndRerunnable:
     def test_unregistered_filter_key_is_fatal_and_a_fixed_rerun_succeeds(
         self, base_deps, state_store
     ):
-        broken_strategies_config = {
-            "strategies": {
-                "default": {
-                    "filters_all": ["nonexistent_filter"],
-                    "signals_all": ["trend_sma"],
-                    "candidate_limit": 10,
+        broken_strategies_config = StrategiesConfig.model_validate(
+            {
+                "strategies": {
+                    "default": {
+                        "filters_all": ["nonexistent_filter"],
+                        "signals_all": ["trend_sma"],
+                        "candidate_limit": 10,
+                    }
                 }
             }
-        }
+        )
         broken_deps = replace(base_deps, strategies_config=broken_strategies_config)
 
         failed = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), broken_deps)
@@ -1276,15 +1281,17 @@ class TestRejectionsArtifactReachesTheRunDirectory:
     def test_a_symbol_cut_by_candidate_limit_is_recorded_separately(self, base_deps):
         deps = replace(
             base_deps,
-            strategies_config={
-                "strategies": {
-                    "default": {
-                        "filters_all": ["volume_min"],
-                        "signals_all": ["trend_sma"],
-                        "candidate_limit": 1,
+            strategies_config=StrategiesConfig.model_validate(
+                {
+                    "strategies": {
+                        "default": {
+                            "filters_all": ["volume_min"],
+                            "signals_all": ["trend_sma"],
+                            "candidate_limit": 1,
+                        }
                     }
                 }
-            },
+            ),
         )
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)

@@ -6,6 +6,7 @@ from datetime import date
 
 import pandas as pd
 
+from swing_copilot.config import StrategiesConfig
 from swing_copilot.screening.base import RejectionReasonCode, ScreeningInput
 from swing_copilot.screening.pipeline import ScreeningPipeline
 from swing_copilot.screening.technical_signals import MinerviniStage2Signal
@@ -72,15 +73,17 @@ def test_insufficient_52_week_history_does_not_hit(settings):
 
 def test_insufficient_52_week_history_is_recorded_as_data_quality(settings):
     data = _input(("AAPL", [100.0 + index for index in range(199)]))
-    strategies = {
-        "strategies": {
-            "stage2": {
-                "filters_all": [],
-                "signals_all": ["minervini_stage2"],
-                "candidate_limit": 10,
+    strategies = StrategiesConfig.model_validate(
+        {
+            "strategies": {
+                "stage2": {
+                    "filters_all": [],
+                    "signals_all": ["minervini_stage2"],
+                    "candidate_limit": 10,
+                }
             }
         }
-    }
+    )
 
     result = ScreeningPipeline(
         strategies, None, settings, "stage2"
@@ -98,16 +101,18 @@ def test_strategy_min_criteria_config_controls_inclusive_pass_line(settings):
         ("AAPL", [100.0 + index for index in range(253)]),
         ("MSFT", [100.0 + index * 0.6 for index in range(253)]),
     )
-    strategies = {
-        "strategies": {
-            "stage2": {
-                "filters_all": [],
-                "signals_all": ["minervini_stage2"],
-                "candidate_limit": 10,
-                "minervini": {"min_criteria": 7},
+    strategies = StrategiesConfig.model_validate(
+        {
+            "strategies": {
+                "stage2": {
+                    "filters_all": [],
+                    "signals_all": ["minervini_stage2"],
+                    "candidate_limit": 10,
+                    "minervini": {"min_criteria": 7},
+                }
             }
         }
-    }
+    )
 
     candidates = ScreeningPipeline(strategies, None, settings, "stage2").run(data)
 

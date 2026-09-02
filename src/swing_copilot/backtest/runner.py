@@ -8,7 +8,7 @@ screening pass can feed many engine runs (Issue #185).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from swing_copilot.backtest.candidate_stream import (
     CandidateStreamMismatchError,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from swing_copilot.backtest.candidate_stream import CandidateStream, MarketFrame
     from swing_copilot.backtest.policy import EntryPolicy
-    from swing_copilot.config import Settings
+    from swing_copilot.config import Settings, StrategiesConfig
     from swing_copilot.screening.base import Candidate
     from swing_copilot.storage.market_store import MarketStore
     from swing_copilot.universe import UniverseMember
@@ -36,7 +36,7 @@ class BacktestDependencies:
     market_store: MarketStore
     universe: tuple[UniverseMember, ...]
     settings: Settings
-    strategies_config: dict[str, Any]  # Any: arbitrary-depth parsed YAML
+    strategies_config: StrategiesConfig  # validated once at composition
 
 
 @dataclass(frozen=True, slots=True)

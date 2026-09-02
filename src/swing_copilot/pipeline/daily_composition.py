@@ -243,7 +243,7 @@ def _compose_dependencies(
         state_store=state_store,
         settings=settings,
         universe=universe_resolution.members,
-        strategies_config=strategies.model_dump(),
+        strategies_config=strategies,
         clock=clock,
         universe_snapshot_date=universe_resolution.snapshot_date,
         universe_warning=universe_resolution.warning,

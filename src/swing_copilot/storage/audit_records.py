@@ -126,8 +126,14 @@ def record_signals(
 def record_candidates(
     database: Database, candidates: Sequence[Candidate], run_id: UUID, strategy_key: str
 ) -> None:
-    """Record one run's ranked candidates, keyed by `(run_id, symbol, strategy_key)`."""
-    with database.connect() as conn:
+    """Record one run's ranked candidates, keyed by `(run_id, symbol, strategy_key)`.
+
+    One run's candidate set is one logical write: they commit together or not
+    at all (AGENTS.md). Without the explicit transaction, DuckDB autocommits
+    per row, and a mid-batch failure would leave a partially written ranking
+    that misstates where the run's candidates actually landed.
+    """
+    with database.transaction() as conn:
         for candidate in candidates:
             _insert_candidate(conn, candidate, str(run_id), strategy_key)
 
@@ -217,9 +223,11 @@ def record_screening_results(
     REQ-004/REQ-020 plus Issues #188/#192: all four writes share one
     transaction, so a failure partway through (any table) leaves none of this
     run's rows committed. Mirrors `record_signals`'s explicit transaction
-    pattern above -- the pre-P1-02 `record_candidates` below has no such
-    wrapper, which is the actual gap this function closes for the production
-    `_run_step_screening` call site.
+    pattern above. `record_candidates` below wraps its own single-table write
+    in a transaction too (Issue #405); this function exists separately
+    because the production `_run_step_screening` call site must commit
+    candidates, rejections, truncations, and signal hits together as one
+    logical write, not because `record_candidates` is unsafe on its own.
 
     Candidates and truncations are the two halves of one ranking, which is
     why they cannot be two writes: a committed candidate set paired with a

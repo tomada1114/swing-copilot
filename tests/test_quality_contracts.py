@@ -674,15 +674,17 @@ def test_begin_transaction_appears_only_in_the_shared_primitive():
 
     Before Issue #395, ~20 call sites across `storage/` each hand-wrote their
     own `BEGIN TRANSACTION` / `try`/`except Exception: ROLLBACK; raise` /
-    `else: COMMIT` boilerplate -- and `docs/08` §4 records a real incident
-    (`record_risk_assessments`) where a 21st site simply forgot it, silently
-    reintroducing partial-write risk that no test caught until it mattered.
-    `Database.transaction()` / `storage.database.atomic()` is now the single
-    place that spells out the three statements; every writer composes it
-    instead. This pins that down structurally: a future call site that reaches
-    for its own `conn.execute("BEGIN TRANSACTION")` fails this test on sight,
-    rather than depending on someone remembering to write a rollback-injection
-    test for it.
+    `else: COMMIT` boilerplate. `Database.transaction()` /
+    `storage.database.atomic()` is now the single place that spells out the
+    three statements; every writer composes it instead. This pins down that
+    single ownership structurally: a future call site that reaches for its
+    own `conn.execute("BEGIN TRANSACTION")` -- instead of composing the
+    shared primitive -- fails this test on sight. It does not, and cannot,
+    catch a site that omits a transaction altogether (`docs/08` §4's
+    `record_risk_assessments` incident): such a site emits no
+    `BEGIN TRANSACTION` string and would pass this check silently: that
+    failure mode still depends on a rollback-injection test at the writer
+    itself.
     """
     storage_dir = PROJECT_ROOT / "src/swing_copilot/storage"
     offending = [

@@ -506,6 +506,123 @@ class TestRunLifecycle:
         assert retry_run != failed_run
 
 
+class TestInsertRun:
+    """`insert_run()`: a fully specified `runs` row, independent of `start_run`.
+
+    Issue #395's DoD calls this write path out by name. Unlike `start_run`
+    (fixed `status='running'`, `started_at=now()`), every lifecycle field is
+    caller-supplied -- for a test seeding a `runs` row at an arbitrary point
+    in its lifecycle, and a future historical backfill.
+    """
+
+    def test_registers_a_fully_specified_row(self, state_store):
+        run_id = uuid4()
+        started_at = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
+        finished_at = datetime(2026, 7, 20, 9, 45, tzinfo=UTC)
+
+        state_store.insert_run(
+            run_id,
+            date(2026, 7, 20),
+            RunMode.DRY_RUN,
+            "hash-a",
+            status=RunStatus.SUCCESS,
+            started_at=started_at,
+            finished_at=finished_at,
+            metadata={"schema_version": "run-metadata-v1"},
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT run_date, mode, config_hash FROM runs WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row == (date(2026, 7, 20), "dry_run", "hash-a")
+
+    def test_finished_at_lands_in_the_completed_at_column(self, state_store):
+        run_id = uuid4()
+        started_at = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
+        finished_at = datetime(2026, 7, 20, 9, 45, tzinfo=UTC)
+
+        state_store.insert_run(
+            run_id,
+            date(2026, 7, 20),
+            RunMode.DRY_RUN,
+            "hash-a",
+            status=RunStatus.SUCCESS,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT started_at, completed_at FROM runs WHERE run_id = ?",
+                [str(run_id)],
+            ).fetchone()
+        assert row[0] == started_at
+        assert row[1] == finished_at
+
+    def test_finished_at_omitted_leaves_completed_at_null(self, state_store):
+        run_id = uuid4()
+
+        state_store.insert_run(
+            run_id,
+            date(2026, 7, 20),
+            RunMode.LIVE,
+            "hash-a",
+            status=RunStatus.RUNNING,
+            started_at=datetime(2026, 7, 20, 9, 30, tzinfo=UTC),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT completed_at FROM runs WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert row[0] is None
+
+    @pytest.mark.parametrize(
+        "status",
+        [RunStatus.RUNNING, RunStatus.SUCCESS, RunStatus.DEGRADED, RunStatus.FAILED],
+    )
+    def test_every_run_status_satisfies_the_runs_table_check_constraint(
+        self, state_store, status
+    ):
+        run_id = uuid4()
+
+        state_store.insert_run(
+            run_id,
+            date(2026, 7, 20),
+            RunMode.DRY_RUN,
+            "hash-a",
+            status=status,
+            started_at=datetime(2026, 7, 20, 9, 30, tzinfo=UTC),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT status FROM runs WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert row[0] == status.value
+
+    def test_metadata_none_writes_an_empty_json_object(self, state_store):
+        run_id = uuid4()
+
+        state_store.insert_run(
+            run_id,
+            date(2026, 7, 20),
+            RunMode.DRY_RUN,
+            "hash-a",
+            status=RunStatus.SUCCESS,
+            started_at=datetime(2026, 7, 20, 9, 30, tzinfo=UTC),
+            finished_at=datetime(2026, 7, 20, 9, 45, tzinfo=UTC),
+        )
+
+        with state_store._database.connect() as conn:  # noqa: SLF001
+            row = conn.execute(
+                "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
+            ).fetchone()
+        assert json.loads(row[0]) == {}
+
+
 class _FlakyConnection:
     """Wraps a real DuckDB connection; raises on the Nth `UPDATE runs` call."""
 

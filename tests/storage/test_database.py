@@ -5,7 +5,12 @@ from __future__ import annotations
 import duckdb
 import pytest
 
-from swing_copilot.storage.database import Database, atomic, fetch_records
+from swing_copilot.storage.database import (
+    Database,
+    DuplicateColumnsError,
+    atomic,
+    fetch_records,
+)
 
 
 class TestDatabase:
@@ -243,3 +248,24 @@ class TestFetchRecords:
             records = fetch_records(conn, "SELECT b, a FROM t")
 
         assert records == [{"b": "x", "a": 1}]
+
+    def test_a_joined_select_with_duplicate_column_names_raises_instead_of_collapsing(
+        self, tmp_path
+    ):
+        # DuckDB's cursor description reports the bare column name, so
+        # `SELECT a.id, a.v, b.id, b.v FROM a JOIN b ...` produces two
+        # columns literally named "id" and two named "v". Keying a dict by
+        # name would silently keep only the last of each pair -- this must
+        # be rejected loudly instead (Issue #398 will point a joined SELECT
+        # at this helper).
+        database = Database(tmp_path / "copilot.duckdb")
+        with database.connect() as conn:
+            conn.execute("CREATE TABLE a (id INTEGER, v VARCHAR)")
+            conn.execute("CREATE TABLE b (id INTEGER, v VARCHAR)")
+            conn.execute("INSERT INTO a VALUES (1, 'a-value')")
+            conn.execute("INSERT INTO b VALUES (1, 'b-value')")
+
+            with pytest.raises(DuplicateColumnsError, match=r"id.*v|v.*id"):
+                fetch_records(
+                    conn, "SELECT a.id, a.v, b.id, b.v FROM a JOIN b ON a.id = b.id"
+                )

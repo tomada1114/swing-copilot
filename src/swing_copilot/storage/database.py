@@ -6,16 +6,33 @@ share this one physical file — no SQLite, no second database.
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import duckdb
 
+from swing_copilot.exceptions import SwingCopilotError
+
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 DEFAULT_DB_PATH = Path("data/copilot.duckdb")
+
+
+class DuplicateColumnsError(SwingCopilotError):
+    """Raised when a `fetch_records()` query's `SELECT` list repeats a name.
+
+    DuckDB's cursor `description` reports the bare column name with no
+    table qualifier, so a join like `SELECT a.id, a.v, b.id, b.v FROM a JOIN
+    b ...` produces two columns literally named `id` and two named `v`.
+    Keying a dict by column name then silently collapses each duplicate
+    pair to its last value -- exactly the silent-wrong-value failure mode
+    `fetch_records()` exists to prevent for positional row access. This is
+    raised instead, so the caller adds explicit `AS` aliases to the
+    `SELECT` list.
+    """
 
 
 @contextmanager
@@ -66,6 +83,14 @@ def fetch_records(
     `zip` below means a `columns`/`row` length mismatch fails loudly too,
     instead of silently truncating or padding.
 
+    This guarantee holds only for a `SELECT` list with unique column names.
+    DuckDB's cursor `description` reports the bare, unqualified name, so a
+    join that selects the same column name from two tables (`SELECT a.id,
+    b.id FROM a JOIN b ...`) would otherwise let the dict comprehension
+    silently collapse the duplicates to the last one's value. `query` is
+    checked for that up front and rejected with `DuplicateColumnsError`
+    rather than let it happen — the caller must add explicit `AS` aliases.
+
     Args:
         conn: An open connection to run `query` on.
         query: The SQL to execute.
@@ -74,9 +99,22 @@ def fetch_records(
     Returns:
         One dict per row, keyed by the query's own column names, in
         `fetchall()`'s row order.
+
+    Raises:
+        DuplicateColumnsError: `query`'s `SELECT` list repeats a column
+            name.
     """
     cursor = conn.execute(query, list(params))
     columns = [description[0] for description in cursor.description]
+    duplicates = sorted(name for name, count in Counter(columns).items() if count > 1)
+    if duplicates:
+        msg = (
+            f"fetch_records(): query's SELECT list repeats column name(s) "
+            f"{duplicates} — a dict keyed by column name would silently "
+            "keep only the last value for each. Add explicit AS aliases to "
+            "the SELECT list to disambiguate."
+        )
+        raise DuplicateColumnsError(msg)
     return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 

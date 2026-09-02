@@ -358,6 +358,8 @@ class EdgarClient:
 ### 3.7 `storage/database.py` / `storage/market_store.py`
 
 ```python
+from contextlib import AbstractContextManager
+
 import duckdb
 import pandas as pd
 
@@ -367,8 +369,12 @@ class Database:
     def connect(self) -> duckdb.DuckDBPyConnection:
         """コンテキストマネージャとして使う接続を返す。"""
 
-    def transaction(self, conn: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection:
+    def transaction(
+        self, conn: duckdb.DuckDBPyConnection | None = None
+    ) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
         """1論理書き込み=1トランザクションを守る唯一のプリミティブ（Issue #395）。
+        @contextmanagerで実装されているためこのメソッド自体は接続ではなく
+        コンテキストマネージャを返す（`with database.transaction() as conn:`で使う）。
         conn省略時はconnect()した接続を自前でopen/closeし、渡した場合は
         既に開いている接続をトランザクションで包むだけで閉じない。"""
 

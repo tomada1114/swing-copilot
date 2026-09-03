@@ -30,6 +30,7 @@ import json
 import math
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,8 +47,8 @@ from swing_copilot.exceptions import StorageSchemaError, SwingCopilotError
 from swing_copilot.io_atomic import write_bytes_atomically
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
-    from datetime import date, datetime
+    from collections.abc import Iterable, Mapping, Sequence
+    from datetime import datetime
 
     from swing_copilot.storage.database import Database
 
@@ -504,7 +505,9 @@ def validate_bars_format(parquet_root: Path) -> None:
 
 
 def _quarantine_reasons(
-    new_rows: pd.DataFrame, existing: pd.DataFrame
+    new_rows: pd.DataFrame,
+    existing: pd.DataFrame,
+    splits_by_symbol: Mapping[str, Sequence[SplitEvent]],
 ) -> dict[str, str]:
     """Which symbols in `new_rows` must not be written, and why.
 
@@ -513,7 +516,9 @@ def _quarantine_reasons(
     1. The incoming close series carries a mixed-basis signature — the
        provider handed over adjusted and unadjusted rows in one response
        (Issue #413). Checked *before* merging with stored rows, so a clean
-       history cannot mask a broken batch.
+       history cannot mask a broken batch. The symbol's known splits are
+       part of the question: a flip is a *split-sized* step, and a symbol
+       with no split has no second basis to flip to (Issue #421).
     2. A row overlapping a stored `(symbol, date)` disagrees with it by more
        than `_MAX_CORRECTION_RATIO`. Raw bars are immutable facts; a real
        correction is fractions of a percent, and a larger move means the two
@@ -525,6 +530,8 @@ def _quarantine_reasons(
         new_rows: The incoming bars, date-normalized.
         existing: Stored rows for the same symbols, from the affected year
             partitions. May be empty.
+        splits_by_symbol: Each symbol's known splits. A symbol absent from
+            the mapping has none, so gate 1 cannot fire for it.
 
     Returns:
         `{symbol: reason}` for every symbol that must be skipped.
@@ -543,7 +550,9 @@ def _quarantine_reasons(
     )
     for symbol, rows in new_rows.groupby("symbol", sort=True):
         ordered = rows.sort_values("date")
-        if has_mixed_basis_signature(ordered["close"]):
+        if has_mixed_basis_signature(
+            ordered["close"], splits_by_symbol.get(str(symbol), ())
+        ):
             reasons[str(symbol)] = (
                 "調整済みと未調整の行が混在した署名を検出した"
                 f"（{ordered['date'].iloc[0]}〜{ordered['date'].iloc[-1]}）"
@@ -713,7 +722,12 @@ class MarketStore:
         existing = self._read_partition_rows(
             (int(year) for year in years.unique()), symbols
         )
-        reasons = _quarantine_reasons(working, existing)
+        # Splits come from the same store, and every caller records the
+        # response's corporate actions before its bars, so the split that
+        # could have produced a flip in this batch is already visible here.
+        with self.get_connection() as conn:
+            splits_by_symbol = _read_splits_on(conn, symbols, date.max)
+        reasons = _quarantine_reasons(working, existing, splits_by_symbol)
         if reasons:
             keep = ~working["symbol"].isin(reasons)
             working, years = working[keep], years[keep]

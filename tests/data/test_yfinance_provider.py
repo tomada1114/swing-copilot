@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pandas as pd
 import pytest
@@ -476,18 +476,58 @@ class TestGetLatestBars:
 class TestRawBarsAndCorporateActions:
     """Issue #413: the response is stored as-traded, actions travel with it."""
 
+    #: Sessions an unresolvable response needs: two un-propagated splits, and
+    #: room for the five pre-ex sessions that vote on each of them.
+    _LONG_DATES: ClassVar[list[str]] = [
+        "2026-07-01", "2026-07-02", "2026-07-03", "2026-07-06", "2026-07-07",
+        "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13", "2026-07-14",
+        "2026-07-15", "2026-07-16", "2026-07-17",
+    ]  # fmt: skip
+    #: Rows before 07-06 are missing both splits (a factor of 6); 2026-07-03
+    #: sits at `close / 3`, which neither of a row's two readings explains.
+    _UNRESOLVABLE_CLOSES: ClassVar[list[float]] = [
+        600.0, 600.0, 200.0, 300.0, 300.0, 300.0, 300.0,
+        300.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+    ]  # fmt: skip
+    _UNRESOLVABLE_SPLITS: ClassVar[list[float]] = [
+        0.0,
+        0.0,
+        0.0,
+        2.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        3.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+
+    @classmethod
+    def _unresolvable_fixture(cls) -> pd.DataFrame:
+        """A response no assignment of bases resolves, so the symbol is withheld."""
+        return cls._split_fixture(
+            cls._UNRESOLVABLE_CLOSES, cls._UNRESOLVABLE_SPLITS, dates=cls._LONG_DATES
+        )
+
     @staticmethod
-    def _split_fixture(closes: list[float], splits: list[float]) -> pd.DataFrame:
+    def _split_fixture(
+        closes: list[float], splits: list[float], *, dates: list[str] | None = None
+    ) -> pd.DataFrame:
         """One symbol's response, Yahoo-adjusted, with a `Stock Splits` column."""
-        dates = ["2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16"]
+        dates = dates or ["2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16"]
+        volume = [1000] * len(closes)
+        zeros = [0.0] * len(closes)
         return _frame(
             {
                 ("Open", "MNST"): closes,
                 ("High", "MNST"): closes,
                 ("Low", "MNST"): closes,
                 ("Close", "MNST"): closes,
-                ("Volume", "MNST"): [1000, 1000, 1000, 1000],
-                ("Dividends", "MNST"): [0.0, 0.0, 0.0, 0.0],
+                ("Volume", "MNST"): volume,
+                ("Dividends", "MNST"): zeros,
                 ("Stock Splits", "MNST"): splits,
             },
             dates,
@@ -578,14 +618,12 @@ class TestRawBarsAndCorporateActions:
         assert result.bars.iloc[0]["close"] == pytest.approx(20.0)
 
     def test_an_unresolvable_adjustment_basis_fails_the_symbol(self):
-        # Alternating bases a 2:1 split cannot explain: no assignment of
-        # hypotheses removes the signature, so the symbol is withheld whole.
-        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+        fixture = self._unresolvable_fixture()
         provider = YFinanceProvider(
             download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _d: None
         )
 
-        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 1), date(2026, 7, 18))
 
         assert result.bars.empty
         assert len(result.failures) == 1
@@ -595,7 +633,7 @@ class TestRawBarsAndCorporateActions:
 
     def test_a_rejected_symbol_is_never_retried(self):
         calls = 0
-        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+        fixture = self._unresolvable_fixture()
 
         def _download(*_args, **_kwargs):
             nonlocal calls
@@ -603,17 +641,17 @@ class TestRawBarsAndCorporateActions:
             return fixture
 
         provider = YFinanceProvider(download_fn=_download, sleep_fn=lambda _d: None)
-        provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+        provider.get_daily_bars(["MNST"], date(2026, 7, 1), date(2026, 7, 18))
 
         assert calls == 1
 
     def test_a_rejected_symbol_contributes_no_actions_either(self):
-        fixture = self._split_fixture([100.0, 30.0, 100.5, 30.2], [0.0, 0.0, 0.0, 2.0])
+        fixture = self._unresolvable_fixture()
         provider = YFinanceProvider(
             download_fn=lambda *_a, **_k: fixture, sleep_fn=lambda _d: None
         )
 
-        result = provider.get_daily_bars(["MNST"], date(2026, 7, 13), date(2026, 7, 17))
+        result = provider.get_daily_bars(["MNST"], date(2026, 7, 1), date(2026, 7, 18))
 
         assert result.actions.empty
 

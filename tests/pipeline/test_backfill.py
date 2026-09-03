@@ -1048,8 +1048,34 @@ class TestRebuildBars:
 class TestCheckBars:
     """The read-only audit: never writes, and names the session to look at."""
 
-    def _plant(self, market_store: MarketStore, closes: dict[date, float]) -> None:
-        """Plant a series past `write_bars`' gate, the way a bad day left one."""
+    def _plant(
+        self,
+        market_store: MarketStore,
+        closes: dict[date, float],
+        *,
+        split: float | None = None,
+    ) -> None:
+        """Plant a series past `write_bars`' gate, the way a bad day left one.
+
+        `split` records the corporate action the audit reads a flip against:
+        a step is only a basis flip if some split is that size (Issue #421),
+        so a series planted without one is volatility by definition.
+        """
+        if split is not None:
+            market_store.write_corporate_actions(
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": "AAA",
+                            "ex_date": date(2026, 8, 11),
+                            "kind": "split",
+                            "value": split,
+                        }
+                    ]
+                ),
+                provider="yfinance",
+                fetched_at=datetime(2026, 8, 12, tzinfo=UTC),
+            )
         market_store.replace_symbol_bars(
             ["AAA"],
             pd.DataFrame(
@@ -1077,8 +1103,11 @@ class TestCheckBars:
         self, market_store: MarketStore
     ) -> None:
         # The Issue #413 shape: one adjusted row dropped into an otherwise
-        # unadjusted series. The jump down and the jump back multiply to 1.
-        self._plant(market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]))
+        # unadjusted series. The jump down and the jump back multiply to 1,
+        # and both are the size of the symbol's own 2:1 split.
+        self._plant(
+            market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]), split=2.0
+        )
 
         result = check_bars(market_store, ["AAA"])
 
@@ -1086,6 +1115,28 @@ class TestCheckBars:
         assert [(f.symbol, f.first_jump_date) for f in result.findings] == [
             ("AAA", date(2026, 7, 3))
         ]
+
+    def test_the_same_series_is_no_finding_for_a_symbol_with_no_split(
+        self, market_store: MarketStore
+    ) -> None:
+        """Issue #421: `^VIX` halving and doubling back is not a mixed basis."""
+        self._plant(market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]))
+
+        result = check_bars(market_store, ["AAA"])
+
+        assert (result.format_problem, result.findings) == (None, ())
+
+    def test_a_flip_that_matches_no_split_of_the_symbol_is_no_finding(
+        self, market_store: MarketStore
+    ) -> None:
+        """A 2x round trip under a 3:1 split explains nothing about the basis."""
+        self._plant(
+            market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]), split=3.0
+        )
+
+        result = check_bars(market_store, ["AAA"])
+
+        assert result.findings == ()
 
     def test_a_symbol_with_no_stored_rows_is_simply_not_a_finding(
         self, market_store: MarketStore
@@ -1114,14 +1165,35 @@ class TestCheckBars:
     def test_writes_nothing_at_all(
         self, market_store: MarketStore, tmp_path: Path
     ) -> None:
-        self._plant(market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]))
+        self._plant(
+            market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]), split=2.0
+        )
+        # Read-only, as the CLI opens it: a write connection would ensure its
+        # tables on open and touch the database file (Issue #421).
+        auditor = MarketStore(
+            Database(tmp_path / "copilot.duckdb", read_only=True),
+            parquet_root=market_store.parquet_root,
+        )
         before = _tree_snapshot(tmp_path)
 
-        check_bars(market_store, [])
+        check_bars(auditor, [])
 
+        # The DuckDB file included: opened for the splits, but byte- and
+        # mtime-identical afterwards.
         assert _tree_snapshot(tmp_path) == before
-        # Not even the DuckDB file: the audit must be safe to run while the
-        # scheduled job holds the store's exclusive lock.
+
+    def test_an_empty_store_never_opens_the_database_at_all(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing stored means no chunk to scan, so no split to look up."""
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb", read_only=True),
+            parquet_root=tmp_path / "bars",
+        )
+
+        result = check_bars(store, [])
+
+        assert (result.scanned_symbols, result.findings) == ((), ())
         assert not (tmp_path / "copilot.duckdb").exists()
 
 
@@ -1205,6 +1277,20 @@ class TestRebuildAndCheckCli:
     ) -> None:
         store = MarketStore(
             Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_corporate_actions(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAA",
+                        "ex_date": date(2026, 8, 11),
+                        "kind": "split",
+                        "value": 2.0,
+                    }
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 8, 12, tzinfo=UTC),
         )
         store.replace_symbol_bars(
             ["AAA"],

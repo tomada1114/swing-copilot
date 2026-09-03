@@ -88,6 +88,14 @@ _LOOKBACK_DAYS = 90
 
 _OHLC_KEYS = ("open", "low", "close")
 
+#: How far a risk assessment's frozen `entry_price` may drift from the stored
+#: bar's own close on that *same* entry date before it is treated as wrong.
+#: This is not "how much can a real move differ" (there is no elapsed time
+#: between the two figures to move in) -- both numbers claim to be the same
+#: single session's close, so this is rounding tolerance between two paths
+#: that recorded it, mirroring `market_store.py`'s `_MAX_CORRECTION_RATIO`.
+_ENTRY_PRICE_BAR_TOLERANCE = 0.005
+
 
 @dataclass(frozen=True, slots=True)
 class TrackingUpdateResult:
@@ -595,6 +603,18 @@ def _seed_position(
     position whose symbol split after entry is replayed with a pre-split stop
     against post-split bars and stops out instantly at a loss the size of the
     split -- reproducing the very corruption the rebuild exists to remove.
+
+    Once rebased onto today's basis, a frozen `entry_price` is also checked
+    against the stored bar's own close for that same entry date (Issue #423):
+    `risk_assessments.entry_price` is documented above to *be* the run day's
+    close, so a same-day disagreement between the two is not a market move to
+    interpret via a ratio -- it is definitionally wrong, whatever the ratio
+    happens to be, because both numbers claim to be one single day's close.
+    This is a same-day consistency check against the stored bar, structurally
+    different from the ratio-based *rebase* this module's own docstring
+    rejects: a mismatch beyond `_ENTRY_PRICE_BAR_TOLERANCE` falls back to the
+    bar's close (the same value the None-entry-price path below already
+    uses) and is recorded in `notes`, never silently substituted.
     """
     bars = _position_bars(all_bars, candidate.symbol, candidate.as_of)
     factor = _split_factor(
@@ -603,8 +623,22 @@ def _seed_position(
     entry_price = candidate.entry_price
     if entry_price is None:
         entry_price = _close_on(bars, candidate.symbol, candidate.as_of)
-    elif factor != 1.0:
-        entry_price /= factor
+    else:
+        if factor != 1.0:
+            entry_price /= factor
+        bar_close = _close_on(bars, candidate.symbol, candidate.as_of)
+        if (
+            bar_close is not None
+            and bar_close > 0
+            and abs(entry_price - bar_close) > bar_close * _ENTRY_PRICE_BAR_TOLERANCE
+        ):
+            notes.append(
+                f"{candidate.symbol} {candidate.as_of.isoformat()}: "
+                f"リスク評価の凍結エントリー価格（{entry_price:.6f}）が"
+                f"同日の保存済みバー終値（{bar_close:.6f}）と一致しないため、"
+                "バーの終値を使用した"
+            )
+            entry_price = bar_close
     if entry_price is None or entry_price <= 0:
         notes.append(
             f"{candidate.symbol} {candidate.as_of.isoformat()}: "

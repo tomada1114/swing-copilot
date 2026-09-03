@@ -1308,6 +1308,70 @@ class TestSplitRebase:
         assert marks[0].stop_price == pytest.approx(RISK_STOP)
 
 
+class TestEntryPriceBarConsistency:
+    """Issue #423: a frozen `entry_price` must agree with its own day's bar.
+
+    `risk_assessments.entry_price` is documented to *be* the run day's close,
+    so a same-day disagreement is not a real market move -- unlike
+    `TestSplitRebase`, none of these scenarios plant a split event, because
+    no split explains the gap (the APH shape: `risk_assessments` frozen at
+    roughly double the stored bar's own close for that same date).
+    """
+
+    def test_a_basis_mismatched_frozen_entry_price_falls_back_to_the_bar_close(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        # Frozen at roughly double the stored bar's own close on ENTRY_DATE,
+        # with no split recorded -- the APH shape, not a corporate action.
+        seed_risk(state_store, entry_price=FLAT_CLOSE * 2.0)
+        write_bars(market_store, flat_prelude())
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        assert result.opened_count == 1
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        # Not the frozen 200.00: the bar's own close for the same day stands
+        # in, exactly as the missing-entry-price fallback already does.
+        assert position.entry_price == pytest.approx(FLAT_CLOSE)
+        assert any(
+            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note
+            and "200.000000" in note
+            and "100.000000" in note
+            for note in result.notes
+        )
+
+    def test_a_small_rounding_level_difference_is_not_treated_as_a_mismatch(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        seed_verdict(state_store)
+        # 0.01 on a 100.00 close is 0.01%, well inside the 0.5% tolerance --
+        # ordinary rounding noise between two paths that recorded the same
+        # session's close, not a basis mismatch.
+        seed_risk(state_store, entry_price=FLAT_CLOSE + 0.01)
+        write_bars(market_store, flat_prelude())
+
+        result = update_tracking(
+            state_store, market_store, backtest_config, as_of=ENTRY_DATE
+        )
+
+        assert result.opened_count == 1
+        position = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert position is not None
+        # The risk assessment's own frozen price is kept, not the bar's.
+        assert position.entry_price == pytest.approx(FLAT_CLOSE + 0.01)
+        assert not any("一致しない" in note for note in result.notes)
+
+
 class TestExitAtrPeriod:
     """Issue #194: the ledger's ATR period is `trade_plan.exit_atr_period` too.
 
@@ -1676,4 +1740,50 @@ class TestRebuildPositions:
         assert state_store.get_verdict_position(RUN_ID, SYMBOL) is None
         assert any(
             "エントリー価格を解決できない" in note for note in result.update.notes
+        )
+
+    def test_rebuilding_a_basis_mismatched_frozen_entry_price_uses_the_bar_close(
+        self,
+        state_store: StateStore,
+        market_store: MarketStore,
+        backtest_config: TradePlanConfig,
+    ) -> None:
+        """The APH shape end to end (Issue #423).
+
+        `risk_assessments.entry_price` was frozen at roughly double the
+        stored bar's own close for the entry date, with no split event to
+        explain the gap. `copilot-track rebuild` reopens straight from that
+        frozen row, so without the same-day consistency check it would
+        reproduce the same ~50% realized loss the corrupted row created live
+        -- exactly the failure this rebuild exists to remove, not recreate.
+        """
+        self._stopped_out(state_store, market_store, backtest_config)
+        self._repair_day_1(market_store)
+        # Simulate the basis-mismatched freeze directly: unlike
+        # `TestSplitRebase`'s scenarios, no split is recorded here -- that is
+        # the whole point of Issue #423, so `corporate_actions` stays empty.
+        with state_store.database.connect() as conn:
+            conn.execute(
+                "UPDATE risk_assessments SET entry_price = ? "
+                "WHERE run_id = ? AND symbol = ?",
+                [FLAT_CLOSE * 2.0, str(RUN_ID), SYMBOL],
+            )
+
+        result = rebuild_positions(
+            state_store,
+            market_store,
+            backtest_config,
+            RebuildTarget(symbol=SYMBOL),
+            as_of=DAY_1,
+        )
+
+        rebuilt = state_store.get_verdict_position(RUN_ID, SYMBOL)
+        assert rebuilt is not None
+        assert rebuilt.status == "open"
+        assert rebuilt.exit_reason is None
+        # Not the frozen 200.00: the bar's own close for ENTRY_DATE stands in.
+        assert rebuilt.entry_price == pytest.approx(FLAT_CLOSE)
+        assert any(
+            f"{SYMBOL} {ENTRY_DATE.isoformat()}" in note and "一致しない" in note
+            for note in result.update.notes
         )

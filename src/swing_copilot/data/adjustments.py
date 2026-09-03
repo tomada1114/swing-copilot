@@ -8,10 +8,12 @@ Two directions live here, and they are inverses of each other:
   `yfinance.download(..., auto_adjust=False)` is documented to hand back
   split-adjusted (dividend-unadjusted) closes, so the raw price of a row is
   `close x cum`, where `cum` is the product of every split that took effect
-  *after* that row. Yahoo does not always keep that promise -- Issue #413's
-  MNST response applied the 2026-08-11 2:1 split to some July/August rows and
-  not to others, inside one response -- so a mixed series is classified row by
-  row and, when that fails, the symbol is rejected rather than stored.
+  *after* that row. Yahoo does not always keep that promise, and the way it
+  breaks has a shape (Issue #421): it fails to push **one** split back
+  through the history, uniformly, and then patchily applies it to a handful
+  of recent rows. So the response is read as one question -- *which splits
+  has Yahoo propagated?* -- answered per split from the boundary at its own
+  ex-date, rather than as a per-row guess over the whole series.
 * `adjust_bars` turns stored raw bars back into the prices that were
   *visible* at an `as_of`: every split with `ex_date <= as_of` divides the
   prices (and multiplies the volume) of every row dated before its ex-date.
@@ -46,10 +48,27 @@ _JUMP_LOG_THRESHOLD = math.log(1.25)
 #: by a matching -44% day, and a real split shows up exactly once.
 _REVERSAL_PRODUCT_LOW = 0.9
 _REVERSAL_PRODUCT_HIGH = 1.1
-#: Below this factor the "adjusted" and "unadjusted" hypotheses for a row are
-#: too close together to choose between, so the symbol is rejected instead of
-#: guessed at.
+#: Below this factor the "propagated" and "not propagated" readings of a
+#: split's own boundary overlap, so the split is taken at Yahoo's word rather
+#: than guessed at. Deliberately clear of `_PROPAGATION_TOLERANCE`: the two
+#: bands must not touch, or an ordinary session could vote either way.
 _MIN_CLASSIFIABLE_FACTOR = 1.2
+#: How close a jump must sit to a split factor to count as a *basis flip*
+#: rather than a price move. A flip is exact arithmetic, so the only slack
+#: needed is the one session's real return that rides along with it: the six
+#: flips in Issue #413's MNST response land within 4.1%.
+_FLIP_FACTOR_TOLERANCE = math.log(1.06)
+#: The same slack, for accepting the alternative hypothesis when the backward
+#: walk changes its mind about a row.
+_STRAY_FLIP_TOLERANCE = math.log(1.06)
+#: How close a split's own boundary ratio must sit to its factor before the
+#: split is called un-propagated. Looser than a flip's tolerance because the
+#: ex-date session's return is unconstrained.
+_PROPAGATION_TOLERANCE = math.log(1.12)
+#: Sessions before an ex-date that vote on whether the split was propagated.
+#: More than one, so a single row Yahoo quoted on the other basis -- exactly
+#: what this module exists to handle -- cannot decide the question alone.
+_PROPAGATION_SAMPLE = 5
 #: Price columns a split divides. `volume` moves the other way.
 _PRICE_COLUMNS = ("open", "high", "low", "close")
 
@@ -80,52 +99,83 @@ class NormalizationRejection:
     reason: str
 
 
-def has_mixed_basis_signature(closes: pd.Series) -> bool:
+def has_mixed_basis_signature(closes: pd.Series, splits: Sequence[SplitEvent]) -> bool:
     """Whether `closes` looks like adjusted and unadjusted rows interleaved.
 
     The signature is a jump immediately followed (in the *jump* sequence, with
-    any number of ordinary sessions in between) by a jump that undoes it: the
-    two ratios multiply back to roughly 1. A real corporate action moves the
-    series once and leaves it there; a real price shock is not mirrored.
+    any number of ordinary sessions in between) by a jump that undoes it,
+    where **both jumps are the size of one of `splits`' factors**. A real
+    corporate action moves the series once and leaves it there; a real price
+    shock is not mirrored; and a mirrored pair that is not split-sized is
+    ordinary volatility, which is all a long history ever offers.
+
+    That last clause is what makes the gate usable over decades rather than
+    over one rolling window (Issue #421). Scanned split-blind, 153 of this
+    repository's 510 stored symbols carry a "mixed basis" that is nothing but
+    2008 and the dot-com years -- `^VIX` and `^TNX` among them, which have no
+    splits at all and therefore cannot have a basis to mix.
 
     Args:
         closes: Closing prices in ascending date order. Non-positive and
             non-finite values contribute no ratio rather than raising.
+        splits: The splits that could have produced a flip in this series. An
+            empty sequence means no flip is possible, so the answer is
+            `False` without inspecting a single ratio.
 
     Returns:
-        `True` when at least one pair of consecutive jumps reverses.
+        `True` when at least one pair of consecutive split-sized jumps
+        reverses.
     """
-    values = pd.to_numeric(pd.Series(closes), errors="coerce").to_numpy(dtype=float)
-    jumps = [
-        later / earlier
-        for earlier, later in pairwise(values)
-        if _is_usable(earlier)
-        and _is_usable(later)
-        and abs(math.log(later / earlier)) > _JUMP_LOG_THRESHOLD
-    ]
-    return any(
-        _REVERSAL_PRODUCT_LOW <= first * second <= _REVERSAL_PRODUCT_HIGH
-        for first, second in pairwise(jumps)
-    )
+    return _first_reversing_flip(closes, splits) is not None
 
 
-def first_mixed_basis_jump(closes: pd.Series) -> int | None:
+def first_mixed_basis_jump(
+    closes: pd.Series, splits: Sequence[SplitEvent]
+) -> int | None:
     """Where `has_mixed_basis_signature` first sees the basis flip.
 
     The reporting counterpart of the boolean gate: `copilot-backfill check`
     has to tell an operator *which session* to look at, not merely that a
-    symbol is broken. Deliberately a separate walk rather than a refactor of
-    `has_mixed_basis_signature`, so the gate every write depends on keeps
-    exactly the behaviour its own tests pin.
+    symbol is broken. The two share one walk, so the gate every write depends
+    on and the audit that explains it cannot drift apart.
 
     Args:
         closes: Closing prices in ascending date order.
+        splits: The splits that could have produced a flip in this series.
 
     Returns:
         The positional index of the *later* row of the first jump that takes
         part in a reversing pair — the first session quoted on the other
         basis — or `None` when the series carries no signature.
     """
+    return _first_reversing_flip(closes, splits)
+
+
+def _flip_ratios(splits: Sequence[SplitEvent]) -> tuple[float, ...]:
+    """Every jump ratio a basis flip could produce, both directions."""
+    ratios: set[float] = set()
+    for split in splits:
+        if _is_usable(split.factor):
+            ratios.add(split.factor)
+            ratios.add(1.0 / split.factor)
+    return tuple(ratios)
+
+
+def _is_split_sized(ratio: float, flip_ratios: Sequence[float]) -> bool:
+    """Whether one jump is the size of some split, within a flip's slack."""
+    return any(
+        abs(math.log(ratio / candidate)) <= _FLIP_FACTOR_TOLERANCE
+        for candidate in flip_ratios
+    )
+
+
+def _first_reversing_flip(
+    closes: pd.Series, splits: Sequence[SplitEvent]
+) -> int | None:
+    """The shared walk behind the boolean gate and its reporting counterpart."""
+    flip_ratios = _flip_ratios(splits)
+    if not flip_ratios:
+        return None
     values = pd.to_numeric(pd.Series(closes), errors="coerce").to_numpy(dtype=float)
     jumps = [
         (position, later / earlier)
@@ -133,6 +183,7 @@ def first_mixed_basis_jump(closes: pd.Series) -> int | None:
         if _is_usable(earlier)
         and _is_usable(later)
         and abs(math.log(later / earlier)) > _JUMP_LOG_THRESHOLD
+        and _is_split_sized(later / earlier, flip_ratios)
     ]
     for (position, first), (_, second) in pairwise(jumps):
         if _REVERSAL_PRODUCT_LOW <= first * second <= _REVERSAL_PRODUCT_HIGH:
@@ -214,21 +265,32 @@ def unadjust_yahoo_bars(
 ) -> pd.DataFrame | NormalizationRejection:
     """Turn one symbol's Yahoo response into as-traded (raw) bars.
 
-    Three passes, each falling through to the next only when the cheaper one
-    cannot be trusted:
+    Yahoo's contract is that `close` already carries every split, so the raw
+    price of a row is `close x cum`. Issue #413 showed the contract can break;
+    Issue #421 showed *how* it breaks, and the shape is what makes it
+    tractable. For MNST, Yahoo had propagated all five splits from 2005 to
+    2023 through 36 years of history and had **not** propagated the sixth
+    (2026-08-11), except to five scattered sessions in the three weeks before
+    its ex-date. So the response is resolved in two steps:
 
-    1. **Fast path.** Assume Yahoo adjusted every row, i.e. `raw = close x
-       cum`. If that series carries no mixed-basis signature, it is the
-       answer. With no split in the window `cum` is 1 everywhere and this is
-       always where the function stops.
-    2. **Classification.** Otherwise decide per row which of the two
-       hypotheses (`close x cum` or `close`) continues the series most
-       smoothly, anchored at the newest bar — the one row that is
-       unambiguously as-traded, because no split in the response postdates
-       it.
-    3. **Rejection.** If the signature survives classification, or a split
-       small enough to make the two hypotheses indistinguishable is involved,
-       the symbol is rejected.
+    1. **Which splits did Yahoo propagate?** Asked per split, at its own
+       ex-date. A propagated split leaves no step there — that is the entire
+       point of an adjusted series — while an un-propagated one leaves a step
+       the size of its factor. When every split is propagated, `raw = close x
+       cum` is the answer and the function stops. That is where all but one
+       of this repository's 510 stored symbols land.
+    2. **Which individual rows did Yahoo get right anyway?** Only rows that an
+       un-propagated split should have moved can disagree, and only those are
+       walked, backwards from the newest bar — whose basis is forced, because
+       no split in the response postdates it.
+
+    Nothing is rejected for want of evidence: a split whose boundary says
+    neither "propagated" nor "not propagated" is taken at Yahoo's word, which
+    is what the pre-Issue-#413 code did unconditionally. Reverse splits and
+    spin-offs land here routinely, because the economic move that comes with
+    them swamps the mechanical one (AIG 2009, EXPE/TripAdvisor 2011). A
+    symbol is rejected only on *positive* evidence that cannot be resolved:
+    an un-propagated split whose rows still flip after classification.
 
     `cum` is deliberately *not* cut off at any `as_of`: Yahoo adjusts its
     history with every split known today, so undoing that has to use them
@@ -247,38 +309,166 @@ def unadjust_yahoo_bars(
     if bars.empty:
         return bars.copy()
 
+    # Filtered once, so `cum`, the classification and the verification cannot
+    # disagree about which splits exist. `yfinance_provider` already drops
+    # zero and non-finite action values; this keeps a hand-built or
+    # database-sourced split list from dividing by one.
+    usable = [split for split in splits if _is_usable(split.factor)]
     working = bars.sort_values("date").reset_index(drop=True)
     working["date"] = pd.to_datetime(working["date"]).dt.date
-    cumulative = cumulative_split_factors(working["date"], splits, as_of=date.max)
+    cumulative = cumulative_split_factors(working["date"], usable, as_of=date.max)
 
-    fast = _apply_basis(working, cumulative, pd.Series(True, index=working.index))
-    if not has_mixed_basis_signature(fast["close"]):
-        return fast
+    unpropagated = _unpropagated_splits(working, usable)
+    if not unpropagated:
+        return _apply_basis(working, cumulative)
 
-    ambiguous = _ambiguous_split(working["date"].iloc[0], splits)
-    if ambiguous is not None:
+    # The factor Yahoo is missing on a *baseline* row: everything it failed to
+    # push back past that row. A row it corrected anyway is missing nothing.
+    missing = cumulative_split_factors(working["date"], unpropagated, as_of=date.max)
+    is_corrected = _classify_corrected_rows(working["close"], missing)
+    # What Yahoo actually applied to each row, which is what undoing it needs.
+    applied = cumulative.where(is_corrected, cumulative / missing)
+    # Yahoo's own domain, with the classification undone: continuous if the
+    # classification explained every row, still flipping if it did not.
+    reconstructed = working["close"] / missing.where(~is_corrected, 1.0)
+    if has_mixed_basis_signature(reconstructed, usable):
         return NormalizationRejection(
             symbol=symbol,
             reason=(
-                "分割調整の混在を解消できない（分類不能な分割 "
-                f"ex_date={ambiguous.ex_date.isoformat()}, "
-                f"factor={ambiguous.factor}）"
+                "分割調整の混在を解消できない（未伝播の分割 "
+                f"{_describe_splits(unpropagated)}）"
             ),
         )
+    return _apply_basis(working, applied)
 
-    resolved = _apply_basis(working, cumulative, _classify(working, cumulative))
-    if has_mixed_basis_signature(resolved["close"]):
-        return NormalizationRejection(
-            symbol=symbol,
-            reason=f"分割調整の混在を解消できない（{_describe_splits(splits)}）",
-        )
-    return resolved
+
+def _unpropagated_splits(
+    bars: pd.DataFrame, splits: Sequence[SplitEvent]
+) -> tuple[SplitEvent, ...]:
+    """The splits Yahoo has *not* pushed back through this response's history.
+
+    Read at each split's own ex-date, where the two readings are furthest
+    apart: an adjusted series steps by nothing there, an unadjusted one steps
+    by the factor. Several pre-ex sessions vote against the first post-ex
+    session, so one row quoted on the other basis — the very defect being
+    resolved — cannot swing the answer by itself.
+
+    Args:
+        bars: One symbol's rows, ascending, with `date` and `close`.
+        splits: Splits observed in the same response, factors already known
+            usable.
+
+    Returns:
+        The un-propagated splits, ascending by ex-date. Empty is the normal
+        answer and means `close x cum` can be trusted.
+    """
+    dates = bars["date"].to_numpy()
+    closes = [
+        float(value)
+        for value in pd.to_numeric(bars["close"], errors="coerce").to_numpy(dtype=float)
+    ]
+    found: list[SplitEvent] = []
+    for split in sorted(splits, key=lambda event: event.ex_date):
+        if 1.0 / _MIN_CLASSIFIABLE_FACTOR < split.factor < _MIN_CLASSIFIABLE_FACTOR:
+            # Indistinguishable from an ordinary session either way; Yahoo's
+            # contract wins, exactly as it did before Issue #413.
+            continue
+        before = [
+            position for position, day in enumerate(dates) if day < split.ex_date
+        ][-_PROPAGATION_SAMPLE:]
+        after = [position for position, day in enumerate(dates) if day >= split.ex_date]
+        if not before or not after:
+            continue
+        if _votes_unpropagated(closes, before, after[0], split.factor):
+            found.append(split)
+    return tuple(found)
+
+
+def _votes_unpropagated(
+    closes: Sequence[float], before: Sequence[int], after: int, factor: float
+) -> bool:
+    """Whether a majority of pre-ex sessions see the factor still in the price."""
+    votes = 0
+    counted = 0
+    for position in before:
+        earlier, later = closes[position], closes[after]
+        if not (_is_usable(earlier) and _is_usable(later)):
+            continue
+        counted += 1
+        ratio = earlier / later
+        # Both halves matter: "as far from 1 as a jump" rules out a propagated
+        # split, "within tolerance of the factor" rules in an un-propagated one.
+        if (
+            abs(math.log(ratio / factor)) <= _PROPAGATION_TOLERANCE
+            and abs(math.log(ratio)) > _PROPAGATION_TOLERANCE
+        ):
+            votes += 1
+    return counted > 0 and votes * 2 > counted
+
+
+def _classify_corrected_rows(closes: pd.Series, missing: pd.Series) -> pd.Series:
+    """Which rows Yahoo adjusted correctly despite failing to propagate.
+
+    Walks backwards from the newest bar, in Yahoo's *adjusted* domain rather
+    than the as-traded one. That choice is the whole reason this terminates
+    on a real series: an adjusted price series is continuous even across an
+    ex-date, so a step in it means a basis flip, whereas the as-traded series
+    steps by the factor at every split and offers the walk nothing to hold on
+    to (Issue #421).
+
+    The state carried is "did Yahoo correct this row", not a factor, so it
+    survives a plateau boundary where the factor itself changes. It flips only
+    when keeping it would leave a jump *and* flipping lands within a flip's
+    slack — a genuine +45% session (MNST, 1996-05-06) satisfies the first and
+    fails the second.
+
+    Args:
+        closes: Yahoo's closes, ascending, positionally indexed.
+        missing: Per row, the factor Yahoo failed to propagate past it. `1.0`
+            where no un-propagated split applies, which forces "baseline".
+
+    Returns:
+        A boolean series: `True` where Yahoo had already applied the
+        un-propagated splits to that row.
+    """
+    values = pd.to_numeric(closes, errors="coerce").to_numpy(dtype=float)
+    factors = missing.to_numpy(dtype=float)
+    count = len(values)
+    corrected = [False] * count
+    settled = values[-1] / factors[-1] if _is_usable(factors[-1]) else values[-1]
+    for position in range(count - 2, -1, -1):
+        if factors[position] == 1.0:
+            corrected[position] = False
+            settled = values[position]
+            continue
+        carried = corrected[position + 1] and factors[position + 1] != 1.0
+        keep = values[position] / (1.0 if carried else factors[position])
+        flip = values[position] / (factors[position] if carried else 1.0)
+        if (
+            _log_distance(keep, settled) > _JUMP_LOG_THRESHOLD
+            and _log_distance(flip, settled) <= _STRAY_FLIP_TOLERANCE
+        ):
+            corrected[position] = not carried
+            settled = flip
+        else:
+            corrected[position] = carried
+            settled = keep
+    # A corrected run that reaches the first row has no flip *into* it, so
+    # nothing says it is one: Yahoo cannot have applied a split it never
+    # propagated to the oldest rows alone. It is a real price move misread.
+    position = 0
+    while position < count and corrected[position]:
+        corrected[position] = False
+        position += 1
+    return pd.Series(corrected, index=closes.index)
 
 
 def _describe_splits(splits: Sequence[SplitEvent]) -> str:
-    """The splits a rejection message names, for an operator reading a report."""
-    if not splits:
-        return "応答に分割イベントが無い"
+    """The splits a rejection message names, for an operator reading a report.
+
+    Only ever called with the un-propagated splits, which a rejection has at
+    least one of, so there is no empty case to word.
+    """
     return ", ".join(
         f"ex_date={split.ex_date.isoformat()}, factor={split.factor}"
         for split in splits
@@ -298,44 +488,25 @@ def _scaled_volume(volume: pd.Series, factors: pd.Series) -> pd.Series:
     return scaled
 
 
-def _apply_basis(
-    bars: pd.DataFrame, cumulative: pd.Series, is_adjusted: pd.Series
-) -> pd.DataFrame:
-    """Undo Yahoo's adjustment on the rows flagged as adjusted.
+def _apply_basis(bars: pd.DataFrame, applied: pd.Series) -> pd.DataFrame:
+    """Undo the split adjustment Yahoo actually applied to each row.
 
     Args:
         bars: One symbol's rows, ascending.
-        cumulative: Per-row cumulative split factor.
-        is_adjusted: `True` where the row is taken to carry Yahoo's split
-            adjustment, so its raw price is `close x factor`.
+        applied: Per row, the factor Yahoo divided that row's prices by, so
+            multiplying by it gives the as-traded price back. `1.0` for a row
+            Yahoo left alone.
 
     Returns:
         A new frame on the as-traded basis.
     """
-    factors = cumulative.where(is_adjusted, 1.0)
     raw = bars.copy()
     for column in _PRICE_COLUMNS:
         if column in raw.columns:
-            raw[column] = raw[column] * factors
+            raw[column] = raw[column] * applied
     if "volume" in raw.columns:
-        raw["volume"] = _scaled_volume(raw["volume"], 1.0 / factors)
+        raw["volume"] = _scaled_volume(raw["volume"], 1.0 / applied)
     return raw
-
-
-def _ambiguous_split(
-    first_date: date, splits: Sequence[SplitEvent]
-) -> SplitEvent | None:
-    """The first split too small to classify rows against, if any.
-
-    Only splits that actually move a row's cumulative factor matter; a split
-    on or before the window's first date leaves every row alone.
-    """
-    for split in splits:
-        if split.ex_date <= first_date:
-            continue
-        if 1.0 / _MIN_CLASSIFIABLE_FACTOR < split.factor < _MIN_CLASSIFIABLE_FACTOR:
-            return split
-    return None
 
 
 def _log_distance(candidate: float, reference: float) -> float:
@@ -343,65 +514,3 @@ def _log_distance(candidate: float, reference: float) -> float:
     if not (_is_usable(candidate) and _is_usable(reference)):
         return math.inf
     return abs(math.log(candidate / reference))
-
-
-def _classify(bars: pd.DataFrame, cumulative: pd.Series) -> pd.Series:
-    """Decide, per row, whether Yahoo had applied the split adjustment.
-
-    Walks backwards from the newest bar, which is the only row whose basis is
-    known without a guess: no split in the response postdates it, so its two
-    hypotheses coincide. Each earlier row then takes whichever hypothesis sits
-    closer (in log space) to the raw close already settled for the row after
-    it, which is what makes a one-day basis flip visible at all.
-
-    The anchor is seeded as *unadjusted* and re-seeded as adjusted only if
-    that removes a jump between the last two rows — the one case where a
-    response window ending before a known split would otherwise poison the
-    whole backward pass.
-    """
-    closes = [
-        float(value)
-        for value in pd.to_numeric(bars["close"], errors="coerce").to_numpy(dtype=float)
-    ]
-    factors = [float(value) for value in cumulative.to_numpy(dtype=float)]
-    flags = _classify_from_anchor(closes, factors, anchor_adjusted=False)
-    if _has_trailing_jump(closes, factors, flags):
-        alternative = _classify_from_anchor(closes, factors, anchor_adjusted=True)
-        if not _has_trailing_jump(closes, factors, alternative):
-            flags = alternative
-    return pd.Series(flags, index=bars.index)
-
-
-def _classify_from_anchor(
-    closes: list[float], factors: list[float], *, anchor_adjusted: bool
-) -> list[bool]:
-    """One backward classification pass, given the newest row's hypothesis."""
-    count = len(closes)
-    flags = [False] * count
-    flags[-1] = anchor_adjusted
-    reference = closes[-1] * (factors[-1] if anchor_adjusted else 1.0)
-    for position in range(count - 2, -1, -1):
-        adjusted_candidate = closes[position] * factors[position]
-        as_is_candidate = closes[position]
-        take_adjusted = _log_distance(adjusted_candidate, reference) <= _log_distance(
-            as_is_candidate, reference
-        )
-        flags[position] = take_adjusted
-        reference = adjusted_candidate if take_adjusted else as_is_candidate
-    return flags
-
-
-def _has_trailing_jump(
-    closes: list[float], factors: list[float], flags: list[bool]
-) -> bool:
-    """Whether the two newest rows disagree by more than a jump under `flags`.
-
-    Safe to index two rows back: classification only runs on a series that
-    carries the mixed-basis signature, which takes two jumps and so at least
-    three rows.
-    """
-    settled = [
-        close * (factor if is_adjusted else 1.0)
-        for close, factor, is_adjusted in zip(closes, factors, flags, strict=True)
-    ]
-    return _log_distance(settled[-1], settled[-2]) > _JUMP_LOG_THRESHOLD

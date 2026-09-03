@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pandas as pd
 import pytest
@@ -1302,23 +1302,44 @@ class TestBarsFormatMarker:
 class TestWriteBarsQuarantineGate:
     """Raw bars are immutable facts; a contradicting batch is withheld."""
 
+    #: The Issue #413 shape: one halved row inside an otherwise as-traded
+    #: series, which the symbol's own 2:1 split is what makes readable.
+    MIXED_BATCH: ClassVar[list[tuple[str, str, float, float, float, float, int]]] = [
+        ("MNST", "2026-07-29", 97, 97, 97, 97.2, 1000),
+        ("MNST", "2026-07-30", 48, 48, 48, 48.6, 1000),
+        ("MNST", "2026-07-31", 97, 97, 97, 97.6, 1000),
+        ("MNST", "2026-08-03", 96, 96, 96, 96.4, 1000),
+    ]
+
     def test_a_mixed_basis_batch_quarantines_the_symbol(self, market_store):
-        result = market_store.write_bars(
-            _bars(
-                [
-                    ("MNST", "2026-07-29", 97, 97, 97, 97.2, 1000),
-                    ("MNST", "2026-07-30", 48, 48, 48, 48.6, 1000),
-                    ("MNST", "2026-07-31", 97, 97, 97, 97.6, 1000),
-                    ("MNST", "2026-08-03", 96, 96, 96, 96.4, 1000),
-                ]
-            )
+        market_store.write_corporate_actions(
+            _actions([("MNST", "2026-08-11", "split", 2.0)]),
+            provider="yfinance",
+            fetched_at=datetime(2026, 8, 12, tzinfo=UTC),
         )
+
+        result = market_store.write_bars(_bars(self.MIXED_BATCH))
 
         assert [item.symbol for item in result.quarantined] == ["MNST"]
         assert "混在" in result.quarantined[0].reason
         assert market_store.read_bars(
             ["MNST"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31)
         ).empty
+
+    def test_the_same_batch_is_written_when_the_symbol_has_no_split(self, market_store):
+        """Issue #421: without a split there is no second basis to flip to.
+
+        The same doubling and halving is then ordinary volatility, and
+        refusing it costs the run a symbol for nothing — which is how 153 of
+        510 stored symbols came to be rejected.
+        """
+        result = market_store.write_bars(_bars(self.MIXED_BATCH))
+
+        assert result.quarantined == ()
+        stored = market_store.read_bars(
+            ["MNST"], date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31)
+        )
+        assert len(stored) == 4
 
     def test_a_deviation_beyond_the_tolerance_quarantines_the_symbol(
         self, market_store

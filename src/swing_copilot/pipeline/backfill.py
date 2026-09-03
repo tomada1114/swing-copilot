@@ -381,19 +381,25 @@ def rebuild_bars(deps: BarsBackfillDeps, symbols: Sequence[str]) -> BarsRebuildR
 def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckResult:
     """Audit stored bars for a mixed adjustment basis. Never writes.
 
-    Reads the Parquet partitions directly (`MarketStore.read_raw_bars`) rather
-    than through DuckDB: an audit must be safe to run while the scheduled job
-    or an operator holds the database's exclusive file lock, and the signature
-    it looks for is only visible in the values as stored -- `read_bars` would
+    Reads the *bars* from the Parquet partitions directly
+    (`MarketStore.read_raw_bars`) rather than through DuckDB, because the
+    signature is only visible in the values as stored -- `read_bars` would
     hand back an adjusted series in which it can no longer appear.
 
+    The splits do come from DuckDB, in one short query per chunk: a flip is a
+    split-sized step, and asking the question without them flags 153 of this
+    repository's 510 symbols on nothing but 2008 and the dot-com years
+    (Issue #421). Pass a store opened read-only, as the CLI does — a write
+    connection ensures its tables on open, which would make an audit that
+    writes nothing write something.
+
     Args:
-        market_store: The store to audit.
+        market_store: The store to audit; open it read-only.
         symbols: Tickers to scan; empty means every symbol with stored bars.
 
     Returns:
-        The marker's state, what was scanned, and one finding per symbol whose
-        series still flips between two bases.
+        The marker's state, what was scanned, and one finding per symbol
+        whose series still flips between two bases.
     """
     scanned = tuple(symbols) if symbols else market_store.stored_symbols()
     try:
@@ -414,8 +420,11 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
         rows = market_store.read_raw_bars(chunk)
         if rows.empty:
             continue
+        splits_by_symbol = market_store.read_splits(chunk, as_of=date.max)
         for symbol, series in rows.groupby("symbol", sort=False):
-            position = first_mixed_basis_jump(series["close"])
+            position = first_mixed_basis_jump(
+                series["close"], splits_by_symbol.get(str(symbol), ())
+            )
             if position is not None:
                 flagged[str(symbol)] = series["date"].to_numpy()[position]
     return BarsCheckResult(
@@ -619,9 +628,19 @@ def _run_fundamentals(args: argparse.Namespace, end: date, symbols: list[str]) -
         sys.stdout.write(f"失敗した銘柄: {', '.join(result.failed_symbols)}\n")
 
 
-def _market_store(args: argparse.Namespace) -> MarketStore:
-    """The store both bar commands address: `<db>`'s sibling `bars/` root."""
-    return MarketStore(Database(args.db), parquet_root=Path(args.db).parent / "bars")
+def _market_store(args: argparse.Namespace, *, read_only: bool = False) -> MarketStore:
+    """The store both bar commands address: `<db>`'s sibling `bars/` root.
+
+    Args:
+        args: The parsed command line; `--db` names the database file.
+        read_only: Open the database read-only. `check` does, so that reading
+            a symbol's splits cannot ensure a table, and the audit keeps the
+            "writes nothing" property its own test pins.
+    """
+    return MarketStore(
+        Database(args.db, read_only=read_only),
+        parquet_root=Path(args.db).parent / "bars",
+    )
 
 
 def _run_rebuild(args: argparse.Namespace, clock: SystemClock) -> None:
@@ -651,7 +670,7 @@ def _run_rebuild(args: argparse.Namespace, clock: SystemClock) -> None:
 
 def _run_check(args: argparse.Namespace) -> None:
     symbols = _resolve_explicit_symbols(args)
-    result = check_bars(_market_store(args), symbols)
+    result = check_bars(_market_store(args, read_only=True), symbols)
     if result.format_problem is not None:
         sys.stdout.write(f"形式マーカー: NG\n{result.format_problem}\n")
         return

@@ -100,23 +100,64 @@ replacement for canonical requirements/design. If canonical design and current
 schema/API disagree, do not silently pick one. Preserve compatibility, record
 the divergence, and update the stale canonical source or request a decision.
 
+## Skills
+
+`.claude/skills/` holds two kinds of skill. **Workflow skills** drive a procedure
+end to end: `create-pr`, `smart-commit`, `merge-dependabot`, `swing-daily`,
+`swing-retro`, `swing-research`, `swing-deepdive`, and the three analysis skills
+(`analyze-news`, `analyze-filings`, `interpret-screening`). **Knowledge skills**
+own a body of convention and carry the reasoning, boundary cases, and
+anti-patterns this file states only as bare rules — load the matching one before
+changing that layer.
+
+| Touching | Load |
+|---|---|
+| `src/**/*.py`, `scripts/**/*.py` | `writing-python` |
+| an error class or a CLI exit code | `designing-errors` |
+| `__all__` or a `copilot-*` entry point | `public-api-contract` |
+| any test | `writing-tests`, `placing-tests` |
+| anything reading market data as of a date | `enforcing-point-in-time` |
+| `storage/**`, `research/**` | `writing-storage-code` |
+| `data/**`, `text/**` | `writing-external-adapters` |
+| `analysis/**` | `guarding-analysis-boundary` |
+| `regime/**` | `writing-regime-gates` |
+| `report/**` | `rendering-reports` |
+| `retro/**`, `tracking/**` | `scoring-verdict-outcomes` |
+| `backtest/**` | `writing-backtests` |
+| `risk/**`, `screening/**` ranking | `checking-risk-math` |
+| `config.py`, `pipeline/**` | `wiring-the-pipeline` |
+| CI workflows, `.claude/hooks/**`, `justfile`, gate settings | `changing-gates` |
+| `pyproject.toml` dependencies | `managing-dependencies` |
+| `docs/**`, `README.md` | `updating-docs` |
+| a GitHub issue | `triaging-issues` |
+| whether a change is breaking | `release-impact` |
+| a `SKILL.md` | `authoring-skills` |
+| `just data-pull` / `data-push` | `operating-shared-data` |
+| a red or unexpectedly green `swing-daily` job | `diagnosing-daily-runs` |
+| finishing any change | `reviewing-changes` |
+
 ## Non-negotiable Behavioral Invariants
 
-### Time and point-in-time visibility
+Every rule below is enforceable as written and holds whether or not a skill is
+loaded. The reasoning, boundary cases, code patterns, and the anti-patterns a
+reviewer must reject live in the skill named beside each group.
+
+### Time and point-in-time visibility — `enforcing-point-in-time`
 
 - Every screening, risk, report, and backtest calculation receives an explicit
   `as_of`. Price rows require `date <= as_of`; filings/fundamentals require
   `filed_at <= as_of`; universe snapshots require `snapshot_date <= as_of`.
-- Treat the boundary as inclusive and test a row immediately before, exactly
-  at, and immediately after the cutoff.
-- Domain logic and adapters must not call `date.today()` or `datetime.now()`
-  directly. Use the injected `Clock`; wall time is metadata, never a substitute
-  for `as_of`.
+- The boundary is inclusive; test a row immediately before, exactly at, and
+  immediately after the cutoff.
+- Domain logic and adapters never call `date.today()` or `datetime.now()`. Use
+  the injected `Clock`; wall time is metadata, never a substitute for `as_of`.
 
-### Storage, correction, and atomicity
+### Storage, correction, and atomicity — `writing-storage-code`
 
-- Natural-key reruns must incorporate corrected input; do not use
-  `ON CONFLICT DO NOTHING` where correction is expected.
+- A logical multi-row DuckDB write is one transaction: all rows commit or all
+  roll back. Tests inject a failure after at least one successful statement.
+- Natural-key reruns must incorporate corrected input; `ON CONFLICT DO NOTHING`
+  is wrong wherever correction is expected.
 - Daily price bars are the one deliberate exception: stored rows are raw
   (as-traded, unadjusted) and immutable. A re-fetched row within 0.5% of the
   stored value replaces it; a larger deviation, or a mixed-adjustment-basis
@@ -124,48 +165,44 @@ the divergence, and update the stale canonical source or request a decision.
   written, existing rows untouched).
 - Splits/dividends adjust prices only on read, as of the caller's `as_of`;
   dividends are recorded but never applied to price.
-- A logical multi-row DuckDB write is one transaction: all rows commit or all
-  roll back. Tests inject a failure after at least one successful statement.
 - A snapshot replacement must also remove members absent from the replacement.
-- Parquet/report replacement uses a temporary file in the destination
-  directory and `os.replace`; failure must preserve the previous destination
-  and clean up temporary artifacts.
-- Ad-hoc/notebook reads of the shared DuckDB file go through
-  `swing_copilot.research` (read-only, one short-lived connection per query).
-  Never hold a connection open across analysis think-time — DuckDB's file
-  lock is exclusive between a read-write process and everything else — and
-  never re-implement the sector as-of join by hand; `v_symbol_sector_asof`
-  is the single blessed implementation.
+- Parquet/report replacement goes through `io_atomic`: a temporary file in the
+  destination directory and `os.replace`; a failure preserves the previous
+  destination and cleans up temporary artifacts.
+- Ad-hoc reads of the shared DuckDB file go through `swing_copilot.research`
+  (read-only, one short-lived connection per query). Never hold a connection
+  across think-time, and never re-implement the sector as-of join by hand —
+  `v_symbol_sector_asof` is the single blessed implementation.
 
-### Quantitative correctness
+### Quantitative correctness — `writing-backtests`, `checking-risk-math`, `wiring-the-pipeline`
 
-- Correlation joins return series by trading date, not row position. Require the
-  configured number of overlapping returns; duplicates, insufficient overlap,
-  and constant series produce an explicit data-quality result.
 - Backtests apply adverse slippage and commission on both entry and exit,
   including forced liquidation. Tests assert hand-calculated cash/equity, stop
   versus max-hold precedence, residual benchmark cash, and final liquidation.
+- The production risk path is account-independent by design: it carries no
+  correlation and no account-concentration rule, and reintroducing one is a
+  regression that `tests/risk/test_checks.py::TestTradePlan::test_public_plan_has_no_account_or_correlation_constraints`
+  exists to catch.
 - Strategy configuration is parsed into strict typed values before external I/O.
   Reject unknown fields/keys, empty required signals, invalid limits, and ranking
   rules that violate deterministic ordering.
 
-### External boundaries and skill-based analysis safety
+### External boundaries — `writing-external-adapters`
 
 - External calls have explicit timeouts, bounded retryable exceptions, total
   attempt ceilings, and deterministic backoff tests. Rate limiting applies to
   every attempt. Do not retry validation/programming errors.
 - The default pytest suite is offline. The autouse socket guard must remain in
-  place; inject fakes at external ports. Live checks are separately marked and
-  never part of the offline success sentinel.
+  place; inject fakes at external ports.
 - The suite must not write operator-owned data. `output_dir` and other
   repo-relative defaults resolve to real directories, so every filesystem test
-  passes an isolated path. The autouse `reports/` and `data/` guards must
-  remain in place alongside the socket guard. `data/` is guarded twice on
-  purpose: an mtime check catches writes, and a `duckdb.connect` interception
-  catches the *open* — `init_schema()` against an already initialized file
-  changes no mtime, yet still takes DuckDB's exclusive file lock and can fail
-  whatever the operator is doing with that file (a `just data-pull` /
-  `data-push`, or a local `copilot-daily`).
+  passes an isolated path, and the autouse `reports/` and `data/` guards must
+  remain in place alongside the socket guard. A test that trips a guard is a bug
+  in the test, never a reason to weaken the guard.
+- Never log secrets. Redact exception and audit fields.
+
+### Skill-based analysis safety — `guarding-analysis-boundary`
+
 - Qualitative analysis runs in a Claude Code skill, never inside this process.
   The pipeline exports `analysis_input.json` and ingests `analysis_result.json`
   via `copilot-ingest-analysis`; both directions parse under strict
@@ -176,26 +213,28 @@ the divergence, and update the stale canonical source or request a decision.
   and code-owned metadata (form type, filing date, source URL) is resolved from
   the exported input rather than echoed back from the result. Deterministic
   screening, sizing, and ranking values are never rewritten by an analysis.
-- Enforce CON-03 centrally at ingest, over every user-visible text field,
-  before anything reaches a report. Skill instructions alone are insufficient;
-  a violating symbol is withheld fail-closed, per symbol, with no retry.
-- Never log secrets. Redact exception and audit fields.
+- Enforce CON-03 centrally at ingest, over every user-visible text field, before
+  anything reaches a report. Skill instructions alone are insufficient; a
+  violating symbol is withheld fail-closed, per symbol, with no retry.
 
 ## Test and Review Discipline
 
+Depth: `writing-tests` (what one test asserts and how it fakes the world),
+`placing-tests` (where it goes and which gate runs it), `reviewing-changes` (the
+pre-completion routing).
+
 - Test behavior and contracts, including happy path, boundaries, partial
   failure, rollback, recovery, and cache reuse. Coverage is a floor, not proof.
+- An expected value comes from outside the code under test — a hand-worked
+  number, a literal, the spec — never recomputed the way the implementation
+  computes it.
 - Calling a fake/mock can be asserted when the call itself is the contract,
   such as retry/rate limits, skipped steps, or proving no network/API call.
 - Keep implementation, its regression test, and required canonical-doc update
   in the same logical commit.
-- Before completion, inspect changed paths and apply the matching review:
-  - `storage/**`: transaction rollback, correction upsert, replacement semantics
-  - `data/**` or `text/**`: as-of boundary, timeout/retry/rate limit, offline test
-  - `risk/**`: date alignment, minimum sample, NaN/constant inputs
-  - `backtest/**`: no look-ahead, both-side costs, exact final equity
-  - `analysis/**`: strict schema boundary, provenance, CON-03, fail-closed withholding
-  - config/pipeline: fail-fast validation, fatal/fail-soft boundary, rerun safety
+- Before claiming completion, route the diff's changed paths through
+  `reviewing-changes`, which names the review each layer owes and the skill that
+  holds it.
 
 ## Git Workflow
 
@@ -224,210 +263,137 @@ the divergence, and update the stale canonical source or request a decision.
 
 ## Scheduled Daily Run
 
+Depth: `diagnosing-daily-runs` (reading a run's outcome — the exit codes, the
+`PREFLIGHT_ABORT[...]` tags, the outcome file, and what to re-dispatch),
+`operating-shared-data` (pull, push, and the shared `generation` lock).
+
 The daily analysis loop runs unattended on weekdays in CI: it fires the day
-*after* the US session it analyzes, so the weekday mask must include Saturday
-to cover Friday's session — a Monday-through-Friday mask would miss it. That
-is the only scheduled trigger, plus a manual dispatch for an out-of-band run.
-Nothing is retried automatically: a failed or skipped day is re-dispatched by
-hand, and the pipeline's preflight check makes the gap visible in the next
-run.
+*after* the US session it analyzes, so the weekday mask must include Saturday to
+cover Friday's session — a Monday-through-Friday mask would miss it. That is the
+only scheduled trigger, plus a manual dispatch for an out-of-band run. Nothing is
+retried automatically: a failed or skipped day is re-dispatched by hand, and the
+pipeline's preflight check makes the gap visible in the next run.
 
-The canonical `data/` — and, since Issue #370, the canonical daily run archive
-under `reports/<run_date>/<run_id>/` (and `<run_id>.md`) — lives in a private
-object-storage bucket, not in any working copy. Both trees share one manifest,
-one `generation`, and one push/pull commit; there is no separate reports-side
-counter. `reports/latest.md` and everything under `reports/backtests/`,
-`reports/dry_run/`, `reports/assets/`, and `reports/retro/` stay local/derived
-and are never synced. The scheduled run pulls before analysis and pushes back
-only on success, so a failed day leaves the remote on the previous generation.
-`copilot-retro collect` — the only path that fills `verdicts` (design decision
-D2: `copilot-ingest-analysis` never touches the DB) — now runs inside that
-same CI job, after the analysis and before the push, so a day's verdicts ride
-out with everything else instead of being lost when the runner is discarded.
+The job pulls before analysis and pushes back only on success, so a failed day
+leaves the remote on the previous generation. `copilot-retro collect` — the only
+path that fills `verdicts` (design decision D2: `copilot-ingest-analysis` never
+touches the DB) — runs inside that same job, after the analysis and before the
+push, so a day's verdicts ride out with everything else instead of being lost
+when the runner is discarded.
 
-`reports/<run_date>/<run_id>/` is retained forever and grows without bound
-(Issue #370 made it R2-canonical, on purpose — retention/deletion was
-considered and rejected in Issue #373); what does not scale is a *fresh*
-CI runner re-fetching all of it every weekday. The scheduled job's `pull`
-therefore passes `--reports-window 10`: only the `reports/` keys belonging to
-the 10 most recent *run dates* (never calendar days, so a holiday or a missed
-run cannot shrink it below 10 actual runs) are fetched; `data/` is always
-pulled in full. The window actually used is recorded in the shared state
-file, and the following `push` derives its behavior from that record rather
-than from a repeated flag: `reports/`'s garbage collection is suppressed
-entirely (an out-of-window key is expected to be locally absent, not
-deleted), and `--reports-append-only`'s guard only checks keys the window did
-fetch. The accepted trade-off is that CI's own `copilot-retro collect` only
-ever sees the last 10 run dates; a correction to an older archive still needs
-an operator's local full `pull` (no window) → `collect` → `push` (without
-`--reports-append-only`) to be re-collected and re-published.
+`copilot-daily` exits `2` on a preflight abort and puts a machine-readable
+`PREFLIGHT_ABORT[<reason>]:` tag on the first line of stderr. Never assume exit 2
+means "already ran": `same_day_rerun` and `no_trading_day` are legitimate stops
+that keep the job green, while `price_fetch_failed` means the price prefetch
+itself raised, so whether any session had even closed could not be determined —
+a genuine failure that must not be reported as a clean day.
+`scripts/check_daily_complete.py` whitelists exactly the first two reasons, so an
+unrecognized or missing reason fails closed the same way.
 
 ### Working with the data locally
 
-- Read-only work (ad-hoc research, a read-only dashboard): pull the remote
-  copy first, then read the local copy; a status check confirms whether it
-  still matches the remote.
+The canonical `data/` and the canonical daily run archive under
+`reports/<run_date>/<run_id>/` live in a private object-storage bucket, not in
+any working copy. Both trees share one manifest, one `generation`, and one
+push/pull commit.
+
+- Read-only work (ad-hoc research, a read-only dashboard): pull the remote copy
+  first, then read the local copy; a status check confirms whether it still
+  matches the remote.
 - Anything that writes (a retrospective run, a live daily run): pull → work →
-  push, in one sitting. The optimistic lock is a monotonic `generation` field
-  in the shared manifest — the only concurrent-write guard, covering `data/`
-  and `reports/` together — so do not leave a pulled copy unpushed, and do not
-  start a local write while the scheduled run holds the generation.
-- Never open the shared DuckDB file as a read-write connection for
-  exploration, and never hold any connection across think-time. The file lock
-  is exclusive between a read-write process and everything else, so a held
-  handle fails the next pull/push. Sync always moves the file as bytes, never
-  through DuckDB.
-- A fresh worktree has no `data/`, `reports/`, `.env`, or virtualenv of its
-  own. Install dependencies there, copy `.env` in by hand (it holds
-  credentials and is untracked), and pull the data and report-archive history
-  fresh — never by copying or symlinking another checkout's `data/` or
-  `reports/`.
-- `--reports-window` is a CI-only flag (`justfile`'s `data-pull` and any local
-  `scripts/data_sync.py pull` never pass it): a local working copy always
-  pulls `reports/` in full, which is also what lets it recover a windowed CI
-  runner's blind spot (see above).
-
-The daily pipeline's entry point exits `2` on a preflight abort, and stderr's
-first line carries a machine-readable tag that the caller branches on — never
-assume exit 2 means "already ran":
-
-- `PREFLIGHT_ABORT[same_day_rerun]:` — a successful run already exists for the
-  resolved run date (the schedule fires once per weekday, but a manual
-  dispatch or a re-run of a completed day would otherwise write a second
-  verdict set). It exits before creating a run record or report directory. An
-  explicit override flag bypasses the guard for an intentional re-run. This is
-  a legitimate stop: `scripts/check_daily_complete.py` passes and the job
-  stays green.
-- `PREFLIGHT_ABORT[no_trading_day]:` — the price prefetch succeeded, but no
-  fetched bar belongs to a session that has actually closed (16:00
-  America/New_York): either the prefetch came back empty, or the newest bar
-  is still mid-session because the scheduled job started late — `run_date` is
-  never the wall clock and never merely "the newest bar fetched", either of
-  which would book a day before it closed (Issue #372). No retry follows
-  automatically; the next scheduled run resolves it, or a manual dispatch
-  does. This is also a legitimate stop: the job stays green.
-- `PREFLIGHT_ABORT[price_fetch_failed]:` — the price prefetch itself raised
-  (e.g. a data-provider outage), so whether any session had closed could not
-  even be determined (Issue #372). Unlike the two reasons above, this is a
-  genuine failure, not a clean day with nothing to analyze, and it must not
-  be reported as one: `scripts/check_daily_complete.py` fails the job on this
-  reason (its legitimate-stop check is a whitelist of exactly
-  `same_day_rerun` and `no_trading_day`, so an unrecognized or missing reason
-  fails closed the same way). No retry follows automatically.
-
-`copilot-daily` also writes its own terminal outcome (`success`/`degraded`/
-`failed`/`preflight_abort`, plus the abort reason when applicable) to a JSON
-file outside `reports/<run_date>/<run_id>/`, whenever `--outcome-file` (or its
-`COPILOT_DAILY_OUTCOME_FILE` environment fallback, which CI always sets) is
-configured. This is what lets `scripts/check_daily_complete.py` tell "the
-pipeline never even started" apart from "it started and legitimately found no
-trading day yet", without relying on the headless analysis session to
-self-report anything.
+  push, in one sitting. The monotonic `generation` field in the shared manifest
+  is the only concurrent-write guard, covering `data/` and `reports/` together —
+  so do not leave a pulled copy unpushed, and do not start a local write while
+  the scheduled run holds the generation.
+- Never open the shared DuckDB file as a read-write connection for exploration,
+  and never hold any connection across think-time. The file lock is exclusive
+  between a read-write process and everything else, so a held handle fails the
+  next pull/push. Sync always moves the file as bytes, never through DuckDB.
+- A fresh worktree has no `data/`, `reports/`, `.env`, or virtualenv of its own.
+  Install dependencies there, copy `.env` in by hand (it holds credentials and is
+  untracked), and pull the data and report-archive history fresh — never by
+  copying or symlinking another checkout's `data/` or `reports/`.
+- `--reports-window` is a CI-only flag: a local working copy always pulls
+  `reports/` in full, which is also what lets it recover a windowed CI runner's
+  blind spot.
 
 ## Reading the Accumulated Data
 
+Depth: `swing-research` (the workflow for answering a question from the history),
+`writing-storage-code` (the read-only accessors and the blessed views),
+`operating-shared-data` (getting a current copy first).
+
 Ad-hoc analysis of the DuckDB history (verdict outcomes, score breakdowns,
 tracking ledger, regimes, rejections) goes through the read-only research
-accessor module — one connection per query, joined views included. Never open
-a raw read-write DuckDB connection against the shared file for exploration,
-and never hold any connection across think-time: the file's lock is exclusive
-between a read-write process and everything else, so a held connection fails
-the next pull/push and strands the local copy on a stale generation.
-Improvement work discovered while analyzing follows the architecture review's
-principles: no config changes on point estimates alone; route proposals
-through issues or the retrospective loop.
+accessor module — one connection per query, joined views included. Never open a
+raw read-write DuckDB connection against the shared file for exploration, and
+never hold any connection across think-time: the file's lock is exclusive between
+a read-write process and everything else, so a held connection fails the next
+pull/push and strands the local copy on a stale generation. Improvement work
+discovered while analyzing follows the architecture review's principles: no
+config changes on point estimates alone; route proposals through issues or the
+retrospective loop.
 
 ## Conventions: src/**/*.py, scripts/**/*.py
 
-### Design
+Depth: `writing-python` (module and function style, typing, the size triggers,
+docstrings, the performance and Pythonic idioms), `designing-errors` (the
+exception hierarchy and how a domain error becomes an exit code),
+`public-api-contract` (what may be exported).
 
+- Avoid `Any`; where it is unavoidable, the line carries a comment saying why.
+- `@dataclass(frozen=True, slots=True)` for internal value objects; pydantic only
+  at serialization/deserialization boundaries; `TypedDict` for structured dict
+  shapes; `Protocol` for volatile or failure-prone boundaries, not every internal
+  class.
+- Google-style docstrings (Args/Returns/Raises) on all public functions,
+  documenting *why*, not what the type signature already says.
+- Every specific error derives from `SwingCopilotError`. Catch the most specific
+  exception possible, use `logging.exception()` in catch blocks rather than
+  `logger.error(str(e))`, never swallow an exception silently, and never use
+  exceptions for control flow.
+- Context managers for all resource management. `enum.Enum` for fixed sets of
+  values. `UPPER_SNAKE_CASE` named constants instead of magic numbers or strings.
 - Treat 300-line modules and 40-line functions as review triggers, not absolute
-  correctness rules. Split only when doing so improves a real responsibility boundary
-- Prefer 3 or fewer parameters; group related parameters with a dataclass or TypedDict
-- Google-style docstrings (Args/Returns/Raises) on all public functions; document *why*, not what the type signature already says; don't document obvious code
-
-### Error Handling
-
-- Define a package-level base exception; derive all specific errors from it
-- Catch the most specific exception possible
-- Use `logging.exception()` in catch blocks (auto-includes traceback), never `logger.error(str(e))`
-- Never swallow exceptions silently; if catching, handle meaningfully or re-raise
-- Never use exceptions for control flow
-- Return `None` or a sentinel only when the caller expects it; prefer raising for true errors
-
-### Type System
-
-- Prefer `@dataclass(frozen=True, slots=True)` for internal value objects
-- Use Pydantic (`BaseModel`) only at serialization/deserialization boundaries
-- Use `TypedDict` for structured dict shapes (API responses, config dicts)
-- Use `Protocol` for structural subtyping instead of ABC when possible
-- Avoid `Any`; when unavoidable, add a comment explaining why (e.g., `# Any: third-party lib has no stubs`)
-
-### Performance
-
-- Use generator expressions and `itertools` for large sequences; avoid materializing unnecessary lists
-- Use `__slots__` on frequently instantiated classes (dataclass `slots=True`)
-- Use `functools.lru_cache` or `functools.cache` for expensive pure functions
-- Prefer `str.join()` over `+=` concatenation in loops
-- Use `collections.defaultdict`, `Counter`, `deque` instead of hand-rolled equivalents
-- Avoid repeated attribute lookups in tight loops; bind to local variable
-- Use `dict`/`set` for O(1) membership tests instead of lists
-- Lazy-import heavy optional dependencies inside functions to reduce import time
-
-### Pythonic Patterns
-
-- EAFP (try/except) over LBYL (if-check) when dealing with duck typing or I/O
-- Use context managers (`with`) for all resource management (files, connections, locks)
-- Prefer comprehensions over `map()`/`filter()` for readability
-- Use `enum.Enum` for fixed sets of values instead of string constants
-- Use `walrus operator` (:=) for assign-and-test when it improves clarity
-- Use structural pattern matching (`match/case`) for complex dispatch
-- Use `*args` unpacking and `**kwargs` deliberately; avoid passing them blindly through call chains
-
-### Security
-
-- Sanitize file paths to prevent directory traversal (`pathlib.Path.resolve()` then check prefix)
-- Ruff's bandit rules (`S`) cover eval/exec/pickle/random misuse — do not suppress them with `noqa` without a written justification
-
-### Constants and Naming
-
-- Use `UPPER_SNAKE_CASE` named constants instead of magic numbers/strings
-- Boolean variables/params: prefix with `is_`, `has_`, `can_`, `should_`
-- Private helpers: prefix with `_`; reserve `__` (name mangling) only for avoiding conflicts in subclass hierarchies
+  rules. Prefer 3 or fewer parameters; group related ones in a dataclass or
+  `TypedDict`.
+- Ruff's bandit (`S`) rules are never silenced with a bare `noqa`; an accepted
+  suppression states its justification inline.
+- Sanitize file paths to prevent directory traversal (`pathlib.Path.resolve()`,
+  then check the prefix).
+- Private helpers are prefixed with `_`; reserve `__` for avoiding conflicts in
+  subclass hierarchies. Boolean names use `is_`/`has_`/`can_`/`should_`.
 
 ## Conventions: pyproject.toml
 
-- Runtime dependencies go under `[project] dependencies`
-- Dev dependencies go under `[dependency-groups] dev`; docs under `[dependency-groups] docs`
-- Before adding a dependency: verify active maintenance, compatible license (MIT/BSD/Apache), and minimal transitive dependencies
-- Use version ranges (`>=X.Y`) for runtime dependencies -- never pin exact versions in a library
-- NEVER remove existing ruff rules without explicit user approval
-- NEVER lower the line+branch coverage threshold (currently 95%)
-- After modifying dependencies, run `uv sync --all-groups`
-- The `uv.lock` file MUST be committed alongside dependency changes
+Depth: `managing-dependencies` (whether a package may enter at all, the two-layer
+cooldown, and the `exclude-newer` bump procedure), `changing-gates` (the ruff,
+mypy, and coverage tables).
 
-### `[tool.uv] exclude-newer`
-
-`exclude-newer` is a supply-chain cooldown: `uv lock` and `uv sync` ignore any
-package version published after the given timestamp, so a dependency cannot be
-resolved until it has survived in the wild for a while. This complements the
-Dependabot `cooldown.default-days` setting in `.github/dependabot.yml`, which
-delays *update PRs* by the same idea — together they keep both fresh installs
-and automated upgrades off packages published in the last few days.
-
-Bump cadence: whenever dependencies are updated, move the `exclude-newer`
-timestamp forward to roughly "today minus 14 days"; do this at least monthly
-even if no dependency changed, so the cutoff doesn't drift too far behind.
-
-Procedure:
-
-1. Edit the `exclude-newer` date in `pyproject.toml`.
-2. Run `uv lock` to regenerate `uv.lock` against the new cutoff.
-3. Commit `pyproject.toml` and `uv.lock` together in the same commit.
+- Runtime dependencies go under `[project] dependencies`; dev, docs, and ops
+  dependencies under their `[dependency-groups]` group.
+- Use version ranges (`>=X.Y`) for runtime dependencies — never pin exact
+  versions in a library.
+- Before adding a dependency: verify active maintenance, a compatible license
+  (MIT/BSD/Apache), and a minimal transitive footprint. Record the judgment in
+  the PR.
+- Run `uv sync --all-groups` after modifying dependencies, and commit `uv.lock`
+  in the same commit.
+- NEVER remove existing ruff rules without explicit user approval.
+- NEVER lower the line+branch coverage threshold (currently 95%).
+- `[tool.uv] exclude-newer` is a supply-chain cooldown. Move it forward to
+  roughly today-minus-14-days whenever dependencies are updated, and at least
+  monthly regardless, then regenerate `uv.lock` and commit both files together.
 
 ## Conventions: docs/**/*.md, README.md, CONTRIBUTING.md, CHANGELOG.md
 
-- Document non-obvious behavior, architecture decisions, and trade-offs
-- Do NOT document what is obvious from the code or already expressed by the type system
-- Code examples in docs must be valid Python that works with the current API
-- Use admonitions (note, warning, tip) for important callouts in MkDocs pages
+Depth: `updating-docs` (which surface a change lands on, and the canonical-source
+conflict rule), `release-impact` (whether it needs a CHANGELOG entry, and at
+which semver level).
+
+- Document non-obvious behavior, architecture decisions, and trade-offs. Do NOT
+  document what is obvious from the code or already expressed by the type system.
+- Code examples in docs must be valid Python that works with the current API.
+- `just docs-check` (`mkdocs build --strict`) fails on warnings, so a new page
+  must be reachable from the nav and every link must resolve.
+- Use admonitions (note, warning, tip) for important callouts in MkDocs pages.

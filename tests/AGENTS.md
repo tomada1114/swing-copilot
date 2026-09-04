@@ -1,103 +1,96 @@
 Applies to: `*.py` under this directory.
 
-## Structure and Organization
+Depth: `writing-tests` (how one test is named, what it asserts, and how it fakes
+the world), `placing-tests` (where the file goes, which command runs it, and
+which coverage floor applies). The rules below are the ones that hold whether or
+not those skills are loaded.
 
-- File structure mirrors source: `tests/test_<module>.py`
-- Shared fixtures go in `tests/conftest.py`; use the narrowest fixture scope possible
-- Function names: `test_<what>_<scenario>_<expected_result>` (e.g., `test_parse_config_empty_string_raises_value_error`)
-- Follow Arrange-Act-Assert: set up data, execute the behavior, verify the outcome
-- One logical assertion per test; multiple `assert` statements are fine if they verify one behavior
+## Structure
+
+- Test files mirror the source tree: `tests/<package>/test_<module>.py`.
+- Shared fixtures go in `tests/conftest.py`, at the narrowest scope that works.
+- `test_<what>_<scenario>_<expected_result>`, Arrange-Act-Assert, one behavior
+  per test.
 
 ## What to Test
 
-- Test *behavior and contracts*, not implementation details
-- Never test private methods directly; test through the public interface
-- Always test the happy path AND the error path for every public function
-- If a function can raise, test that it raises the right exception with the right message
+- Test *behavior and contracts*, not implementation details. Never test a
+  private helper directly; test through the public interface.
+- Test the happy path AND the error path of every public function.
+- **An expected value comes from outside the code under test** — a hand-worked
+  number, a literal, the spec. Never recompute it the way the implementation
+  computes it: such an assertion passes by construction and can never disagree
+  with the implementation, even when the implementation is wrong.
+- `pytest.raises(XError, match=r"...")` — assert the type and the message
+  pattern. Test that errors propagate through the call chain and that cleanup
+  runs on the failure path too.
 
 ## Edge Cases (always consider these)
 
-- **Empty inputs**: empty string, empty list, empty dict, None where optional
-- **Boundary values**: 0, 1, -1, max int, min int, float('inf'), float('nan')
-- **Type boundaries**: very long strings, unicode/emoji, mixed encodings
-- **Collection boundaries**: single element, duplicate elements, max expected size
-- **Concurrent scenarios**: if the code is async, test cancellation and timeout behavior
-- **State transitions**: initial state, after one operation, after repeated operations, after error recovery
-- **Point-in-time boundaries**: immediately before, exactly at, and immediately after `as_of`
-- **Batch atomicity**: inject failure after an earlier row succeeds and assert full rollback/recovery
-- **Aligned series**: mismatched dates, duplicates, insufficient overlap, and constant values
-- **Exact accounting**: hand-calculate entry/exit costs and final liquidation equity
-- **Reused artifacts**: validate provenance and policy constraints on reused/loaded artifacts, not only freshly produced ones
+The ordinary sweep — empty inputs, 0/1/-1/max/`inf`/`nan`, long and unicode
+strings, single-element and duplicate collections, state after repetition and
+after error recovery — is table stakes. These five are the ones specific to this
+domain, and they are the ones reviews actually miss:
 
-## Error and Exception Testing
+- **Point-in-time boundaries**: immediately before, exactly at, and immediately
+  after `as_of`.
+- **Batch atomicity**: inject failure after an earlier row succeeded, and assert
+  full rollback and recovery.
+- **Series joins**: mismatched dates, duplicates, insufficient overlap, constant
+  values.
+- **Exact accounting**: hand-calculate entry/exit costs and final liquidation
+  equity.
+- **Reused artifacts**: validate provenance and policy constraints on reused or
+  loaded artifacts, not only on freshly produced ones.
 
-- Use `pytest.raises(XError, match=r"expected message")` -- always verify the message pattern
-- Test that errors propagate correctly through the call chain
-- Test that cleanup/teardown runs even when exceptions occur (context managers, finally blocks)
-- Test invalid argument combinations that should be rejected
-- Test error recovery: after an error, does the object remain in a consistent state?
+## Isolation and Fakes
 
-## Parametrize and Data-Driven Tests
+- `tmp_path` for filesystem tests — never a real directory. `monkeypatch` for
+  environment variables — never `os.environ` mutation.
+- Mock at boundaries only: I/O, network, clock, external services. Never mock
+  the unit under test or an internal collaborator; prefer an in-memory fake to a
+  mock for a repository or store.
+- Assert on behavior and outputs — but a call count or its *absence* is the right
+  assertion when the call itself is the contract: retry and rate ceilings,
+  fail-soft isolation, budget skips, or proving no external call happened.
 
-- Use `@pytest.mark.parametrize` for input/output variations; don't copy-paste test bodies
-- Group related parametrize cases with `pytest.param(..., id="descriptive-name")`
-- For complex parametrized data, use a helper function or fixture to build test cases
-- Consider property-based testing with `hypothesis` for functions with well-defined invariants (add to dev deps if using)
+## Independence and Reliability
 
-## Fixtures
-
-- Prefer factory fixtures over static fixtures: `def make_user(**overrides)` returns a customizable object
-- Use `tmp_path` for filesystem tests; never write to real directories
-- Use `monkeypatch` for environment variables, not direct `os.environ` manipulation
-- Fixtures that open resources must clean up with `yield` + teardown or `addfinalizer`
-- Scope fixtures appropriately: `function` (default) for isolation, `session` only for truly expensive setup
-
-## Mocking Strategy
-
-- Mock at boundaries only: I/O, network, clock (`freezegun`/`time_machine`), external services
-- Never mock the unit under test
-- Prefer fakes (in-memory implementations) over mocks for repositories/stores
-- Use `unittest.mock.AsyncMock` for async callables
-- Assert on behavior and outputs. Call count/order is appropriate when it is the
-  contract: retry/rate ceilings, fail-soft isolation, budget skips, or proving
-  that an external call did not happen
-- If you need to mock more than 2 things in one test, the code under test may have too many dependencies
-
-## Test Independence and Reliability
-
-- Tests must be independent: no shared mutable state, no ordering dependency
-- Each test must pass when run alone (`pytest tests/test_foo.py::test_specific`)
-- No `@pytest.mark.skip` or TODO tests on main -- delete them or fix them
-- No `time.sleep` in tests; design tests to be event-driven or use deterministic fakes for time
-- Flaky tests must be fixed immediately, not ignored
+- No shared mutable state, no ordering dependency; each test passes when run
+  alone. No dependence on timezone, locale, or wall-clock time.
+- No `time.sleep`: use deterministic fakes for time.
+- Nothing is left `@pytest.mark.skip` or as a TODO test on main, and a flaky
+  test is fixed rather than retried.
 
 ## Coverage Philosophy
 
-- Coverage is a *floor*, not a *ceiling* -- 95% line+branch minimum, but aim for meaningful coverage not percentage
-- Branch coverage matters more than line coverage; always test both sides of conditionals
-- Missing coverage should prompt "is this code reachable?" -- if not, delete it
-- Don't write trivial tests just to hit numbers; cover edge cases and error paths instead
+Coverage is a *floor*, not a *ceiling* — 95% line+branch minimum repo-wide, but
+aim for meaningful coverage, not a percentage. Branch coverage matters more than
+line coverage; test both sides of a conditional. Missing coverage should prompt
+"is this code reachable?" — if not, delete the code rather than writing a test
+for it.
 
-## Anti-Patterns
-
-- Don't test getters/setters while missing business logic edge cases
-- Don't use `assert True` or `assert result is not None` when a specific value should be checked
-- Don't share mutable test data between tests (use fresh fixtures)
-- Don't test that a dependency's library works (e.g., testing that `json.loads` parses JSON)
-- Don't mock everything -- integration tests with real dependencies catch real bugs
 
 ## Offline and Cross-cutting Contracts
 
-- Keep the autouse socket blocker in `tests/conftest.py`; ordinary tests must
-  fail fast on uninjected network access. Live tests are separate and explicit
+- The autouse socket blocker in `tests/conftest.py` stays: an ordinary test must
+  fail fast on uninjected network access.
+- The autouse `reports/` and `data/` guards stay alongside it — the suite must
+  not write operator-owned data. `data/` is guarded twice on purpose: an mtime
+  check catches writes, and a `duckdb.connect` interception catches the *open*,
+  because `init_schema()` against an already-initialized file changes no mtime
+  yet still takes DuckDB's exclusive file lock and can fail whatever the
+  operator is doing with that file. A test that trips a guard is a bug in the
+  test; fix the test's path, never the guard.
 - Storage tests cover correction upsert, replacement deletion, Nth-write
-  rollback, previous-file preservation, and rerun after failure
+  rollback, previous-file preservation, and rerun after failure.
 - External adapter tests cover retryable and non-retryable failures, exact total
-  attempts/backoff, timeout, and throttling on every attempt using fake time
+  attempts and backoff, timeout, and throttling on every attempt, using fake
+  time.
 - Analysis-boundary tests cover strict (`extra="forbid"`) schema rejection in
   both directions, non-empty source IDs proven to be a subset of the exported
   input, CON-03 checks over every user-visible free-text field, per-symbol
-  fail-closed withholding without retry, and hard-fail boundaries (broken
-  JSON, `as_of` mismatch, unknown symbol)
+  fail-closed withholding without retry, and hard-fail boundaries (broken JSON,
+  `as_of` mismatch, unknown symbol).
 - Backtest tests use exact arithmetic for adverse slippage and commission on
-  entry and every exit path, including forced liquidation
+  entry and every exit path, including forced liquidation.

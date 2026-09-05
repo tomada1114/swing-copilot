@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pytest
 
-from swing_copilot.config import load_settings, load_strategies
+from swing_copilot.config import (
+    RankingConfig,
+    StrategySpec,
+    load_settings,
+    load_strategies,
+)
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.filter_matrix import (
     CheckKind,
@@ -48,6 +53,18 @@ FUNDAMENTALS_CHECK = "profitable_positive_fcf_equity"
 VOLUME_CHECK = "volume_min"
 TREND_CHECK = "trend_sma"
 PULLBACK_CHECK = "pullback_rsi"
+
+
+def _unvalidated_no_signal_strategy() -> StrategySelection:
+    """Exercise the diagnostic's defensive path below the config boundary."""
+    spec = StrategySpec.model_construct(
+        filters_all=("profitable_positive_fcf_equity", "volume_min"),
+        signals_all=(),
+        candidate_limit=10,
+        ranking=RankingConfig(),
+        minervini=None,
+    )
+    return StrategySelection(key="default", spec=spec)
 
 
 def _pullback_closes() -> list[float]:
@@ -373,12 +390,12 @@ class TestCandidateEquivalence:
         assert result.unblocked_symbols == ("SHORT",)
         assert result.candidate_equivalent_symbols == ()
 
-    def test_a_strategy_without_signals_produces_no_candidates(
-        self, settings, tmp_path
-    ):
-        strategy = _strategy(tmp_path, signals_all=[])
-
-        result = evaluate_filter_matrix(_screening_input(), settings, strategy)
+    def test_a_strategy_without_signals_produces_no_candidates(self, settings):
+        # `load_strategies` rejects this state; keep the lower-level defensive
+        # behavior covered for callers that construct a model without validation.
+        result = evaluate_filter_matrix(
+            _screening_input(), settings, _unvalidated_no_signal_strategy()
+        )
 
         assert result.unblocked_symbols == ("PASSALL", "UPTREND")
         assert result.candidate_equivalent_symbols == ()

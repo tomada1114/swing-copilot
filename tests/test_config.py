@@ -107,6 +107,19 @@ class TestLoadStrategies:
         with pytest.raises(ConfigError, match="failed validation"):
             load_strategies(str(bad))
 
+    def test_rejects_empty_signals_all(self, tmp_path):
+        bad = tmp_path / "strategies.yaml"
+        bad.write_text(
+            "strategies:\n"
+            "  default:\n"
+            "    filters_all: []\n"
+            "    signals_all: []\n"
+            "    candidate_limit: 10\n"
+        )
+
+        with pytest.raises(ConfigError, match="signals_all"):
+            load_strategies(str(bad))
+
     def test_default_score_weights_sum_to_one(self):
         strategies = load_strategies("config/strategies.yaml")
 

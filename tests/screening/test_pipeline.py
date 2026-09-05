@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pytest
 
-from swing_copilot.config import ScoreWeights, StrategiesConfig, load_strategies
+from swing_copilot.config import (
+    RankingConfig,
+    ScoreWeights,
+    StrategiesConfig,
+    StrategySpec,
+    load_strategies,
+)
 from swing_copilot.screening import (
     fundamental_filters as _fundamental_filters,  # noqa: F401 - imported for its @register_filter side effect
 )
@@ -71,6 +77,18 @@ STRATEGIES_CONFIG = StrategiesConfig.model_validate(
         }
     }
 )
+
+
+def _unvalidated_no_signal_config() -> StrategiesConfig:
+    """Exercise defensive pipeline paths below the config validation boundary."""
+    spec = StrategySpec.model_construct(
+        filters_all=(),
+        signals_all=(),
+        candidate_limit=10,
+        ranking=RankingConfig(),
+        minervini=None,
+    )
+    return StrategiesConfig.model_construct(strategies={"default": spec})
 
 
 def _uptrend_bars(
@@ -159,20 +177,11 @@ class TestAndSemantics:
         data = ScreeningInput(
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
-        strategies_config = StrategiesConfig.model_validate(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": [],
-                        "candidate_limit": 10,
-                    }
-                }
-            }
-        )
 
+        # `StrategiesConfig.model_validate` rejects this state; this keeps the
+        # lower-level pipeline's defensive behavior covered.
         pipeline = ScreeningPipeline(
-            strategies_config, market_store=None, settings=settings
+            _unvalidated_no_signal_config(), market_store=None, settings=settings
         )
         candidates = pipeline.run(data)
 
@@ -858,7 +867,7 @@ class TestExtensibility:
                 "strategies": {
                     "default": {
                         "filters_all": ["does_not_exist"],
-                        "signals_all": [],
+                        "signals_all": ["trend_sma"],
                         "candidate_limit": 10,
                     }
                 }
@@ -1008,21 +1017,12 @@ class TestRunWithRejections:
         data = ScreeningInput(
             as_of=AS_OF, universe=universe, fundamentals=pd.DataFrame(), bars=bars
         )
-        strategies_config = StrategiesConfig.model_validate(
-            {
-                "strategies": {
-                    "default": {
-                        "filters_all": [],
-                        "signals_all": [],
-                        "candidate_limit": 10,
-                    }
-                }
-            }
-        )
-        pipeline = ScreeningPipeline(
-            strategies_config, market_store=None, settings=settings
-        )
 
+        # `StrategiesConfig.model_validate` rejects this state; this keeps the
+        # lower-level classifier's defensive behavior covered.
+        pipeline = ScreeningPipeline(
+            _unvalidated_no_signal_config(), market_store=None, settings=settings
+        )
         result = pipeline.run_with_rejections(data)
 
         assert result.candidates == []
@@ -1264,7 +1264,12 @@ class TestRequiredBars:
         assert pipeline.required_bars == expected
 
     def test_required_bars_floors_at_ranking_window_with_no_signals(self, settings):
-        assert self._pipeline(settings, []).required_bars == 200
+        assert (
+            ScreeningPipeline(
+                _unvalidated_no_signal_config(), market_store=None, settings=settings
+            ).required_bars
+            == 200
+        )
 
     def test_lookback_days_keeps_the_pre_186_floor(self):
         # 200 bars is exactly what the long-standing 400-day constant served.

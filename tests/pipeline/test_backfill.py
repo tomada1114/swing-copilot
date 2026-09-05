@@ -23,7 +23,7 @@ from swing_copilot.pipeline.backfill import (
     rebuild_bars,
 )
 from swing_copilot.pipeline.backfill import main as backfill_main
-from swing_copilot.pipeline.daily import _select_symbols
+from swing_copilot.pipeline.daily import select_symbols
 from swing_copilot.storage.database import Database
 from swing_copilot.storage.market_store import (
     BarWriteResult,
@@ -716,7 +716,7 @@ class TestBackfillCli:
         # unions holdings into it (none here), so all three must agree.
         expected = list(select_universe_sample(universe, 6).symbols)
         assert sorted(provider.calls[0][0]) == expected
-        assert _select_symbols(universe, set(), 6) == expected
+        assert select_symbols(universe, set(), 6) == expected
 
     def test_rejects_a_non_positive_limit(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

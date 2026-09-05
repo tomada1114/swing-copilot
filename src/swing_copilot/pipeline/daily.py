@@ -250,7 +250,9 @@ class DailyDependencies:
 
 
 @dataclass(frozen=True, slots=True)
-class _StepOutcome:
+class StepOutcome:
+    """One step's result, as `record_step` and the fatal/soft-step loops need it."""
+
     success: bool
     detail: str | None = None
     is_skipped: bool = False
@@ -260,11 +262,11 @@ class _StepOutcome:
 # an ordinary "not configured" skip (`success=True, is_skipped=True`), this
 # degrades the run (`success=False`) even though it is recorded as `skipped`
 # in `run_steps` rather than `failed`.
-_TIME_BUDGET_STEP_OUTCOME = _StepOutcome(False, "time budget exceeded", is_skipped=True)
+TIME_BUDGET_STEP_OUTCOME = StepOutcome(False, "time budget exceeded", is_skipped=True)
 
 
 @dataclass(frozen=True, slots=True)
-class _RunContext:
+class RunContext:
     """Screening-derived state steps 5-9 share (keeps step functions under 5 args)."""
 
     run_id: UUID
@@ -288,7 +290,7 @@ class _RunContext:
 
 
 @dataclass(frozen=True, slots=True)
-class _RiskStepRequest:
+class RiskStepRequest:
     """Point-in-time inputs for one risk step."""
 
     candidates: list[Candidate]
@@ -299,11 +301,11 @@ class _RiskStepRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class _OutputContext:
+class OutputContext:
     """Grouped inputs for the final local-output step."""
 
-    run: _RunContext
-    # Set only when step 6 exported one; `_run_step_output` archives the
+    run: RunContext
+    # Set only when step 6 exported one; `run_step_output` archives the
     # matching `report_context.json` beside it so ingest can re-render.
     analysis_input_path: Path | None
     analysis_input_digest: str | None
@@ -313,15 +315,15 @@ class _OutputContext:
 
 
 @dataclass(frozen=True, slots=True)
-class _OutputCompletion:
+class OutputCompletion:
     """Everything needed to record the final run state after step 8."""
 
-    outcome: _StepOutcome
+    outcome: StepOutcome
     report_path: Path | None
     brief: DailyBrief | None
     analysis_input_path: Path | None
-    text_outcome: _StepOutcome
-    export_outcome: _StepOutcome
+    text_outcome: StepOutcome
+    export_outcome: StepOutcome
 
 
 _RUN_METADATA_SCHEMA_VERSION = "run-metadata-v1"
@@ -337,7 +339,7 @@ def _canonical_json(payload: object) -> str:
     )
 
 
-def _config_hash(
+def config_hash(
     settings: Settings, strategies_config: StrategiesConfig, strategy_key: str
 ) -> str:
     """Return the full effective-run fingerprint required for reconstruction.
@@ -377,7 +379,7 @@ def _universe_snapshot_identity(universe: tuple[UniverseMember, ...]) -> str:
     return hashlib.sha256(_canonical_json(members).encode("utf-8")).hexdigest()
 
 
-def _run_metadata(deps: DailyDependencies) -> dict[str, object]:
+def run_metadata(deps: DailyDependencies) -> dict[str, object]:
     """Build non-secret data required to reproduce a stored daily run."""
     return {
         "schema_version": _RUN_METADATA_SCHEMA_VERSION,
@@ -397,7 +399,7 @@ def _run_metadata(deps: DailyDependencies) -> dict[str, object]:
     }
 
 
-def _run_mode(options: DailyRunOptions) -> RunMode:
+def run_mode(options: DailyRunOptions) -> RunMode:
     """Whether this invocation is `live` or `dry_run`.
 
     Shared by `run_daily` and `_compose_dependencies`, which both need it
@@ -406,7 +408,7 @@ def _run_mode(options: DailyRunOptions) -> RunMode:
     return RunMode.DRY_RUN if options.is_dry_run else RunMode.LIVE
 
 
-def _paths_for_mode(mode: RunMode) -> tuple[Path, str]:
+def paths_for_mode(mode: RunMode) -> tuple[Path, str]:
     """Return the isolated `(db_path, output_dir)` to compose for `mode`.
 
     A `--dry-run` invocation must never touch the live DuckDB file or
@@ -425,7 +427,7 @@ def _paths_for_mode(mode: RunMode) -> tuple[Path, str]:
     return DEFAULT_DB_PATH, "reports"
 
 
-def _select_symbols(
+def select_symbols(
     universe: tuple[UniverseMember, ...], held_symbols: set[str], limit: int | None
 ) -> list[str]:
     """Symbols this run screens: the universe (or a `--limit` sample) plus holdings.
@@ -445,7 +447,7 @@ def _select_symbols(
     price fetch, so that symbol got no bar at all and its trailing-stop /
     max-hold checks ran on stale prices, exactly when an index deletion makes
     an exit decision most urgent (Issue #212). This adds symbols to the
-    *fetch* set only; `_run_step_screening()` still intersects the screening
+    *fetch* set only; `run_step_screening()` still intersects the screening
     universe with `deps.universe`, so a holding outside the snapshot cannot
     re-enter as a fresh entry candidate.
 
@@ -478,7 +480,7 @@ def _select_symbols(
     return sorted({*sample.symbols, *held_symbols})
 
 
-def _text_target_symbols(
+def text_target_symbols(
     held_symbols: frozenset[str], candidates: list[Candidate]
 ) -> list[str]:
     """Text/analysis target symbols: held positions + today's candidates (`docs/04_detailed_design.md` 3.14).
@@ -500,7 +502,7 @@ def _stamp_bars(
     return stamped
 
 
-def _screening_lookback_days(deps: DailyDependencies) -> int:
+def screening_lookback_days(deps: DailyDependencies) -> int:
     """Calendar days of price history the configured strategy screens over.
 
     A broken strategy configuration (unknown key, unregistered component)
@@ -516,21 +518,26 @@ def _screening_lookback_days(deps: DailyDependencies) -> int:
     return price_history_lookback_days(required)
 
 
-def _run_step_prices(
+def run_step_prices(
     deps: DailyDependencies,
     symbols: list[str],
     as_of: date,
     prefetched: BarFetchResult | None = None,
-) -> _StepOutcome:
+) -> StepOutcome:
+    """Fetch/store `symbols`' bars and corporate actions, fatal step 1.
+
+    `prefetched` lets `daily_runner.run_daily` reuse the bars it already
+    fetched to resolve `run_date` (`#372`), instead of fetching twice.
+    """
     if prefetched is None:
-        start = as_of - timedelta(days=_screening_lookback_days(deps))
+        start = as_of - timedelta(days=screening_lookback_days(deps))
         result = deps.data_provider.get_daily_bars(
             symbols, start, as_of + timedelta(days=1)
         )
     else:
         result = prefetched
     if result.bars.empty:
-        return _StepOutcome(False, "no price data returned for any symbol")
+        return StepOutcome(False, "no price data returned for any symbol")
     fetched_at = deps.clock.now()
     # Actions first: `write_bars` stores raw prices and `read_bars` adjusts
     # them from `corporate_actions`, so a split recorded after its own bars
@@ -550,7 +557,7 @@ def _run_step_prices(
         details.append(
             f"quarantined symbols: {[q.symbol for q in write_result.quarantined]}"
         )
-    return _StepOutcome(True, "; ".join(details) or None)
+    return StepOutcome(True, "; ".join(details) or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -877,18 +884,18 @@ def _log_fundamentals_progress(position: int, total: int) -> None:
 def _fundamentals_fetch_order(
     symbols: list[str], held_symbols: frozenset[str]
 ) -> list[str]:
-    """Order the fundamentals fetch held-first, mirroring `_text_target_symbols`.
+    """Order the fundamentals fetch held-first, mirroring `text_target_symbols`.
 
     The NFR-03 time budget truncates this step mid-sequence, so whatever sorts
     last is what silently loses today's fundamentals. Plain lexicographic order
     made that an arbitrary draw, and a held position sorting after the
     candidates lost its refresh to alphabetically-earlier candidates (Issue
-    #219) -- the exact outcome `_text_target_symbols` already prevents on the
+    #219) -- the exact outcome `text_target_symbols` already prevents on the
     text side. Both blocks keep the incoming (lexicographic) order, so the
     reordered sequence stays reproducible.
 
     Args:
-        symbols: `_select_symbols()`'s return value, whose own lexicographic
+        symbols: `select_symbols()`'s return value, whose own lexicographic
             order contract is unchanged; the reorder is local to this step.
         held_symbols: Open holdings (real + virtual ledger), 3.14's held set.
 
@@ -900,14 +907,14 @@ def _fundamentals_fetch_order(
     return [*held, *rest]
 
 
-def _run_step_fundamentals(
+def run_step_fundamentals(
     deps: DailyDependencies,
     symbols: list[str],
     as_of: date,
     deadline: float,
     *,
     held_symbols: frozenset[str],
-) -> _StepOutcome:
+) -> StepOutcome:
     """Fetch/upsert fundamentals for `symbols`, filed on or before `as_of`.
 
     Fail-soft/efficiency behaviors beyond a plain per-symbol fetch:
@@ -952,9 +959,7 @@ def _run_step_fundamentals(
     """
     edgar_client = deps.edgar_client
     if edgar_client is None:
-        return _StepOutcome(
-            True, "skipped: no EDGAR client configured", is_skipped=True
-        )
+        return StepOutcome(True, "skipped: no EDGAR client configured", is_skipped=True)
 
     today = deps.clock.today()
     freshness = _load_fundamentals_freshness(deps, symbols, as_of, today)
@@ -1038,7 +1043,7 @@ def _run_step_fundamentals(
         ]
     )
 
-    return _StepOutcome(
+    return StepOutcome(
         True,
         _fundamentals_detail(
             _FundamentalsStepTally(
@@ -1072,7 +1077,7 @@ def _fundamentals_detail(tally: _FundamentalsStepTally) -> str | None:
     """Summarize the step for `run_steps.detail`, or `None` if unremarkable.
 
     This detail is the operator's only signal that fundamentals did not
-    refresh, because the step is never fatal (see `_run_step_fundamentals`).
+    refresh, because the step is never fatal (see `run_step_fundamentals`).
     So it names the "nothing at all got through" case explicitly rather than
     leaving it to be inferred from a list of symbols.
     """
@@ -1097,9 +1102,10 @@ def _fundamentals_detail(tally: _FundamentalsStepTally) -> str | None:
     return "; ".join(details) if details else None
 
 
-def _run_step_screening(
+def run_step_screening(
     deps: DailyDependencies, symbols: list[str], as_of: date, run_id: UUID
-) -> tuple[_StepOutcome, ScreeningResult]:
+) -> tuple[StepOutcome, ScreeningResult]:
+    """Run the configured strategy over `symbols`, fatal step 3."""
     fundamentals = deps.market_store.read_fundamentals(as_of)
     pipeline = ScreeningPipeline(
         deps.strategies_config, deps.market_store, deps.settings, deps.strategy_key
@@ -1131,13 +1137,14 @@ def _run_step_screening(
             run_id, pipeline.strategy_key, as_of, pipeline.candidate_limit
         ),
     )
-    return _StepOutcome(True), result
+    return StepOutcome(True), result
 
 
-def _run_step_risk(
+def run_step_risk(
     deps: DailyDependencies,
-    request: _RiskStepRequest,
-) -> tuple[_StepOutcome, list[RiskAssessment], str | None]:
+    request: RiskStepRequest,
+) -> tuple[StepOutcome, list[RiskAssessment], str | None]:
+    """Check every candidate against the earnings guard, fatal step 4."""
     earnings = collect_earnings_calendar(
         deps.earnings_client,
         sorted(candidate.symbol for candidate in request.candidates),
@@ -1156,7 +1163,7 @@ def _run_step_risk(
     )
     assessments = checker.check(request.candidates, request.exposure)
     deps.state_store.record_risk_assessments(assessments, request.run_id)
-    return _StepOutcome(True), assessments, earnings.notice
+    return StepOutcome(True), assessments, earnings.notice
 
 
 def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSnapshot:
@@ -1199,7 +1206,7 @@ def _calculate_regime_snapshot(deps: DailyDependencies, as_of: date) -> RegimeSn
     )
 
 
-def _record_regime_snapshot(
+def record_regime_snapshot(
     deps: DailyDependencies, run_id: UUID, as_of: date
 ) -> RegimeSnapshot:
     """Compute and persist one run's deterministic market-regime state."""
@@ -1208,7 +1215,7 @@ def _record_regime_snapshot(
     return snapshot
 
 
-def _record_exposure_decision(
+def record_exposure_decision(
     deps: DailyDependencies, run_id: UUID, snapshot: RegimeSnapshot
 ) -> ExposureDecision:
     """Derive and persist one immutable-in-run Exposure Ceiling decision."""
@@ -1217,7 +1224,7 @@ def _record_exposure_decision(
     return decision
 
 
-def _record_ftd_snapshot(
+def record_ftd_snapshot(
     deps: DailyDependencies, run_id: UUID, regime_snapshot: RegimeSnapshot
 ) -> FtdSnapshot:
     """Persist the FTD state already calculated as part of the regime snapshot."""
@@ -1285,14 +1292,14 @@ def _text_step_outcome(
     failed_symbols: list[str],
     calendar_failed: bool,
     symbol_count: int,
-) -> tuple[_StepOutcome, list[TextItem] | None]:
+) -> tuple[StepOutcome, list[TextItem] | None]:
     if not (failed_symbols or calendar_failed):
-        return _StepOutcome(True), items
+        return StepOutcome(True), items
     if items:
         detail = f"failed symbols: {failed_symbols}"
         if calendar_failed:
             detail += "; calendar events fetch failed"
-        return _StepOutcome(False, detail), items
+        return StepOutcome(False, detail), items
 
     # Nothing was collected at all: state truthfully *why*, distinguishing a
     # calendar-only failure with no target symbols from genuine per-symbol
@@ -1318,7 +1325,7 @@ def _text_step_outcome(
             f"calendar fetch failed; {symbol_count} target symbol(s) "
             "returned no text items"
         )
-    return _StepOutcome(False, detail), None
+    return StepOutcome(False, detail), None
 
 
 def _deduplicate_text_items(items: list[TextItem]) -> list[TextItem]:
@@ -1329,7 +1336,7 @@ def _deduplicate_text_items(items: list[TextItem]) -> list[TextItem]:
     carries no symbol component. Without this, one article reaches two
     candidates' `news` arrays as if each had independent coverage, and
     `text_items` (`PRIMARY KEY (source_id)`) keeps whichever symbol happened to
-    be written last. `_text_target_symbols` orders held positions first and
+    be written last. `text_target_symbols` orders held positions first and
     then alphabetically, so a symbol the account actually holds keeps the
     shared article; otherwise the alphabetically first candidate does.
 
@@ -1351,14 +1358,14 @@ def _deduplicate_text_items(items: list[TextItem]) -> list[TextItem]:
 
 def _run_step_text(
     deps: DailyDependencies, symbols: list[str], as_of: date, *, skip: bool
-) -> tuple[_StepOutcome, list[TextItem] | None]:
+) -> tuple[StepOutcome, list[TextItem] | None]:
     if skip or (
         deps.news_client is None
         and deps.calendar_client is None
         and deps.edgar_client is None
     ):
         return (
-            _StepOutcome(True, "skipped: no text clients configured", is_skipped=True),
+            StepOutcome(True, "skipped: no text clients configured", is_skipped=True),
             None,
         )
 
@@ -1391,13 +1398,13 @@ def _run_output_dir(deps: DailyDependencies, run_date: date, run_id: UUID) -> Pa
     return Path(deps.output_dir) / run_date.isoformat() / str(run_id)
 
 
-def _run_step_analysis_export(
+def run_step_analysis_export(
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     text_items: list[TextItem] | None,
     *,
     include_prior_verdicts: bool,
-) -> tuple[_StepOutcome, Path | None, str | None]:
+) -> tuple[StepOutcome, Path | None, str | None]:
     """Export `analysis_input.json` for the qualitative-analysis skill.
 
     No model is called here, so this step is cheap and unconditional -- it is
@@ -1417,13 +1424,13 @@ def _run_step_analysis_export(
     """
     if not ctx.candidates:
         return (
-            _StepOutcome(True, "skipped: no candidates to analyze", is_skipped=True),
+            StepOutcome(True, "skipped: no candidates to analyze", is_skipped=True),
             None,
             None,
         )
     if text_items is None:
         return (
-            _StepOutcome(True, "skipped: step 5 produced no text", is_skipped=True),
+            StepOutcome(True, "skipped: step 5 produced no text", is_skipped=True),
             None,
             None,
         )
@@ -1442,14 +1449,14 @@ def _run_step_analysis_export(
         # unexpectedly unserializable state) degrades the run and still lets
         # step 8 produce a screening-only report.
         logger.exception("analysis input export failed")
-        return _StepOutcome(False, f"analysis input export failed: {exc}"), None, None
+        return StepOutcome(False, f"analysis input export failed: {exc}"), None, None
     logger.info("analysis input exported: %s", path)
-    return _StepOutcome(True, f"exported {path}"), path, payload.input_digest
+    return StepOutcome(True, f"exported {path}"), path, payload.input_digest
 
 
 def _export_request(
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     text_items: list[TextItem],
     *,
     include_prior_verdicts: bool,
@@ -1511,9 +1518,9 @@ def _export_request(
     )
 
 
-def _run_step_postmortem(
+def run_step_postmortem(
     deps: DailyDependencies, run_date: date
-) -> tuple[_StepOutcome, tuple[SignalPerformanceRow, ...]]:
+) -> tuple[StepOutcome, tuple[SignalPerformanceRow, ...]]:
     """P2-11: classify past candidates' forward returns, then aggregate (fail-soft).
 
     `run_postmortem_step` itself never raises for expected conditions (no
@@ -1533,8 +1540,8 @@ def _run_step_postmortem(
         )
     except Exception as exc:
         logger.exception("postmortem step raised unexpectedly")
-        return _StepOutcome(False, f"unexpected error: {exc}"), ()
-    return _StepOutcome(True, note), performance
+        return StepOutcome(False, f"unexpected error: {exc}"), ()
+    return StepOutcome(True, note), performance
 
 
 def _retro_step_detail(summary_line: str, notes: tuple[str, ...]) -> str:
@@ -1558,7 +1565,7 @@ def _retro_step_detail(summary_line: str, notes: tuple[str, ...]) -> str:
     return f"{summary_line} / notes: " + "; ".join(excerpt)
 
 
-def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
+def run_step_retro_collect(deps: DailyDependencies) -> StepOutcome:
     """P8-30: archive the day's verdicts into DuckDB (fail-soft).
 
     `reports/<date>/<run_id>/analysis_result.json` is the only artifact the
@@ -1584,8 +1591,8 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
         summary = collect_verdicts(deps.state_store, Path(deps.output_dir))
     except Exception as exc:
         logger.exception("retro collect step raised unexpectedly")
-        return _StepOutcome(False, f"unexpected error: {exc}")
-    return _StepOutcome(
+        return StepOutcome(False, f"unexpected error: {exc}")
+    return StepOutcome(
         True,
         _retro_step_detail(
             f"collected {summary.collected_run_count}/{summary.scanned_run_count} run(s), "
@@ -1596,7 +1603,7 @@ def _run_step_retro_collect(deps: DailyDependencies) -> _StepOutcome:
     )
 
 
-def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+def run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> StepOutcome:
     """P8-30: classify the verdicts whose horizons matured by `as_of` (fail-soft).
 
     Deterministic and idempotent: each slice's row is keyed by its own
@@ -1624,8 +1631,8 @@ def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutco
         )
     except Exception as exc:
         logger.exception("retro evaluate step raised unexpectedly")
-        return _StepOutcome(False, f"unexpected error: {exc}")
-    return _StepOutcome(
+        return StepOutcome(False, f"unexpected error: {exc}")
+    return StepOutcome(
         True,
         _retro_step_detail(
             f"evaluated {summary.evaluated_slice_count} slice(s), "
@@ -1637,7 +1644,7 @@ def _run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> _StepOutco
     )
 
 
-def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome:
+def run_step_track_update(deps: DailyDependencies, as_of: date) -> StepOutcome:
     """Carry the verdict-tracking ledger forward to `as_of` (fail-soft).
 
     Runs right after `retro_evaluate` for the same reason both of those do:
@@ -1657,8 +1664,8 @@ def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome
         )
     except Exception as exc:
         logger.exception("track update step raised unexpectedly")
-        return _StepOutcome(False, f"unexpected error: {exc}")
-    return _StepOutcome(
+        return StepOutcome(False, f"unexpected error: {exc}")
+    return StepOutcome(
         True,
         _retro_step_detail(
             f"opened {summary.opened_count}, "
@@ -1669,32 +1676,37 @@ def _run_step_track_update(deps: DailyDependencies, as_of: date) -> _StepOutcome
     )
 
 
-def _run_text_soft_step(
+def run_text_soft_step(
     options: DailyRunOptions,
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     deadline: float,
     text_symbols: list[str],
-) -> tuple[_StepOutcome, list[TextItem] | None]:
+) -> tuple[StepOutcome, list[TextItem] | None]:
     """Execute and audit the time-budgeted text step."""
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step 5_text skipped: time budget exceeded")
-        outcome, items = _TIME_BUDGET_STEP_OUTCOME, None
+        outcome, items = TIME_BUDGET_STEP_OUTCOME, None
     else:
         logger.debug("step 5_text starting")
-        _step_started(deps, "5_text")
+        step_started(deps, "5_text")
         outcome, items = _run_step_text(
             deps, text_symbols, ctx.run_date, skip=options.skip_text
         )
-    _record_step(deps, ctx.run_id, "5_text", outcome, started_at)
+    record_step(deps, ctx.run_id, "5_text", outcome, started_at)
     return outcome, items
 
 
-def _run_step_output(
+def run_step_output(
     deps: DailyDependencies,
-    output: _OutputContext,
-) -> tuple[_StepOutcome, Path | None, DailyBrief | None]:
+    output: OutputContext,
+) -> tuple[StepOutcome, Path | None, DailyBrief | None]:
+    """Build and archive the local Markdown/context/rejections artifacts, step 8.
+
+    Never fatal: this is the always-attempted step that produces at least a
+    screening-only report even when earlier fail-soft steps degraded the run.
+    """
     tracked = _published_tracking(deps, output.run.run_date)
     context = DailyBriefContext(
         run_id=output.run.run_id,
@@ -1718,17 +1730,17 @@ def _run_step_output(
     try:
         brief = build_daily_brief(context, deps.market_store)
     except Exception as exc:
-        return _StepOutcome(False, f"brief construction failed: {exc}"), None, None
+        return StepOutcome(False, f"brief construction failed: {exc}"), None, None
     try:
         report_path = write_markdown_report(brief, output.status, deps.output_dir)
     except LatestMarkdownUpdateError as exc:
         return (
-            _StepOutcome(False, f"latest Markdown update failed: {exc}"),
+            StepOutcome(False, f"latest Markdown update failed: {exc}"),
             exc.report_path,
             brief,
         )
     except Exception as exc:
-        return _StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
+        return StepOutcome(False, f"Markdown archive failed: {exc}"), None, brief
     if (
         output.analysis_input_path is not None
         and output.analysis_input_digest is not None
@@ -1746,7 +1758,7 @@ def _run_step_output(
             )
         except Exception as exc:
             return (
-                _StepOutcome(False, f"report context archive failed: {exc}"),
+                StepOutcome(False, f"report context archive failed: {exc}"),
                 report_path,
                 brief,
             )
@@ -1766,11 +1778,11 @@ def _run_step_output(
         # already durable, so a diagnostic artifact cannot cost the run.
         logger.exception("rejections artifact archive failed")
         return (
-            _StepOutcome(False, f"rejections archive failed: {exc}"),
+            StepOutcome(False, f"rejections archive failed: {exc}"),
             report_path,
             brief,
         )
-    return _StepOutcome(True), report_path, brief
+    return StepOutcome(True), report_path, brief
 
 
 def _published_tracking(
@@ -1805,13 +1817,14 @@ def _published_tracking(
     )
 
 
-def _record_step(
+def record_step(
     deps: DailyDependencies,
     run_id: UUID,
     step: str,
-    outcome: _StepOutcome,
+    outcome: StepOutcome,
     started_at: float,
 ) -> None:
+    """Persist one step's outcome and, for a visible step, its progress event."""
     duration = time.perf_counter() - started_at
     if outcome.is_skipped:
         status = StepStatus.SKIPPED
@@ -1833,13 +1846,13 @@ def _record_step(
         )
 
 
-def _step_started(deps: DailyDependencies, step: str) -> None:
+def step_started(deps: DailyDependencies, step: str) -> None:
     """Notify the injected reporter when a user-visible step begins."""
     index = _VISIBLE_PIPELINE_STEPS.index(step) + 1
     deps.progress.step_started(index, len(_VISIBLE_PIPELINE_STEPS), step)
 
 
-def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
+def warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
     """Log NFR-03 stuck-run detection results, if any were found and marked failed."""
     if stale_run_ids:
         logger.warning(
@@ -1851,9 +1864,51 @@ def _warn_stale_runs(run_id: UUID, stale_run_ids: list[UUID]) -> None:
 
 
 # Compatibility facade: the public console-script target remains this module.
-# Step implementations and shared dependency values above intentionally stay
-# importable here; lifecycle and composition have explicit module boundaries.
-__all__ = ["DailyDependencies", "main", "run_daily"]
+# Everything below `DailyDependencies`/`main`/`run_daily` is the declared
+# module boundary Issue #400 asked for: every name `daily_runner.py` and
+# `daily_composition.py` import from here is public (no leading `_`) and
+# listed in `__all__`; `tests/test_quality_contracts.py`'s
+# `test_daily_runner_and_composition_import_no_private_name_from_daily`
+# enforces that a sibling never reaches back in for a name that stays private
+# because it is used only inside this module. Step implementations and
+# shared dependency values are still meant to live in this module -- only the
+# rename is in scope here, not moving them into a `pipeline/steps/`
+# subpackage (Issue #193 rejected that split; Issue #400 restates it).
+__all__ = [
+    "TIME_BUDGET_STEP_OUTCOME",
+    "DailyDependencies",
+    "OutputCompletion",
+    "OutputContext",
+    "RiskStepRequest",
+    "RunContext",
+    "StepOutcome",
+    "config_hash",
+    "main",
+    "paths_for_mode",
+    "record_exposure_decision",
+    "record_ftd_snapshot",
+    "record_regime_snapshot",
+    "record_step",
+    "run_daily",
+    "run_metadata",
+    "run_mode",
+    "run_step_analysis_export",
+    "run_step_fundamentals",
+    "run_step_output",
+    "run_step_postmortem",
+    "run_step_prices",
+    "run_step_retro_collect",
+    "run_step_retro_evaluate",
+    "run_step_risk",
+    "run_step_screening",
+    "run_step_track_update",
+    "run_text_soft_step",
+    "screening_lookback_days",
+    "select_symbols",
+    "step_started",
+    "text_target_symbols",
+    "warn_stale_runs",
+]
 
 
 def run_daily(options: DailyRunOptions, deps: DailyDependencies) -> DailyRunResult:

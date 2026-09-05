@@ -33,12 +33,12 @@ from swing_copilot.pipeline.daily import (
     _FUNDAMENTALS_EMPTY_BACKOFF_DAYS,
     _FUNDAMENTALS_REFRESH_INTERVAL_DAYS,
     DailyDependencies,
-    _config_hash,
     _FundamentalsFreshness,
     _refresh_interval_days,
-    _run_step_fundamentals,
-    _select_symbols,
+    config_hash,
     run_daily,
+    run_step_fundamentals,
+    select_symbols,
 )
 from swing_copilot.pipeline.daily_runner import _ANALYSIS_GAP_LOOKBACK_DAYS
 from swing_copilot.screening import (
@@ -156,7 +156,7 @@ _HELD_SYMBOL = "ZHELD"
 
 
 class _RecordingEdgarClient:
-    """EDGAR fake that records the order `_run_step_fundamentals` fetches in."""
+    """EDGAR fake that records the order `run_step_fundamentals` fetches in."""
 
     def __init__(self):
         self.fetched: list[str] = []
@@ -456,7 +456,7 @@ class TestPriceStepRawBars:
 
 class TestRunFingerprintAndMetadata:
     def test_fingerprint_is_canonical_and_covers_settings_strategy_and_key(self, deps):
-        canonical = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")
+        canonical = config_hash(deps.settings, STRATEGIES_CONFIG, "default")
         reordered = StrategiesConfig.model_validate(
             {
                 "strategies": {
@@ -485,10 +485,10 @@ class TestRunFingerprintAndMetadata:
         changed_settings = deps.settings.model_copy(update={"risk": changed_risk})
 
         assert len(canonical) == 64
-        assert canonical == _config_hash(deps.settings, reordered, "default")
-        assert canonical != _config_hash(deps.settings, changed_strategy, "default")
-        assert canonical != _config_hash(changed_settings, STRATEGIES_CONFIG, "default")
-        assert canonical != _config_hash(
+        assert canonical == config_hash(deps.settings, reordered, "default")
+        assert canonical != config_hash(deps.settings, changed_strategy, "default")
+        assert canonical != config_hash(changed_settings, STRATEGIES_CONFIG, "default")
+        assert canonical != config_hash(
             deps.settings, TWO_STRATEGIES_CONFIG, "growth_v2"
         )
 
@@ -496,15 +496,15 @@ class TestRunFingerprintAndMetadata:
         """Fingerprint stability across #396's typed threading.
 
         Threading `StrategiesConfig` through typed instead of a
-        `model_dump()`'d dict indexed by `_config_hash` must not move this
+        `model_dump()`'d dict indexed by `config_hash` must not move this
         fingerprint -- it is persisted (`runs.config_hash`) and drives rerun
         identity.
         """
-        new_hash = _config_hash(deps.settings, STRATEGIES_CONFIG, "default")
+        new_hash = config_hash(deps.settings, STRATEGIES_CONFIG, "default")
 
         # Reproduce the pre-#396 shape byte-for-byte: `DailyDependencies.
         # strategies_config` as a `model_dump()`'d dict, dict-indexed by
-        # `_config_hash` instead of read off the typed model.
+        # `config_hash` instead of read off the typed model.
         legacy_strategies_config = STRATEGIES_CONFIG.model_dump()
         legacy_selected_strategy = legacy_strategies_config["strategies"]["default"]
         legacy_payload = {
@@ -563,7 +563,7 @@ class TestRunFingerprintAndMetadata:
                 [str(result.run_id)],
             ).fetchone()
         metadata = json.loads(row[1])
-        assert row[0] == _config_hash(
+        assert row[0] == config_hash(
             tracked_deps.settings,
             tracked_deps.strategies_config,
             tracked_deps.strategy_key,
@@ -989,7 +989,7 @@ class TestSymbolLimit:
         # the universe-relative RS percentile (condition 7) measures.
         universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
 
-        symbols = _select_symbols(universe, set(), 20)
+        symbols = select_symbols(universe, set(), 20)
 
         assert symbols != [f"S{index:03d}" for index in range(20)]
         assert len(symbols) == 20
@@ -998,8 +998,8 @@ class TestSymbolLimit:
     def test_limit_selects_the_same_symbols_on_every_run(self):
         universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
 
-        first = _select_symbols(universe, set(), 25)
-        again = _select_symbols(tuple(reversed(universe)), set(), 25)
+        first = select_symbols(universe, set(), 25)
+        again = select_symbols(tuple(reversed(universe)), set(), 25)
 
         # Deterministic, and pinned so a reordered universe or another machine
         # cannot silently redraw the sample.
@@ -1009,7 +1009,7 @@ class TestSymbolLimit:
     def test_held_symbols_are_screened_regardless_of_the_limit(self):
         universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
 
-        symbols = _select_symbols(universe, {"HELD"}, 20)
+        symbols = select_symbols(universe, {"HELD"}, 20)
 
         assert "HELD" in symbols
         assert symbols == sorted(symbols)
@@ -1017,18 +1017,18 @@ class TestSymbolLimit:
     def test_zero_limit_selects_only_held_symbols(self):
         universe = self._sectored_universe({"Energy": 100, "Utilities": 100})
 
-        assert _select_symbols(universe, {"HELD"}, 0) == ["HELD"]
-        assert _select_symbols(universe, set(), 0) == []
+        assert select_symbols(universe, {"HELD"}, 0) == ["HELD"]
+        assert select_symbols(universe, set(), 0) == []
 
     def test_limit_at_or_above_the_universe_size_keeps_every_symbol(self):
         universe = self._sectored_universe({"Energy": 3})
 
-        assert _select_symbols(universe, set(), 5) == ["S000", "S001", "S002"]
+        assert select_symbols(universe, set(), 5) == ["S000", "S001", "S002"]
 
     def test_no_limit_selects_the_whole_universe(self):
         universe = self._sectored_universe({"Energy": 3, "Utilities": 2})
 
-        symbols = _select_symbols(universe, set(), None)
+        symbols = select_symbols(universe, set(), None)
 
         assert symbols == [member.symbol for member in universe]
 
@@ -1038,14 +1038,14 @@ class TestSymbolLimit:
         # still reach the fetch set, or its exit checks run on stale bars.
         universe = self._sectored_universe({"Energy": 3})
 
-        symbols = _select_symbols(universe, {"S001", "OLDCO"}, None)
+        symbols = select_symbols(universe, {"S001", "OLDCO"}, None)
 
         assert symbols == ["OLDCO", "S000", "S001", "S002"]
 
     def test_no_limit_returns_alphabetical_order_for_any_universe_order(self):
         universe = self._sectored_universe({"Energy": 3})
 
-        assert _select_symbols(tuple(reversed(universe)), set(), None) == [
+        assert select_symbols(tuple(reversed(universe)), set(), None) == [
             "S000",
             "S001",
             "S002",
@@ -1056,8 +1056,8 @@ class TestSymbolLimit:
         # the sample it draws, only add the holdings on top of it.
         universe = self._sectored_universe({"Energy": 40, "Utilities": 60})
 
-        without_holdings = _select_symbols(universe, set(), 25)
-        with_holdings = _select_symbols(universe, {"OLDCO"}, 25)
+        without_holdings = select_symbols(universe, set(), 25)
+        with_holdings = select_symbols(universe, {"OLDCO"}, 25)
 
         assert without_holdings[:3] == ["S003", "S011", "S013"]
         assert with_holdings == sorted([*without_holdings, "OLDCO"])
@@ -1101,7 +1101,7 @@ class TestSymbolLimit:
         self, deps, state_store
     ):
         # Issue #212: the production 18:30 routine never passes `--limit`, and
-        # `_select_symbols()` is the only input to the daily price fetch. A
+        # `select_symbols()` is the only input to the daily price fetch. A
         # position whose symbol left the S&P 500 snapshot must still get today's
         # bar, otherwise its trailing stop / max-hold checks read stale prices.
         # `StubDataProvider` already records every `get_daily_bars` call's
@@ -2828,7 +2828,7 @@ class TestFundamentalsIncrementalRefresh:
     @staticmethod
     def _run_fundamentals_step(deps: DailyDependencies, *, as_of: date) -> None:
         """Exercise the refresh contract without paying for full composition."""
-        _run_step_fundamentals(
+        run_step_fundamentals(
             deps,
             [member.symbol for member in deps.universe],
             as_of,
@@ -2973,10 +2973,10 @@ class TestFundamentalsIncrementalRefresh:
 class TestFundamentalsHeldFirstOrder:
     """Issue #219: the NFR-03 budget must truncate candidates, not holdings.
 
-    `_select_symbols()` returns lexicographic order, so a holding whose ticker
+    `select_symbols()` returns lexicographic order, so a holding whose ticker
     sorts after every candidate used to lose its fundamentals refresh to
     alphabetically-earlier candidates whenever the budget ran out mid-step --
-    the exact outcome `_text_target_symbols()` already prevents on the text
+    the exact outcome `text_target_symbols()` already prevents on the text
     side. `_HELD_SYMBOL` is deliberately last alphabetically and outside the
     universe, so lexicographic order and held-first order disagree.
     """
@@ -3064,7 +3064,7 @@ class TestFundamentalsHeldFirstOrder:
 
         assert result.status == RunStatus.SUCCESS
         # Same set as before, reordered held-first and deterministically:
-        # each block keeps `_select_symbols()`'s lexicographic order.
+        # each block keeps `select_symbols()`'s lexicographic order.
         assert edgar_client.fetched == [_HELD_SYMBOL, "AAPL", "MSFT"]
         assert self._fundamentals_step_row(state_store, result.run_id) == (
             "success",

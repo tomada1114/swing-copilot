@@ -368,7 +368,7 @@ def run_postmortem_step(
     history yet) completes this step successfully with nothing to show
     (the roadmap's NO_PRIOR_RUN fallback). Only a genuinely unexpected
     exception (e.g. a DB connectivity failure) propagates, to be caught by
-    `pipeline/daily.py`'s `_run_step_postmortem` wrapper and recorded as a
+    `pipeline/daily.py`'s `run_step_postmortem` wrapper and recorded as a
     degraded (not failed/aborted) step.
 
     Args:

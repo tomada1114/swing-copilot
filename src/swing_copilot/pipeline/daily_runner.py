@@ -22,36 +22,36 @@ from swing_copilot.exceptions import PreflightAbort
 from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import DailyRunOptions, DailyRunResult, RunMode, RunStatus
 from swing_copilot.pipeline.daily import (
-    _TIME_BUDGET_STEP_OUTCOME,
+    TIME_BUDGET_STEP_OUTCOME,
     DailyDependencies,
-    _config_hash,
-    _OutputCompletion,
-    _OutputContext,
-    _record_exposure_decision,
-    _record_ftd_snapshot,
-    _record_regime_snapshot,
-    _record_step,
-    _RiskStepRequest,
-    _run_metadata,
-    _run_mode,
-    _run_step_analysis_export,
-    _run_step_fundamentals,
-    _run_step_output,
-    _run_step_postmortem,
-    _run_step_prices,
-    _run_step_retro_collect,
-    _run_step_retro_evaluate,
-    _run_step_risk,
-    _run_step_screening,
-    _run_step_track_update,
-    _run_text_soft_step,
-    _RunContext,
-    _screening_lookback_days,
-    _select_symbols,
-    _step_started,
-    _StepOutcome,
-    _text_target_symbols,
-    _warn_stale_runs,
+    OutputCompletion,
+    OutputContext,
+    RiskStepRequest,
+    RunContext,
+    StepOutcome,
+    config_hash,
+    record_exposure_decision,
+    record_ftd_snapshot,
+    record_regime_snapshot,
+    record_step,
+    run_metadata,
+    run_mode,
+    run_step_analysis_export,
+    run_step_fundamentals,
+    run_step_output,
+    run_step_postmortem,
+    run_step_prices,
+    run_step_retro_collect,
+    run_step_retro_evaluate,
+    run_step_risk,
+    run_step_screening,
+    run_step_track_update,
+    run_text_soft_step,
+    screening_lookback_days,
+    select_symbols,
+    step_started,
+    text_target_symbols,
+    warn_stale_runs,
 )
 from swing_copilot.report.daily_brief import MARKET_STRIP_SYMBOLS
 from swing_copilot.report.incomplete_runs import (
@@ -303,7 +303,7 @@ def _prior_analysis_gaps(
     followed by a skill session that owes one:
 
     * A `--dry-run` gets its own throwaway database and `reports/dry_run` tree
-      (`_paths_for_mode`), yet step 6 still exports there. Two dry runs a few
+      (`paths_for_mode`), yet step 6 still exports there. Two dry runs a few
       days apart would otherwise make the second one report the first, inside
       the mode the docs describe as disposable.
     * A `--as-of` replay exports for a day whose analysis already happened or
@@ -387,7 +387,7 @@ def _analysis_gap_notices(analysis_gaps: list[dict[str, object]]) -> tuple[str, 
     )
 
 
-def _mark_historical_replay(analysis_input_path: Path, ctx: _RunContext) -> None:
+def _mark_historical_replay(analysis_input_path: Path, ctx: RunContext) -> None:
     """Stamp a replay's export so later live runs never read it as a gap.
 
     Written beside the `analysis_input.json` it describes, because that file
@@ -444,11 +444,11 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     budget_s = deps.settings.schedule.timeout_minutes * 60
     deadline = run_started_at + budget_s
 
-    mode = _run_mode(options)
+    mode = run_mode(options)
     fetch_cutoff = options.as_of or deps.clock.today()
     is_historical = options.as_of is not None
     held_symbols = _held_symbols(deps, is_historical=is_historical)
-    symbols = _select_symbols(deps.universe, held_symbols, options.limit)
+    symbols = select_symbols(deps.universe, held_symbols, options.limit)
     # The market strip is never screened but must be fetched for report context.
     price_symbols = sorted({*symbols, *MARKET_STRIP_SYMBOLS})
 
@@ -464,7 +464,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         # resolve to a session still in progress if the scheduled job started
         # late. Both now abort before any state is written rather than
         # booking a day that has not (yet, or ever) closed.
-        start = fetch_cutoff - timedelta(days=_screening_lookback_days(deps))
+        start = fetch_cutoff - timedelta(days=screening_lookback_days(deps))
         try:
             prefetched_prices = deps.data_provider.get_daily_bars(
                 price_symbols, start, fetch_cutoff + timedelta(days=1)
@@ -500,7 +500,13 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         deps, run_date, mode=mode, is_historical=is_historical
     )
 
-    config_hash = _config_hash(deps.settings, deps.strategies_config, deps.strategy_key)
+    # Named apart from the imported `config_hash()` function itself (Issue
+    # #400's rename lost the leading `_` that used to keep the two apart):
+    # assigning straight to `config_hash` here would shadow the function name
+    # for this whole scope and crash on its own right-hand-side call.
+    run_config_hash = config_hash(
+        deps.settings, deps.strategies_config, deps.strategy_key
+    )
     # Issue #189: record what that hash stands for before anything reads it.
     # `config_hash` alone is one-way, so a settings edit made every earlier
     # run's parameters unrecoverable -- unlike a metric, a value that was never
@@ -508,13 +514,13 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     sections = config_snapshot_sections(deps.settings)
     deps.state_store.upsert_config_version(
         ConfigVersionRecord(
-            config_hash=config_hash,
+            config_hash=run_config_hash,
             first_seen_run_date=run_date,
             snapshot_hash=config_snapshot_hash(sections),
             sections=sections,
         )
     )
-    metadata = _run_metadata(deps)
+    metadata = run_metadata(deps)
     if analysis_gaps:
         # Recorded on *this* run's row rather than the gapped ones: those rows
         # are finished history, and `metadata_json` already exists for exactly
@@ -523,7 +529,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     run_id = deps.state_store.start_run(
         run_date,
         mode,
-        config_hash,
+        run_config_hash,
         metadata=metadata,
     )
     logger.info(
@@ -538,17 +544,17 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
         logger.warning(
             "run %s universe data quality: %s", run_id, deps.universe_warning
         )
-        _record_step(
+        record_step(
             deps,
             run_id,
             "0_universe",
-            _StepOutcome(False, deps.universe_warning),
+            StepOutcome(False, deps.universe_warning),
             time.perf_counter(),
         )
 
     stale_cutoff = deps.clock.now() - timedelta(seconds=budget_s)
     stale_run_ids = deps.state_store.mark_stale_running_runs(stale_cutoff, run_id)
-    _warn_stale_runs(run_id, stale_run_ids)
+    warn_stale_runs(run_id, stale_run_ids)
 
     empty_run_data: tuple[
         list[Candidate],
@@ -562,43 +568,43 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     ftd_snapshot: FtdSnapshot | None = None
     earnings_guard_notice: str | None = None
 
-    def _step_screening() -> _StepOutcome:
+    def _step_screening() -> StepOutcome:
         nonlocal candidates, rejections, truncated
-        outcome, screening = _run_step_screening(deps, symbols, run_date, run_id)
+        outcome, screening = run_step_screening(deps, symbols, run_date, run_id)
         candidates = screening.candidates
         rejections = screening.rejections
         truncated = screening.truncated
         return outcome
 
-    def _step_risk() -> _StepOutcome:
+    def _step_risk() -> StepOutcome:
         nonlocal earnings_guard_notice, exposure_decision
         nonlocal ftd_snapshot
         nonlocal regime_snapshot, risk_assessments
-        regime_snapshot = _record_regime_snapshot(deps, run_id, run_date)
-        ftd_snapshot = _record_ftd_snapshot(deps, run_id, regime_snapshot)
-        exposure_decision = _record_exposure_decision(deps, run_id, regime_snapshot)
+        regime_snapshot = record_regime_snapshot(deps, run_id, run_date)
+        ftd_snapshot = record_ftd_snapshot(deps, run_id, regime_snapshot)
+        exposure_decision = record_exposure_decision(deps, run_id, regime_snapshot)
         (
             outcome,
             risk_assessments,
             earnings_guard_notice,
-        ) = _run_step_risk(
+        ) = run_step_risk(
             deps,
-            _RiskStepRequest(
+            RiskStepRequest(
                 candidates, run_id, run_date, exposure_decision, is_historical
             ),
         )
         return outcome
 
-    def _step_prices() -> _StepOutcome:
+    def _step_prices() -> StepOutcome:
         # `prefetched_prices` is guaranteed non-empty for a live run: a failed
         # or empty prefetch already aborted above, before `start_run()`.
-        return _run_step_prices(deps, price_symbols, run_date, prefetched_prices)
+        return run_step_prices(deps, price_symbols, run_date, prefetched_prices)
 
-    fatal_steps: list[tuple[str, Callable[[], _StepOutcome]]] = [
+    fatal_steps: list[tuple[str, Callable[[], StepOutcome]]] = [
         ("1_prices", _step_prices),
         (
             "2_fundamentals",
-            lambda: _run_step_fundamentals(
+            lambda: run_step_fundamentals(
                 deps,
                 symbols,
                 run_date,
@@ -611,14 +617,14 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
     ]
     for step_name, step_fn in fatal_steps:
         logger.debug("step %s starting", step_name)
-        _step_started(deps, step_name)
+        step_started(deps, step_name)
         started_at = time.perf_counter()
         try:
             outcome = step_fn()
         except Exception as exc:
             logger.exception("step %s raised unexpectedly", step_name)
-            outcome = _StepOutcome(False, f"unexpected error: {exc}")
-        _record_step(deps, run_id, step_name, outcome, started_at)
+            outcome = StepOutcome(False, f"unexpected error: {exc}")
+        record_step(deps, run_id, step_name, outcome, started_at)
         if not outcome.success:
             deps.state_store.complete_run(
                 run_id, RunStatus.FAILED, error_summary=outcome.detail
@@ -628,7 +634,7 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
             )
             return DailyRunResult(run_id, run_date, RunStatus.FAILED, exit_code=1)
 
-    ctx = _RunContext(
+    ctx = RunContext(
         run_id=run_id,
         run_date=run_date,
         candidates=candidates,
@@ -648,14 +654,14 @@ def run_daily(  # noqa: PLR0915 - the documented batch lifecycle is intentionall
 def _run_soft_steps(
     options: DailyRunOptions,
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     deadline: float,
 ) -> DailyRunResult:
     """Run fail-soft local and optional steps after required steps finish."""
     degraded = deps.universe_warning is not None
-    text_symbols = _text_target_symbols(ctx.held_symbols, ctx.candidates)
+    text_symbols = text_target_symbols(ctx.held_symbols, ctx.candidates)
 
-    text_outcome, text_items = _run_text_soft_step(
+    text_outcome, text_items = run_text_soft_step(
         options, deps, ctx, deadline, text_symbols
     )
     degraded = degraded or not text_outcome.success
@@ -684,15 +690,15 @@ def _run_soft_steps(
     if export_over_budget:
         logger.warning("step 6_analysis_export skipped: time budget exceeded")
         export_outcome, analysis_input_path, analysis_input_digest = (
-            _TIME_BUDGET_STEP_OUTCOME,
+            TIME_BUDGET_STEP_OUTCOME,
             None,
             None,
         )
     else:
         logger.debug("step 6_analysis_export starting")
-        _step_started(deps, "6_analysis_export")
+        step_started(deps, "6_analysis_export")
         export_outcome, analysis_input_path, analysis_input_digest = (
-            _run_step_analysis_export(
+            run_step_analysis_export(
                 deps,
                 ctx,
                 text_items,
@@ -701,7 +707,7 @@ def _run_soft_steps(
                 ),
             )
         )
-    _record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
+    record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
     degraded = degraded or not export_outcome.success
     if options.as_of is not None and analysis_input_path is not None:
         # Issue #254: a replay's export is nobody's to answer, and only a
@@ -711,13 +717,11 @@ def _run_soft_steps(
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step postmortem skipped: time budget exceeded")
-        postmortem_outcome, signal_performance = _TIME_BUDGET_STEP_OUTCOME, ()
+        postmortem_outcome, signal_performance = TIME_BUDGET_STEP_OUTCOME, ()
     else:
         logger.debug("step postmortem starting")
-        postmortem_outcome, signal_performance = _run_step_postmortem(
-            deps, ctx.run_date
-        )
-    _record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
+        postmortem_outcome, signal_performance = run_step_postmortem(deps, ctx.run_date)
+    record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
     degraded = degraded or not postmortem_outcome.success
 
     degraded = _run_track_update_soft_step(deps, ctx, deadline) or degraded
@@ -741,10 +745,10 @@ def _run_soft_steps(
     )
     started_at = time.perf_counter()
     logger.debug("step 8_output starting")
-    _step_started(deps, "8_output")
-    output_outcome, report_path, brief = _run_step_output(
+    step_started(deps, "8_output")
+    output_outcome, report_path, brief = run_step_output(
         deps,
-        _OutputContext(
+        OutputContext(
             run=ctx,
             analysis_input_path=analysis_input_path,
             analysis_input_digest=analysis_input_digest,
@@ -753,11 +757,11 @@ def _run_soft_steps(
             status=status_before_output,
         ),
     )
-    _record_step(deps, ctx.run_id, "8_output", output_outcome, started_at)
+    record_step(deps, ctx.run_id, "8_output", output_outcome, started_at)
     return _finalize_output(
         deps,
         ctx,
-        _OutputCompletion(
+        OutputCompletion(
             outcome=output_outcome,
             report_path=report_path,
             brief=brief,
@@ -771,7 +775,7 @@ def _run_soft_steps(
 
 def _run_retro_collect_soft_step(
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     deadline: float,
 ) -> bool:
     """Archive the previously ingested verdicts, ahead of the export (Issue #207).
@@ -791,17 +795,17 @@ def _run_retro_collect_soft_step(
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step retro_collect skipped: time budget exceeded")
-        outcome = _TIME_BUDGET_STEP_OUTCOME
+        outcome = TIME_BUDGET_STEP_OUTCOME
     else:
         logger.debug("step retro_collect starting")
-        outcome = _run_step_retro_collect(deps)
-    _record_step(deps, ctx.run_id, "retro_collect", outcome, started_at)
+        outcome = run_step_retro_collect(deps)
+    record_step(deps, ctx.run_id, "retro_collect", outcome, started_at)
     return not outcome.success
 
 
 def _run_retro_evaluate_soft_step(
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     deadline: float,
 ) -> bool:
     """Classify the matured verdicts, ahead of the export (Issue #209).
@@ -825,17 +829,17 @@ def _run_retro_evaluate_soft_step(
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step retro_evaluate skipped: time budget exceeded")
-        outcome = _TIME_BUDGET_STEP_OUTCOME
+        outcome = TIME_BUDGET_STEP_OUTCOME
     else:
         logger.debug("step retro_evaluate starting")
-        outcome = _run_step_retro_evaluate(deps, ctx.run_date)
-    _record_step(deps, ctx.run_id, "retro_evaluate", outcome, started_at)
+        outcome = run_step_retro_evaluate(deps, ctx.run_date)
+    record_step(deps, ctx.run_id, "retro_evaluate", outcome, started_at)
     return not outcome.success
 
 
 def _run_track_update_soft_step(
     deps: DailyDependencies,
-    ctx: _RunContext,
+    ctx: RunContext,
     deadline: float,
 ) -> bool:
     """Carry the verdict-tracking ledger forward, after the export.
@@ -864,18 +868,18 @@ def _run_track_update_soft_step(
     started_at = time.perf_counter()
     if deps.monotonic() >= deadline:
         logger.warning("step track_update skipped: time budget exceeded")
-        track_outcome = _TIME_BUDGET_STEP_OUTCOME
+        track_outcome = TIME_BUDGET_STEP_OUTCOME
     else:
         logger.debug("step track_update starting")
-        track_outcome = _run_step_track_update(deps, ctx.run_date)
-    _record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
+        track_outcome = run_step_track_update(deps, ctx.run_date)
+    record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
     return not track_outcome.success
 
 
 def _finalize_output(
     deps: DailyDependencies,
-    ctx: _RunContext,
-    completion: _OutputCompletion,
+    ctx: RunContext,
+    completion: OutputCompletion,
     degraded: bool,
 ) -> DailyRunResult:
     """Persist and return the only terminal state compatible with step 8."""
@@ -927,14 +931,14 @@ def _finalize_output(
 
 def _missing_sources(
     deps: DailyDependencies,
-    text_outcome: _StepOutcome,
-    export_outcome: _StepOutcome,
+    text_outcome: StepOutcome,
+    export_outcome: StepOutcome,
 ) -> tuple[str, ...]:
     """List unavailable source boundaries without conflating notifications."""
     return tuple(
         label
         for label, outcome in (
-            ("universe", _StepOutcome(deps.universe_warning is None)),
+            ("universe", StepOutcome(deps.universe_warning is None)),
             ("text", text_outcome),
             ("analysis input", export_outcome),
         )

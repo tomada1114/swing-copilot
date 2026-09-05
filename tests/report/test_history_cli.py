@@ -50,7 +50,7 @@ _TABLES = (
 
 
 def _db_path(state_store: StateStore) -> str:
-    return str(state_store._database.db_path)  # noqa: SLF001
+    return str(state_store.database.db_path)
 
 
 def _write_run_archive(tmp_path: Path, run_date: date, *, has_result: bool) -> UUID:
@@ -98,7 +98,7 @@ def _insert_legacy_risk_assessment(
     reproduced by writing straight to the table -- exactly what an
     un-rewritten pre-#348 archive still looks like (Issue #385).
     """
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         conn.execute(
             "INSERT INTO risk_assessments (run_id, symbol, status, max_shares, "
             "reasons_json, warnings_json) VALUES (?, ?, 'approved', ?, '[]', '[]')",
@@ -464,9 +464,9 @@ class TestReadOnly:
     """REQ-007: no `copilot-history` subcommand may mutate any table."""
 
     def _assert_no_mutation(self, state_store: StateStore, argv: list[str]) -> None:
-        before = _snapshot(state_store._database)  # noqa: SLF001
+        before = _snapshot(state_store.database)
         main([*argv, "--db", _db_path(state_store)])
-        after = _snapshot(state_store._database)  # noqa: SLF001
+        after = _snapshot(state_store.database)
         assert before == after
 
     def test_runs_does_not_mutate_any_table(
@@ -507,7 +507,7 @@ class TestReadOnly:
         # work, to prove even that branch stays `SELECT`-only (REQ-007).
         run_id = _write_run_archive(tmp_path, date(2026, 8, 10), has_result=False)
         _insert_run_row(state_store, run_id, date(2026, 8, 10))
-        before = _snapshot(state_store._database)  # noqa: SLF001
+        before = _snapshot(state_store.database)
 
         with pytest.raises(SystemExit):
             main(
@@ -520,5 +520,5 @@ class TestReadOnly:
                 ]
             )
 
-        assert _snapshot(state_store._database) == before  # noqa: SLF001
+        assert _snapshot(state_store.database) == before
         capsys.readouterr()

@@ -219,8 +219,15 @@ def base_deps(settings, market_store, state_store, tmp_path):
     )
 
 
-def _step_status(state_store: StateStore, run_id: UUID, step: str) -> str:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+def _step_status(
+    state_store: StateStore,
+    run_id: UUID,
+    step: str,
+    *,
+    database: Database | None = None,
+) -> str:
+    target_database = state_store.database if database is None else database
+    with target_database.connect() as conn:
         row = conn.execute(
             "SELECT status FROM run_steps WHERE run_id = ? AND step = ?",
             [str(run_id), step],
@@ -231,7 +238,7 @@ def _step_status(state_store: StateStore, run_id: UUID, step: str) -> str:
 
 
 def _step_detail(state_store: StateStore, run_id: UUID, step: str) -> str:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         row = conn.execute(
             "SELECT detail FROM run_steps WHERE run_id = ? AND step = ?",
             [str(run_id), step],
@@ -288,7 +295,7 @@ class TestTextStepDetailMessagesAreTruthful:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.DEGRADED
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             detail = conn.execute(
                 "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
                 [str(result.run_id)],
@@ -305,7 +312,7 @@ class TestTextStepDetailMessagesAreTruthful:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.DEGRADED
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             detail = conn.execute(
                 "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
                 [str(result.run_id)],
@@ -326,7 +333,7 @@ class TestTextStepDetailMessagesAreTruthful:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.DEGRADED
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             detail = conn.execute(
                 "SELECT detail FROM run_steps WHERE run_id = ? AND step = '5_text'",
                 [str(result.run_id)],
@@ -388,11 +395,24 @@ class TestPostmortemFailureDegrades:
         assert result.exit_code == 0
         assert result.report_path is not None
         assert result.report_path.is_file()
+        underlying_database = exploding_state_store._database  # noqa: SLF001 - private database access: broken public property
         assert (
-            _step_status(exploding_state_store, result.run_id, "postmortem") == "failed"
+            _step_status(
+                exploding_state_store,
+                result.run_id,
+                "postmortem",
+                database=underlying_database,
+            )
+            == "failed"
         )
         assert (
-            _step_status(exploding_state_store, result.run_id, "8_output") == "success"
+            _step_status(
+                exploding_state_store,
+                result.run_id,
+                "8_output",
+                database=underlying_database,
+            )
+            == "success"
         )
 
     def test_postmortem_succeeds_when_no_prior_runs_exist_yet(
@@ -460,7 +480,7 @@ class TestRetroStepsRunDaily:
         assert result.status == RunStatus.SUCCESS
         assert _step_status(state_store, result.run_id, "retro_collect") == "success"
         assert _step_status(state_store, result.run_id, "retro_evaluate") == "success"
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute("SELECT run_id, symbol FROM verdicts").fetchall()
         # The daily run really invoked `retro.collect`, not a copy of it.
         assert [(str(row[0]), row[1]) for row in rows] == [(ARCHIVED_RUN_ID, "AAPL")]
@@ -755,7 +775,7 @@ class TestUniverseFallbackDegrades:
         assert result.status == RunStatus.DEGRADED
         assert result.exit_code == 0
         assert _step_status(state_store, result.run_id, "0_universe") == "failed"
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT detail FROM run_steps WHERE run_id = ? AND step = '0_universe'",
                 [str(result.run_id)],
@@ -785,7 +805,7 @@ class TestMixedOutcomeTextStepPreservesSuccesses:
             _step_status(state_store, result.run_id, "6_analysis_export") == "success"
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol FROM text_items WHERE source_type = 'news'"
             ).fetchall()
@@ -835,7 +855,7 @@ def _seed_virtual_position(
 
 
 def _news_covered_symbols(state_store: StateStore) -> set[str]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         rows = conn.execute(
             "SELECT symbol FROM text_items WHERE source_type = 'news'"
         ).fetchall()
@@ -843,7 +863,7 @@ def _news_covered_symbols(state_store: StateStore) -> set[str]:
 
 
 def _candidate_symbols(state_store: StateStore, run_id: UUID) -> set[str]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         rows = conn.execute(
             "SELECT symbol FROM candidates WHERE run_id = ?", [str(run_id)]
         ).fetchall()
@@ -1373,7 +1393,7 @@ class TestCrossSymbolNewsDeduplication:
 
         run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol FROM text_items WHERE source_id = ?",
                 [SharedArticleNewsClient.SHARED_SOURCE_ID],

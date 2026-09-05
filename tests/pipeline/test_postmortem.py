@@ -228,7 +228,7 @@ def _seed_benchmark(market_store: MarketStore, as_of: date) -> None:
 def _signal_outcome_rows(
     state_store: StateStore, symbol: str, horizon_days: int
 ) -> list[tuple[object, ...]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(
             "SELECT forward_return_pct, classification FROM signal_outcomes "
             "WHERE symbol = ? AND horizon_days = ?",
@@ -507,7 +507,7 @@ class TestRunPostmortemStepLookAheadPrevention:
 def _universe_return_rows(
     state_store: StateStore, horizon_days: int
 ) -> list[tuple[object, ...]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(
             "SELECT symbol, outcome_class, reason_code, forward_return_pct "
             "FROM universe_forward_returns WHERE horizon_days = ? ORDER BY symbol",
@@ -578,7 +578,7 @@ class TestRunPostmortemStepControlGroups:
 
         run_postmortem_step(market_store, state_store, AS_OF, PostmortemConfig(), "SPY")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             symbols = conn.execute(
                 "SELECT symbol FROM signal_outcomes ORDER BY symbol"
             ).fetchall()

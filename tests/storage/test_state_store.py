@@ -347,7 +347,7 @@ class TestInitSchema:
         assert position_again.max_hold_days == 25
 
     def test_text_items_has_related_symbols_and_category_columns(self, state_store):
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             columns = conn.execute("DESCRIBE text_items").fetchall()
         names = [row[0] for row in columns]
         assert len(names) == 10
@@ -470,7 +470,7 @@ class TestRunLifecycle:
 
         state_store.complete_run(run_id, RunStatus.SUCCESS, report_path=report_path)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001 - verifying persisted state
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status, report_path, completed_at FROM runs WHERE run_id = ?",
                 [str(run_id)],
@@ -488,7 +488,7 @@ class TestRunLifecycle:
             date(2026, 7, 20), RunMode.DRY_RUN, "b" * 64, metadata=metadata
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT config_hash, metadata_json FROM runs WHERE run_id = ?",
                 [str(run_id)],
@@ -531,7 +531,7 @@ class TestInsertRun:
             metadata={"schema_version": "run-metadata-v1"},
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT run_date, mode, config_hash FROM runs WHERE run_id = ?",
                 [str(run_id)],
@@ -553,7 +553,7 @@ class TestInsertRun:
             finished_at=finished_at,
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT started_at, completed_at FROM runs WHERE run_id = ?",
                 [str(run_id)],
@@ -573,7 +573,7 @@ class TestInsertRun:
             started_at=datetime(2026, 7, 20, 9, 30, tzinfo=UTC),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT completed_at FROM runs WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -597,7 +597,7 @@ class TestInsertRun:
             started_at=datetime(2026, 7, 20, 9, 30, tzinfo=UTC),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status FROM runs WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -616,7 +616,7 @@ class TestInsertRun:
             finished_at=datetime(2026, 7, 20, 9, 45, tzinfo=UTC),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -651,7 +651,7 @@ class _FlakyConnection:
 class TestMarkStaleRunningRuns:
     @staticmethod
     def _backdate(state_store, run_id, started_at):
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "UPDATE runs SET started_at = ? WHERE run_id = ?",
                 [started_at, str(run_id)],
@@ -679,7 +679,7 @@ class TestMarkStaleRunningRuns:
         )
 
         assert marked == [stale_run]
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status, error_summary, completed_at FROM runs WHERE run_id = ?",
                 [str(stale_run)],
@@ -696,7 +696,7 @@ class TestMarkStaleRunningRuns:
         marked = state_store.mark_stale_running_runs(cutoff, uuid4())
 
         assert marked == []
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             status = conn.execute(
                 "SELECT status FROM runs WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -742,9 +742,9 @@ class TestMarkStaleRunningRuns:
         self._backdate(state_store, first, datetime(2026, 7, 18, 8, tzinfo=UTC))
         self._backdate(state_store, second, datetime(2026, 7, 19, 8, tzinfo=UTC))
 
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyConnection(real_connect(), fail_on_call=2),
         )
@@ -756,7 +756,7 @@ class TestMarkStaleRunningRuns:
 
         # Rolled back entirely: the first UPDATE succeeded before the second
         # one raised, but neither run's status was left changed.
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT run_id, status FROM runs ORDER BY run_id"
             ).fetchall()
@@ -774,7 +774,7 @@ class TestRecordRunStep:
         )
         state_store.record_run_step(run_id, "1_prices", StepStatus.SUCCESS, None, 2.5)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT status, detail, duration_s FROM run_steps "
                 "WHERE run_id = ? AND step = ?",
@@ -789,7 +789,7 @@ class TestRecordRunStep:
         state_store.record_run_step(run_a, "1_prices", StepStatus.SUCCESS, None, 1.0)
         state_store.record_run_step(run_b, "1_prices", StepStatus.FAILED, "boom", 0.5)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT run_id, status FROM run_steps ORDER BY run_id"
             ).fetchall()
@@ -890,7 +890,7 @@ class TestRecordSignals:
         state_store.record_signals([hit], run_date, "default")
         state_store.record_signals([updated_hit], run_date, "default")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT metrics_json FROM signals WHERE symbol = 'AAPL'"
             ).fetchall()
@@ -923,7 +923,7 @@ class TestRecordSignals:
         with pytest.raises(ValueError, match="non-finite"):
             state_store.record_signals([valid_hit, nan_hit], run_date, "default")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM signals").fetchone()
         assert count == (0,)
 
@@ -943,7 +943,7 @@ class TestRecordCandidates:
 
         state_store.record_candidates(candidates, run_id, "default")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, rank FROM candidates WHERE run_id = ?", [str(run_id)]
             ).fetchall()
@@ -958,7 +958,7 @@ class TestRecordCandidates:
         state_store.record_candidates([candidate], run_a, "default")
         state_store.record_candidates([candidate], run_b, "default")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM candidates").fetchone()
         assert count == (2,)
 
@@ -979,7 +979,7 @@ class TestRecordCandidates:
         with pytest.raises(duckdb.Error):
             state_store.record_candidates([first, second], run_id, "default")
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM candidates WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -1068,7 +1068,7 @@ class TestRecordScreeningResults:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             candidate_rows = conn.execute(
                 "SELECT symbol, rank FROM candidates WHERE run_id = ?", [str(run_id)]
             ).fetchall()
@@ -1104,7 +1104,7 @@ class TestRecordScreeningResults:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT detail FROM screening_rejections WHERE run_id = ? AND symbol = ?",
                 [str(run_id), "XYZ"],
@@ -1115,7 +1115,7 @@ class TestRecordScreeningResults:
         # REQ-002: reason_code is limited to the closed enum at the schema
         # level, independent of application-layer validation.
         with (
-            state_store._database.connect() as conn,  # noqa: SLF001
+            state_store.database.connect() as conn,
             pytest.raises(ConstraintException),
         ):
             conn.execute(
@@ -1136,7 +1136,7 @@ class TestRecordScreeningResults:
 
     def test_invalid_stage_violates_check_constraint(self, state_store):
         with (
-            state_store._database.connect() as conn,  # noqa: SLF001
+            state_store.database.connect() as conn,
             pytest.raises(ConstraintException),
         ):
             conn.execute(
@@ -1182,9 +1182,9 @@ class TestRecordScreeningResults:
             for i in range(1, 4)
         ]
 
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=3),
         )
@@ -1199,7 +1199,7 @@ class TestRecordScreeningResults:
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             candidate_count = conn.execute(
                 "SELECT count(*) FROM candidates WHERE run_id = ?", [str(run_id)]
             ).fetchone()
@@ -1237,9 +1237,9 @@ class TestRecordScreeningResults:
                 detail={"available_quarters": 0, "required_quarters": 4},
             ),
         ]
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyRejectionConnection(real_connect(), fail_on_call=2),
         )
@@ -1253,7 +1253,7 @@ class TestRecordScreeningResults:
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
-        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        monkeypatch.setattr(state_store.database, "connect", real_connect)
         retry_run_id = uuid4()
         state_store.record_screening_results(
             ScreeningResult(
@@ -1264,7 +1264,7 @@ class TestRecordScreeningResults:
             ScreeningRunMeta(retry_run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             counts = conn.execute(
                 "SELECT "
                 "(SELECT count(*) FROM candidates WHERE run_id = ?), "
@@ -1296,7 +1296,7 @@ class TestRecordScreeningResults:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
                 [str(run_id)],
@@ -1387,7 +1387,7 @@ class TestRecordScreeningTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT score_pivot_proximity, score_rs_percentile, "
                 "score_criteria_met FROM screening_truncations WHERE run_id = ?",
@@ -1407,7 +1407,7 @@ class TestRecordScreeningTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 """
                 SELECT symbol, strategy_key, rank, score, score_rsi_pullback,
@@ -1446,7 +1446,7 @@ class TestRecordScreeningTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 2),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             ranks = conn.execute(
                 "SELECT rank FROM screening_truncations WHERE run_id = ? ORDER BY rank",
                 [str(run_id)],
@@ -1467,7 +1467,7 @@ class TestRecordScreeningTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 0),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
                 [str(run_id)],
@@ -1499,7 +1499,7 @@ class TestRecordScreeningTruncations:
             meta,
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, rank, score FROM screening_truncations "
                 "WHERE run_id = ? ORDER BY symbol",
@@ -1529,7 +1529,7 @@ class TestRecordScreeningTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT strategy_key, symbol FROM screening_truncations "
                 "WHERE run_id = ? ORDER BY strategy_key",
@@ -1562,9 +1562,9 @@ class TestRecordScreeningTruncations:
         ]
         truncations = [_truncated(f"T{rank}", rank) for rank in (6, 7, 8)]
 
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyTruncationConnection(real_connect(), fail_on_call=3),
         )
@@ -1579,8 +1579,8 @@ class TestRecordScreeningTruncations:
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
-        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        monkeypatch.setattr(state_store.database, "connect", real_connect)
+        with state_store.database.connect() as conn:
             counts = conn.execute(
                 "SELECT "
                 "(SELECT count(*) FROM candidates WHERE run_id = ?), "
@@ -1596,9 +1596,9 @@ class TestRecordScreeningTruncations:
         run_id = uuid4()
         meta = ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5)
         truncations = [_truncated(f"T{rank}", rank) for rank in (6, 7)]
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyTruncationConnection(real_connect(), fail_on_call=2),
         )
@@ -1612,7 +1612,7 @@ class TestRecordScreeningTruncations:
                 meta,
             )
 
-        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
+        monkeypatch.setattr(state_store.database, "connect", real_connect)
         state_store.record_screening_results(
             ScreeningResult(
                 candidates=[],
@@ -1622,7 +1622,7 @@ class TestRecordScreeningTruncations:
             meta,
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
                 [str(run_id)],
@@ -1689,7 +1689,7 @@ class TestRecordSignalHits:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, strategy_key, signal_name, strength, metrics_json "
                 "FROM signal_hits WHERE run_id = ? ORDER BY signal_name",
@@ -1715,7 +1715,7 @@ class TestRecordSignalHits:
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT run_id, strength FROM signal_hits ORDER BY strength"
             ).fetchall()
@@ -1749,7 +1749,7 @@ class TestRecordSignalHits:
             meta,
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, strength FROM signal_hits WHERE run_id = ?",
                 [str(run_id)],
@@ -1772,7 +1772,7 @@ class TestRecordSignalHits:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT strategy_key, symbol FROM signal_hits WHERE run_id = ? "
                 "ORDER BY strategy_key",
@@ -1803,9 +1803,9 @@ class TestRecordSignalHits:
         ]
         hits = [_hit(f"H{index}") for index in range(3)]
 
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakySignalHitConnection(real_connect(), fail_on_call=3),
         )
@@ -1821,8 +1821,8 @@ class TestRecordSignalHits:
                 ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
             )
 
-        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        monkeypatch.setattr(state_store.database, "connect", real_connect)
+        with state_store.database.connect() as conn:
             counts = conn.execute(
                 "SELECT "
                 "(SELECT count(*) FROM candidates WHERE run_id = ?), "
@@ -1875,7 +1875,7 @@ class TestPromotedCandidateColumns:
         )
 
     def _row(self, state_store, run_id):
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             return conn.execute(
                 "SELECT score, score_rsi_pullback, score_trend_quality, "
                 "score_liquidity, score_atr_pct, execution_state, "
@@ -1927,7 +1927,7 @@ class TestPromotedCandidateColumns:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT score_pivot_proximity, score_rs_percentile, "
                 "score_criteria_met FROM candidates WHERE run_id = ?",
@@ -2054,7 +2054,7 @@ class TestReplaceUniverseForwardReturns:
             ],
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, outcome_class, reason_code, forward_return_pct "
                 "FROM universe_forward_returns WHERE run_id = ? ORDER BY symbol",
@@ -2068,7 +2068,7 @@ class TestReplaceUniverseForwardReturns:
 
     def test_invalid_outcome_class_violates_check_constraint(self, state_store):
         with (
-            state_store._database.connect() as conn,  # noqa: SLF001
+            state_store.database.connect() as conn,
             pytest.raises(ConstraintException),
         ):
             conn.execute(
@@ -2093,7 +2093,7 @@ class TestReplaceUniverseForwardReturns:
             run_id, 5, [_universe_return(run_id, "A", forward_return_pct=2.25)]
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, forward_return_pct FROM universe_forward_returns "
                 "WHERE run_id = ?",
@@ -2111,7 +2111,7 @@ class TestReplaceUniverseForwardReturns:
             run_id, 5, [_universe_return(run_id, "B")]
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT horizon_days, symbol FROM universe_forward_returns "
                 "WHERE run_id = ? ORDER BY horizon_days",
@@ -2144,9 +2144,9 @@ class TestReplaceUniverseForwardReturns:
         state_store.replace_universe_forward_returns(
             run_id, 5, [_universe_return(run_id, "KEEP")]
         )
-        real_connect = state_store._database.connect  # noqa: SLF001
+        real_connect = state_store.database.connect
         monkeypatch.setattr(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             "connect",
             lambda: _FlakyUniverseReturnConnection(real_connect(), fail_on_call=2),
         )
@@ -2158,8 +2158,8 @@ class TestReplaceUniverseForwardReturns:
                 [_universe_return(run_id, "A"), _universe_return(run_id, "B")],
             )
 
-        monkeypatch.setattr(state_store._database, "connect", real_connect)  # noqa: SLF001
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        monkeypatch.setattr(state_store.database, "connect", real_connect)
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol FROM universe_forward_returns WHERE run_id = ?",
                 [str(run_id)],
@@ -2200,7 +2200,7 @@ class TestRecordRiskAssessments:
         with pytest.raises(duckdb.Error):
             state_store.record_risk_assessments([valid, invalid], run_id)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM risk_assessments").fetchone()
         assert count == (0,)
 
@@ -2220,7 +2220,7 @@ class TestRecordRiskAssessments:
 
         state_store.record_risk_assessments([assessment], run_id)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT status, warnings_json FROM risk_assessments WHERE run_id = ?",
                 [str(run_id)],
@@ -2244,7 +2244,7 @@ class TestRecordRiskAssessments:
 
         state_store.record_risk_assessments([assessment], run_id)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 """
                 SELECT entry_price, limit_price, max_shares, shares_by_risk,
@@ -2287,7 +2287,7 @@ class TestRecordRiskAssessments:
         state_store.record_risk_assessments([first], run_id)
         state_store.record_risk_assessments([second], run_id)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT max_shares, shares_by_risk, shares_by_position_cap, "
                 "binding_constraint, limit_price "
@@ -2314,7 +2314,7 @@ class TestRecordSignalOutcomes:
 
         state_store.record_signal_outcomes([outcome])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT symbol, horizon_days, forward_return_pct, classification "
                 "FROM signal_outcomes WHERE run_id = ?",
@@ -2325,7 +2325,7 @@ class TestRecordSignalOutcomes:
     def test_empty_sequence_is_a_no_op(self, state_store):
         state_store.record_signal_outcomes([])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM signal_outcomes").fetchone()
         assert count == (0,)
 
@@ -2344,7 +2344,7 @@ class TestRecordSignalOutcomes:
 
         state_store.replace_signal_outcomes(run_id, 5, [])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM signal_outcomes WHERE run_id = ?",
                 [str(run_id)],
@@ -2376,7 +2376,7 @@ class TestRecordSignalOutcomes:
         with pytest.raises(ValueError, match="must match"):
             state_store.replace_signal_outcomes(run_id, 5, [mismatched])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM signal_outcomes WHERE run_id = ?",
                 [str(run_id)],
@@ -2408,7 +2408,7 @@ class TestRecordSignalOutcomes:
         with pytest.raises(ConstraintException):
             state_store.replace_signal_outcomes(run_id, 5, [invalid])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, classification FROM signal_outcomes "
                 "WHERE run_id = ? AND horizon_days = 5",
@@ -2440,7 +2440,7 @@ class TestRecordSignalOutcomes:
         state_store.record_signal_outcomes([first])
         state_store.record_signal_outcomes([corrected])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT forward_return_pct, classification FROM signal_outcomes "
                 "WHERE run_id = ? AND symbol = ? AND horizon_days = ?",
@@ -2477,7 +2477,7 @@ class TestRecordSignalOutcomes:
         with pytest.raises(duckdb.ConstraintException):
             state_store.record_signal_outcomes([valid, invalid])
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM signal_outcomes").fetchone()
         assert count == (0,)
 
@@ -2513,7 +2513,7 @@ def _filing_text_item(source_id: str, content_text: str) -> TextItem:
 
 
 def _text_item_content(state_store: StateStore, source_id: str) -> str:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         row = conn.execute(
             "SELECT content_text FROM text_items WHERE source_id = ?",
             [source_id],
@@ -2525,7 +2525,7 @@ def _text_item_content(state_store: StateStore, source_id: str) -> str:
 def _text_item_related_symbols_and_category(
     state_store: StateStore, source_id: str
 ) -> tuple[str | None, str | None]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         row = conn.execute(
             "SELECT related_symbols, category FROM text_items WHERE source_id = ?",
             [source_id],

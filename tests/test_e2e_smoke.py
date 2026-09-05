@@ -218,7 +218,7 @@ class TestFiveSymbolEndToEnd:
         assert (result.report_path.parent.parent / "latest.md").is_file()
         assert result.brief is not None
 
-        with deps.state_store._database.connect() as conn:  # noqa: SLF001
+        with deps.state_store.database.connect() as conn:
             steps = conn.execute(
                 "SELECT step, status FROM run_steps WHERE run_id = ? ORDER BY step",
                 [str(result.run_id)],

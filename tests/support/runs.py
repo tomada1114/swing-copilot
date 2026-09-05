@@ -1,8 +1,8 @@
 """Thin `runs`-row seeding helper built on `StateStore.insert_run()` (Issue #398).
 
 Eleven test modules used to hand-write `INSERT INTO runs (...)` straight
-against `state_store._database`, each carrying its own `# noqa: SLF001` for
-reaching into the private attribute. Issue #395 added
+against a store's private database field, each carrying its own lint
+suppression. Issue #395 added
 `StateStore.insert_run()` precisely so a test could seed a fully specified
 historical `runs` row through the public API instead; `seed_run()` here is
 just a caller-convenience wrapper around it (default `status`/`mode`/

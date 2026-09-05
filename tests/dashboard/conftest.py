@@ -57,16 +57,16 @@ class Builder:
     """
 
     def __init__(self, database: Database, run_id: UUID = RUN_ID) -> None:
-        self._database = database
+        self._db = database
         self._run_id = str(run_id)
         self._raw_run_id = run_id
 
     def for_run(self, run_id: UUID) -> Builder:
         """A builder writing into a different run."""
-        return Builder(self._database, run_id)
+        return Builder(self._db, run_id)
 
     def _execute(self, sql: str, params: list[object]) -> None:
-        with self._database.connect() as connection:
+        with self._db.connect() as connection:
             connection.execute(sql, params)
 
     def run(
@@ -85,7 +85,7 @@ class Builder:
         much later.
         """
         seed_run(
-            StateStore(self._database),
+            StateStore(self._db),
             self._raw_run_id,
             run_date,
             status=status,

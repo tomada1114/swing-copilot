@@ -112,8 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   あるとき初めて `verdict_outcomes` から当該スライスの既存行を読み戻し
   （`get_verdict_outcomes_for_slice`、通常経路では余計なクエリを払わない）、
   同じ `recommendation` のまま記録済みの行が見つかればそれをそのまま `outcomes` に
-  引き継いで残す。別途 verdict が訂正され `recommendation` が一致しなくなっている
-  場合は、古い行を保持する根拠が無いため従来どおり削除する。`EvaluateSummary` に
+  引き継いで残す。引き継ぎの条件は 2 つで、どちらか一方でも崩れた行は保持する根拠が
+  無いため従来どおり削除する: 別途 verdict が訂正され `recommendation` が一致しなく
+  なっている場合と、ベンチマークのバー再取得でスライスの満期セッション自体が動き、
+  記録済み行の `as_of` が同じスライスの再計算行と食い違う場合である（後者を残すと
+  1 スライスの行が 2 つの `as_of` に分かれ、`as_of` で絞る
+  `get_verdict_outcomes_in_window` が別々の集計窓に振り分けてしまう）。`EvaluateSummary` に
   `preserved_outcome_count`（今回保持した行数）を追加し、`copilot-retro evaluate` と
   日次 `retro_evaluate` ステップの両方の出力に反映した
 

@@ -539,6 +539,43 @@ class TestEvaluatePreservesUnrecomputableRows:
         assert summary.preserved_outcome_count == 0
         assert any("満期日" in note and "スキップ" in note for note in summary.notes)
 
+    def test_a_row_is_dropped_not_carried_forward_when_the_maturity_session_moves(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The benchmark stands in for the trading calendar, so a re-fetch that
+        # drops one of *its* bars moves the slice's maturity session. Every
+        # recomputable row in the slice is then filed under the new session;
+        # carrying the old row forward would leave one slice holding rows at
+        # two different `as_of` values, which `get_verdict_outcomes_in_window`
+        # (it filters on `as_of`) would place in two reporting windows, and
+        # would pair a `benchmark_return_pct` measured over one span with
+        # siblings measured over another.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        _evaluate(market_store, state_store, CALENDAR[10])
+        assert _outcome_rows(state_store, 5) == [
+            ("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(1.5), HIT)
+        ]
+
+        # One benchmark session disappears between the run and its maturity,
+        # so the 5th session forward is now CALENDAR[6], not CALENDAR[5] --
+        # and AAPL has no bar there to recompute against.
+        market_store.replace_symbol_bars(
+            [BENCHMARK],
+            bars(
+                BENCHMARK,
+                {day: 100.0 for day in CALENDAR if day != CALENDAR[2]},
+            ),
+        )
+
+        summary = _evaluate(market_store, state_store, CALENDAR[15])
+
+        assert _outcome_rows(state_store, 5) == []
+        assert summary.preserved_outcome_count == 0
+        assert any("満期日" in note and "スキップ" in note for note in summary.notes)
+
     def test_a_symbol_with_no_previous_row_still_writes_nothing_for_it(
         self, market_store: MarketStore, state_store: StateStore
     ) -> None:

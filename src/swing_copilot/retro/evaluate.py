@@ -176,9 +176,12 @@ def evaluate_verdicts(
             to bound the work to slices that are not already recorded.
 
     Returns:
-        Counts plus a note per symbol skipped for missing bars. A horizon that
-        has simply not matured yet is counted in `pending_slice_count` rather
-        than noted: in a batch that runs every few days, most recent runs are
+        Counts plus a note per symbol whose bars were missing -- one saying
+        the symbol was skipped, or, when its previously recorded row was kept
+        instead of being deleted by the slice replace (Issue #424), one saying
+        so, which `preserved_outcome_count` also counts. A horizon that has
+        simply not matured yet is counted in `pending_slice_count` rather than
+        noted: in a batch that runs every few days, most recent runs are
         legitimately not due, and noting each one would drown the real
         data-quality signals.
     """
@@ -298,6 +301,76 @@ class _EvaluationStores:
     state_store: StateStore
 
 
+def _carried_forward_row(
+    previous: VerdictOutcomeRecord | None,
+    recommendation: str,
+    maturity_date: date,
+) -> VerdictOutcomeRecord | None:
+    """Return the previous row to keep for an unrecomputable symbol, if any.
+
+    Issue #424: `replace_verdict_outcomes` replaces the *whole* slice it is
+    given, so simply omitting a symbol whose maturity-day close has gone
+    missing from the store (a re-fetch that dropped a historical bar, for
+    example) would delete its previously recorded, already-audited
+    classification rather than correct it. Carrying the old row forward
+    untouched is the only way a full-slice replace can leave it alone.
+
+    Args:
+        previous: The row `verdict_outcomes` already holds for this symbol in
+            this slice, or `None` if it was never recorded.
+        recommendation: The verdict the run currently holds for the symbol.
+        maturity_date: The session this slice is being evaluated as of, which
+            every recomputed row in it is filed under.
+
+    Returns:
+        `previous` when it still describes this slice, otherwise `None`. Two
+        things can make it stale, and both drop the row exactly as an
+        unrecomputable row always was before Issue #424:
+
+        - the verdict was corrected since (`proceed` <-> `skip`), leaving the
+          old classification describing a verdict the store no longer holds;
+        - the slice's maturity session moved (the benchmark's own bars were
+          re-fetched, so `find_maturity_trading_day` now answers differently),
+          leaving the old row filed under a different `as_of` than every
+          recomputed row beside it. Keeping it would put one slice's rows in
+          two reporting windows, since `get_verdict_outcomes_in_window`
+          filters on `as_of`, and pair a `benchmark_return_pct` measured over
+          one span with siblings measured over another.
+    """
+    if previous is None or previous.recommendation != recommendation:
+        return None
+    if previous.as_of != maturity_date:
+        return None
+    return previous
+
+
+def _missing_close_note(
+    *,
+    run_date: date,
+    symbol: str,
+    horizon_days: int,
+    maturity_date: date,
+    is_carried_forward: bool,
+) -> str:
+    """Render the fail-soft note for a symbol whose closes did not line up.
+
+    Args:
+        run_date: The run's own session.
+        symbol: The symbol that could not be recomputed.
+        horizon_days: The horizon being evaluated.
+        maturity_date: The session the horizon came due on.
+        is_carried_forward: Whether a previously recorded row was kept
+            (Issue #424) instead of the symbol dropping out of the slice.
+    """
+    outcome = (
+        "既存の評価行を保持した（削除しない）" if is_carried_forward else "スキップ"
+    )
+    return (
+        f"{run_date.isoformat()} {symbol} {horizon_days}d: "
+        f"満期日 {maturity_date.isoformat()} までの終値が揃わないため{outcome}"
+    )
+
+
 def _evaluate_slice(
     stores: _EvaluationStores,
     rows: Sequence[VerdictRow],
@@ -366,30 +439,21 @@ def _evaluate_slice(
                         run_id, horizon_days
                     )
                 }
-            preserved = previous_by_symbol.get(row.symbol)
-            # Issue #424: `replace_verdict_outcomes` replaces the whole slice
-            # it is given, so simply omitting this row here would delete a
-            # previously recorded, already-audited classification -- not
-            # correct it -- the moment its maturity-day close goes missing
-            # from the store (a re-fetch that dropped a historical bar, for
-            # example). Carry the old row forward untouched instead. Only
-            # when the verdict itself was corrected since (`recommendation`
-            # no longer matches) is the old row not trustworthy enough to
-            # keep; it is dropped, exactly as an unrecomputable row always
-            # was before this fix.
-            if preserved is not None and preserved.recommendation == row.recommendation:
+            preserved = _carried_forward_row(
+                previous_by_symbol.get(row.symbol), row.recommendation, maturity_date
+            )
+            if preserved is not None:
                 outcomes.append(preserved)
                 preserved_count += 1
-                notes.append(
-                    f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
-                    f"満期日 {maturity_date.isoformat()} までの終値が揃わないため、"
-                    "既存の評価行を保持した（削除しない）"
+            notes.append(
+                _missing_close_note(
+                    run_date=run_date,
+                    symbol=row.symbol,
+                    horizon_days=horizon_days,
+                    maturity_date=maturity_date,
+                    is_carried_forward=preserved is not None,
                 )
-            else:
-                notes.append(
-                    f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
-                    f"満期日 {maturity_date.isoformat()} までの終値が揃わないためスキップ"
-                )
+            )
             continue
         outcomes.append(
             VerdictOutcomeRecord(

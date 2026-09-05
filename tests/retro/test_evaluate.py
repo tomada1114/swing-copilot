@@ -591,6 +591,40 @@ class TestEvaluatePreservesUnrecomputableRows:
         assert _outcome_rows(state_store, 5) == []
         assert summary.preserved_outcome_count == 0
 
+    def test_a_preserved_row_survives_an_ordinary_re_collect_of_the_same_run(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # Issue #448 taught `replace_collected_run` to delete a run's
+        # `verdict_outcomes` too -- but only when the run's new verdict set is
+        # *empty* (the run vanishing entirely), never on an ordinary
+        # re-collect that still analyzes the symbol. If it fired
+        # unconditionally, every re-collect would force a recompute that
+        # #424's carry-forward exists precisely to avoid for a row whose
+        # maturity close can no longer be recomputed -- silently undoing it.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        _evaluate(market_store, state_store, CALENDAR[10])
+        market_store.replace_symbol_bars(["AAPL"], bars("AAPL", {RUN_DATE: 100.0}))
+        summary = _evaluate(market_store, state_store, CALENDAR[15])
+        preserved = _outcome_rows(state_store, 5)
+        assert preserved == [
+            ("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(1.5), HIT)
+        ]
+        assert summary.preserved_outcome_count == 1
+
+        # An everyday re-collect of the run's analysis_result.json with the
+        # exact same, still non-empty, verdict -- not a run vanishing.
+        _seed_verdict(state_store, run_id)
+
+        assert _outcome_rows(state_store, 5) == preserved
+
+        # And the preserved row keeps surviving further evaluation batches.
+        again = _evaluate(market_store, state_store, CALENDAR[20])
+        assert _outcome_rows(state_store, 5) == preserved
+        assert again.preserved_outcome_count == 1
+
 
 class TestEvaluateIdempotence:
     def test_rerunning_on_a_later_day_reproduces_the_same_row(

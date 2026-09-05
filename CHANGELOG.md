@@ -102,6 +102,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `replace_collected_run`（`verdict_records.py`）が `verdicts` / `verdict_sources` /
+  `verdict_reasons` / `verdict_reason_sources` / `analysis_source_coverage` /
+  `verdict_collections` の6テーブルは run 単位で置換していたが、`verdict_outcomes`
+  だけが対象外だった問題を修正した（Issue #448）。シンボル単位で verdict が落ちる
+  ケースは `evaluate_verdicts` の `only_pending` 判定（記録済み集合と現在の
+  `verdicts` の集合比較）と `replace_verdict_outcomes` の全置換により自己修復するが、
+  ある run の再 collect が verdict を1件も生まなくなった場合は `evaluate_verdicts` が
+  `get_verdicts_in_window`（`verdicts` に依存）が返す run しか走査しないため、その
+  run の `verdict_outcomes` 行は二度と訪問されず恒久的に残り、成績集計を静かに汚し
+  続けていた。`replace_collected_run` は新しい `verdicts` が空のときに限り
+  `verdict_outcomes WHERE run_id = ?` も同じトランザクションで削除する。空でない
+  再 collect（通常の再取り込み・訂正）ではこの DELETE は発火しない — 無条件に
+  発火させると、満期日の終値を再計算できなくなった行を保持し続ける Issue #424 の
+  carry-forward ロジックを、再 collect のたびに強制再計算で踏み潰してしまうため
+
 - `has_mixed_basis_signature`/`first_mixed_basis_jump`（Issue #421）が誤検知する
   問題を修正した（Issue #425）。実データ（`data/bars` の生バー + `corporate_actions`、
   510 銘柄の store）で再判定したところ、19 銘柄が混在署名として検出されていたが、

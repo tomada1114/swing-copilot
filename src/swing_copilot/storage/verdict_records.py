@@ -477,7 +477,11 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
             of the two documents they were built from. The fingerprint is
             written in the same transaction so a later scan can prove the
             archive unchanged; `None` *removes* any previous fingerprint
-            rather than leaving it behind.
+            rather than leaving it behind. An empty `records.verdicts` also
+            clears the run's `verdict_outcomes` rows (Issue #448): once a run
+            has no verdicts, `evaluate_verdicts` never visits it again, so
+            those rows would otherwise be orphaned permanently instead of
+            being reclaimed the next time this run is (re-)evaluated.
 
     Raises:
         ValueError: A record belongs to a different run than `records.run_id`.
@@ -491,6 +495,24 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
 
     with database.transaction() as conn:
         conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
+        if not verdicts:
+            # Issue #448: an empty replacement means this run analyzes no
+            # symbol any more (the "empty clears the run" case documented on
+            # `replace_run_verdicts`). `evaluate_verdicts` only walks the runs
+            # `get_verdicts_in_window` returns, which reads `verdicts` itself,
+            # so once a run has zero rows there it is never visited again --
+            # any `verdict_outcomes` rows it left behind would stay orphaned
+            # forever, quietly polluting every aggregate that reads them.
+            # Cleared here, in the same transaction, rather than
+            # unconditionally on every replacement: a *non-empty* replacement
+            # still relies on `evaluate_verdicts`'s own full-slice replace to
+            # drop a merely dropped symbol's row (self-heals without help),
+            # and, more importantly, on Issue #424's carry-forward keeping a
+            # still-current symbol's outcome when its maturity close can no
+            # longer be recomputed. An unconditional delete here would throw
+            # that preserved row away on every re-collect instead of only
+            # when the whole run disappears, silently undoing #424.
+            conn.execute("DELETE FROM verdict_outcomes WHERE run_id = ?", [str(run_id)])
         conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
         # Issue #192: the normalized projection is replaced with the
         # document it projects. Deleting it here rather than per symbol is

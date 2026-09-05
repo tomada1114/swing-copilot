@@ -36,8 +36,10 @@ preparation.md`) via an injectable clock/sleep pair so the throttle itself is
 unit-testable without real waiting.
 
 The repository's own retry contract (`retry_external_call`: 3 attempts,
-injectable `sleep_fn`, deterministic 1s/2s backoff) is the *only* retry loop
-that runs against EDGAR. `edgartools` implements its own transport-level
+injectable `sleep_fn`, deterministic 1s/2s backoff -- except SEC's HTTP 429,
+which waits on its own `Retry-After`-derived schedule instead; see
+`_edgar_retry_delay`) is the *only* retry loop that runs against EDGAR.
+`edgartools` implements its own transport-level
 retry with `stamina`'s `@retry` decorator (`get_with_retry` and friends in
 `edgar.httprequests`), which would otherwise run underneath `_with_retries`
 with real `time.sleep` and no injection seam, silently multiplying every
@@ -67,6 +69,7 @@ from edgar.httprequests import TooManyRequestsError
 from swing_copilot.clock import SystemClock
 from swing_copilot.retry import (
     EXTERNAL_FAILURES,
+    RetryPolicy,
     is_retryable_external_error,
     retry_external_call,
 )
@@ -99,6 +102,13 @@ logger = logging.getLogger(__name__)
 #: free of an edgartools import.
 _EDGAR_RETRYABLE_TYPES = (*EXTERNAL_FAILURES, TooManyRequestsError)
 
+#: SEC's own fallback wait (seconds) when a 429 carries no usable
+#: `Retry-After` header. edgartools' `TooManyRequestsError` docstring states
+#: this verbatim: the offending IP is blocked for approximately this long,
+#: and continuing to send requests during the block *extends* it -- so this
+#: is a floor, not a generic guess.
+_EDGAR_RATE_LIMIT_BLOCK_SECONDS = TooManyRequestsError.BLOCK_DURATION_MINUTES * 60
+
 
 def _is_edgar_error_retryable(error: Exception) -> bool:
     """Extend the shared retry predicate with edgartools' 429 type.
@@ -110,6 +120,33 @@ def _is_edgar_error_retryable(error: Exception) -> bool:
     if isinstance(error, TooManyRequestsError):
         return True
     return is_retryable_external_error(error)
+
+
+def _edgar_retry_delay(error: Exception, default: float) -> float:
+    """Replace the generic 1.0s/2.0s backoff with SEC's own 429 wait.
+
+    edgartools' `TooManyRequestsError` docstring says verbatim: "Do NOT
+    retry immediately -- wait for the block to expire", because continuing
+    to send requests during the block *extends* it. So a 429's own
+    `retry_after` (seconds, parsed from the response's `Retry-After` header
+    by edgartools' `_get_retry_after`) governs the wait; when the header was
+    absent or unparsable, `retry_after` is `None` and the wait falls back
+    to the full `_EDGAR_RATE_LIMIT_BLOCK_SECONDS` block duration rather than
+    the generic default. Every other retryable error (transport failures,
+    408, 5xx) is untouched and keeps the generic schedule.
+    """
+    if isinstance(error, TooManyRequestsError):
+        if error.retry_after is not None:
+            return float(error.retry_after)
+        return float(_EDGAR_RATE_LIMIT_BLOCK_SECONDS)
+    return default
+
+
+_EDGAR_RETRY_POLICY = RetryPolicy(
+    is_retryable=_is_edgar_error_retryable,
+    retryable_types=_EDGAR_RETRYABLE_TYPES,
+    delay_for=_edgar_retry_delay,
+)
 
 
 # Exhibit collection (Issue #128). Restricted to 8-K because that is the form
@@ -493,14 +530,18 @@ class EdgarClient:
         the shared default (`retry.EXTERNAL_FAILURES`) never catches it at
         all -- a custom `is_retryable` predicate alone cannot fix this,
         since the predicate is only ever consulted for an exception the
-        `except` clause already caught.
+        `except` clause already caught. It also replaces the generic 1.0s/2.0s
+        backoff with SEC's own 429 wait (`_edgar_retry_delay`): SEC blocks the
+        offending IP for roughly `TooManyRequestsError.BLOCK_DURATION_MINUTES`
+        (10) minutes and *extends* the block if retried sooner, so a 429's own
+        `retry_after` -- or that 10-minute floor when the header is missing or
+        unparsable -- governs the wait instead.
         """
         return retry_external_call(
             operation,
             before_attempt=self._throttle,
             sleep_fn=self._sleep_fn,
-            is_retryable=_is_edgar_error_retryable,
-            retryable_types=_EDGAR_RETRYABLE_TYPES,
+            policy=_EDGAR_RETRY_POLICY,
         )
 
     def fetch_fundamentals(

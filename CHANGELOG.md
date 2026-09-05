@@ -1436,5 +1436,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report: a filing/news analysis served from a cache entry within
   `llm.cache_ttl_days` (new setting) of `near_stale_threshold_days`
   remaining now surfaces a re-run warning instead of being silently reused
+- SEC の HTTP 429（`edgar.httprequests.TooManyRequestsError`）が EDGAR 境界の
+  どのリトライ層でもリトライされない問題を修正した（Issue #447）。
+  `TooManyRequestsError` は edgartools 独自の素の `Exception` サブクラスで、
+  edgartools 自身の `RETRYABLE_EXCEPTIONS` にも `retry.py` の内部例外集合にも
+  含まれず、両層とも1試行で例外がそのまま伝播していた——
+  `docs/04_detailed_design.md` が定める「接続・タイムアウト・HTTP 408/429/5xx
+  は合計3試行」契約から 429 だけが漏れていた（修正前を実測: 1リクエスト、
+  `sleep_fn == []`）。429 は他の retryable なエラーと違い、SEC 自身が
+  「約10分間 IP をブロックし、ブロック中の再送はブロック時間を延長する」と
+  明言しているため、捕捉できるようにするだけでなく待機時間そのものを
+  差し替える必要がある。`retry_external_call` はキーワード専用引数
+  `policy: RetryPolicy`（`is_retryable`・`retryable_types`・待機時間を決める
+  `delay_for` をまとめた frozen dataclass、既定値は従来どおりの共有設定で
+  他アダプタの挙動は変わらない）を追加し、`EdgarClient._with_retries` だけが
+  `TooManyRequestsError` を含む型と、429 の待機時間を決める
+  `_edgar_retry_delay` を渡す——`retry.py`自体は edgartools を import しない。
+  待機時間はレスポンスの `Retry-After` ヘッダ由来の `retry_after`（秒）を
+  優先し、ヘッダが無い／パースできない場合は
+  `TooManyRequestsError.BLOCK_DURATION_MINUTES * 60`（600秒）へフォールバック
+  する（`Retry-After`が0以下の場合も同様——0秒待機はSECのブロックを延長し、
+  負値は本番の実`time.sleep`が`ValueError`を投げるため）。429 以外の retryable なエラー（408/5xx/transport）は従来どおり
+  1秒・2秒backoffのまま。3試行のうち2回が600秒フォールバックだと
+  EDGAR呼び出し1回が約20分スタールしうるが、SEC側のブロック延長を避ける
+  ことを優先した設計判断である。`tests/data/test_edgar_http_boundary.py`に
+  回帰テストを追加し、`Retry-After: 120`付き429が3試行・
+  `sleep_fn == [120.0, 120.0]`、`Retry-After`無し／パース不能な429が
+  3試行・`sleep_fn == [600.0, 600.0]`になることを固定し、429以外の
+  retryableなエラー（5xx）は引き続き`sleep_fn == [1.0, 2.0]`のままである
+  ことも固定した
 
 [Unreleased]: https://github.com/tomada1114/swing-copilot/commits/main

@@ -52,6 +52,7 @@ from datetime import UTC, datetime
 from itertools import count
 from typing import TYPE_CHECKING
 
+import edgar.httprequests
 import httpx
 import pytest
 
@@ -176,6 +177,23 @@ def _always_status(status_code: int) -> Callable[[httpx.Request, int], httpx.Res
     return responder
 
 
+def _always_429_with_headers(
+    headers: dict[str, str],
+) -> Callable[[httpx.Request, int], httpx.Response]:
+    """A 429 responder carrying the given raw response headers.
+
+    Used to drive edgartools' real `Retry-After`-parsing path
+    (`edgar.httprequests._get_retry_after`) rather than constructing a
+    `TooManyRequestsError` by hand, per this module's wire-response
+    discipline.
+    """
+
+    def responder(_request: httpx.Request, _attempt: int) -> httpx.Response:
+        return httpx.Response(429, headers=headers, json={})
+
+    return responder
+
+
 def _empty_facts(_request: httpx.Request, _attempt: int) -> httpx.Response:
     return httpx.Response(200, json=_EMPTY_FACTS_JSON)
 
@@ -251,6 +269,13 @@ class TestRetryableServerError:
     def test_a_retryable_server_error_still_stops_at_three_requests(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Regression guard: a non-429 retryable error keeps the generic backoff.
+
+        Issue #447 gave 429 its own SEC-block-derived wait
+        (`_edgar_retry_delay`); this pins that every *other* retryable error
+        (a 5xx here) is untouched and still waits the generic 1.0s/2.0s
+        schedule.
+        """
         sleeps: list[float] = []
         client, requests = _build_client(
             monkeypatch, tmp_path, _always_status(500), sleep_fn=sleeps.append
@@ -261,6 +286,105 @@ class TestRetryableServerError:
 
         assert len(requests) == 3
         assert sleeps == [1.0, 2.0]
+
+
+class TestTooManyRequestsIsRetryable:
+    """Issue #447: SEC's 429 must join the shared retry contract.
+
+    edgartools raises 429 as `edgar.httprequests.TooManyRequestsError`, a
+    bare `Exception` subclass -- not `httpx`-derived, and in neither
+    edgartools' own `RETRYABLE_EXCEPTIONS` nor
+    `swing_copilot.retry.EXTERNAL_FAILURES`. Before the Issue #447 fix this
+    propagated on the first attempt (measured: 1 request, `sleep_fn == []`).
+
+    It is now retried up to 3 requests like any other retryable error, but
+    -- unlike every other retryable error -- the wait between attempts is
+    *not* the generic 1.0s/2.0s backoff: `TooManyRequestsError`'s own
+    docstring says verbatim that SEC blocks the offending IP for
+    approximately `BLOCK_DURATION_MINUTES` (10) minutes and *extends* the
+    block if retried sooner, so the wait is the exception's own
+    `retry_after` (seconds, parsed from the response's `Retry-After` header
+    by edgartools' `_get_retry_after`), falling back to the full 600s block
+    duration when that header is absent or unparsable. Every responder
+    here returns a real HTTP 429 rather than raising the vendor exception
+    directly, so the wire-to-exception conversion inside `edgar.httprequests`
+    (including its `Retry-After` parsing) is part of what these tests pin.
+    """
+
+    def test_a_429_with_a_retry_after_header_waits_the_header_value(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleeps: list[float] = []
+        client, requests = _build_client(
+            monkeypatch,
+            tmp_path,
+            _always_429_with_headers({"Retry-After": "120"}),
+            sleep_fn=sleeps.append,
+        )
+
+        with pytest.raises(edgar.httprequests.TooManyRequestsError):
+            _fetch(client)
+
+        assert len(requests) == 3
+        assert sleeps == [120.0, 120.0]
+
+    def test_a_429_with_no_retry_after_header_falls_back_to_the_block_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleeps: list[float] = []
+        client, requests = _build_client(
+            monkeypatch, tmp_path, _always_status(429), sleep_fn=sleeps.append
+        )
+
+        with pytest.raises(edgar.httprequests.TooManyRequestsError):
+            _fetch(client)
+
+        assert len(requests) == 3
+        assert sleeps == [600.0, 600.0]
+
+    def test_a_429_with_a_non_positive_retry_after_header_falls_back_to_the_block_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A `Retry-After` of 0 (or negative) is not a usable wait.
+
+        edgartools' `_get_retry_after` returns `0` for an HTTP-date already
+        in the past and passes a negative integer header through verbatim.
+        Sleeping `0` would retry immediately -- exactly what extends SEC's
+        block -- and a negative delay would make production's real
+        `time.sleep` raise `ValueError` out of the retry loop, so both take
+        the 600s block-duration fallback.
+        """
+        for header_value in ("0", "-5"):
+            sleeps: list[float] = []
+            client, requests = _build_client(
+                monkeypatch,
+                tmp_path,
+                _always_429_with_headers({"Retry-After": header_value}),
+                sleep_fn=sleeps.append,
+            )
+
+            with pytest.raises(edgar.httprequests.TooManyRequestsError):
+                _fetch(client)
+
+            assert len(requests) == 3
+            assert sleeps == [600.0, 600.0]
+
+    def test_a_429_with_an_unparsable_retry_after_header_falls_back_to_the_block_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sleeps: list[float] = []
+        client, requests = _build_client(
+            monkeypatch,
+            tmp_path,
+            _always_429_with_headers({"Retry-After": "not-a-number-or-date"}),
+            sleep_fn=sleeps.append,
+        )
+
+        with pytest.raises(edgar.httprequests.TooManyRequestsError):
+            _fetch(client)
+
+        assert len(requests) == 3
+        assert sleeps == [600.0, 600.0]
 
 
 class TestNonRetryableClientError:
@@ -321,6 +445,38 @@ class TestThrottleAtTheRealHttpLayer:
         def responder(request: httpx.Request, attempt: int) -> httpx.Response:
             timeline.issue_request()
             return _fails_then_succeeds(failing_attempts=2)(request, attempt)
+
+        client, requests = _build_client(
+            monkeypatch,
+            tmp_path,
+            responder,
+            clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        _fetch(client)
+
+        assert len(requests) == 3
+        assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
+
+    def test_every_retried_429_attempt_is_also_throttled(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The throttle fires on every attempt for a 429 too (Issue #447).
+
+        `TooManyRequestsError` now joins the retryable set, so this repeats
+        the sibling test above with a 429-response-then-recover responder
+        instead of a transport failure, guarding against a fix that widens the caught
+        exception type but accidentally skips the pre-attempt throttle for
+        it.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.02)
+
+        def responder(request: httpx.Request, attempt: int) -> httpx.Response:
+            timeline.issue_request()
+            if attempt <= 2:
+                return httpx.Response(429, json={})
+            return _empty_facts(request, attempt)
 
         client, requests = _build_client(
             monkeypatch,

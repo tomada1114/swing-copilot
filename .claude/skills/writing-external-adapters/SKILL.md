@@ -29,8 +29,11 @@ Every external HTTP call carries an explicit timeout — `httpx.get(url,
 params=params, timeout=10.0)` in `text/news_finnhub.py`,
 `data/earnings_finnhub.py`, `text/calendar_fred.py`; `yfinance_provider.py`
 uses its own `_REQUEST_TIMEOUT_SECONDS`. `retry.py`'s
-`retry_external_call(operation, *, before_attempt, sleep_fn, is_retryable=...)`
-is the one retry loop every adapter shares: `RETRY_DELAYS_SECONDS = (1.0,
+`retry_external_call(operation, *, before_attempt, sleep_fn, policy=...)`
+is the one retry loop every adapter shares (`policy` is a frozen
+`RetryPolicy(is_retryable, retryable_types, delay_for)`; omit it and every
+adapter gets the shared default -- only `data/edgar.py` overrides it, for
+SEC's 429): `RETRY_DELAYS_SECONDS = (1.0,
 2.0)` gives exactly three total attempts with deterministic backoff between
 them — no jitter, no exponential growth, nothing that would make a test's
 expected sleep sequence non-reproducible. A test asserts the *exact* backoff

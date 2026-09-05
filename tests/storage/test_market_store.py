@@ -166,6 +166,23 @@ class TestWriteAndReadBars:
 
         assert list(result["date"]) == [date(2026, 7, 15)]
 
+    def test_as_of_includes_a_bar_dated_exactly_at_the_cutoff(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAPL", "2026-07-15", 10, 10.5, 9.5, 10.2, 1000),
+                    ("AAPL", "2026-07-20", 11, 11.5, 10.5, 11.2, 1100),
+                    ("AAPL", "2026-07-22", 12, 12.5, 11.5, 12.2, 1200),
+                ]
+            )
+        )
+
+        result = market_store.read_bars(
+            ["AAPL"], date(2026, 7, 1), date(2026, 7, 31), as_of=date(2026, 7, 20)
+        )
+
+        assert list(result["date"]) == [date(2026, 7, 15), date(2026, 7, 20)]
+
     def test_bars_across_multiple_years_partition_correctly(self, market_store):
         market_store.write_bars(
             _bars(
@@ -434,6 +451,30 @@ class TestUpsertFundamentals:
         result = market_store.read_fundamentals(as_of=date(2026, 7, 20))
 
         assert result["accession_no"].tolist() == ["acc-2026-07-10"]
+
+    def test_read_fundamentals_includes_a_filing_on_as_of(self, market_store):
+        records = [
+            FundamentalsRecord(
+                accession_no="acc-on-cutoff",
+                symbol="AAPL",
+                form="10-Q",
+                fiscal_period_end=date(2026, 6, 30),
+                filed_at=datetime(2026, 7, 20, tzinfo=UTC),
+                revenue=1.0,
+                net_income=1.0,
+                fcf=1.0,
+                equity=1.0,
+                assets=2.0,
+                shares=1.0,
+                source_url="https://www.sec.gov/example",
+                fetched_at=datetime(2026, 7, 30, tzinfo=UTC),
+            ),
+        ]
+        market_store.upsert_fundamentals(records)
+
+        result = market_store.read_fundamentals(as_of=date(2026, 7, 20))
+
+        assert result["accession_no"].tolist() == ["acc-on-cutoff"]
 
     def test_batch_rolls_back_when_a_later_record_is_invalid(self, market_store):
         valid = FundamentalsRecord(

@@ -685,43 +685,46 @@ def _run_soft_steps(
     degraded = _run_retro_collect_soft_step(deps, ctx, deadline) or degraded
     degraded = _run_retro_evaluate_soft_step(deps, ctx, deadline) or degraded
 
-    started_at = time.perf_counter()
-    signal_performance: tuple[SignalPerformanceRow, ...]
-    if export_over_budget:
-        logger.warning("step 6_analysis_export skipped: time budget exceeded")
-        export_outcome, analysis_input_path, analysis_input_digest = (
-            TIME_BUDGET_STEP_OUTCOME,
-            None,
-            None,
+    def _analysis_export_step() -> tuple[StepOutcome, tuple[Path | None, str | None]]:
+        outcome, path, digest = run_step_analysis_export(
+            deps,
+            ctx,
+            text_items,
+            include_prior_verdicts=(not options.is_dry_run and options.as_of is None),
         )
-    else:
-        logger.debug("step 6_analysis_export starting")
-        step_started(deps, "6_analysis_export")
-        export_outcome, analysis_input_path, analysis_input_digest = (
-            run_step_analysis_export(
-                deps,
-                ctx,
-                text_items,
-                include_prior_verdicts=(
-                    not options.is_dry_run and options.as_of is None
-                ),
-            )
+        return outcome, (path, digest)
+
+    # Typed explicitly (not an inline literal) so mypy binds the helper's
+    # `_SoftStepExtraT` from this call's actual step-function return type
+    # rather than from the narrowest type a bare `(None, None)` would infer.
+    no_export_result: tuple[Path | None, str | None] = (None, None)
+    export_outcome, (analysis_input_path, analysis_input_digest) = (
+        _run_budgeted_soft_step(
+            deps,
+            ctx,
+            "6_analysis_export",
+            export_over_budget,
+            _analysis_export_step,
+            no_export_result,
+            notify_progress=True,
         )
-    record_step(deps, ctx.run_id, "6_analysis_export", export_outcome, started_at)
+    )
     degraded = degraded or not export_outcome.success
     if options.as_of is not None and analysis_input_path is not None:
         # Issue #254: a replay's export is nobody's to answer, and only a
         # stamp left next to it can still say so tomorrow.
         _mark_historical_replay(analysis_input_path, ctx)
 
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step postmortem skipped: time budget exceeded")
-        postmortem_outcome, signal_performance = TIME_BUDGET_STEP_OUTCOME, ()
-    else:
-        logger.debug("step postmortem starting")
-        postmortem_outcome, signal_performance = run_step_postmortem(deps, ctx.run_date)
-    record_step(deps, ctx.run_id, "postmortem", postmortem_outcome, started_at)
+    # Same reasoning as `no_export_result` above.
+    no_signal_performance: tuple[SignalPerformanceRow, ...] = ()
+    postmortem_outcome, signal_performance = _run_budgeted_soft_step(
+        deps,
+        ctx,
+        "postmortem",
+        deps.monotonic() >= deadline,
+        lambda: run_step_postmortem(deps, ctx.run_date),
+        no_signal_performance,
+    )
     degraded = degraded or not postmortem_outcome.success
 
     degraded = _run_track_update_soft_step(deps, ctx, deadline) or degraded
@@ -773,6 +776,64 @@ def _run_soft_steps(
     )
 
 
+def _run_budgeted_soft_step[SoftStepExtraT](  # noqa: PLR0913 - one parameter per part of the collapsed boilerplate: budget decision, step identity, execution, skip value, plus the progress flag
+    deps: DailyDependencies,
+    ctx: RunContext,
+    step_name: str,
+    is_over_budget: bool,
+    step_fn: Callable[[], tuple[StepOutcome, SoftStepExtraT]],
+    skipped_extra: SoftStepExtraT,
+    *,
+    notify_progress: bool = False,
+) -> tuple[StepOutcome, SoftStepExtraT]:
+    """Run one NFR-03-budgeted fail-soft step, then record its outcome once.
+
+    Collapses the "time-budget check -> run or skip -> record" boilerplate
+    that used to be copied five times in this module (Issue #400): the three
+    `_run_*_soft_step` wrappers below, plus two inline blocks that used to sit
+    in `_run_soft_steps` (`6_analysis_export` and `postmortem`).
+
+    `is_over_budget` is a caller-computed decision rather than a `deadline`
+    this helper re-checks itself, because `6_analysis_export`'s decision must
+    be taken *before* `retro_collect`/`retro_evaluate` run -- see the comment
+    above their calls in `_run_soft_steps` -- while the export step function
+    itself still runs *after* them. A helper that read `deps.monotonic()`
+    itself at call time could not reproduce that decoupling; the caller
+    evaluates the same `deps.monotonic() >= deadline` expression these steps
+    used to check inline, at the same point in the flow.
+
+    `notify_progress` is set only for a `_VISIBLE_PIPELINE_STEPS` member
+    (today, only `6_analysis_export`): `step_started` raises `ValueError` for
+    any other name, and the operator-facing progress reporter was never told
+    about the other four steps here, before or after this helper.
+
+    Args:
+        deps: Run dependencies.
+        ctx: This run's screening-derived state.
+        step_name: The `run_steps.step` value to record.
+        is_over_budget: Whether the NFR-03 time budget is already exhausted.
+        step_fn: Runs the step; returns its outcome plus any extra value the
+            caller still needs (`None` when there is none).
+        skipped_extra: The extra value to report when the step is skipped.
+        notify_progress: Whether to call `step_started` before running.
+
+    Returns:
+        The step's outcome, and its extra value (or `skipped_extra` when
+        skipped).
+    """
+    started_at = time.perf_counter()
+    if is_over_budget:
+        logger.warning("step %s skipped: time budget exceeded", step_name)
+        outcome, extra = TIME_BUDGET_STEP_OUTCOME, skipped_extra
+    else:
+        logger.debug("step %s starting", step_name)
+        if notify_progress:
+            step_started(deps, step_name)
+        outcome, extra = step_fn()
+    record_step(deps, ctx.run_id, step_name, outcome, started_at)
+    return outcome, extra
+
+
 def _run_retro_collect_soft_step(
     deps: DailyDependencies,
     ctx: RunContext,
@@ -792,14 +853,14 @@ def _run_retro_collect_soft_step(
     Returns:
         Whether the step degraded the run.
     """
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step retro_collect skipped: time budget exceeded")
-        outcome = TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step retro_collect starting")
-        outcome = run_step_retro_collect(deps)
-    record_step(deps, ctx.run_id, "retro_collect", outcome, started_at)
+    outcome, _ = _run_budgeted_soft_step(
+        deps,
+        ctx,
+        "retro_collect",
+        deps.monotonic() >= deadline,
+        lambda: (run_step_retro_collect(deps), None),
+        None,
+    )
     return not outcome.success
 
 
@@ -826,14 +887,14 @@ def _run_retro_evaluate_soft_step(
     Returns:
         Whether the step degraded the run.
     """
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step retro_evaluate skipped: time budget exceeded")
-        outcome = TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step retro_evaluate starting")
-        outcome = run_step_retro_evaluate(deps, ctx.run_date)
-    record_step(deps, ctx.run_id, "retro_evaluate", outcome, started_at)
+    outcome, _ = _run_budgeted_soft_step(
+        deps,
+        ctx,
+        "retro_evaluate",
+        deps.monotonic() >= deadline,
+        lambda: (run_step_retro_evaluate(deps, ctx.run_date), None),
+        None,
+    )
     return not outcome.success
 
 
@@ -865,15 +926,15 @@ def _run_track_update_soft_step(
     Returns:
         Whether the step degraded the run.
     """
-    started_at = time.perf_counter()
-    if deps.monotonic() >= deadline:
-        logger.warning("step track_update skipped: time budget exceeded")
-        track_outcome = TIME_BUDGET_STEP_OUTCOME
-    else:
-        logger.debug("step track_update starting")
-        track_outcome = run_step_track_update(deps, ctx.run_date)
-    record_step(deps, ctx.run_id, "track_update", track_outcome, started_at)
-    return not track_outcome.success
+    outcome, _ = _run_budgeted_soft_step(
+        deps,
+        ctx,
+        "track_update",
+        deps.monotonic() >= deadline,
+        lambda: (run_step_track_update(deps, ctx.run_date), None),
+        None,
+    )
+    return not outcome.success
 
 
 def _finalize_output(

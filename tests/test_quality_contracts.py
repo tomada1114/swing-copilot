@@ -1095,8 +1095,10 @@ _RUNS_INSERT_ALLOWED_PREFIXES = ("tests/storage/", "tests/support/")
 #: asserts on the pre-existing row's `report_path`, and `insert_run()` has no
 #: parameter for it (only `complete_run()` sets one). Maps to the expected
 #: `INSERT INTO runs` occurrence count in that file, so a *new* raw seed
-#: added anywhere else in it still fails this test.
-_RUNS_RAW_INSERT_EXCEPTIONS = {"tests/pipeline/test_daily_core.py": 1}
+#: added anywhere else in it still fails this test. Issue #400 moved this
+#: test (and every other lifecycle test) out of the former
+#: `test_daily_core.py` into `test_daily_runner.py`.
+_RUNS_RAW_INSERT_EXCEPTIONS = {"tests/pipeline/test_daily_runner.py": 1}
 
 #: A deliberately broken test double overrides `StateStore.database` to
 #: raise, so its test must inspect the backing database after the pipeline

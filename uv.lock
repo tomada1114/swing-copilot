@@ -538,9 +538,9 @@ dependencies = [
     { name = "h11" },
     { name = "truststore" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/50/a332c2a959a7f12d3cf6b96bb35c7028c5d1904fa7b2f5850fa175af01/httpcore2-2.8.0.tar.gz", hash = "sha256:44be3730e7cd4fd206478488c00f57c0960b5e00ee9f7099ef18bb2b0c5cdb79", size = 66779, upload-time = "2026-07-23T11:54:40.443236Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/50/a33260c2a959a7f12d3cf6b96bb35c7028c5d1904fa7b2f5850fa175af01/httpcore2-2.8.0.tar.gz", hash = "sha256:44be3730e7cd4fd206478488c00f57c0960b5e00ee9f7099ef18bb2b0c5cdb79", size = 66779, upload-time = "2026-07-23T11:54:40.443Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/b7/76d6baa8c087cf5170f36dbeb92471e77c5c48f8f7ca8e5ba4ad613ea492/httpcore2-2.8.0-py3-none-any.whl", hash = "sha256:60ee2f9963ca942955ffd44553fc1111f00286283f9cc047d74e19888e061ace", size = 82638, upload-time = "2026-07-23T11:54:37.976967Z" },
+    { url = "https://files.pythonhosted.org/packages/12/b7/76d6baa8c087cf5170f36dbeb92471e77c5c48f8f7ca8e5ba4ad613ea492/httpcore2-2.8.0-py3-none-any.whl", hash = "sha256:60ee2f9963ca942955ffd44553fc1111f00286283f9cc047d74e19888e061ace", size = 82638, upload-time = "2026-07-23T11:54:37.976Z" },
 ]
 
 [[package]]
@@ -568,9 +568,9 @@ dependencies = [
     { name = "idna" },
     { name = "truststore" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/31/ca/928387a80e8e6ebbfa7ed020f1412e99038092657d63d801fe935f56677c/httpx2-2.8.0.tar.gz", hash = "sha256:7137d9278553773c672856112c36062ae691146212ab748a6a8362479b19bdee", size = 94485, upload-time = "2026-07-23T11:54:41.363496Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/ca/928387a80e8e6ebbfa7ed020f1412e99038092657d63d801fe935f56677c/httpx2-2.8.0.tar.gz", hash = "sha256:7137d9278553773c672856112c36062ae691146212ab748a6a8362479b19bdee", size = 94485, upload-time = "2026-07-23T11:54:41.363Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/a7/aea061b450d51cf448c1ccc8e1fc6f04c0d8fdc97c17524c7f835018bb92/httpx2-2.8.0-py3-none-any.whl", hash = "sha256:9617a6af8354667c94dc06a1b7b88a32db618ffb1f0649f8be31c0639dc58227", size = 90232, upload-time = "2026-07-23T11:54:39.222314Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/a7/aea061b450d51cf448c1ccc8e1fc6f04c0d8fdc97c17524c7f835018bb92/httpx2-2.8.0-py3-none-any.whl", hash = "sha256:9617a6af8354667c94dc06a1b7b88a32db618ffb1f0649f8be31c0639dc58227", size = 90232, upload-time = "2026-07-23T11:54:39.222Z" },
 ]
 
 [[package]]
@@ -1633,6 +1633,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "stamina" },
     { name = "uvicorn" },
     { name = "yfinance" },
 ]
@@ -1674,6 +1675,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.0" },
+    { name = "stamina", specifier = ">=24.2" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "yfinance", specifier = ">=0.2.48" },
 ]

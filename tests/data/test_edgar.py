@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+import stamina
 
 from swing_copilot.analysis.filing_selection import select_filing_text
 from swing_copilot.data.edgar import (
@@ -258,6 +259,27 @@ def _no_real_edgar_identity_mutation(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _restore_stamina_retry_state():
+    """Reset `stamina`'s process-wide active flag around every test (Issue #429).
+
+    `EdgarClient.__init__` calls `stamina.set_active(False)` as a real,
+    documented side effect (not a fake): every `EdgarClient(...)` built by
+    this module leaves `stamina` globally deactivated for whatever test runs
+    next in this worker process. `TestEdgartoolsInternalRetry` needs to
+    start from a known "active" state to prove construction is what turns it
+    off, and that has to hold under `-n auto` / any test order, not just when
+    this file happens to run first -- so set it explicitly before yielding
+    rather than relying on whatever a previous test left behind, and restore
+    the pre-test value afterwards so a later, unrelated test file is not left
+    looking at a permanently deactivated `stamina`.
+    """
+    previous = stamina.is_active()
+    stamina.set_active(True)
+    yield
+    stamina.set_active(previous)
+
+
 class TestIdentity:
     def test_sets_edgar_identity_on_construction(self, monkeypatch):
         calls: list[str] = []
@@ -266,6 +288,32 @@ class TestIdentity:
         EdgarClient(IDENTITY, company_factory=_company_factory(FakeCompany([])))
 
         assert calls == [IDENTITY]
+
+
+class TestEdgartoolsInternalRetry:
+    """Issue #429: `EdgarClient` construction disables edgartools' own retry.
+
+    `tests/data/test_edgar_http_boundary.py` proves the observable effect
+    (request counts, injected `sleep_fn` values) through the real HTTP layer
+    for the paths that go through `_with_retries` (`fetch_fundamentals`,
+    `fetch_recent_filings`, `fetch_filing_texts`). This test instead checks
+    the mechanism directly, because it is the only way to cover every path
+    that calls into edgartools without going through `_with_retries` at all
+    -- `filing.text()` (via `_filing_text_item`), `filing.attachments` /
+    `attachment.content` (via `_exhibit_text`), and `filing.obj()` (via
+    `_extract_ten_q_sections`, called with no retry wrapper whatsoever). The
+    invariant this repository relies on is process-wide ("edgartools never
+    runs its own retry loop in this process"), not per-call-site, so
+    asserting on the process-wide switch is the correct level for the
+    invariant, not a shortcut around testing behavior.
+    """
+
+    def test_construction_disables_the_edgartools_internal_retry_loop(self):
+        assert stamina.is_active() is True  # the autouse fixture's precondition
+
+        EdgarClient(IDENTITY, company_factory=_company_factory(FakeCompany([])))
+
+        assert stamina.is_active() is False
 
 
 class TestFetchFundamentals:

@@ -257,6 +257,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   読めなくなっていた。0/`false` を一律に落とすと今度は実際に計上した世代が壊れるため、
   値ではなくキー集合で世代を見分ける。キーを失った・増やした・書き換えた文書が落ちる
   従来の性質は変わらない
+- `EdgarClient`の「合計3試行・決定論的backoff」というリトライ契約が、依存ライブラリ
+  edgartoolsの隠れた内部リトライで実質無効化されていた問題を修正した（Issue #429）。
+  `_with_retries()`（`retry_external_call`経由）の内側で呼ぶedgartoolsの同期リクエスト
+  関数（`get_with_retry`/`stream_with_retry`/`post_with_retry`）は`stamina`ライブラリの
+  `@retry(...)`で独自にラップされており、実`time.sleep`・注入不能のまま最大
+  `QUICK_RETRY_ATTEMPTS = 5`回再送していたため、transport障害が続くと論理1呼び出し
+  あたり最大15リクエスト・実時間48秒（未計測）になり得た。`company_factory`を偽装する
+  既存テストはこの二重リトライを一度も観測していなかった。`EdgarClient.__init__`で
+  `edgar.set_identity(identity)`の直後に`stamina.set_active(False)`を呼ぶことで
+  （edgartoolsのバージョンに依らず有効な、`stamina`自身が文書化したプロセス全体の
+  キルスイッチ）、edgartools内部リトライを無効化し、`_with_retries()`だけが実際に
+  動くリトライループになるようにした。実測: transport障害が続くケースで
+  15リクエスト/実時間48.0秒だったのが3リクエスト/実時間0秒（`sleep_fn`への注入値は
+  引き続き`[1.0, 2.0]`）へ改善した。回帰は`tests/data/test_edgar_http_boundary.py`
+  （新規、`edgar.httprequests.http_client`を`httpx.MockTransport`で差し替えて実HTTP層を
+  通す）と`tests/data/test_edgar.py::TestEdgartoolsInternalRetry`で固定した。監査が
+  挙げていた「401/403/404も内部で6〜8回リトライされる」という主張は本Issueの再調査で
+  誤りと判明した（ステータス例外は内部リトライの外側で送出されるため）——429
+  （`TooManyRequestsError`、両層ともリトライ対象外）と`stream_with_retry`のジェネレータ
+  非リトライ（`@with_identity`が`isgeneratorfunction`を偽装させる、edgartools側の潜在
+  バグ）は本Issueのスコープ外として切り離した
 
 ### Changed
 

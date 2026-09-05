@@ -56,7 +56,7 @@ class TestLoadSettings:
     def test_invalid_schema_raises_config_error(self, tmp_path):
         bad = tmp_path / "settings.yaml"
         bad.write_text('universe:\n  refresh_interval_days: "not-a-number"\n')
-        with pytest.raises(ConfigError):
+        with pytest.raises(ConfigError, match="refresh_interval_days"):
             load_settings(str(bad))
 
     def test_malformed_yaml_raises_config_error(self, tmp_path):
@@ -69,7 +69,7 @@ class TestLoadSettings:
         valid_yaml = Path("config/settings.yaml").read_text(encoding="utf-8")
         bad = tmp_path / "settings.yaml"
         bad.write_text(valid_yaml + "\nbogus_top_level_field: 1\n")
-        with pytest.raises(ConfigError):
+        with pytest.raises(ConfigError, match="bogus_top_level_field"):
             load_settings(str(bad))
 
     def test_non_utf8_file_raises_config_error(self, tmp_path):
@@ -486,48 +486,67 @@ class TestSecretsModel:
 
 
 def test_settings_rejects_wrong_type_for_nested_field():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=r"technical_signals\.trend\.sma_short"):
         Settings.model_validate({"technical_signals": {"trend": {"sma_short": "fast"}}})
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "field"),
     [
-        pytest.param({"universe": {"refresh_interval_days": 0}}, id="refresh-zero"),
         pytest.param(
-            {"universe": {"refresh_interval_days": -1}}, id="refresh-negative"
+            {"universe": {"refresh_interval_days": 0}},
+            "refresh_interval_days",
+            id="refresh-zero",
+        ),
+        pytest.param(
+            {"universe": {"refresh_interval_days": -1}},
+            "refresh_interval_days",
+            id="refresh-negative",
         ),
         pytest.param(
             {"fundamental_filters": {"min_profitable_quarters": 0}},
+            "min_profitable_quarters",
             id="profitable-quarters-zero",
         ),
         pytest.param(
             {"technical_signals": {"trend": {"sma_short": 0}}},
+            "sma_short",
             id="sma-short-zero",
         ),
         pytest.param(
             {"technical_signals": {"trend": {"sma_long": -1}}},
+            "sma_long",
             id="sma-long-negative",
         ),
         pytest.param(
             {"technical_signals": {"pullback": {"rsi_period": 0}}},
+            "rsi_period",
             id="rsi-period-zero",
         ),
         pytest.param(
             {"technical_signals": {"volume": {"avg_volume_days": 0}}},
+            "avg_volume_days",
             id="volume-window-zero",
         ),
         pytest.param(
             {"technical_signals": {"volume": {"min_avg_volume": -1}}},
+            "min_avg_volume",
             id="minimum-volume-negative",
         ),
-        pytest.param({"schedule": {"timeout_minutes": 0}}, id="timeout-zero"),
-        pytest.param({"schedule": {"timeout_minutes": -1}}, id="timeout-negative"),
+        pytest.param(
+            {"schedule": {"timeout_minutes": 0}}, "timeout_minutes", id="timeout-zero"
+        ),
+        pytest.param(
+            {"schedule": {"timeout_minutes": -1}},
+            "timeout_minutes",
+            id="timeout-negative",
+        ),
     ],
 )
-def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
-    with pytest.raises(ValidationError):
+def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides, field):
+    with pytest.raises(ValidationError) as excinfo:
         Settings.model_validate(overrides)
+    assert excinfo.value.errors()[0]["loc"][-1] == field
 
 
 @pytest.mark.parametrize(
@@ -577,7 +596,7 @@ def test_settings_rejects_non_positive_periods_counts_and_timeout(overrides):
     ],
 )
 def test_settings_rejects_out_of_range_screening_ratios_and_thresholds(overrides):
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=next(iter(overrides))):
         Settings.model_validate(overrides)
 
 
@@ -774,7 +793,7 @@ def test_earnings_warn_threshold_cannot_be_below_block_threshold():
     ],
 )
 def test_settings_rejects_invalid_quantitative_thresholds(overrides):
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=next(iter(overrides))):
         Settings.model_validate(overrides)
 
 
@@ -923,16 +942,16 @@ def test_analysis_config_error_names_the_required_minimum_and_the_actual_value()
 
 
 def test_analysis_config_no_longer_has_the_old_chunk_keys():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="filing_chunk_chars"):
         Settings.model_validate({"analysis": {"filing_chunk_chars": 1_000}})
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="max_filing_chunks"):
         Settings.model_validate({"analysis": {"max_filing_chunks": 3}})
 
 
 def test_settings_no_longer_has_an_llm_or_budget_section():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="llm"):
         Settings.model_validate({"llm": {"cache_ttl_days": 5}})
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="budget"):
         Settings.model_validate({"budget": {"monthly_cost_cap_usd": 10.0}})
 
 
@@ -958,7 +977,7 @@ class TestRetroConfig:
         ],
     )
     def test_rejects_invalid_values(self, overrides):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match=next(iter(overrides))):
             Settings.model_validate({"retro": overrides})
 
     def test_does_not_duplicate_the_postmortem_thresholds(self):
@@ -966,7 +985,7 @@ class TestRetroConfig:
         # thresholds rather than growing a second vocabulary for the same
         # quantities, so these must stay unknown fields here.
         for duplicated in ("neutral_threshold_pct", "preliminary_sample_threshold"):
-            with pytest.raises(ValidationError):
+            with pytest.raises(ValidationError, match=duplicated):
                 Settings.model_validate({"retro": {duplicated: 1.0}})
 
     def test_rejects_the_removed_approval_mode_reservation(self):
@@ -974,7 +993,7 @@ class TestRetroConfig:
         # silently kept the auto-apply behaviour. It is gone, and a settings
         # file that still carries it must fail loudly instead of being ignored.
         for value in ("auto", "manual"):
-            with pytest.raises(ValidationError):
+            with pytest.raises(ValidationError, match="approval_mode"):
                 Settings.model_validate({"retro": {"approval_mode": value}})
 
 
@@ -1005,5 +1024,5 @@ def test_band_atr_multiple_accepts_a_positive_multiple():
 def test_analysis_config_rejects_a_non_positive_news_mention_floor():
     # Issue #191: a floor of 0 would grade every feed `sufficient`, silently
     # undoing Issue #130's declaration rather than loosening it visibly.
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="sufficient_news_mention_items"):
         Settings.model_validate({"analysis": {"sufficient_news_mention_items": 0}})

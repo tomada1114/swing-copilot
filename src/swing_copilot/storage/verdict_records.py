@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
+from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.database import atomic, fetch_records
 from swing_copilot.storage.json_guard import dumps_safe
 
@@ -64,6 +65,10 @@ ACCOUNT_INDEPENDENT_VERDICT_CUTOFF: Final = date(2026, 8, 21)
 #: `reason_text_visible_sql`/`is_reason_text_visible` below combine the two
 #: cutoffs as a pure relaxation of `ACCOUNT_INDEPENDENT_VERDICT_CUTOFF` alone.
 ACCOUNT_INDEPENDENT_EXPORT_SINCE: Final = datetime(2026, 8, 21, 19, 14, 55, tzinfo=UTC)
+
+
+class VerdictRecordError(SwingCopilotError):
+    """Raised when an archived verdict record has an invalid JSON shape."""
 
 
 def reason_text_visible_sql(
@@ -1100,16 +1105,26 @@ def _reasons_from_json(raw: str) -> tuple[VerdictReasonRecord, ...]:
     `basis` is read with `.get()`: rows archived before Issue #191 carry no
     such key, and an untagged reason must come back as `None` rather than
     fail the whole run's read.
+
+    Raises:
+        VerdictRecordError: The archived `source_ids` value is not a JSON
+            array, so returning a partial reason would lose its provenance.
     """
     reasons: list[dict[str, object]] = json.loads(str(raw))
-    return tuple(
-        VerdictReasonRecord(
-            text=str(reason["text"]),
-            source_ids=tuple(str(value) for value in list(reason["source_ids"])),  # type: ignore[call-overload]
-            basis=_optional_str(reason.get("basis")),
+    parsed: list[VerdictReasonRecord] = []
+    for reason in reasons:
+        source_ids = reason.get("source_ids")
+        if not isinstance(source_ids, list):
+            msg = "archived verdict reason source_ids must be a JSON array"
+            raise VerdictRecordError(msg)
+        parsed.append(
+            VerdictReasonRecord(
+                text=str(reason["text"]),
+                source_ids=tuple(str(value) for value in source_ids),
+                basis=_optional_str(reason.get("basis")),
+            )
         )
-        for reason in reasons
-    )
+    return tuple(parsed)
 
 
 def _optional_str(value: object) -> str | None:

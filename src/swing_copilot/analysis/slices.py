@@ -310,6 +310,7 @@ class SliceDocument:
         return f"{SLICE_FILENAME_PREFIX}-{self.kind}-{self.symbol}.json"
 
 
+# Any: the exported document is an untyped JSON mapping before slice validation.
 def build_slices(payload: Mapping[str, Any]) -> tuple[SliceDocument, ...]:
     """Cut every (expert x symbol) slice out of one analysis input document.
 
@@ -403,7 +404,7 @@ class _Candidate:
     """One candidate in both forms slicing needs: parsed, and as written."""
 
     parsed: CandidateInput
-    raw: Mapping[str, Any]
+    raw: Mapping[str, Any]  # Any: verbatim JSON candidate copied from the input
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,7 +412,7 @@ class _SliceSource:
     """The input document, parsed for decisions and raw for copying."""
 
     analysis_input: AnalysisInput
-    payload: Mapping[str, Any]
+    payload: Mapping[str, Any]  # Any: raw JSON retained for verbatim slice output
 
     def candidates(self) -> tuple[_Candidate, ...]:
         """Pair each parsed candidate with the object it was parsed from."""
@@ -424,6 +425,7 @@ class _SliceSource:
             )
         )
 
+    # Any: these identity values are copied from the untyped input JSON.
     def identity(self) -> dict[str, Any]:
         """The three run-identity values, verbatim, in their fixed order."""
         return {
@@ -432,8 +434,10 @@ class _SliceSource:
             "input_digest": self.payload["input_digest"],
         }
 
+    # Any: context blocks retain heterogeneous JSON values for each expert.
     def context_for(self, kind: FragmentKind) -> dict[str, Any]:
         """The run-wide blocks this expert reads, verbatim."""
+        # Any: raw context values are heterogeneous JSON from the input file.
         raw_context: Mapping[str, Any] = self.payload["context"]
         return {
             key: raw_context[key]
@@ -442,6 +446,7 @@ class _SliceSource:
         }
 
 
+# Any: the document reader returns an untyped JSON mapping before strict parsing.
 def _validated_input(payload: Mapping[str, Any]) -> AnalysisInput:
     """Parse the document strictly before anything is cut out of it."""
     try:
@@ -478,6 +483,7 @@ def _slice_document(
     if _SAFE_SYMBOL.fullmatch(symbol) is None:
         msg = f"symbol {symbol!r} cannot be used in a slice filename"
         raise SliceExportError(msg)
+    # Any: this payload is a heterogeneous JSON object copied into the slice.
     candidate_payload: dict[str, Any] = {"symbol": candidate.raw["symbol"]}
     for key in _CANDIDATE_KEYS_BY_KIND[kind]:
         if key not in candidate.raw:
@@ -488,6 +494,7 @@ def _slice_document(
             ]
         else:
             candidate_payload[key] = candidate.raw[key]
+    # Any: slice fields intentionally preserve heterogeneous input JSON values.
     slice_payload: dict[str, Any] = {
         **source.identity(),
         "kind": kind,
@@ -512,8 +519,10 @@ def _slice_document(
     )
 
 
+# Any: filing fields are opaque JSON values until the strict slice model validates them.
 def _chunk_filing(filing: Mapping[str, Any]) -> dict[str, Any]:
     """Replace one raw filing body with an ordered, line-safe chunk list."""
+    # Any: retain every provider filing field while replacing only the text body.
     chunked: dict[str, Any] = {}
     for key, value in filing.items():
         chunked["text_chunks" if key == "text" else key] = (
@@ -555,7 +564,9 @@ def _split_filing_text(text: str) -> list[str]:
 
 
 def _source_chars(
-    kind: FragmentKind, candidate: CandidateInput, raw_context: Mapping[str, Any]
+    kind: FragmentKind,
+    candidate: CandidateInput,
+    raw_context: Mapping[str, Any],  # Any: untyped context JSON is counted verbatim
 ) -> int:
     """Count the characters of the bodies this slice hands its expert.
 
@@ -576,6 +587,7 @@ def _source_chars(
         candidate.prior_verdicts,
         raw_context.get("market_regime"),
     )
+    # Any: calendar event fields come from the provider's heterogeneous JSON.
     events: Sequence[Mapping[str, Any]] = raw_context.get("calendar_events", [])
     return sum(len(block or "") for block in blocks) + sum(
         len(event.get("title") or "") + len(event["summary"]) for event in events

@@ -51,6 +51,7 @@ def build_environment() -> Environment:
     return environment
 
 
+# Any: Jinja receives a heterogeneous context assembled from view models.
 def render(environment: Environment, template: str, context: dict[str, Any]) -> str:
     """Render one template with the given context."""
     return environment.get_template(template).render(**context)

@@ -543,6 +543,7 @@ CONFIG_SNAPSHOT_SECTIONS: Final = (
 )
 
 
+# Any: model_dump returns heterogeneous JSON-ready values for each settings section.
 def config_snapshot_sections(settings: Settings) -> dict[str, Any]:
     """Return the proposal-relevant settings sections, JSON-ready.
 
@@ -559,6 +560,7 @@ def config_snapshot_sections(settings: Settings) -> dict[str, Any]:
     return {name: dumped[name] for name in CONFIG_SNAPSHOT_SECTIONS}
 
 
+# Any: the hash consumes the heterogeneous JSON sections emitted above.
 def config_snapshot_hash(sections: Mapping[str, Any]) -> str:
     """Return the SHA-256 fingerprint of one snapshot's sections.
 

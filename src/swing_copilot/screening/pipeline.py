@@ -132,6 +132,8 @@ def build_strategy_components(
     """
     filters = [FILTER_REGISTRY[key](settings) for key in spec.filters_all]
     signals = [
+        # Any: registry entries have heterogeneous constructors; this branch
+        # supplies the optional `min_criteria` argument only to one signal.
         cast("Any", SIGNAL_REGISTRY[key])(
             settings, min_criteria=spec.minervini.min_criteria
         )

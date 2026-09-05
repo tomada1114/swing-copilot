@@ -28,14 +28,17 @@ _MIN_REQUEST_INTERVAL_SECONDS = FINNHUB_MIN_REQUEST_INTERVAL_SECONDS
 
 
 class _HttpGet(Protocol):
+    # Any: Finnhub's decoded JSON object has no static response schema.
     def __call__(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         """Return a parsed Finnhub JSON object."""
         ...  # pragma: no cover
 
 
+# Any: the HTTP client returns an untyped Finnhub JSON object.
 def _real_http_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
     response = httpx.get(url, params=params, timeout=10.0)
     response.raise_for_status()
+    # Any: response JSON has no provider schema.
     result: dict[str, Any] = response.json()
     return result
 
@@ -141,6 +144,7 @@ class FinnhubEarningsClient:
         if not isinstance(calendar, list):
             msg = "Finnhub earningsCalendar response must be a list"
             raise TypeError(msg)
+        # Any: each matching row is a heterogeneous Finnhub JSON object.
         matching: list[tuple[date, dict[str, Any]]] = []
         for item in calendar:
             if (

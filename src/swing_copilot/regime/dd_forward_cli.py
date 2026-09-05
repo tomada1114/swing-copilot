@@ -589,6 +589,7 @@ def render_terminal(
     return buffer.getvalue()
 
 
+# Any: the CLI JSON payload combines heterogeneous regime statistics.
 def _stats_payload(stats: LevelStats) -> dict[str, Any]:
     return {
         "level": stats.level.value,
@@ -605,6 +606,7 @@ def _stats_payload(stats: LevelStats) -> dict[str, Any]:
     }
 
 
+# Any: this machine-readable CLI document contains heterogeneous JSON values.
 def build_payload(scan: ForwardScan, thresholds: RegimeThresholds) -> dict[str, Any]:
     """Build the `--json` document (the machine-readable form of the tables)."""
     distribution = thresholds.distribution

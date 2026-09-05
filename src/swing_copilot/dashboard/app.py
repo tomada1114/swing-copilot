@@ -61,6 +61,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     environment = templating.build_environment()
 
+    # Any: template contexts combine heterogeneous view-model values for Jinja.
     def page(template: str, context: dict[str, Any], status: int = 200) -> Response:
         body = templating.render(environment, template, context)
         return HTMLResponse(body, status_code=status)

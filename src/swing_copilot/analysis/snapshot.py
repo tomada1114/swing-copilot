@@ -162,6 +162,7 @@ def read_report_context(path: Path) -> ReportContext:
     )
 
 
+# Any: the snapshot file is decoded JSON before its envelope is validated.
 def _require_matching_schema_version(payload: dict[str, Any], path: Path) -> None:
     """Fail with a generation-mismatch message before any further parsing.
 
@@ -192,6 +193,7 @@ def _require_matching_schema_version(payload: dict[str, Any], path: Path) -> Non
     raise AnalysisIngestError(msg)
 
 
+# Any: a snapshot is an untyped JSON object until its schema version is checked.
 def _read_payload(path: Path) -> dict[str, Any]:
     """Return the archived envelope, or fail as a broken artifact.
 

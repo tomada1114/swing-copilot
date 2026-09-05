@@ -1455,7 +1455,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   待機時間はレスポンスの `Retry-After` ヘッダ由来の `retry_after`（秒）を
   優先し、ヘッダが無い／パースできない場合は
   `TooManyRequestsError.BLOCK_DURATION_MINUTES * 60`（600秒）へフォールバック
-  する。429 以外の retryable なエラー（408/5xx/transport）は従来どおり
+  する（`Retry-After`が0以下の場合も同様——0秒待機はSECのブロックを延長し、
+  負値は本番の実`time.sleep`が`ValueError`を投げるため）。429 以外の retryable なエラー（408/5xx/transport）は従来どおり
   1秒・2秒backoffのまま。3試行のうち2回が600秒フォールバックだと
   EDGAR呼び出し1回が約20分スタールしうるが、SEC側のブロック延長を避ける
   ことを優先した設計判断である。`tests/data/test_edgar_http_boundary.py`に

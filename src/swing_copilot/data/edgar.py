@@ -132,11 +132,16 @@ def _edgar_retry_delay(error: Exception, default: float) -> float:
     by edgartools' `_get_retry_after`) governs the wait; when the header was
     absent or unparsable, `retry_after` is `None` and the wait falls back
     to the full `_EDGAR_RATE_LIMIT_BLOCK_SECONDS` block duration rather than
-    the generic default. Every other retryable error (transport failures,
-    408, 5xx) is untouched and keeps the generic schedule.
+    the generic default. A non-positive `retry_after` takes the same
+    fallback: `_get_retry_after` returns `0` for an HTTP-date already in the
+    past and passes a negative integer header through verbatim, and neither
+    "retry immediately" (which is exactly what extends SEC's block) nor a
+    negative sleep (`time.sleep` raises `ValueError`) is a usable wait.
+    Every other retryable error (transport failures, 408, 5xx) is untouched
+    and keeps the generic schedule.
     """
     if isinstance(error, TooManyRequestsError):
-        if error.retry_after is not None:
+        if error.retry_after is not None and error.retry_after > 0:
             return float(error.retry_after)
         return float(_EDGAR_RATE_LIMIT_BLOCK_SECONDS)
     return default

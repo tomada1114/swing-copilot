@@ -342,6 +342,33 @@ class TestTooManyRequestsIsRetryable:
         assert len(requests) == 3
         assert sleeps == [600.0, 600.0]
 
+    def test_a_429_with_a_non_positive_retry_after_header_falls_back_to_the_block_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A `Retry-After` of 0 (or negative) is not a usable wait.
+
+        edgartools' `_get_retry_after` returns `0` for an HTTP-date already
+        in the past and passes a negative integer header through verbatim.
+        Sleeping `0` would retry immediately -- exactly what extends SEC's
+        block -- and a negative delay would make production's real
+        `time.sleep` raise `ValueError` out of the retry loop, so both take
+        the 600s block-duration fallback.
+        """
+        for header_value in ("0", "-5"):
+            sleeps: list[float] = []
+            client, requests = _build_client(
+                monkeypatch,
+                tmp_path,
+                _always_429_with_headers({"Retry-After": header_value}),
+                sleep_fn=sleeps.append,
+            )
+
+            with pytest.raises(edgar.httprequests.TooManyRequestsError):
+                _fetch(client)
+
+            assert len(requests) == 3
+            assert sleeps == [600.0, 600.0]
+
     def test_a_429_with_an_unparsable_retry_after_header_falls_back_to_the_block_duration(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

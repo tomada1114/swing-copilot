@@ -73,6 +73,9 @@ class TestNumber:
     def test_infinity_is_treated_as_unrenderable(self) -> None:
         assert fmt.number(math.inf, key="absent").absence == "absent"
 
+    def test_non_numeric_value_uses_the_named_token(self) -> None:
+        assert fmt.number("not a number", key="absent").absence == "absent"
+
 
 class TestScalarCoercion:
     @pytest.mark.parametrize(
@@ -132,6 +135,9 @@ class TestIntegerAndTones:
 
     def test_integer_absent_uses_the_named_token(self) -> None:
         assert fmt.integer(pd.NA, key="untracked").absence == "untracked"
+
+    def test_integer_non_numeric_value_uses_the_named_token(self) -> None:
+        assert fmt.integer("not a number", key="absent").absence == "absent"
 
     def test_unknown_state_falls_back_to_the_neutral_tone(self) -> None:
         assert fmt.tone_of(fmt.RUN_STATUS_TONES, "invented") == "quiet"

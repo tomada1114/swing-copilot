@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 import pandas as pd
 import pytest
@@ -132,6 +132,28 @@ class TestProfitablePositiveFCFEquityFilter:
         data = base_input(rows)
         result = ProfitablePositiveFCFEquityFilter(settings).apply(data)
         assert result == {"AAPL"}
+
+    def test_includes_a_filing_filed_exactly_on_as_of(self, settings, base_input):
+        rows = _quarterly_rows("AAPL", [10.0, 10.0, 10.0, 10.0])
+        rows.append(
+            make_fundamentals_row(
+                "AAPL",
+                FundamentalsSpec(
+                    accession_no="acc-on-cutoff",
+                    fiscal_period_end=date(2026, 6, 30),
+                    filed_at=datetime.combine(AS_OF, time.max, tzinfo=UTC),
+                    net_income=-999.0,
+                    fcf=10.0,
+                    equity=60.0,
+                    assets=100.0,
+                ),
+            )
+        )
+        data = base_input(rows)
+
+        result = ProfitablePositiveFCFEquityFilter(settings).apply(data)
+
+        assert result == set()
 
     def test_empty_fundamentals_returns_empty_set(self, settings, base_input):
         data = base_input([])

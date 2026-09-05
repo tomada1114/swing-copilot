@@ -525,13 +525,15 @@ class TestReplaceRunVerdictsAtomicity:
 
 
 class TestReplaceCollectedRunOutcomeCleanup:
-    """Issue #448: a run dropped from `verdicts` must not orphan `verdict_outcomes`.
+    """Issue #448: a replacement must not orphan the `verdict_outcomes` it drops.
 
     `evaluate_verdicts` only walks the runs `get_verdicts_in_window` returns,
-    which is driven by `verdicts` itself, so once a run has zero rows there,
-    its previously recorded outcomes would never be revisited or reclaimed --
-    unlike a merely *dropped symbol*, which self-heals through
-    `evaluate_verdicts`'s own full-slice replace.
+    which is driven by `verdicts` itself. So a run whose verdicts go to zero
+    is never revisited at all, and a merely *dropped symbol* self-heals
+    through `evaluate_verdicts`'s own full-slice replace only while its run
+    is still inside the evaluation window -- `collect` re-collects run
+    directories far older than that (Issue #209). Both leaks end in
+    `research.frames`, which reads `verdict_outcomes` unwindowed.
     """
 
     def test_an_empty_replacement_clears_the_runs_orphaned_outcomes(
@@ -567,6 +569,30 @@ class TestReplaceCollectedRunOutcomeCleanup:
             state_store,
             "SELECT symbol FROM verdict_outcomes WHERE run_id = ?",
             [str(kept)],
+        ) == [("AAPL",)]
+
+    def test_a_dropped_symbols_outcomes_are_cleared_while_the_rest_survive(
+        self, state_store: StateStore
+    ) -> None:
+        # The symbol-scoped half of the same leak. `evaluate_verdicts` would
+        # reclaim MSFT's row by itself, but only while this run is still
+        # inside the evaluation window; `collect` re-collects run directories
+        # far older than that, and such a run is never walked again.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL"), _verdict(run_id, "MSFT")], []
+        )
+        state_store.replace_verdict_outcomes(
+            run_id, 5, [_outcome(run_id, "AAPL", 5), _outcome(run_id, "MSFT", 5)]
+        )
+
+        # A corrected re-collect keeps AAPL and drops MSFT entirely.
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        assert _rows(
+            state_store,
+            "SELECT symbol FROM verdict_outcomes WHERE run_id = ? ORDER BY symbol",
+            [str(run_id)],
         ) == [("AAPL",)]
 
     def test_a_non_empty_replacement_leaves_the_runs_outcomes_untouched(

@@ -24,6 +24,21 @@ Dividends are recorded as events but never applied to a price
 (`design-pit-prices.md` 3): holding periods here are capped at 25 sessions
 and every fill is quoted in as-traded dollars, so a dividend-adjusted basis
 would buy nothing and would silently disagree with `entry_price`.
+
+`has_mixed_basis_signature` and `first_mixed_basis_jump` narrow a reversing
+jump pair with two further, purely arithmetic checks (Issue #425), on top of
+the split-sized-jump requirement above: **eligibility** -- only a split whose
+`ex_date` falls *after* the pair's run can explain it, since Yahoo's mismatch
+can only appear on rows before a split's own boundary -- and a **run-length
+ceiling** (`_MAX_FLIP_RUN_SESSIONS`) -- a pair whose run holds for months or
+years is a real, sustained price level, not a few misadjusted rows. Both
+conditions are measured, not tuned: against this repository's 510-symbol
+store they took the detector's false positives from 19 symbols to 2, with
+every known true positive (MNST, Issue #421) still detected. The two symbols
+that remain -- JKHY 1990-06-06 and WDC 2002-07-22 -- have a factor small
+enough that a real round-trip and a basis flip are arithmetically
+indistinguishable; narrowing further is out of this module's scope (Issue
+#425's own "rejected alternatives" section).
 """
 
 from __future__ import annotations
@@ -65,6 +80,13 @@ _STRAY_FLIP_TOLERANCE = math.log(1.06)
 #: split is called un-propagated. Looser than a flip's tolerance because the
 #: ex-date session's return is unconstrained.
 _PROPAGATION_TOLERANCE = math.log(1.12)
+#: Sessions a reversing pair's run (the rows between the two jumps) may span
+#: before it counts as a basis flip rather than a real sustained price level.
+#: Issue #421's only observed defect (MNST) was 1-3 sessions scattered across
+#: the three weeks before its ex-date; a run that holds for months or years
+#: is the market actually pricing there for that long -- a crash and its
+#: recovery, not a misadjusted row (Issue #425).
+_MAX_FLIP_RUN_SESSIONS = 25
 #: Sessions before an ex-date that vote on whether the split was propagated.
 #: More than one, so a single row Yahoo quoted on the other basis -- exactly
 #: what this module exists to handle -- cannot decide the question alone.
@@ -99,15 +121,21 @@ class NormalizationRejection:
     reason: str
 
 
-def has_mixed_basis_signature(closes: pd.Series, splits: Sequence[SplitEvent]) -> bool:
-    """Whether `closes` looks like adjusted and unadjusted rows interleaved.
+def has_mixed_basis_signature(bars: pd.DataFrame, splits: Sequence[SplitEvent]) -> bool:
+    """Whether `bars` looks like adjusted and unadjusted rows interleaved.
 
     The signature is a jump immediately followed (in the *jump* sequence, with
     any number of ordinary sessions in between) by a jump that undoes it,
-    where **both jumps are the size of one of `splits`' factors**. A real
-    corporate action moves the series once and leaves it there; a real price
-    shock is not mirrored; and a mirrored pair that is not split-sized is
-    ordinary volatility, which is all a long history ever offers.
+    where **both jumps are the size of one of `splits`' factors**, the pair's
+    run (the rows between the two jumps) is no longer than
+    `_MAX_FLIP_RUN_SESSIONS` sessions, and some **single** split's `ex_date`
+    falls after that run and whose `{factor, 1/factor}` explains both jumps
+    (Issue #425). A real corporate action moves the series once and leaves it
+    there; a real price shock is not mirrored; a mirrored pair that is not
+    split-sized is ordinary volatility, which is all a long history ever
+    offers; and a mirrored pair that *is* split-sized but whose run outlasts
+    the ceiling, or whose only candidate split predates the run, is a real
+    sustained price level (a crash and its recovery), not a misadjusted row.
 
     That last clause is what makes the gate usable over decades rather than
     over one rolling window (Issue #421). Scanned split-blind, 153 of this
@@ -116,21 +144,23 @@ def has_mixed_basis_signature(closes: pd.Series, splits: Sequence[SplitEvent]) -
     splits at all and therefore cannot have a basis to mix.
 
     Args:
-        closes: Closing prices in ascending date order. Non-positive and
-            non-finite values contribute no ratio rather than raising.
+        bars: One symbol's rows, ascending by `date`, with `date` and `close`
+            columns. Non-positive and non-finite `close` values contribute no
+            ratio rather than raising. Column presence is not defensively
+            checked; every caller already carries both.
         splits: The splits that could have produced a flip in this series. An
             empty sequence means no flip is possible, so the answer is
             `False` without inspecting a single ratio.
 
     Returns:
-        `True` when at least one pair of consecutive split-sized jumps
-        reverses.
+        `True` when at least one eligible pair of consecutive split-sized
+        jumps reverses.
     """
-    return _first_reversing_flip(closes, splits) is not None
+    return _first_reversing_flip(bars, splits) is not None
 
 
 def first_mixed_basis_jump(
-    closes: pd.Series, splits: Sequence[SplitEvent]
+    bars: pd.DataFrame, splits: Sequence[SplitEvent]
 ) -> int | None:
     """Where `has_mixed_basis_signature` first sees the basis flip.
 
@@ -140,15 +170,16 @@ def first_mixed_basis_jump(
     on and the audit that explains it cannot drift apart.
 
     Args:
-        closes: Closing prices in ascending date order.
+        bars: One symbol's rows, ascending by `date`, with `date` and `close`
+            columns.
         splits: The splits that could have produced a flip in this series.
 
     Returns:
-        The positional index of the *later* row of the first jump that takes
-        part in a reversing pair — the first session quoted on the other
-        basis — or `None` when the series carries no signature.
+        The positional index of the *later* row of the first eligible jump
+        that takes part in a reversing pair — the first session quoted on the
+        other basis — or `None` when the series carries no signature.
     """
-    return _first_reversing_flip(closes, splits)
+    return _first_reversing_flip(bars, splits)
 
 
 def _flip_ratios(splits: Sequence[SplitEvent]) -> tuple[float, ...]:
@@ -169,14 +200,61 @@ def _is_split_sized(ratio: float, flip_ratios: Sequence[float]) -> bool:
     )
 
 
+def _bar_dates(bars: pd.DataFrame) -> list[date]:
+    """`bars["date"]` as plain `date` values, accepting `date` or `Timestamp`."""
+    return [pd.Timestamp(value).date() for value in bars["date"].to_numpy()]
+
+
+def _explaining_split(
+    first: float,
+    second: float,
+    splits: Sequence[SplitEvent],
+    run_end: date,
+) -> bool:
+    """Whether some single split's `{factor, 1/factor}` explains both jumps.
+
+    Eligibility (Issue #425): only a split whose `ex_date` falls *after*
+    `run_end` (the run's last row) can be the cause. Yahoo's mismatch can
+    only show up on rows *before* a split's own ex-date -- every row at or
+    after it is already on the new basis under both readings, so it cannot be
+    the flipped side of a pair. A split with `ex_date <= run_end` is
+    therefore not a candidate at all, regardless of its factor.
+
+    Both jumps of one pair must match the *same* split's factor pair, not two
+    different splits' factors: one run's mismatch is one factor's worth of
+    arithmetic.
+
+    Args:
+        first: The earlier jump's ratio.
+        second: The later jump's ratio.
+        splits: Every split known for the symbol.
+        run_end: The date of the run's last row (`dates[j - 1]`).
+
+    Returns:
+        `True` once a qualifying split is found.
+    """
+    for split in splits:
+        if not _is_usable(split.factor):
+            continue
+        if split.ex_date <= run_end:
+            continue
+        pair = (split.factor, 1.0 / split.factor)
+        if _is_split_sized(first, pair) and _is_split_sized(second, pair):
+            return True
+    return False
+
+
 def _first_reversing_flip(
-    closes: pd.Series, splits: Sequence[SplitEvent]
+    bars: pd.DataFrame, splits: Sequence[SplitEvent]
 ) -> int | None:
     """The shared walk behind the boolean gate and its reporting counterpart."""
     flip_ratios = _flip_ratios(splits)
     if not flip_ratios:
         return None
-    values = pd.to_numeric(pd.Series(closes), errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(pd.Series(bars["close"]), errors="coerce").to_numpy(
+        dtype=float
+    )
+    dates = _bar_dates(bars)
     jumps = [
         (position, later / earlier)
         for position, (earlier, later) in enumerate(pairwise(values), start=1)
@@ -185,9 +263,13 @@ def _first_reversing_flip(
         and abs(math.log(later / earlier)) > _JUMP_LOG_THRESHOLD
         and _is_split_sized(later / earlier, flip_ratios)
     ]
-    for (position, first), (_, second) in pairwise(jumps):
-        if _REVERSAL_PRODUCT_LOW <= first * second <= _REVERSAL_PRODUCT_HIGH:
-            return position
+    for (i, first), (j, second) in pairwise(jumps):
+        if not (_REVERSAL_PRODUCT_LOW <= first * second <= _REVERSAL_PRODUCT_HIGH):
+            continue
+        if j - i > _MAX_FLIP_RUN_SESSIONS:
+            continue
+        if _explaining_split(first, second, splits, dates[j - 1]):
+            return i
     return None
 
 
@@ -331,7 +413,7 @@ def unadjust_yahoo_bars(
     # Yahoo's own domain, with the classification undone: continuous if the
     # classification explained every row, still flipping if it did not.
     reconstructed = working["close"] / missing.where(~is_corrected, 1.0)
-    if has_mixed_basis_signature(reconstructed, usable):
+    if has_mixed_basis_signature(working.assign(close=reconstructed), usable):
         return NormalizationRejection(
             symbol=symbol,
             reason=(

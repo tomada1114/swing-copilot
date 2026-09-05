@@ -12,7 +12,7 @@ corrected anyway (five, scattered across three weeks).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import ClassVar
 
 import pandas as pd
@@ -195,53 +195,87 @@ def _flat(symbol: str, closes: list[float], start_day: int = 1) -> pd.DataFrame:
     )
 
 
+def _flip_bars(closes: list[float], start: date = date(2020, 1, 1)) -> pd.DataFrame:
+    """A minimal ascending `date`+`close` frame, one row per calendar day.
+
+    `has_mixed_basis_signature`/`first_mixed_basis_jump` only ever look at
+    `date` and `close`, so tests that don't otherwise care about OHLCV build
+    this instead of a full `_bars`/`_flat` frame.
+    """
+    return pd.DataFrame(
+        {
+            "date": [start + timedelta(days=offset) for offset in range(len(closes))],
+            "close": closes,
+        }
+    )
+
+
+def _run_bars(
+    run_length: int, *, factor: float = 2.0, start: date = date(2020, 1, 1)
+) -> pd.DataFrame:
+    """A reversing pair whose run is exactly `run_length` sessions long.
+
+    Row 0 is baseline; the split immediately dips it by `factor` and holds
+    flat for `run_length` rows; the final row reverses back to baseline. The
+    run's last row (`dates[j - 1]`) lands at `start + run_length` days, so a
+    split eligible for this pair needs `ex_date > start + run_length days`.
+    """
+    baseline = 100.0
+    dipped = baseline / factor
+    return _flip_bars([baseline, *([dipped] * run_length), baseline], start=start)
+
+
 class TestHasMixedBasisSignature:
-    """The gate `write_bars` and `copilot-backfill check` share."""
+    """The gate `write_bars` and `copilot-backfill check` share.
+
+    Every series here sits at `_flip_bars`' default 2020-01-01 start, well
+    before `SPLIT`'s 2026-07-10 ex-date and far short of the 25-session run
+    ceiling, so the pre-Issue-#425 expectations are unaffected by the two new
+    checks -- only the frame-vs-Series calling convention changed.
+    """
 
     SPLIT = (SplitEvent(ex_date=date(2026, 7, 10), factor=2.0),)
 
     def test_a_quiet_series_has_no_signature(self) -> None:
-        closes = pd.Series([100.0, 101.0, 99.5, 100.2, 103.0])
+        bars = _flip_bars([100.0, 101.0, 99.5, 100.2, 103.0])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_a_single_real_shock_is_not_a_signature(self) -> None:
         """MRNA's 2026-08-19 +77% day: one jump, never mirrored back."""
-        closes = pd.Series([25.0, 25.4, 45.0, 44.1, 46.0, 45.2])
+        bars = _flip_bars([25.0, 25.4, 45.0, 44.1, 46.0, 45.2])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_a_real_split_in_a_raw_series_is_not_a_signature(self) -> None:
         """A raw series steps down once on the ex-date and stays there."""
-        closes = pd.Series([97.2, 97.6, 96.4, 93.5, 45.5, 45.9, 46.2])
+        bars = _flip_bars([97.2, 97.6, 96.4, 93.5, 45.5, 45.9, 46.2])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_alternating_bases_are_a_signature(self) -> None:
-        closes = pd.Series([97.2, 48.6, 97.6, 96.4])
+        bars = _flip_bars([97.2, 48.6, 97.6, 96.4])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is True
+        assert has_mixed_basis_signature(bars, self.SPLIT) is True
 
     def test_ordinary_sessions_between_the_two_jumps_still_count(self) -> None:
         """The reversal is looked for in the *jump* sequence, not day to day."""
-        closes = pd.Series([97.2, 48.6, 48.7, 48.5, 48.8, 97.6])
+        bars = _flip_bars([97.2, 48.6, 48.7, 48.5, 48.8, 97.6])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is True
+        assert has_mixed_basis_signature(bars, self.SPLIT) is True
 
     def test_a_single_jump_is_never_a_signature(self) -> None:
-        closes = pd.Series([97.2, 48.6, 48.7])
+        bars = _flip_bars([97.2, 48.6, 48.7])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_non_positive_and_non_finite_values_contribute_no_ratio(self) -> None:
-        closes = pd.Series([100.0, 0.0, float("nan"), 100.5, 101.0])
+        bars = _flip_bars([100.0, 0.0, float("nan"), 100.5, 101.0])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_an_empty_series_is_not_a_signature(self) -> None:
-        assert (
-            has_mixed_basis_signature(pd.Series([], dtype=float), self.SPLIT) is False
-        )
+        assert has_mixed_basis_signature(_flip_bars([]), self.SPLIT) is False
 
     def test_a_symbol_with_no_splits_can_never_carry_a_signature(self) -> None:
         """`^VIX` doubling and halving back is volatility, not a basis.
@@ -251,23 +285,125 @@ class TestHasMixedBasisSignature:
         the series to be quoted on, so the question is not merely hard — it
         is meaningless.
         """
-        closes = pd.Series([97.2, 48.6, 97.6, 96.4])
+        bars = _flip_bars([97.2, 48.6, 97.6, 96.4])
 
-        assert has_mixed_basis_signature(closes, ()) is False
+        assert has_mixed_basis_signature(bars, ()) is False
 
     def test_a_reversing_pair_that_is_not_split_sized_is_not_a_signature(self) -> None:
         """A 45% swing back and forth under a 2:1 split explains nothing."""
-        closes = pd.Series([100.0, 68.0, 99.0, 98.0])
+        bars = _flip_bars([100.0, 68.0, 99.0, 98.0])
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
 
     def test_the_flip_is_matched_against_every_supplied_factor(self) -> None:
         """A 3:1 flip is a signature once the symbol's 3:1 split is known."""
-        closes = pd.Series([99.0, 33.0, 99.5, 99.2])
+        bars = _flip_bars([99.0, 33.0, 99.5, 99.2])
         splits = (SplitEvent(ex_date=date(2026, 7, 10), factor=3.0),)
 
-        assert has_mixed_basis_signature(closes, self.SPLIT) is False
-        assert has_mixed_basis_signature(closes, splits) is True
+        assert has_mixed_basis_signature(bars, self.SPLIT) is False
+        assert has_mixed_basis_signature(bars, splits) is True
+
+    def test_a_run_after_every_known_splits_ex_date_is_not_a_signature(self) -> None:
+        """AIG 2008-09-16: the only matching-factor split predates the run.
+
+        Issue #425. AIG's 1.5-factor splits all sit in 1993-2000; the only
+        split after this run is an unrelated 0.05 reverse split in 2009 that
+        no jump here is sized for. Neither split is eligible, so the pair --
+        arithmetically identical to a real basis flip -- is a real crash and
+        recovery instead.
+        """
+        bars = _run_bars(3, factor=1.5, start=date(2008, 9, 10))
+        splits = (
+            SplitEvent(ex_date=date(1998, 1, 1), factor=1.5),
+            SplitEvent(ex_date=date(2009, 7, 1), factor=0.05),
+        )
+
+        assert has_mixed_basis_signature(bars, splits) is False
+
+    def test_no_split_after_the_run_at_all_is_not_a_signature(self) -> None:
+        """Every known split predates the run: no candidate is ever eligible."""
+        bars = _flip_bars([100.0, 33.3, 100.0])
+        splits = (
+            SplitEvent(ex_date=date(2019, 1, 1), factor=3.0),
+            SplitEvent(ex_date=date(2019, 6, 1), factor=2.0),
+        )
+
+        assert has_mixed_basis_signature(bars, splits) is False
+
+    def test_an_ex_date_matching_the_runs_last_row_does_not_qualify(self) -> None:
+        """The eligibility boundary is a strict `>`, not `>=` (Issue #425)."""
+        bars = pd.DataFrame(
+            {
+                "date": [
+                    date(2026, 7, 1),
+                    date(2026, 7, 2),
+                    date(2026, 7, 3),
+                    date(2026, 7, 4),
+                ],
+                "close": [97.2, 48.6, 97.6, 96.4],
+            }
+        )
+        splits = (SplitEvent(ex_date=date(2026, 7, 2), factor=2.0),)
+
+        assert has_mixed_basis_signature(bars, splits) is False
+
+    def test_an_ex_date_the_day_after_the_runs_last_row_does_qualify(self) -> None:
+        """One calendar day later than the previous case flips the verdict."""
+        bars = pd.DataFrame(
+            {
+                "date": [
+                    date(2026, 7, 1),
+                    date(2026, 7, 2),
+                    date(2026, 7, 3),
+                    date(2026, 7, 4),
+                ],
+                "close": [97.2, 48.6, 97.6, 96.4],
+            }
+        )
+        splits = (SplitEvent(ex_date=date(2026, 7, 3), factor=2.0),)
+
+        assert has_mixed_basis_signature(bars, splits) is True
+
+    def test_a_run_of_exactly_the_ceiling_length_still_qualifies(self) -> None:
+        """`j - i == _MAX_FLIP_RUN_SESSIONS` (25) is let through."""
+        bars = _run_bars(25)
+        splits = (SplitEvent(ex_date=date(2020, 1, 27), factor=2.0),)
+
+        assert has_mixed_basis_signature(bars, splits) is True
+
+    def test_a_run_one_session_past_the_ceiling_does_not_qualify(self) -> None:
+        """`j - i == 26` is rejected (Issue #425's `_MAX_FLIP_RUN_SESSIONS`)."""
+        bars = _run_bars(26)
+        splits = (SplitEvent(ex_date=date(2020, 1, 28), factor=2.0),)
+
+        assert has_mixed_basis_signature(bars, splits) is False
+
+    def test_orcl_type_long_run_is_rejected_on_run_length_alone(self) -> None:
+        """ORCL 1990-03-28: a real 694-session crash-and-recovery.
+
+        Issue #425's regression case: with an eligible split (`ex_date` after
+        the run) supplied, only the run-length ceiling is left to reject it —
+        proving the ceiling, not eligibility, is what disqualifies this shape.
+        """
+        bars = _run_bars(30, factor=1.5, start=date(1990, 3, 28))
+        splits = (SplitEvent(ex_date=date(1992, 12, 23), factor=1.5),)
+
+        assert has_mixed_basis_signature(bars, splits) is False
+
+    def test_two_jumps_matching_different_splits_factors_do_not_qualify(self) -> None:
+        """Both jumps of one pair must match the *same* split's `{f, 1/f}`."""
+        bars = pd.DataFrame(
+            {
+                "date": [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)],
+                "close": [100.0, 200.0, 92.0],
+            }
+        )
+        splits = (
+            SplitEvent(ex_date=date(2026, 7, 10), factor=2.0),
+            SplitEvent(ex_date=date(2026, 7, 15), factor=1.0 / 0.46),
+        )
+
+        assert has_mixed_basis_signature(bars, splits) is False
 
 
 class TestFirstMixedBasisJump:
@@ -277,36 +413,65 @@ class TestFirstMixedBasisJump:
 
     def test_a_clean_series_names_no_session(self) -> None:
         assert (
-            first_mixed_basis_jump(pd.Series([100.0, 101.0, 99.5]), self.SPLIT) is None
+            first_mixed_basis_jump(_flip_bars([100.0, 101.0, 99.5]), self.SPLIT) is None
         )
 
     def test_a_single_real_split_names_no_session(self) -> None:
-        closes = pd.Series([97.2, 97.6, 96.4, 45.5, 45.9])
+        bars = _flip_bars([97.2, 97.6, 96.4, 45.5, 45.9])
 
-        assert first_mixed_basis_jump(closes, self.SPLIT) is None
+        assert first_mixed_basis_jump(bars, self.SPLIT) is None
 
     def test_it_names_the_first_row_quoted_on_the_other_basis(self) -> None:
         # Index 1 is the halved row: the jump down lands *on* it, and the
         # jump back up at index 2 is what proves the pair reverses.
-        closes = pd.Series([97.2, 48.6, 97.6, 96.4])
+        bars = _flip_bars([97.2, 48.6, 97.6, 96.4])
 
-        assert first_mixed_basis_jump(closes, self.SPLIT) == 1
+        assert first_mixed_basis_jump(bars, self.SPLIT) == 1
 
     def test_a_non_reversing_jump_pair_is_walked_past(self) -> None:
         # The first pair of jumps (x2 then x2) compounds rather than
         # reversing, so it is skipped; the x2/x0.5 pair that follows is the
         # flip, and index 2 is where it starts.
-        closes = pd.Series([25.0, 50.0, 100.0, 50.0, 100.0])
+        bars = _flip_bars([25.0, 50.0, 100.0, 50.0, 100.0])
 
-        assert first_mixed_basis_jump(closes, self.SPLIT) == 2
+        assert first_mixed_basis_jump(bars, self.SPLIT) == 2
 
     def test_an_empty_series_names_no_session(self) -> None:
-        assert first_mixed_basis_jump(pd.Series([], dtype=float), self.SPLIT) is None
+        assert first_mixed_basis_jump(_flip_bars([]), self.SPLIT) is None
 
     def test_a_symbol_with_no_splits_names_no_session(self) -> None:
-        closes = pd.Series([97.2, 48.6, 97.6, 96.4])
+        bars = _flip_bars([97.2, 48.6, 97.6, 96.4])
 
-        assert first_mixed_basis_jump(closes, ()) is None
+        assert first_mixed_basis_jump(bars, ()) is None
+
+    def test_an_ineligible_pair_is_skipped_in_favor_of_a_later_eligible_one(
+        self,
+    ) -> None:
+        """The walk does not stop at the first *reversing* pair, only the first *eligible* one.
+
+        Rows 0-2 reverse by a factor of 2.0, but the only 2.0-sized split
+        predates that run, so it is not eligible. Rows 2-4 reverse by a
+        factor of 3.0 against a split whose `ex_date` sits after that run, so
+        that is the pair actually reported -- at position 3, not 1.
+        """
+        bars = pd.DataFrame(
+            {
+                "date": [
+                    date(2026, 1, 1),
+                    date(2026, 1, 2),
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 5),
+                ],
+                "close": [100.0, 200.0, 100.0, 300.0, 100.0],
+            }
+        )
+        splits = (
+            SplitEvent(ex_date=date(2025, 12, 31), factor=2.0),
+            SplitEvent(ex_date=date(2026, 1, 10), factor=3.0),
+        )
+
+        assert first_mixed_basis_jump(bars, splits) == 3
 
 
 class TestCumulativeSplitFactors:
@@ -622,13 +787,16 @@ class TestMnstGolden:
         raw = unadjust_yahoo_bars("MNST", _mnst_response(), [MNST_SPLIT])
 
         assert isinstance(raw, pd.DataFrame)
-        assert has_mixed_basis_signature(raw["close"], [MNST_SPLIT]) is False
+        assert has_mixed_basis_signature(raw, [MNST_SPLIT]) is False
 
     def test_the_untouched_response_does_carry_the_signature(self) -> None:
-        """The write gate still refuses the raw response, which is its job."""
-        assert (
-            has_mixed_basis_signature(_mnst_response()["close"], [MNST_SPLIT]) is True
-        )
+        """The write gate still refuses the raw response, which is its job.
+
+        This is Issue #425's true-positive regression: the flip run is
+        2026-07-20 -> 2026-07-23 (3 sessions), and MNST_SPLIT's ex-date
+        (2026-08-11) sits after it, so both new checks still let it through.
+        """
+        assert has_mixed_basis_signature(_mnst_response(), [MNST_SPLIT]) is True
 
     def test_reading_it_as_of_the_split_halves_every_earlier_row(self) -> None:
         raw = unadjust_yahoo_bars("MNST", _mnst_response(), [MNST_SPLIT])
@@ -769,7 +937,7 @@ class TestUnadjustEdgeCases:
 
         assert isinstance(raw, pd.DataFrame)
         assert list(raw["close"]) == pytest.approx([100.0, 50.0, 100.5, 50.2, 100.8])
-        assert has_mixed_basis_signature(response["close"], splits) is False
+        assert has_mixed_basis_signature(response, splits) is False
 
     def test_an_unusable_close_casts_no_vote_on_a_split(self) -> None:
         """A zero in the sessions before an ex-date simply does not vote."""

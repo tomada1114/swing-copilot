@@ -1310,6 +1310,49 @@ class TestRebuildAndCheckCli:
         assert "混在署名 1 銘柄" in out
         assert "混在署名: AAA（最初のジャンプ 2026-07-03）" in out
 
+    def test_check_reports_ok_for_a_run_that_predates_every_split(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #425: an AIG-type shape is not reported as a finding.
+
+        Same reversing arithmetic as the mixed-basis case above, but the
+        only split sized for it has an `ex_date` before the run instead of
+        after, so it is not eligible and the store reports clean.
+        """
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_corporate_actions(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAA",
+                        "ex_date": date(2008, 1, 1),
+                        "kind": "split",
+                        "value": 2.0,
+                    }
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+        store.replace_symbol_bars(
+            ["AAA"],
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1) + timedelta(days=offset), close)
+                    for offset, close in enumerate([100.0, 100.0, 50.0, 100.0, 100.0])
+                ]
+            ),
+        )
+
+        backfill_main(
+            ["check", "--db", str(tmp_path / "copilot.duckdb"), "--symbols", "aaa"]
+        )
+
+        out = capsys.readouterr().out
+        assert "check: ok（対象 1 銘柄、混在署名なし）" in out
+
 
 class TestBarsCliQuarantineReport:
     def test_bars_command_names_the_symbols_the_store_refused(

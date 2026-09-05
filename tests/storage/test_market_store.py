@@ -1382,6 +1382,35 @@ class TestWriteBarsQuarantineGate:
         )
         assert len(stored) == 4
 
+    def test_a_batch_whose_run_predates_no_split_is_written(self, market_store):
+        """Issue #425: a run *after* every known split's ex-date is real, not mixed.
+
+        Same reversing arithmetic as `MIXED_BATCH` -- a 2:1-sized flip that
+        reverses -- but the only split that could explain it has an `ex_date`
+        *before* the run instead of after, so it is not eligible (AIG-type
+        shape) and the batch is a real crash-and-recovery, written as is.
+        """
+        market_store.write_corporate_actions(
+            _actions([("OLDSPLIT", "2008-01-01", "split", 2.0)]),
+            provider="yfinance",
+            fetched_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+        batch = [
+            ("OLDSPLIT", day, open_, high, low, close, volume)
+            for _, day, open_, high, low, close, volume in self.MIXED_BATCH
+        ]
+
+        result = market_store.write_bars(_bars(batch))
+
+        assert result.quarantined == ()
+        stored = market_store.read_bars(
+            ["OLDSPLIT"],
+            date(2026, 1, 1),
+            date(2026, 12, 31),
+            as_of=date(2026, 12, 31),
+        )
+        assert len(stored) == 4
+
     def test_a_deviation_beyond_the_tolerance_quarantines_the_symbol(
         self, market_store
     ):

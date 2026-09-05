@@ -518,7 +518,13 @@ def _quarantine_reasons(
        (Issue #413). Checked *before* merging with stored rows, so a clean
        history cannot mask a broken batch. The symbol's known splits are
        part of the question: a flip is a *split-sized* step, and a symbol
-       with no split has no second basis to flip to (Issue #421).
+       with no split has no second basis to flip to (Issue #421). A
+       reversing pair only qualifies when some split's `ex_date` falls
+       *after* the pair's run and its run is no longer than
+       `_MAX_FLIP_RUN_SESSIONS` sessions — a pair whose run holds for
+       months or years, or whose only candidate split predates it, is a
+       real sustained price level rather than a misadjusted row
+       (Issue #425).
     2. A row overlapping a stored `(symbol, date)` disagrees with it by more
        than `_MAX_CORRECTION_RATIO`. Raw bars are immutable facts; a real
        correction is fractions of a percent, and a larger move means the two
@@ -550,9 +556,7 @@ def _quarantine_reasons(
     )
     for symbol, rows in new_rows.groupby("symbol", sort=True):
         ordered = rows.sort_values("date")
-        if has_mixed_basis_signature(
-            ordered["close"], splits_by_symbol.get(str(symbol), ())
-        ):
+        if has_mixed_basis_signature(ordered, splits_by_symbol.get(str(symbol), ())):
             reasons[str(symbol)] = (
                 "調整済みと未調整の行が混在した署名を検出した"
                 f"（{ordered['date'].iloc[0]}〜{ordered['date'].iloc[-1]}）"

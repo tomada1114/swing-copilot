@@ -1315,7 +1315,7 @@ class MarketStore:
                   AND CAST(filed_at AS DATE) <= ?
                 GROUP BY symbol, fiscal_period_end
                 ORDER BY symbol, filed_on
-                """,  # noqa: S608 -- placeholders only; every value is bound
+                """,  # noqa: S608 - placeholder counts are generated locally and every value is bound
                 [*symbols, *forms, as_of],
             ).fetchall()
         dates_by_symbol: dict[str, set[date]] = {}

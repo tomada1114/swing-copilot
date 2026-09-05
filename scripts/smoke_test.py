@@ -105,8 +105,9 @@ def _venv_python(venv_dir: Path) -> Path:
 
 def _run(command: list[str]) -> None:
     """Run a command and fail fast if it exits unsuccessfully."""
-    # Commands are passed as fixed argument lists with shell=False.
-    subprocess.run(command, check=True, cwd=REPO_ROOT)  # noqa: S603
+    subprocess.run(  # noqa: S603 - command is a fixed argv list with shell=False
+        command, check=True, cwd=REPO_ROOT
+    )
 
 
 def main(arguments: list[str]) -> int:

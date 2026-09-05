@@ -277,7 +277,7 @@ class TestHappyPath:
         assert result.exit_code == 0
         assert result.run_date == AS_OF
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             steps = conn.execute(
                 "SELECT step, status FROM run_steps WHERE run_id = ? ORDER BY step",
                 [str(result.run_id)],
@@ -341,7 +341,7 @@ class TestPriceStepRawBars:
     """Issue #413: the price step stores raw bars plus the split calendar."""
 
     def _price_step_detail(self, state_store, run_id):
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             return conn.execute(
                 "SELECT status, detail FROM run_steps "
                 "WHERE run_id = ? AND step = '1_prices'",
@@ -557,7 +557,7 @@ class TestRunFingerprintAndMetadata:
 
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), tracked_deps)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT config_hash, metadata_json FROM runs WHERE run_id = ?",
                 [str(result.run_id)],
@@ -605,7 +605,7 @@ class TestIdempotency:
             deps,
         )
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             first_steps = conn.execute(
                 "SELECT count(*) FROM run_steps WHERE run_id = ?", [str(first.run_id)]
             ).fetchone()
@@ -642,7 +642,7 @@ class TestFatalStepFailure:
         assert result.status == RunStatus.FAILED
         assert result.exit_code == 1
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             steps = conn.execute(
                 "SELECT step FROM run_steps WHERE run_id = ?", [str(result.run_id)]
             ).fetchall()
@@ -788,7 +788,7 @@ class TestRunDateResolvesOnlyClosedSessions:
             run_daily(DailyRunOptions(is_dry_run=True), broken_deps)
 
         assert exc_info.value.reason == "no_trading_day"
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)
 
@@ -818,7 +818,7 @@ class TestRunDateResolvesOnlyClosedSessions:
 
         assert exc_info.value.reason == "price_fetch_failed"
         assert "no data returned" in str(exc_info.value)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)
 
@@ -843,7 +843,7 @@ class TestRunDateResolvesOnlyClosedSessions:
 
         assert exc_info.value.reason == "price_fetch_failed"
         assert "network boom" in str(exc_info.value)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (0,)
 
@@ -1073,7 +1073,7 @@ class TestSymbolLimit:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True, limit=1), deps)
 
         assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol FROM screening_rejections WHERE run_id = ?",
                 [str(result.run_id)],
@@ -1165,7 +1165,7 @@ class TestSameDayRerunGuard:
         # `StateStore.insert_run()` has no `report_path` parameter (only
         # `complete_run()` sets it), and this test's abort-message assertion
         # below needs one on the pre-existing row, so this seed stays raw SQL.
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
                 "started_at, report_path) VALUES (?, ?, 'live', 'cfg', 'success', "
@@ -1186,7 +1186,7 @@ class TestSameDayRerunGuard:
         assert str(existing_id) in message
         assert _LIVE_RUN_DATE.isoformat() in message
         assert "reports/2027-02-28/x.md" in message
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute("SELECT count(*) FROM runs").fetchone()
         assert count == (1,)
 
@@ -1292,7 +1292,7 @@ def _archive_run(
 
 
 def _stored_gaps(state_store, run_id):
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         row = conn.execute(
             "SELECT metadata_json FROM runs WHERE run_id = ?", [str(run_id)]
         ).fetchone()
@@ -1609,7 +1609,7 @@ class TestFundamentalsStepSkipped:
     def test_no_edgar_client_records_step_as_skipped(self, deps, state_store):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status, detail FROM run_steps WHERE run_id = ? AND step = '2_fundamentals'",
                 [str(result.run_id)],
@@ -1673,7 +1673,7 @@ class TestFundamentalsStepSkipped:
         )
 
         assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status, detail FROM run_steps WHERE run_id = ? AND step = '2_fundamentals'",
                 [str(result.run_id)],
@@ -2224,7 +2224,7 @@ class _AlwaysFailingEdgarClient(_CountingEdgarClient):
 
 
 def _fundamentals_step_detail(state_store, run_id):
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         row = conn.execute(
             "SELECT detail FROM run_steps WHERE run_id = ? AND step = '2_fundamentals'",
             [run_id],
@@ -3008,7 +3008,7 @@ class TestFundamentalsHeldFirstOrder:
 
     @staticmethod
     def _fundamentals_step_row(state_store, run_id):
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             return conn.execute(
                 "SELECT status, detail FROM run_steps "
                 "WHERE run_id = ? AND step = '2_fundamentals'",
@@ -3123,7 +3123,7 @@ class TestUnexpectedStepException:
         )
 
         assert result.status == RunStatus.FAILED
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             row = conn.execute(
                 "SELECT status, detail FROM run_steps WHERE run_id = ? AND step = '1_prices'",
                 [str(result.run_id)],
@@ -3205,7 +3205,7 @@ class TestTimeoutBudget:
         assert result.report_path is not None
         assert result.report_path.is_file()
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             fundamentals_row = conn.execute(
                 "SELECT status, detail FROM run_steps "
                 "WHERE run_id = ? AND step = '2_fundamentals'",
@@ -3248,7 +3248,7 @@ class TestTimeoutBudget:
         assert result.report_path is not None
         assert result.report_path.is_file()
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = dict(
                 conn.execute(
                     "SELECT step, status FROM run_steps WHERE run_id = ?",
@@ -3295,7 +3295,7 @@ class TestScreeningRejections:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             rows = conn.execute(
                 "SELECT symbol, stage, reason_code FROM screening_rejections "
                 "WHERE run_id = ?",
@@ -3315,7 +3315,7 @@ class TestScreeningRejections:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM screening_rejections WHERE run_id = ?",
                 [str(result.run_id)],
@@ -3363,7 +3363,7 @@ class TestScreeningTruncations:
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
         assert result.status == RunStatus.SUCCESS
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             candidate_count, truncation_rows = (
                 conn.execute(
                     "SELECT count(*) FROM candidates WHERE run_id = ?",
@@ -3386,7 +3386,7 @@ class TestScreeningTruncations:
     ):
         result = run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             count = conn.execute(
                 "SELECT count(*) FROM screening_truncations WHERE run_id = ?",
                 [str(result.run_id)],

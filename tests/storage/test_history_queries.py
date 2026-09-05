@@ -65,7 +65,7 @@ def _insert_run(
 
 class TestListRuns:
     def test_empty_database_returns_empty_list(self, state_store: StateStore) -> None:
-        assert list_runs(state_store._database, limit=20) == []  # noqa: SLF001
+        assert list_runs(state_store.database, limit=20) == []
 
     def test_derives_counts_via_left_join_so_zero_rows_still_show(
         self, state_store: StateStore
@@ -78,7 +78,7 @@ class TestListRuns:
         # appear, showing 0 rather than disappearing (LEFT JOIN contract).
         empty_run_id = state_store.start_run(date(2026, 7, 21), RunMode.LIVE, "cfg")
 
-        rows = list_runs(state_store._database, limit=20)  # noqa: SLF001
+        rows = list_runs(state_store.database, limit=20)
 
         by_run_id = {row.run_id: row for row in rows}
         assert by_run_id[run_id].candidate_count == 2
@@ -92,7 +92,7 @@ class TestListRuns:
         older = state_store.start_run(date(2026, 7, 18), RunMode.LIVE, "cfg")
         newer = state_store.start_run(date(2026, 7, 22), RunMode.LIVE, "cfg")
 
-        rows = list_runs(state_store._database, limit=1)  # noqa: SLF001
+        rows = list_runs(state_store.database, limit=1)
 
         assert len(rows) == 1
         assert rows[0].run_id == newer
@@ -101,7 +101,7 @@ class TestListRuns:
 
 class TestGetRunDetail:
     def test_unknown_run_id_returns_none(self, state_store: StateStore) -> None:
-        assert get_run_detail(state_store._database, uuid4()) is None  # noqa: SLF001
+        assert get_run_detail(state_store.database, uuid4()) is None
 
     def test_returns_candidates_and_risk_for_the_run(
         self, state_store: StateStore
@@ -137,7 +137,7 @@ class TestGetRunDetail:
             ],
             run_id,
         )
-        detail = get_run_detail(state_store._database, run_id)  # noqa: SLF001
+        detail = get_run_detail(state_store.database, run_id)
 
         assert detail is not None
         assert detail.run_id == run_id
@@ -152,7 +152,7 @@ class TestGetRunDetail:
 
 class TestGetRejections:
     def test_unknown_run_returns_empty_list(self, state_store: StateStore) -> None:
-        assert get_rejections(state_store._database, uuid4()) == []  # noqa: SLF001
+        assert get_rejections(state_store.database, uuid4()) == []
 
     def test_reads_p1_02_table_and_parses_detail_json(
         self, state_store: StateStore
@@ -175,7 +175,7 @@ class TestGetRejections:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        rows = get_rejections(state_store._database, run_id)  # noqa: SLF001
+        rows = get_rejections(state_store.database, run_id)
 
         assert len(rows) == 1
         assert rows[0].symbol == "MSFT"
@@ -189,7 +189,7 @@ class TestGetTruncations:
     """Issue #188: reading back the near-misses one past run recorded."""
 
     def test_unknown_run_returns_empty_list(self, state_store: StateStore) -> None:
-        assert get_truncations(state_store._database, uuid4()) == []  # noqa: SLF001
+        assert get_truncations(state_store.database, uuid4()) == []
 
     def test_returns_the_retained_tail_closest_to_the_cut_first(
         self, state_store: StateStore
@@ -214,7 +214,7 @@ class TestGetTruncations:
             ScreeningRunMeta(run_id, "default", date(2026, 7, 20), 5),
         )
 
-        rows = get_truncations(state_store._database, run_id)  # noqa: SLF001
+        rows = get_truncations(state_store.database, run_id)
 
         assert [(row.symbol, row.rank, row.score) for row in rows] == [
             ("NEAR", 6, 0.4),
@@ -227,13 +227,13 @@ class TestGetTruncations:
 
 class TestGetSymbolTimeline:
     def test_never_a_candidate_returns_none(self, state_store: StateStore) -> None:
-        assert get_symbol_timeline(state_store._database, "ZZZZ") is None  # noqa: SLF001
+        assert get_symbol_timeline(state_store.database, "ZZZZ") is None
 
     def test_merges_candidacy_across_runs(self, state_store: StateStore) -> None:
         run_id = state_store.start_run(date(2026, 7, 18), RunMode.LIVE, "cfg")
         state_store.record_candidates([_candidate()], run_id, "default")
 
-        timeline = get_symbol_timeline(state_store._database, "AAPL")  # noqa: SLF001
+        timeline = get_symbol_timeline(state_store.database, "AAPL")
 
         assert timeline is not None
         assert timeline.symbol == "AAPL"
@@ -244,26 +244,23 @@ class TestGetSymbolTimeline:
 
 class TestRunExists:
     def test_unknown_run_id_is_false(self, state_store: StateStore) -> None:
-        assert run_exists(state_store._database, uuid4()) is False  # noqa: SLF001
+        assert run_exists(state_store.database, uuid4()) is False
 
     def test_known_run_id_is_true(self, state_store: StateStore) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
-        assert run_exists(state_store._database, run_id) is True  # noqa: SLF001
+        assert run_exists(state_store.database, run_id) is True
 
 
 class TestGetRunByDate:
     """P2-11: locating "the run N trading days back" by its `run_date`."""
 
     def test_unknown_date_returns_none(self, state_store: StateStore) -> None:
-        assert (
-            get_run_by_date(state_store._database, date(2026, 7, 20))  # noqa: SLF001
-            is None
-        )
+        assert get_run_by_date(state_store.database, date(2026, 7, 20)) is None
 
     def test_known_date_returns_the_run_id(self, state_store: StateStore) -> None:
         run_id = state_store.start_run(date(2026, 7, 20), RunMode.LIVE, "cfg")
 
-        found = get_run_by_date(state_store._database, date(2026, 7, 20))  # noqa: SLF001
+        found = get_run_by_date(state_store.database, date(2026, 7, 20))
 
         assert found == run_id
 
@@ -285,7 +282,7 @@ class TestGetRunByDate:
             started_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
         )
 
-        found = get_run_by_date(state_store._database, run_date)  # noqa: SLF001
+        found = get_run_by_date(state_store.database, run_date)
 
         assert found == newer_run_id
 
@@ -294,14 +291,14 @@ class TestGetRunStartedAt:
     """P8-119: `retro/collect.py`'s same-day duplicate tie-break input."""
 
     def test_unknown_run_id_returns_none(self, state_store: StateStore) -> None:
-        assert get_run_started_at(state_store._database, uuid4()) is None  # noqa: SLF001
+        assert get_run_started_at(state_store.database, uuid4()) is None
 
     def test_known_run_id_returns_its_started_at(self, state_store: StateStore) -> None:
         run_id = uuid4()
         started_at = datetime(2026, 8, 6, 15, 6, 7, tzinfo=UTC)
         seed_run(state_store, run_id, date(2026, 8, 6), started_at=started_at)
 
-        found = get_run_started_at(state_store._database, run_id)  # noqa: SLF001
+        found = get_run_started_at(state_store.database, run_id)
 
         assert found == started_at
 
@@ -318,7 +315,7 @@ class TestGetRunStatuses:
         _insert_run(state_store, finished, date(2026, 8, 10), "success", started_at)
         _insert_run(state_store, unfinished, date(2026, 8, 11), "failed", started_at)
 
-        found = get_run_statuses(state_store._database, [finished, unfinished])  # noqa: SLF001
+        found = get_run_statuses(state_store.database, [finished, unfinished])
 
         assert found[finished].status == "success"
         assert found[finished].started_at == started_at
@@ -339,7 +336,7 @@ class TestGetRunStatuses:
             datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
         )
 
-        found = get_run_statuses(state_store._database, [known, unknown])  # noqa: SLF001
+        found = get_run_statuses(state_store.database, [known, unknown])
 
         assert set(found) == {known}
 
@@ -352,7 +349,7 @@ class TestGetRunStatuses:
             msg = "connect() must not be called for an empty request"
             raise AssertionError(msg)
 
-        database = state_store._database  # noqa: SLF001
+        database = state_store.database
         monkeypatch.setattr(database, "connect", fail)
 
         assert get_run_statuses(database, []) == {}
@@ -362,10 +359,7 @@ class TestGetSuccessfulRun:
     """P8-118: the same-day rerun guard's existing-run lookup."""
 
     def test_no_run_on_the_date_returns_none(self, state_store: StateStore) -> None:
-        assert (
-            get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
-            is None
-        )
+        assert get_successful_run(state_store.database, date(2026, 8, 7)) is None
 
     def test_a_success_run_is_returned_with_its_report_path(
         self, state_store: StateStore
@@ -374,7 +368,7 @@ class TestGetSuccessfulRun:
         # `StateStore.insert_run()` has no `report_path` parameter (only
         # `complete_run()` sets it), and this test asserts on it, so this
         # seed stays raw SQL.
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO runs (run_id, run_date, mode, config_hash, status, "
                 "started_at, report_path) VALUES (?, ?, 'live', 'cfg', 'success', "
@@ -387,7 +381,7 @@ class TestGetSuccessfulRun:
                 ],
             )
 
-        found = get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+        found = get_successful_run(state_store.database, date(2026, 8, 7))
 
         assert found is not None
         assert found.run_id == run_id
@@ -403,7 +397,7 @@ class TestGetSuccessfulRun:
             started_at=datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
         )
 
-        found = get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
+        found = get_successful_run(state_store.database, date(2026, 8, 7))
 
         assert found is not None
         assert found.report_path is None
@@ -418,10 +412,7 @@ class TestGetSuccessfulRun:
                 started_at=datetime(2026, 8, 7, 15, 5, tzinfo=UTC),
             )
 
-        assert (
-            get_successful_run(state_store._database, date(2026, 8, 7))  # noqa: SLF001
-            is None
-        )
+        assert get_successful_run(state_store.database, date(2026, 8, 7)) is None
 
     def test_multiple_success_runs_returns_the_most_recently_started(
         self, state_store: StateStore
@@ -441,7 +432,7 @@ class TestGetSuccessfulRun:
             started_at=datetime(2026, 8, 6, 16, 52, tzinfo=UTC),
         )
 
-        found = get_successful_run(state_store._database, date(2026, 8, 6))  # noqa: SLF001
+        found = get_successful_run(state_store.database, date(2026, 8, 6))
 
         assert found is not None
         assert found.run_id == newer_id
@@ -452,7 +443,7 @@ class TestGetSignalOutcomes:
 
     def test_empty_table_returns_empty_tuple(self, state_store: StateStore) -> None:
         rows = get_signal_outcomes(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             date(2026, 7, 1),
             date(2026, 7, 24),
         )
@@ -486,7 +477,7 @@ class TestGetSignalOutcomes:
         )
 
         rows = get_signal_outcomes(
-            state_store._database,  # noqa: SLF001
+            state_store.database,
             date(2026, 7, 1),
             date(2026, 7, 24),
         )

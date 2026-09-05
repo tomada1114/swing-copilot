@@ -46,8 +46,8 @@ def reports_root(tmp_path: Path) -> Path:
     return root
 
 
-def _database(state_store: StateStore) -> Database:
-    return state_store._database  # noqa: SLF001
+def _state_database(state_store: StateStore) -> Database:
+    return state_store.database
 
 
 def _write_run(
@@ -100,7 +100,7 @@ class TestAnalysisMissing:
         _write_run(reports_root, date(2026, 8, 10), _UNFINISHED)
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 10))
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert [(run.run_id, run.kind) for run in found] == [
             (_UNFINISHED, IncompleteRunKind.ANALYSIS_MISSING)
@@ -117,7 +117,7 @@ class TestAnalysisMissing:
         _write_run(reports_root, date(2026, 8, 10), _UNFINISHED)
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 10), status="degraded")
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.ANALYSIS_MISSING
         assert found[0].is_actionable
@@ -135,10 +135,10 @@ class TestFinishedRunsAreNeverFlagged:
         """
         _write_run(reports_root, date(2026, 8, 11), _FINISHED, has_result=True)
         _insert_run(state_store, _FINISHED, date(2026, 8, 11))
-        with _database(state_store).connect() as conn:
+        with _state_database(state_store).connect() as conn:
             verdict_count = conn.execute("SELECT COUNT(*) FROM verdicts").fetchone()
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert verdict_count == (0,)
         assert found == ()
@@ -151,12 +151,15 @@ class TestFinishedRunsAreNeverFlagged:
         _write_run(reports_root, date(2026, 8, 10), _UNFINISHED, has_input=False)
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 10), status="failed")
 
-        assert find_incomplete_runs(_database(state_store), reports_root) == ()
+        assert find_incomplete_runs(_state_database(state_store), reports_root) == ()
 
     def test_missing_reports_root_returns_empty_without_raising(
         self, state_store: StateStore, tmp_path: Path
     ) -> None:
-        assert find_incomplete_runs(_database(state_store), tmp_path / "absent") == ()
+        assert (
+            find_incomplete_runs(_state_database(state_store), tmp_path / "absent")
+            == ()
+        )
 
 
 class TestNonActionableKinds:
@@ -169,7 +172,7 @@ class TestNonActionableKinds:
         _insert_run(state_store, _SAME_DAY_FIRST, date(2026, 8, 3))
         _insert_run(state_store, _SAME_DAY_SECOND, date(2026, 8, 3))
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert [run.run_id for run in found] == [_SAME_DAY_SECOND]
         assert found[0].kind is IncompleteRunKind.SAME_DAY_SUPERSEDED
@@ -183,7 +186,7 @@ class TestNonActionableKinds:
         _write_run(reports_root, date(2026, 8, 10), _UNFINISHED)
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 10), status=status)
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.PIPELINE_UNFINISHED
         assert found[0].run_status == status
@@ -198,7 +201,7 @@ class TestNonActionableKinds:
         _write_run(reports_root, date(2026, 8, 3), _SAME_DAY_SECOND)
         _insert_run(state_store, _SAME_DAY_SECOND, date(2026, 8, 3), status="failed")
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.SAME_DAY_SUPERSEDED
         assert not found[0].is_actionable
@@ -214,7 +217,7 @@ class TestNonActionableKinds:
         (directory / HISTORICAL_REPLAY_FILENAME).write_text("{}", encoding="utf-8")
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 14))
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.HISTORICAL_REPLAY
         assert not found[0].is_actionable
@@ -230,7 +233,7 @@ class TestNonActionableKinds:
         _insert_run(state_store, _SAME_DAY_FIRST, date(2026, 8, 3))
         _insert_run(state_store, _SAME_DAY_SECOND, date(2026, 8, 3))
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert [run.run_id for run in found] == [_SAME_DAY_SECOND]
         assert found[0].kind is IncompleteRunKind.HISTORICAL_REPLAY
@@ -243,7 +246,7 @@ class TestDatabaseDivergence:
     ) -> None:
         _write_run(reports_root, date(2026, 8, 10), _UNFINISHED)
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert found[0].kind is IncompleteRunKind.RUN_ROW_MISSING
         assert found[0].run_status is None
@@ -273,7 +276,7 @@ class TestSinceBoundary:
         _insert_run(state_store, _UNFINISHED, run_date)
 
         found = find_incomplete_runs(
-            _database(state_store), reports_root, since=date(2026, 8, 10)
+            _state_database(state_store), reports_root, since=date(2026, 8, 10)
         )
 
         assert bool(found) is is_included
@@ -287,7 +290,7 @@ class TestSinceBoundary:
         _insert_run(state_store, _UNFINISHED, date(2026, 8, 10))
 
         found = find_incomplete_runs(
-            _database(state_store), reports_root, since=date(2026, 8, 10)
+            _state_database(state_store), reports_root, since=date(2026, 8, 10)
         )
 
         assert [run.run_id for run in found] == [_UNFINISHED]
@@ -316,6 +319,6 @@ class TestOrdering:
             started_at=datetime(2026, 8, 10, 18, 30, tzinfo=UTC),
         )
 
-        found = find_incomplete_runs(_database(state_store), reports_root)
+        found = find_incomplete_runs(_state_database(state_store), reports_root)
 
         assert [run.run_id for run in found] == [later, earlier, _SAME_DAY_SECOND]

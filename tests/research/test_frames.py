@@ -42,7 +42,7 @@ def _insert_run(store, run_id, run_date=RUN_DATE, status="success"):
 
 
 def _insert_universe(store, snapshot_date, sector="Information Technology"):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             "INSERT INTO universe_membership VALUES (?, 'AAPL', 'AAPL', "
             "'Apple Inc.', ?, 'test')",
@@ -51,7 +51,7 @@ def _insert_universe(store, snapshot_date, sector="Information Technology"):
 
 
 def _insert_candidate(store, run_id, metrics_json):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             # Deliberately only `metrics_json`, leaving Issue #192's promoted
             # columns NULL: this is the pre-migration row shape `v_candidates`
@@ -64,7 +64,7 @@ def _insert_candidate(store, run_id, metrics_json):
 
 
 def _insert_verdict(store, run_id, recommendation="proceed"):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             "INSERT INTO verdicts (run_id, symbol, as_of, strategy_key, "
             "recommendation, reasons_json, no_trade) VALUES (?, 'AAPL', ?, "
@@ -85,7 +85,7 @@ class TestScorecard:
             ' "close": 190.5, "avg_volume": 10000000.0}',
         )
         _insert_verdict(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
                 "as_of, recommendation, forward_return_pct, classification) "
@@ -200,7 +200,7 @@ class TestTableAccessors:
         run_id = uuid4()
         _insert_run(state_store, run_id)
         _insert_verdict(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
                 "as_of, recommendation, forward_return_pct, classification) "
@@ -237,7 +237,7 @@ class TestTableAccessors:
         run_id = uuid4()
         _insert_run(state_store, run_id)
         _insert_verdict(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO verdict_outcomes (run_id, symbol, horizon_days, "
                 "as_of, recommendation, forward_return_pct, classification, "
@@ -258,7 +258,7 @@ class TestTableAccessors:
         run_id = uuid4()
         _insert_run(state_store, run_id)
         _insert_verdict(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO verdict_positions (run_id, symbol, strategy_key, "
                 "no_trade, entry_date, entry_price, stop_price, days_held, "
@@ -285,7 +285,7 @@ class TestTableAccessors:
 
 
 def _insert_truncation(store, run_id, symbol="NEAR", strategy_key="default", rank=6):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             "INSERT INTO screening_truncations VALUES "
             "(?, ?, ?, ?, 0.42, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, "
@@ -295,7 +295,7 @@ def _insert_truncation(store, run_id, symbol="NEAR", strategy_key="default", ran
 
 
 def _insert_universe_return(store, run_id, symbol, outcome_class, reason_code=None):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             "INSERT INTO universe_forward_returns VALUES "
             "(?, ?, 5, '2027-02-08', ?, ?, -3.5)",
@@ -368,7 +368,7 @@ class TestControlGroupAccessors:
 
 
 def _insert_promoted_candidate(store, run_id, symbol, execution_state, rank=1):
-    with store._database.connect() as conn:  # noqa: SLF001
+    with store.database.connect() as conn:
         conn.execute(
             "INSERT INTO candidates (run_id, symbol, strategy_key, rank, "
             "signal_names, metrics_json, score, execution_state, "
@@ -417,7 +417,7 @@ class TestPromotedColumnAccessors:
     ):
         run_id = uuid4()
         _insert_run(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO signal_hits VALUES (?, 'AAPL', 'default', "
                 "'trend_sma', 1.0, '{}')",
@@ -436,7 +436,7 @@ class TestPromotedColumnAccessors:
         run_id = uuid4()
         _insert_run(state_store, run_id)
         _insert_verdict(state_store, run_id)
-        with state_store._database.connect() as conn:  # noqa: SLF001
+        with state_store.database.connect() as conn:
             conn.execute(
                 "INSERT INTO verdict_reasons VALUES "
                 "(?, 'AAPL', 0, 'cited', 'filing', 2), "

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 def _rows(
     state_store: StateStore, sql: str, parameters: list[object] | None = None
 ) -> list[tuple[object, ...]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(sql, parameters or []).fetchall()
 
 

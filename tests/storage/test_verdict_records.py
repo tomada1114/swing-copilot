@@ -126,7 +126,7 @@ def _coverage(
 def _rows(
     state_store: StateStore, sql: str, parameters: list[object] | None = None
 ) -> list[tuple[object, ...]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(sql, parameters or []).fetchall()
 
 
@@ -446,9 +446,9 @@ def _inject_failure(
     table: str,
     fail_on_call: int,
 ) -> None:
-    real_connect = state_store._database.connect  # noqa: SLF001
+    real_connect = state_store.database.connect
     monkeypatch.setattr(
-        state_store._database,  # noqa: SLF001
+        state_store.database,
         "connect",
         lambda: _FlakyVerdictConnection(real_connect(), table, fail_on_call),
     )

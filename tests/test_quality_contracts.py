@@ -138,6 +138,49 @@ def test_no_cover_pragmas_are_limited_to_main_and_abstract_protocol_bodies():
     assert not violations, "unexpected # pragma: no cover: " + ", ".join(violations)
 
 
+#: Issue #400: every name `daily_runner.py`/`daily_composition.py` import from
+#: `daily.py`, now that the module boundary is declared rather than merely
+#: named. `DailyDependencies`, `main`, and `run_daily` predate this issue and
+#: were already public; the rest lost their leading `_` as part of it.
+DAILY_PUBLIC_BOUNDARY_NAMES = frozenset(
+    {
+        "DailyDependencies",
+        "OutputCompletion",
+        "OutputContext",
+        "RiskStepRequest",
+        "RunContext",
+        "StepOutcome",
+        "TIME_BUDGET_STEP_OUTCOME",
+        "config_hash",
+        "main",
+        "paths_for_mode",
+        "record_exposure_decision",
+        "record_ftd_snapshot",
+        "record_regime_snapshot",
+        "record_step",
+        "run_daily",
+        "run_metadata",
+        "run_mode",
+        "run_step_analysis_export",
+        "run_step_fundamentals",
+        "run_step_output",
+        "run_step_postmortem",
+        "run_step_prices",
+        "run_step_retro_collect",
+        "run_step_retro_evaluate",
+        "run_step_risk",
+        "run_step_screening",
+        "run_step_track_update",
+        "run_text_soft_step",
+        "screening_lookback_days",
+        "select_symbols",
+        "step_started",
+        "text_target_symbols",
+        "warn_stale_runs",
+    }
+)
+
+
 def test_daily_entrypoint_remains_a_compatible_facade_over_split_boundaries():
     """Keep the documented console-script target and direct API stable."""
     assert daily.run_daily.__module__ == "swing_copilot.pipeline.daily"
@@ -147,6 +190,39 @@ def test_daily_entrypoint_remains_a_compatible_facade_over_split_boundaries():
         daily_composition.main.__module__ == "swing_copilot.pipeline.daily_composition"
     )
     assert daily.DailyDependencies is daily_runner.DailyDependencies
+    assert set(daily.__all__) == DAILY_PUBLIC_BOUNDARY_NAMES
+
+
+def test_daily_runner_and_composition_import_no_private_name_from_daily():
+    """Issue #400: a name a sibling module imports must be declared public.
+
+    `daily.py`'s own docstring called itself a "compatibility facade" that
+    intentionally kept step implementations importable, yet every one of
+    those names still started with `_` -- the module boundary was asserted in
+    prose, not enforced. This walks the AST of each sibling's import
+    statements (not merely the names it currently uses) so a *new* private
+    import regresses here immediately, before `just lint`/mypy would ever see
+    it as anything other than an ordinary cross-module reference.
+    """
+    sibling_paths = {
+        "daily_runner": PROJECT_ROOT / "src/swing_copilot/pipeline/daily_runner.py",
+        "daily_composition": (
+            PROJECT_ROOT / "src/swing_copilot/pipeline/daily_composition.py"
+        ),
+    }
+    for label, path in sibling_paths.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        private_imports = sorted(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "swing_copilot.pipeline.daily"
+            for alias in node.names
+            if alias.name.startswith("_")
+        )
+        assert not private_imports, (
+            f"{label}.py imports private name(s) from pipeline.daily: {private_imports}"
+        )
 
 
 def test_daily_console_script_facade_delegates_to_composition(

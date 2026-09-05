@@ -24,7 +24,7 @@ STRATEGIES_CONFIG = StrategiesConfig.model_validate(
         "strategies": {
             "default": {
                 "filters_all": [],
-                "signals_all": [],
+                "signals_all": ["trend_sma"],
                 "candidate_limit": 10,
             }
         }

@@ -59,8 +59,8 @@ def _git_tracked_files(repo_root: Path) -> list[Path] | None:
         repo_root is not a git repository or git is unavailable.
     """
     try:
-        result = subprocess.run(  # noqa: S603
-            ["git", "-C", str(repo_root), "ls-files", "-z"],  # noqa: S607
+        result = subprocess.run(  # noqa: S603 - fixed argv with shell=False; repo_root is passed as a path argument
+            ["git", "-C", str(repo_root), "ls-files", "-z"],  # noqa: S607 - executable is the fixed git command
             check=True,
             capture_output=True,
             text=True,

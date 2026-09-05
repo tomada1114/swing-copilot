@@ -144,7 +144,12 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
 def write_markdown_report(
     brief: DailyBrief, status: RunStatus, output_dir: str | Path
 ) -> Path:
-    """Write a run-ID archive and `latest.md` using atomic replacement."""
+    """Write a run-ID archive and `latest.md` using atomic replacement.
+
+    Raises:
+        LatestMarkdownUpdateError: If the durable run archive is written but
+            the shared `latest.md` pointer cannot be replaced.
+    """
     root = Path(output_dir)
     dated_dir = root / brief.run_date.isoformat()
     dated_dir.mkdir(parents=True, exist_ok=True)

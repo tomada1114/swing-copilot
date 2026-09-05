@@ -838,8 +838,8 @@ Issue #231の追記を参照）。
 バックテストのpolicyは市場状態、決算ゲート、`not_calculable`だけを評価する。
 口座ヒート、セクター、相関、サーキットブレーカーは本番・追跡・バックテストの
 売買計画から除外し、policyへ互換値を注入して無効化する方式も採用しない。
-`risk/circuit_breaker.py`の純関数は履歴互換のため残るが、現行の本番および
-バックテスト実行経路からは呼び出さない。
+到達不能だったサーキットブレーカー実装と、対応するバックテストのゼロ固定ラベルは
+削除済みである。
 
 ### 3.14 `text/news_finnhub.py` / `text/edgar_filings.py` / `text/calendar_fred.py`（FR-07）
 
@@ -1447,7 +1447,7 @@ uv run copilot-backtest --strategy <name> --start YYYY-MM-DD --end YYYY-MM-DD \
 - **決算ブロックの限界**: バックテストは過去の決算カレンダーを持たないため、`build_entry_policy(..., earnings_guard_fn=...)`（point-in-timeの`EarningsGuardInput`を返す注入口）を渡さない限り決算ゲートは不活性（カウント0）である。捏造した日付でゲートを動かすより0と報告する方を選んだ。
 - **`REGIME_SYMBOLS = ("SPY", "QQQ", "^VIX")`** は`load_market_frame`が**常に**読み込む。アーム依存で読み分けると`bars_digest`＝`cache_key`がアームごとに変わり、A/Bが1本のストリームを共有できなくなるためである。スクリーニングは`universe`を走査するので余分な銘柄の影響を受けない。これらのバーが無い状態で`--policy`を指定した場合は`EntryPolicyError`でfail-fastする（レジームがUNKNOWN→fail-closedで全期間全候補ブロック、という無意味な結果を黙って出さない）。
 
-**`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`を0件でも必ず全件報告する。`portfolio_heat` / `sector`は旧比較レポートの列互換のため残るが、#348以降のポリシーからは発生せず常に0である。複数ゲートが同時に成立した候補は定義済み優先順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
+**`BacktestResult`の追加フィールド**: `entry_block_counts` / `entry_block_days`（「入らなかった理由」の候補件数と発動セッション数。`metrics.ENTRY_BLOCK_REASONS`を0件でも必ず全件報告する。複数ゲートが同時に成立した候補は定義済み優先順の先勝ちで1件だけ計上する）、`avg_invested_pct`（各日の建玉時価/equityの平均）、`max_concurrent_reached`。
 
 **CLI**: `copilot-backtest --policy none|regime|regime+earnings`（カンマ区切りで複数指定可、順序＝レポートの列順、重複は拒否）。複数アームは同一`MarketFrame`・同一`CandidateStream`で実行し、`render_policy_comparison_terminal`/`render_policy_comparison_markdown`が指標とゲート発動回数を列比較する。`--pessimistic`との併用は単一アームのみ（比較軸が2つになると差分の帰属が読めない）。`grid`サブコマンドは`--policy`非対応で、既定以外を渡すとfail-fastする（黙って無視すると「ゲート有りと書いてゲート無しで測った」レポートになる）。
 
@@ -1521,8 +1521,8 @@ schema版とともに`runs`へ保存する。`_VISIBLE_PIPELINE_STEPS`が公開�
 4. プリフェッチが空でなければ、取得できたbarの日付ごとに
    `_session_has_closed(session_date, now)`（`datetime.combine(session_date,
    time(16, 0), tzinfo=MARKET_TIMEZONE) <= now`、`MARKET_TIMEZONE`は
-   `clock.py`が公開する`ZoneInfo("America/New_York")`で`risk/circuit_breaker.py`
-   の`_ET`と共用）を評価し、条件を満たす日付の最大値を`run_date`とする。
+   `clock.py`が公開する`ZoneInfo("America/New_York")`を使って評価し、条件を満たす
+   日付の最大値を`run_date`とする。
    1件も満たさなければ同じ`no_trading_day`で中止する。`now`は必ず
    `deps.clock.now()`（tz-aware UTC）から取り、`datetime.now()`を直接
    呼ばない。

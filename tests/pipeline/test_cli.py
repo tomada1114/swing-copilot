@@ -319,9 +319,7 @@ class TestComposeDependencies:
         )
 
         assert deps.output_dir == "reports/dry_run"
-        assert deps.market_store._database.db_path == Path(  # noqa: SLF001
-            "data/copilot_dry_run.duckdb"
-        )
+        assert deps.market_store.database.db_path == Path("data/copilot_dry_run.duckdb")
 
     def test_live_run_composes_the_default_db_and_report_dir(
         self, monkeypatch, tmp_path
@@ -340,7 +338,7 @@ class TestComposeDependencies:
         )
 
         assert deps.output_dir == "reports"
-        assert deps.market_store._database.db_path == DEFAULT_DB_PATH  # noqa: SLF001
+        assert deps.market_store.database.db_path == DEFAULT_DB_PATH
 
 
 class TestPathsForMode:

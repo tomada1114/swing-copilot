@@ -646,7 +646,7 @@ class StrategySpec(_StrictModel):
     # YAML sequences deserialize as lists. Keep scalar values strict while
     # accepting that serialization boundary for this immutable tuple API.
     filters_all: tuple[str, ...] = Field(strict=False)
-    signals_all: tuple[str, ...] = Field(strict=False)
+    signals_all: tuple[str, ...] = Field(strict=False, min_length=1)
     candidate_limit: int = Field(gt=0, le=10)
     ranking: RankingConfig = RankingConfig()
     minervini: MinerviniStrategyConfig | None = None

@@ -145,7 +145,7 @@ def _outcome_rows(
     if horizon_days is not None:
         sql += " WHERE horizon_days = ?"
         parameters.append(horizon_days)
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(
             sql + " ORDER BY symbol, horizon_days", parameters
         ).fetchall()
@@ -269,7 +269,7 @@ class TestEvaluateBenchmarkReturn:
 
 
 def _benchmark_returns(state_store: StateStore) -> list[float | None]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return [
             row[0]
             for row in conn.execute(
@@ -280,7 +280,7 @@ def _benchmark_returns(state_store: StateStore) -> list[float | None]:
 
 
 def _audit_closes(state_store: StateStore) -> list[tuple[object, object]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return [
             (row[0], row[1])
             for row in conn.execute(

@@ -327,6 +327,12 @@ def resolve_daily_universe(
     Live runs reuse a younger snapshot, otherwise refetch and persist raw
     provider membership to both CSV and DuckDB. A live refresh failure can use
     a previously persisted snapshot, but is returned with an explicit warning.
+
+    Raises:
+        ValueError: If `refresh_interval_days` is less than one, which would
+            make the refresh policy ambiguous.
+        UniverseError: If a historical run has no visible snapshot, or a live
+            refresh fails before any persisted snapshot exists.
     """
     if refresh_interval_days < 1:
         msg = "refresh_interval_days must be at least 1"

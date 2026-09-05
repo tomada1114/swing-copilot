@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import duckdb
 import pytest
 
+from swing_copilot.exceptions import SwingCopilotError
 from swing_copilot.storage.verdict_records import (
     ACCOUNT_INDEPENDENT_EXPORT_SINCE,
     ACCOUNT_INDEPENDENT_VERDICT_CUTOFF,
@@ -126,7 +127,7 @@ def _coverage(
 def _rows(
     state_store: StateStore, sql: str, parameters: list[object] | None = None
 ) -> list[tuple[object, ...]]:
-    with state_store._database.connect() as conn:  # noqa: SLF001
+    with state_store.database.connect() as conn:
         return conn.execute(sql, parameters or []).fetchall()
 
 
@@ -446,9 +447,9 @@ def _inject_failure(
     table: str,
     fail_on_call: int,
 ) -> None:
-    real_connect = state_store._database.connect  # noqa: SLF001
+    real_connect = state_store.database.connect
     monkeypatch.setattr(
-        state_store._database,  # noqa: SLF001
+        state_store.database,
         "connect",
         lambda: _FlakyVerdictConnection(real_connect(), table, fail_on_call),
     )
@@ -525,6 +526,32 @@ class TestReplaceRunVerdictsAtomicity:
 
 class TestNormalizedVerdictReasons:
     """Issue #192: `reasons_json` projected into queryable rows."""
+
+    def test_a_non_iterable_source_ids_fails_as_a_domain_error(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        with state_store.database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO verdicts (
+                    run_id, symbol, as_of, strategy_key, recommendation,
+                    reasons_json, no_trade
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    run_id,
+                    "AAPL",
+                    AS_OF,
+                    "default",
+                    "proceed",
+                    json.dumps([{"text": "壊れた理由", "source_ids": 123}]),
+                    False,
+                ],
+            )
+
+        with pytest.raises(SwingCopilotError, match="source_ids"):
+            state_store.get_run_verdicts(run_id)
 
     def test_writes_one_row_per_reason_with_its_index_and_citation_count(
         self, state_store: StateStore

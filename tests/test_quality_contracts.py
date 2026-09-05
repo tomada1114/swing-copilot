@@ -989,16 +989,30 @@ def test_begin_transaction_appears_only_in_the_shared_primitive():
     assert offending == []
 
 
+def test_bandit_noqa_has_an_inline_security_reason():
+    """Make every Bandit suppression explain why the call is safe here."""
+    violations: list[str] = []
+    noqa_pattern = re.compile(r"# noqa:\s*S\d+(?:\s*,\s*S\d+)*")
+    reason_pattern = re.compile(r"# noqa:\s*S\d+(?:\s*,\s*S\d+)*\s+-\s+\S")
+    for root in (PROJECT_ROOT / "src", PROJECT_ROOT / "scripts"):
+        for path in sorted(root.rglob("*.py")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if noqa_pattern.search(line) and not reason_pattern.search(line):
+                    relative = path.relative_to(PROJECT_ROOT).as_posix()
+                    violations.append(f"{relative}:{line_number}")
+
+    assert violations == [], "Bandit suppressions without inline reasons: " + ", ".join(
+        violations
+    )
+
+
 # --- Issue #398: runs-table seeding goes through StateStore.insert_run() ---
 
-#: `tests/storage/` tests `StateStore`/`Database` themselves -- reaching
-#: `._database` there is the contract under test, not a shortcut around it,
-#: and the issue's own DoD scopes the ban to "outside tests/storage/".
-#: `tests/support/` is the trusted shared seeding implementation
-#: (`runs.py`'s `seed_run()` wraps `insert_run()`; its module docstring also
-#: mentions the old `state_store._database` pattern in prose, which is not a
-#: reintroduction of it).
-_DATABASE_ACCESS_ALLOWED_PREFIXES = ("tests/storage/", "tests/support/")
+#: These modules contain storage-level fixtures or the shared seed helper;
+#: the raw-SQL contract below intentionally does not count their setup.
+_RUNS_INSERT_ALLOWED_PREFIXES = ("tests/storage/", "tests/support/")
 
 #: The one seed site Issue #398 could not migrate onto
 #: `StateStore.insert_run()`: `test_existing_success_run_aborts_before_start_run`
@@ -1008,26 +1022,26 @@ _DATABASE_ACCESS_ALLOWED_PREFIXES = ("tests/storage/", "tests/support/")
 #: added anywhere else in it still fails this test.
 _RUNS_RAW_INSERT_EXCEPTIONS = {"tests/pipeline/test_daily_core.py": 1}
 
+#: A deliberately broken test double overrides `StateStore.database` to
+#: raise, so its test must inspect the backing database after the pipeline
+#: fails. The source line carries this exact reason beside the access.
+_DATABASE_ACCESS_ALLOWLIST = {
+    "tests/pipeline/test_failsoft.py": "private database access: broken public property"
+}
+
 
 def test_runs_table_seeding_goes_through_state_store_insert_run():
     """Issue #398: a hand-written `INSERT INTO runs` outside storage tests is banned.
 
-    Eleven test modules used to reach `state_store._database` directly to
-    seed a `runs` row at an arbitrary lifecycle point, each carrying its own
-    `# noqa: SLF001`. `StateStore.insert_run()` (Issue #395) is the public
-    write path for exactly that now, and `tests/support/runs.py`'s
+    Eleven test modules used to seed a `runs` row with hand-written SQL at an
+    arbitrary lifecycle point. `StateStore.insert_run()` (Issue #395) is the
+    public write path for exactly that now, and `tests/support/runs.py`'s
     `seed_run()` is a thin wrapper over it. This keeps the pattern from
     creeping back into a twelfth file: a new raw `INSERT INTO runs` outside
     `tests/storage/` fails here, with one named, counted exception (see
     `_RUNS_RAW_INSERT_EXCEPTIONS`) where the assertion needs a column
     `insert_run()` does not expose.
 
-    This does not assert that no test outside `tests/storage/` ever reaches
-    `._database` at all -- dozens of read-only accesses remain (`run_steps`,
-    `screening_rejections`, `runs.metadata_json`, and more), each covering a
-    column or table with no public `StateStore`/`MarketStore` accessor.
-    Adding one would be a production-code change, which is explicitly out of
-    scope for #398 ("#395 が追加した `StateStore.insert_run()` を使うだけ").
     This test targets the one anti-pattern the issue actually fixed: raw
     `runs`-table seeding, now that a public alternative exists for it.
     """
@@ -1036,7 +1050,7 @@ def test_runs_table_seeding_goes_through_state_store_insert_run():
     for path in sorted((PROJECT_ROOT / "tests").rglob("*.py")):
         relative = path.relative_to(PROJECT_ROOT).as_posix()
         if relative == self_path or any(
-            relative.startswith(prefix) for prefix in _DATABASE_ACCESS_ALLOWED_PREFIXES
+            relative.startswith(prefix) for prefix in _RUNS_INSERT_ALLOWED_PREFIXES
         ):
             continue
         occurrences = path.read_text(encoding="utf-8").count("INSERT INTO runs")
@@ -1110,3 +1124,38 @@ def _has_any_justification(lines: list[str], line_number: int) -> bool:
             return True
         preceding -= 1
     return False
+
+
+def test_tests_use_public_database_accessors():
+    """Keep test fixtures independent of store implementation attributes.
+
+    ``StateStore.database`` and ``MarketStore.database`` are the read-only
+    seams for tests that need to inspect persisted state. Reaching into a
+    store's private database field makes otherwise behavioral tests depend on
+    its internal layout and causes a broad break on harmless refactors.
+    """
+    violations: list[str] = []
+    for path in sorted((PROJECT_ROOT / "tests").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        source_lines = source.splitlines()
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        violations.extend(
+            f"{relative}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr == "_database"
+            and _private_database_access_is_not_allowlisted(
+                relative, source_lines, node.lineno
+            )
+        )
+
+    assert violations == [], "private database accesses: " + ", ".join(violations)
+
+
+def _private_database_access_is_not_allowlisted(
+    relative: str, source_lines: list[str], line_number: int
+) -> bool:
+    """Return whether a private database access lacks its required reason."""
+    reason = _DATABASE_ACCESS_ALLOWLIST.get(relative)
+    return reason is None or reason not in source_lines[line_number - 1]

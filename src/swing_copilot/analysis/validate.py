@@ -235,6 +235,10 @@ def validate_artifact_identity(
     This is intentionally separate from per-symbol provenance/safety checks:
     an identity mismatch makes the entire report unsafe to rewrite, whereas a
     bad symbol can be withheld without affecting siblings.
+
+    Raises:
+        AnalysisIngestError: If any run ID, `as_of`, strategy key, or input
+            digest differs between the input and either companion artifact.
     """
     checks = (
         ("analysis_result run_id", result.run_id, analysis_input.run_id),

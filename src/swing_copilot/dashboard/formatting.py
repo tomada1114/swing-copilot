@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime
+from numbers import Real
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -161,8 +162,10 @@ def as_float(value: object) -> float | None:
     """A numeric column as a `float`, or `None` when absent or non-numeric."""
     if is_missing(value):
         return None
+    if not isinstance(value, (str, bytes, bytearray, Real)):
+        return None
     try:
-        return float(value)  # type: ignore[arg-type]
+        return float(value)
     except TypeError, ValueError:
         return None
 
@@ -209,7 +212,9 @@ def number(
     """
     if is_missing(value):
         return missing(key)
-    numeric = float(value)  # type: ignore[arg-type]
+    numeric = as_float(value)
+    if numeric is None:
+        return missing(key)
     if math.isnan(numeric) or math.isinf(numeric):
         return missing(key)
     body = f"{numeric:+.{digits}f}" if signed else f"{numeric:,.{digits}f}"
@@ -223,7 +228,10 @@ def integer(value: object, *, suffix: str = "", key: str = "none") -> Cell:
     """Render an integral value, or the named absence token."""
     if is_missing(value):
         return missing(key)
-    return Cell(text=f"{int(value):,d}{suffix}")  # type: ignore[call-overload]
+    numeric = as_float(value)
+    if numeric is None:
+        return missing(key)
+    return Cell(text=f"{int(numeric):,d}{suffix}")
 
 
 #: `recommendation` → badge modifier. `skip` is deliberately not an alarm

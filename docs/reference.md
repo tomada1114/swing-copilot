@@ -842,11 +842,12 @@ copilot-filter-matrix --as-of 2026-07-29 --json reports/filter_matrix.json
 5. **候補相当（`candidate_limit`適用前）**——そのうち`ScreeningPipeline`が
    実際に候補として出すもの
 
-**0個バケツ＝候補ではない。** `ScreeningPipeline`はチェックの後にもう2つの
-ゲートを持つ。ランキング指標（`screening.pipeline.ranking_metrics`：SMA200を
-含むので約200本の履歴が要る）が取れない銘柄は落とされ、`signals_all`が空の
-戦略は候補を1つも出さない。診断はこの2つを`candidate_equivalent_symbols`に
-反映するので、**同じ銘柄が0個バケツと落選台帳の両方に現れることはない**。
+**0個バケツ＝候補ではない。** `ScreeningPipeline`はチェックの後に
+ランキング指標（`screening.pipeline.ranking_metrics`：SMA200を含むので約200本の
+履歴が要る）のゲートを持ち、指標が取れない銘柄は落とす。`signals_all`は設定
+パース時に1件以上を必須とするため、空の戦略は実行前に設定エラーになる。診断は
+ランキング指標のゲートを`candidate_equivalent_symbols`に反映するので、
+**同じ銘柄が0個バケツと落選台帳の両方に現れることはない**。
 
 **データ不足は落選と別カテゴリで数える。** 履歴不足やファンダ欠損は「閾値が
 厳しすぎるか」を何も語らないためで、`FAILED`／`NO_DATA`の判定には

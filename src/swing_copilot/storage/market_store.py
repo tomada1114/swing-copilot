@@ -634,6 +634,15 @@ class MarketStore:
         self._database = database
         self.parquet_root = Path(parquet_root)
 
+    @property
+    def database(self) -> Database:
+        """Expose the shared database for read-only cross-module reuse.
+
+        Callers that need to inspect persisted state should use this seam
+        rather than reaching into the store's private database attribute.
+        """
+        return self._database
+
     def _has_partition_files(self) -> bool:
         return any(self.parquet_root.glob("year=*/*.parquet"))
 
@@ -1306,7 +1315,7 @@ class MarketStore:
                   AND CAST(filed_at AS DATE) <= ?
                 GROUP BY symbol, fiscal_period_end
                 ORDER BY symbol, filed_on
-                """,  # noqa: S608 -- placeholders only; every value is bound
+                """,  # noqa: S608 - placeholder counts are generated locally and every value is bound
                 [*symbols, *forms, as_of],
             ).fetchall()
         dates_by_symbol: dict[str, set[date]] = {}

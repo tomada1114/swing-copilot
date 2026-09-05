@@ -749,6 +749,26 @@ class TestBenchmarkAndReproducibility:
         for _day, value in result.benchmark_curve:
             assert value == pytest.approx(expected_shares * 400.0)
 
+    def test_benchmark_curve_carries_residual_cash_at_every_point(self, engine):
+        days = TRADING_DAYS[:4]
+        rows = [
+            bar_row("SPY", days[0], (333.0, 333.0, 333.0, 333.0)),
+            bar_row("SPY", days[1], (340.0, 340.0, 340.0, 340.0)),
+            bar_row("SPY", days[2], (340.0, 340.0, 340.0, 340.0)),
+            bar_row("SPY", days[3], (340.0, 340.0, 340.0, 340.0)),
+            *flat_bars("AAA", days, 100.0),
+        ]
+        result = engine.run(days, bars_frame(rows), _no_candidates, INITIAL_CASH)
+
+        # 300 shares at $333 leave $100 residual; $300 x $340 + $100 = $102,100.
+        assert [value for _day, value in result.benchmark_curve] == [
+            100_000.0,
+            102_100.0,
+            102_100.0,
+            102_100.0,
+        ]
+        assert result.benchmark_final_equity == pytest.approx(102_100.0)
+
     def test_same_input_produces_identical_result(self, engine):
         days = TRADING_DAYS[:6]
         rows = [

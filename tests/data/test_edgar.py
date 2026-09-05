@@ -82,6 +82,11 @@ class FakeFiling:
         self.filing_text = "Full filing text content."
         self.report: FakeTenQReport | None = None
         self.obj_error: Exception | None = None
+        #: `None` raises `obj_error` on every call; an int raises it for that
+        #: many leading calls only, modelling a transient transport failure
+        #: that a retry recovers from.
+        self.obj_error_limit: int | None = None
+        self.obj_calls = 0
         self.documents: list[FakeAttachment] = []
         self.attachments_error: Exception | None = None
         self.attachments_calls = 0
@@ -97,7 +102,10 @@ class FakeFiling:
         return self.filing_text
 
     def obj(self):
-        if self.obj_error is not None:
+        self.obj_calls += 1
+        if self.obj_error is not None and (
+            self.obj_error_limit is None or self.obj_calls <= self.obj_error_limit
+        ):
             raise self.obj_error
         return self.report
 
@@ -259,27 +267,6 @@ def _no_real_edgar_identity_mutation(monkeypatch):
     )
 
 
-@pytest.fixture(autouse=True)
-def _restore_stamina_retry_state():
-    """Reset `stamina`'s process-wide active flag around every test (Issue #429).
-
-    `EdgarClient.__init__` calls `stamina.set_active(False)` as a real,
-    documented side effect (not a fake): every `EdgarClient(...)` built by
-    this module leaves `stamina` globally deactivated for whatever test runs
-    next in this worker process. `TestEdgartoolsInternalRetry` needs to
-    start from a known "active" state to prove construction is what turns it
-    off, and that has to hold under `-n auto` / any test order, not just when
-    this file happens to run first -- so set it explicitly before yielding
-    rather than relying on whatever a previous test left behind, and restore
-    the pre-test value afterwards so a later, unrelated test file is not left
-    looking at a permanently deactivated `stamina`.
-    """
-    previous = stamina.is_active()
-    stamina.set_active(True)
-    yield
-    stamina.set_active(previous)
-
-
 class TestIdentity:
     def test_sets_edgar_identity_on_construction(self, monkeypatch):
         calls: list[str] = []
@@ -301,7 +288,7 @@ class TestEdgartoolsInternalRetry:
     that calls into edgartools without going through `_with_retries` at all
     -- `filing.text()` (via `_filing_text_item`), `filing.attachments` /
     `attachment.content` (via `_exhibit_text`), and `filing.obj()` (via
-    `_extract_ten_q_sections`, called with no retry wrapper whatsoever). The
+    `_extract_ten_q_sections`). The
     invariant this repository relies on is process-wide ("edgartools never
     runs its own retry loop in this process"), not per-call-site, so
     asserting on the process-wide switch is the correct level for the
@@ -1036,6 +1023,39 @@ class TestTenQSectionFailSoft:
         assert item.filing_sections == ()
         assert item.content_text == "Full filing text content."
         assert self._LOG_PREFIX in caplog.text
+
+    def test_transient_transport_failure_on_obj_is_retried_before_degrading(self):
+        """A transport blip during `filing.obj()` must not cost the sections.
+
+        `filing.obj()` is not a pure re-parse of the text already fetched: on
+        a submission whose SGML carries no inline HTML, edgartools fetches the
+        filing homepage and primary document. Unretried, one `ConnectError`
+        falls straight into the fail-soft handler and silently degrades the
+        filing to `head_fallback`.
+        """
+        filing = _ten_q_filing()
+        filing.report = FakeTenQReport({("Part I", "Item 1"): "financial statements"})
+        filing.obj_error = ConnectionError("EDGAR timeout")
+        filing.obj_error_limit = 2
+        sleeps: list[float] = []
+        # One tick per throttled request (get_filings, filing.text, and one
+        # per `filing.obj()` attempt), spaced far enough apart that no sleep
+        # can come from the throttle.
+        clock = FakeClock([0.0, 5.0, 10.0, 15.0, 20.0])
+        client = EdgarClient(
+            IDENTITY,
+            company_factory=_company_factory(FakeCompany([filing])),
+            clock=clock,
+            sleep_fn=sleeps.append,
+        )
+
+        item = client.fetch_filing_texts(
+            "AAPL", ["10-Q"], as_of=datetime(2026, 7, 20, tzinfo=UTC)
+        )[0]
+
+        assert filing.obj_calls == 3
+        assert sleeps == [1.0, 2.0]
+        assert [section.name for section in item.filing_sections] == ["part_i_item_1"]
 
     def test_item_lookup_failure_keeps_the_filing_text_without_sections(self, caplog):
         filing = _ten_q_filing()

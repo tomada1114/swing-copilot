@@ -263,7 +263,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   関数（`get_with_retry`/`stream_with_retry`/`post_with_retry`）は`stamina`ライブラリの
   `@retry(...)`で独自にラップされており、実`time.sleep`・注入不能のまま最大
   `QUICK_RETRY_ATTEMPTS = 5`回再送していたため、transport障害が続くと論理1呼び出し
-  あたり最大15リクエスト・実時間48秒（未計測）になり得た。`company_factory`を偽装する
+  あたり最大15リクエスト・実時間48秒になり得た。`company_factory`を偽装する
   既存テストはこの二重リトライを一度も観測していなかった。`EdgarClient.__init__`で
   `edgar.set_identity(identity)`の直後に`stamina.set_active(False)`を呼ぶことで
   （edgartoolsのバージョンに依らず有効な、`stamina`自身が文書化したプロセス全体の
@@ -278,6 +278,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`TooManyRequestsError`、両層ともリトライ対象外）と`stream_with_retry`のジェネレータ
   非リトライ（`@with_identity`が`isgeneratorfunction`を偽装させる、edgartools側の潜在
   バグ）は本Issueのスコープ外として切り離した
+  内部リトライ無効化にあわせて、`_extract_ten_q_sections()`内の`filing.obj()`だけが`_with_retries()`を
+  通っていなかったのも修正した（transport一時失敗1回で10-Qセクションが静かに`head_fallback`へ劣化していた）。
 
 ### Changed
 

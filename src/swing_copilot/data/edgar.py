@@ -638,7 +638,7 @@ class EdgarClient:
             source_url=filing.filing_url,
             content_text=content_text,
             fetched_at=self._date_clock.now(),
-            filing_sections=_extract_ten_q_sections(filing),
+            filing_sections=_extract_ten_q_sections(filing, self._with_retries),
         )
 
     def _exhibit_text(self, filing: _FilingLike) -> str:
@@ -793,17 +793,35 @@ def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:
     ]
 
 
-def _extract_ten_q_sections(filing: _FilingLike) -> tuple[FilingSection, ...]:
+def _extract_ten_q_sections(
+    filing: _FilingLike,
+    with_retries: Callable[
+        [Callable[[], _CompanyReportLike | None]], _CompanyReportLike | None
+    ],
+) -> tuple[FilingSection, ...]:
     """Extract priority sections without making their absence a fetch failure.
 
     EdgarTools parses the primary HTML already loaded by `filing.text()`.
     Issuer-specific markup can still defeat section detection; that is an
     expected data-quality outcome, surfaced later as `head_fallback`.
+
+    Args:
+        filing: The filing whose priority sections are wanted.
+        with_retries: `EdgarClient._with_retries`. `filing.obj()` is not a
+            pure re-parse of what `filing.text()` already downloaded -- when
+            the submission SGML carries no inline HTML, edgartools falls back
+            to fetching the filing homepage and the primary document -- so it
+            is an EDGAR boundary call and owes the same throttled 3-attempt
+            contract as every other one. Without it a single transient
+            `ConnectError` lands straight in the fail-soft handler below and
+            silently downgrades the filing to `head_fallback` (Issue #429
+            removed edgartools' own internal retry, which had been masking
+            this call site's missing wrapper).
     """
     if filing.form not in {"10-Q", "10-Q/A"}:
         return ()
     try:
-        report = filing.obj()
+        report = with_retries(filing.obj)
         if report is None:
             return ()
         requested = (

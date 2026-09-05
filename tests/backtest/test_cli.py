@@ -1383,10 +1383,7 @@ class TestSingleArmMarkdownIsPinned:
 | Reason | Value |
 |---|---:|
 | regime | 4 (1d) |
-| circuit_breaker | 0 (0d) |
-| portfolio_heat | 0 (0d) |
 | earnings | 0 (0d) |
-| sector | 0 (0d) |
 | not_calculable | 0 (0d) |
 | max_concurrent | 0 (0d) |
 | already_held | 0 (0d) |

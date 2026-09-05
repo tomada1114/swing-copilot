@@ -1436,5 +1436,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report: a filing/news analysis served from a cache entry within
   `llm.cache_ttl_days` (new setting) of `near_stale_threshold_days`
   remaining now surfaces a re-run warning instead of being silently reused
+- SEC の HTTP 429（`edgar.httprequests.TooManyRequestsError`）が EDGAR 境界の
+  どのリトライ層でもリトライされない問題を修正した（Issue #447）。
+  `TooManyRequestsError` は edgartools 独自の素の `Exception` サブクラスで、
+  edgartools 自身の `RETRYABLE_EXCEPTIONS` にも `retry.py` の内部例外集合にも
+  含まれず、両層とも1試行で例外がそのまま伝播していた——
+  `docs/04_detailed_design.md` が定める「接続・タイムアウト・HTTP 408/429/5xx
+  は合計3試行」契約から 429 だけが漏れていた（修正前を実測: 1リクエスト、
+  `sleep_fn == []`）。`retry_external_call` にキーワード専用引数
+  `retryable_types`（既定値は従来どおりの共有集合で、他アダプタの挙動は
+  変わらない）を追加し、`EdgarClient._with_retries` だけがそれを
+  `TooManyRequestsError` を含むタプルへ拡張する形で対処した——`retry.py`自体は
+  edgartools を import しない。`tests/data/test_edgar_http_boundary.py`に
+  回帰テストを追加し、429 が3試行・`sleep_fn == [1.0, 2.0]`になることを固定した
 
 [Unreleased]: https://github.com/tomada1114/swing-copilot/commits/main

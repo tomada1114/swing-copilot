@@ -52,6 +52,7 @@ from datetime import UTC, datetime
 from itertools import count
 from typing import TYPE_CHECKING
 
+import edgar.httprequests
 import httpx
 import pytest
 
@@ -257,6 +258,37 @@ class TestRetryableServerError:
         )
 
         with pytest.raises(httpx.HTTPStatusError):
+            _fetch(client)
+
+        assert len(requests) == 3
+        assert sleeps == [1.0, 2.0]
+
+
+class TestTooManyRequestsIsRetryable:
+    def test_a_429_is_retried_up_to_three_requests(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Issue #447: SEC's 429 must join the shared retry contract.
+
+        edgartools raises 429 as `edgar.httprequests.TooManyRequestsError`,
+        a bare `Exception` subclass -- not `httpx`-derived, and in neither
+        edgartools' own `RETRYABLE_EXCEPTIONS` nor
+        `swing_copilot.retry.EXTERNAL_FAILURES`. Before the fix this
+        propagated on the first attempt (measured: 1 request, `sleep_fn ==
+        []`); it must now behave exactly like a retryable
+        `httpx.HTTPStatusError` 5xx case: 3 requests, `sleep_fn == [1.0,
+        2.0]`.
+        """
+        sleeps: list[float] = []
+
+        def responder(request: httpx.Request, _attempt: int) -> httpx.Response:
+            raise edgar.httprequests.TooManyRequestsError(str(request.url))
+
+        client, requests = _build_client(
+            monkeypatch, tmp_path, responder, sleep_fn=sleeps.append
+        )
+
+        with pytest.raises(edgar.httprequests.TooManyRequestsError):
             _fetch(client)
 
         assert len(requests) == 3

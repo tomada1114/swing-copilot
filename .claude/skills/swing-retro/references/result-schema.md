@@ -66,6 +66,8 @@ CON-03 機械検査の対象なので、断定的売買指示・命令形はこ�
 |---|---|---|
 | 集約指標（ホライズン別） | `metric:<名前>:<N>d` | `metric:separation:5d`, `metric:skip_hit_rate:20d` |
 | 集約指標（重み合成） | `metric:<名前>:composed` | `metric:proceed_severe_miss_rate:composed` |
+| ペアード separation（Issue #190・RP-001） | `metric:separation_paired:<N>d` / `metric:separation_paired_excess:<N>d`（重み合成は `:composed`） | `metric:separation_paired:5d`, `metric:separation_paired_excess:composed` |
+| 追跡台帳の成績（Issue #190・RP-001） | `metric:tracked_performance:<recommendation>` | `metric:tracked_performance:proceed`, `metric:tracked_performance:skip`, `metric:tracked_performance:all` |
 | verdict_mix | `verdict_mix`（接頭辞なし） | `aggregates.verdict_mix.metric_id` をそのまま。`metric:` を補わない |
 | ソース貢献 | `metric:source_contribution:<source_type>:<provider>` | `metric:source_contribution:news:finnhub` |
 | 根拠タイプ貢献 | `metric:basis_contribution:<basis>` | `metric:basis_contribution:filing_fundamental`、`metric:basis_contribution:untagged` |

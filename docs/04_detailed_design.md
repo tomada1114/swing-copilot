@@ -1889,7 +1889,7 @@ verdictは強気/弱気の方向予測ではなく、**スクリーニング通�
 
 **証拠ID空間**: dossierが供給する全識別子が`retro-result-v1`の`evidence_refs`の値域になる。名前空間は実装が採番した（design §5.3は「集約ID」としか書いていない）。
 
-- 集約指標: `metric:<名前>:<N>d` / `metric:<名前>:composed`
+- 集約指標: `metric:<名前>:<N>d` / `metric:<名前>:composed`。ペアード separation（`metric:separation_paired:*`）・ペアード超過（`metric:separation_paired_excess:*`）・追跡台帳成績（`metric:tracked_performance:{proceed,skip,all}`）はこの形に従うが、Issue #190で追加された後もコードの`evidence_id_space`に登録されておらず引用不能だった（RP-001で解消。証拠ゲート `retro:evidence_id_space:issue190_metric_ids`）
 - verdict_mix: `verdict_mix`（`metric:`接頭辞を持たない素の文字列。ホライズンもベースラインも持たない単一値としてP8-120が採番したもので、他の集約指標と形が違う。スキルは`aggregates.verdict_mix.metric_id`の値をそのまま引き、接頭辞を補ってはならない）
 - ソース貢献: `metric:source_contribution:<source_type>:<provider>`
 - 根拠タイプ貢献: `metric:basis_contribution:<basis>`（`basis`は`analysis.schemas.VerdictBasis`の閉集合＋`untagged`）

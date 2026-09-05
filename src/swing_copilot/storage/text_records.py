@@ -137,7 +137,7 @@ def get_source_urls(database: Database, source_ids: Sequence[str]) -> dict[str, 
     with database.connect() as conn:
         placeholders = ",".join("?" for _ in source_ids)
         rows = conn.execute(
-            f"SELECT source_id, source_url FROM text_items "  # noqa: S608
+            f"SELECT source_id, source_url FROM text_items "  # noqa: S608 - placeholder count is generated locally and values are bound
             f"WHERE source_id IN ({placeholders})",
             list(source_ids),
         ).fetchall()

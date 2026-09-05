@@ -989,6 +989,25 @@ def test_begin_transaction_appears_only_in_the_shared_primitive():
     assert offending == []
 
 
+def test_bandit_noqa_has_an_inline_security_reason():
+    """Make every Bandit suppression explain why the call is safe here."""
+    violations: list[str] = []
+    noqa_pattern = re.compile(r"# noqa:\s*S\d+(?:\s*,\s*S\d+)*")
+    reason_pattern = re.compile(r"# noqa:\s*S\d+(?:\s*,\s*S\d+)*\s+-\s+\S")
+    for root in (PROJECT_ROOT / "src", PROJECT_ROOT / "scripts"):
+        for path in sorted(root.rglob("*.py")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if noqa_pattern.search(line) and not reason_pattern.search(line):
+                    relative = path.relative_to(PROJECT_ROOT).as_posix()
+                    violations.append(f"{relative}:{line_number}")
+
+    assert violations == [], "Bandit suppressions without inline reasons: " + ", ".join(
+        violations
+    )
+
+
 # --- Issue #398: runs-table seeding goes through StateStore.insert_run() ---
 
 #: `tests/storage/` tests `StateStore`/`Database` themselves -- reaching

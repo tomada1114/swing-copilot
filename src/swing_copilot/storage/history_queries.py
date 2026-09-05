@@ -251,7 +251,7 @@ def get_run_statuses(
     placeholders = ", ".join("?" for _ in run_ids)
     with database.connect() as conn:
         rows = conn.execute(
-            f"SELECT run_id, status, started_at FROM runs WHERE run_id IN ({placeholders})",  # noqa: S608
+            f"SELECT run_id, status, started_at FROM runs WHERE run_id IN ({placeholders})",  # noqa: S608 - placeholder count is generated locally and values are bound
             [str(run_id) for run_id in run_ids],
         ).fetchall()
     return {row[0]: RunStatusRow(status=row[1], started_at=row[2]) for row in rows}

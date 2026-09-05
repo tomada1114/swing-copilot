@@ -433,8 +433,9 @@ class ChangedPaths:
 
 
 def _run_git(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
-        ["git", *args],  # noqa: S607
+    """Run fixed-argv Git inspection commands without invoking a shell."""
+    return subprocess.run(  # noqa: S603 - fixed argv with shell=False
+        ["git", *args],  # noqa: S607 - executable is the fixed git command
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

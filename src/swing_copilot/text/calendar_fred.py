@@ -73,15 +73,17 @@ def _redact(text: str) -> str:
 
 
 class _HttpGet(Protocol):
+    # Any: FRED's decoded response is an untyped JSON object.
     def __call__(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         """Return the parsed JSON object from a GET request."""
         ...  # pragma: no cover
 
 
+# Any: the HTTP client returns FRED JSON before endpoint-specific validation.
 def _real_http_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
     response = httpx.get(url, params=params, timeout=10.0)
     response.raise_for_status()
-    result: dict[str, Any] = response.json()
+    result: dict[str, Any] = response.json()  # Any: FRED has no typed JSON schema
     return result
 
 
@@ -163,6 +165,7 @@ class FredCalendarClient:
                 issued_at = now + wait
         self._last_request_at = issued_at
 
+    # Any: retrying still returns the provider's untyped JSON response.
     def _fetch_with_retries(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         """Run one FRED HTTP GET with throttling and bounded retry."""
         return retry_external_call(
@@ -213,8 +216,10 @@ class FredCalendarClient:
         ]
 
     def _collect_release_values(
-        self, raw_events: Sequence[dict[str, Any]], as_of: date
-    ) -> dict[Any, _ReleaseValues | None]:
+        self,
+        raw_events: Sequence[dict[str, Any]],  # Any: raw FRED release rows
+        as_of: date,
+    ) -> dict[Any, _ReleaseValues | None]:  # Any: provider release IDs are untyped
         """Look up latest/prior values once per release, newest releases first.
 
         Releases beyond `max_enriched_releases` are deliberately left out and
@@ -224,6 +229,7 @@ class FredCalendarClient:
         ordered = sorted(
             raw_events, key=lambda item: str(item.get("date", "")), reverse=True
         )
+        # Any: release IDs are opaque values from FRED's JSON payload.
         values: dict[Any, _ReleaseValues | None] = {}
         for item in ordered:
             release_id = item["release_id"]
@@ -234,6 +240,7 @@ class FredCalendarClient:
             values[release_id] = self._release_values(release_id, as_of)
         return values
 
+    # Any: release IDs come directly from FRED's heterogeneous JSON rows.
     def _release_values(self, release_id: Any, as_of: date) -> _ReleaseValues | None:
         """Resolve one release's representative series and its recent values.
 
@@ -262,7 +269,10 @@ class FredCalendarClient:
             )
             return None
 
-    def _representative_series(self, release_id: Any) -> dict[str, Any] | None:
+    def _representative_series(
+        self,
+        release_id: Any,  # Any: opaque FRED release identifier
+    ) -> dict[str, Any] | None:  # Any: FRED series fields are heterogeneous JSON
         """Return the release's most popular series, or `None` if it has none."""
         payload = self._fetch_with_retries(
             FRED_RELEASE_SERIES_URL,
@@ -307,6 +317,7 @@ class FredCalendarClient:
         return tuple(observations[:_REPORTED_OBSERVATIONS])
 
 
+# Any: the summary reads heterogeneous fields from one raw FRED release row.
 def _summarize(item: dict[str, Any], values: _ReleaseValues | None) -> str:
     """Build the event summary, which is never byte-identical to the title.
 

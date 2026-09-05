@@ -337,7 +337,7 @@ def render_terminal(result: FilterMatrixResult, measured: MeasuredUniverse) -> s
 
 def build_payload(
     result: FilterMatrixResult, measured: MeasuredUniverse
-) -> dict[str, Any]:
+) -> dict[str, Any]:  # Any: CLI JSON fields have heterogeneous scalar shapes
     """Build the `--json` document (the machine-readable form of the tables)."""
     return {
         "as_of": result.as_of.isoformat(),

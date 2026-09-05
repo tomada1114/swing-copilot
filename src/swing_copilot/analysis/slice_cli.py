@@ -124,7 +124,9 @@ def _verify_out_dir(input_path: Path, out_dir: Path) -> None:
         raise SliceExportError(msg)
 
 
-def _read_input(path: Path) -> dict[str, Any]:
+def _read_input(
+    path: Path,
+) -> dict[str, Any]:  # Any: raw JSON object from the document reader
     """Return the document exactly as written, for verbatim copying.
 
     The parsed JSON rather than an `AnalysisInput`: re-serializing a model

@@ -1063,6 +1063,69 @@ def test_runs_table_seeding_goes_through_state_store_insert_run():
     assert offending == []
 
 
+def test_any_type_usage_has_a_source_justification():
+    """Require every source of ``Any`` to name the untyped boundary it crosses."""
+    violations: list[str] = []
+    for path in sorted((PROJECT_ROOT / "src").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        tree = ast.parse(source, filename=str(path))
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        violations.extend(
+            f"{relative}:{line_number}"
+            for line_number in sorted(_any_type_usage_lines(tree))
+            if not _has_any_justification(lines, line_number)
+        )
+
+    assert violations == [], "unjustified Any usage: " + ", ".join(violations)
+
+
+def _any_type_usage_lines(tree: ast.AST) -> set[int]:
+    """Return source lines where an annotation or ``cast`` uses ``Any``."""
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        annotation: ast.AST | None = None
+        if isinstance(node, ast.arg):
+            annotation = node.annotation
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotation = node.returns
+        elif isinstance(node, ast.AnnAssign):
+            annotation = node.annotation
+        if annotation is not None:
+            lines.update(
+                child.lineno
+                for child in ast.walk(annotation)
+                if isinstance(child, ast.Name) and child.id == "Any"
+            )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cast"
+            and node.args
+            and (
+                (isinstance(node.args[0], ast.Name) and node.args[0].id == "Any")
+                or (
+                    isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "Any"
+                )
+            )
+        ):
+            lines.add(node.lineno)
+    return lines
+
+
+def _has_any_justification(lines: list[str], line_number: int) -> bool:
+    """Whether the usage line or its contiguous comment block explains ``Any``."""
+    if "# Any:" in lines[line_number - 1]:
+        return True
+    preceding = line_number - 2
+    while preceding >= 0 and lines[preceding].lstrip().startswith("#"):
+        if "# Any:" in lines[preceding]:
+            return True
+        preceding -= 1
+    return False
+
+
 def test_tests_use_public_database_accessors():
     """Keep test fixtures independent of store implementation attributes.
 

@@ -790,6 +790,7 @@ def _sessions(
     return selected.to_dict("records")
 
 
+# Any: pandas records use heterogeneous column labels and values.
 def _ohlc(record: dict[Any, Any]) -> tuple[float, float, float] | None:
     """Return `(open, low, close)`, or `None` when any of them is unusable.
 

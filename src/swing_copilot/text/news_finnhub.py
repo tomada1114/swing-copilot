@@ -28,11 +28,13 @@ _MIN_REQUEST_INTERVAL_SECONDS = FINNHUB_MIN_REQUEST_INTERVAL_SECONDS
 
 
 class _HttpGet(Protocol):
+    # Any: Finnhub's decoded response is an untyped JSON array.
     def __call__(self, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Return the parsed JSON array from a GET request."""
         ...  # pragma: no cover
 
 
+# Any: the provider's `related` field is untyped JSON before normalization.
 def _related_symbols(raw: Any) -> tuple[str, ...]:
     """Normalize Finnhub's `related` field into a ticker tuple.
 
@@ -55,6 +57,7 @@ def _related_symbols(raw: Any) -> tuple[str, ...]:
     return tuple(tickers)
 
 
+# Any: the provider's `category` field is untyped JSON before normalization.
 def _category(raw: Any) -> str | None:
     """Normalize Finnhub's `category` label, treating blank as absent."""
     if not isinstance(raw, str):
@@ -62,10 +65,12 @@ def _category(raw: Any) -> str | None:
     return raw.strip() or None
 
 
+# Any: the HTTP client returns Finnhub JSON before response-shape validation.
 def _real_http_get(url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
 
     response = httpx.get(url, params=params, timeout=10.0)
     response.raise_for_status()
+    # Any: Finnhub has no typed JSON schema.
     result: list[dict[str, Any]] = response.json()
     return result
 

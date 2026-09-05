@@ -35,8 +35,8 @@ from swing_copilot.io_atomic import write_json_atomically
 from swing_copilot.models import DailyRunOptions, DailyRunResult
 from swing_copilot.pipeline.daily import (
     DailyDependencies,
-    _paths_for_mode,
-    _run_mode,
+    paths_for_mode,
+    run_mode,
 )
 from swing_copilot.pipeline.daily_runner import run_daily
 from swing_copilot.pipeline.progress import ProgressReporter
@@ -207,8 +207,8 @@ def _compose_dependencies(
     secrets = load_secrets()
     require_secrets(secrets, _required_features(options))
 
-    mode = _run_mode(options)
-    db_path, output_dir = _paths_for_mode(mode)
+    mode = run_mode(options)
+    db_path, output_dir = paths_for_mode(mode)
     database = Database(db_path)
     market_store = MarketStore(database)
     state_store = StateStore(database)

@@ -225,7 +225,7 @@ def record_screening_results(
     run's rows committed. Mirrors `record_signals`'s explicit transaction
     pattern above. `record_candidates` below wraps its own single-table write
     in a transaction too (Issue #405); this function exists separately
-    because the production `_run_step_screening` call site must commit
+    because the production `run_step_screening` call site must commit
     candidates, rejections, truncations, and signal hits together as one
     logical write, not because `record_candidates` is unsafe on its own.
 

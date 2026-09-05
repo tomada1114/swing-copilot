@@ -20,7 +20,7 @@ from swing_copilot.config import Secrets, Settings, load_settings, load_strategi
 from swing_copilot.exceptions import ConfigError, PreflightAbort
 from swing_copilot.models import DailyRunOptions, DataTier, RunMode, RunStatus
 from swing_copilot.pipeline import daily_composition as daily_module
-from swing_copilot.pipeline.daily import DailyDependencies, _paths_for_mode
+from swing_copilot.pipeline.daily import DailyDependencies, paths_for_mode
 from swing_copilot.pipeline.daily_composition import (
     _OUTCOME_FILE_ENV_VAR,
     _compose_dependencies,
@@ -343,13 +343,13 @@ class TestComposeDependencies:
 
 class TestPathsForMode:
     def test_live_mode_uses_the_default_db_and_reports_dir(self):
-        db_path, output_dir = _paths_for_mode(RunMode.LIVE)
+        db_path, output_dir = paths_for_mode(RunMode.LIVE)
 
         assert db_path == DEFAULT_DB_PATH
         assert output_dir == "reports"
 
     def test_dry_run_mode_uses_an_isolated_db_and_reports_subdir(self):
-        db_path, output_dir = _paths_for_mode(RunMode.DRY_RUN)
+        db_path, output_dir = paths_for_mode(RunMode.DRY_RUN)
 
         assert db_path == Path("data/copilot_dry_run.duckdb")
         assert output_dir == "reports/dry_run"

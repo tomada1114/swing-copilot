@@ -423,7 +423,12 @@ def replace_signal_outcomes(
     horizon_days: int,
     outcomes: Sequence[SignalOutcomeRecord],
 ) -> None:
-    """Atomically replace one historical run/horizon's complete outcome set."""
+    """Atomically replace one historical run/horizon's complete outcome set.
+
+    Raises:
+        ValueError: If an outcome belongs to a different run or horizon, which
+            would otherwise mix unrelated retrospective results.
+    """
     if any(
         outcome.run_id != run_id or outcome.horizon_days != horizon_days
         for outcome in outcomes

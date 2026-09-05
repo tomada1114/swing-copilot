@@ -125,7 +125,13 @@ class FinnhubEarningsClient:
     def fetch_next_earnings(
         self, symbol: str, start: date, end: date
     ) -> EarningsEvent | None:
-        """Fetch the earliest matching event with a three-attempt ceiling."""
+        """Fetch the earliest matching event with a three-attempt ceiling.
+
+        Raises:
+            TypeError: If Finnhub's `earningsCalendar` field is not a list.
+            ValueError: If a matching calendar row contains a malformed ISO
+                date string.
+        """
         params = {
             "symbol": symbol,
             "from": start.isoformat(),

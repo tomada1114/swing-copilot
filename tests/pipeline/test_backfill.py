@@ -257,7 +257,7 @@ class TestBackfillBarsChunking:
         """
         provider = _RecordingProvider(non_finite_symbols=frozenset({"BBB"}))
 
-        with pytest.raises(NonFiniteBarsError):
+        with pytest.raises(NonFiniteBarsError, match="BBB"):
             backfill_bars(
                 _deps(provider, market_store, []), ["AAA", "BBB"], _START, _END
             )

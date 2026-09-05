@@ -102,6 +102,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `copilot-retro evaluate` が満期日の終値を揃えられない `(run, horizon)` スライスで、
+  再計算できない銘柄の既存 outcome 行をスライス置換ごと削除していた問題を修正した
+  （Issue #424）。`replace_verdict_outcomes` は `(run_id, horizon_days)` の全行を
+  置換する契約のため、`_evaluate_slice` が満期していても終値を欠く銘柄を単に
+  `outcomes` から省くと、その銘柄の**過去に記録済みだった行**まで道連れで消え、
+  訂正ではなく消滅になっていた（MNST 2026-08-10: 分割 ex-date 前日のバーを Yahoo が
+  再取得時に落とした事例で実際に発生）。`_evaluate_slice` は再計算に失敗した銘柄が
+  あるとき初めて `verdict_outcomes` から当該スライスの既存行を読み戻し
+  （`get_verdict_outcomes_for_slice`、通常経路では余計なクエリを払わない）、
+  同じ `recommendation` のまま記録済みの行が見つかればそれをそのまま `outcomes` に
+  引き継いで残す。別途 verdict が訂正され `recommendation` が一致しなくなっている
+  場合は、古い行を保持する根拠が無いため従来どおり削除する。`EvaluateSummary` に
+  `preserved_outcome_count`（今回保持した行数）を追加し、`copilot-retro evaluate` と
+  日次 `retro_evaluate` ステップの両方の出力に反映した
+
 - 戦略設定の `signals_all` が空リストでも設定パースを素通りしていた問題を修正した
   （PR #434）。`AGENTS.md` の Quantitative correctness は「空の必須シグナルを拒否する」
   と定めているが、`signals_all` に下限が無く、`signals_all: []` と書いた戦略は

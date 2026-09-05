@@ -460,7 +460,7 @@ runは再評価されないので、より古いrunを是正したいときは`-
 ではない（比率を実際に割った数値そのものを残さなければ、監査列がその比率と
 矛盾するため）。監査専用でどの集計にも入らず、列が存在する前に分類された行は
 NULL＝「未記録」のまま残る（再評価すれば埋まる）。`research.verdict_outcomes()`
-にそのまま列として出る。`--db`の兄弟`bars/`がディレクトリごと無い場合、`evaluate`
+にそのまま列として出る。満期済みスライスのうち一部銘柄だけ終値を欠くときは例外で、単に省くと`(run_id, horizon_days)`単位の完全置換がその銘柄の既存記録行までスライスごと削除してしまう（Issue #424、MNST 2026-08-10の再発事例）。そのときだけ`get_verdict_outcomes_for_slice`で既存行を読み戻し、`recommendation`が一致する限り`outcomes`へそのまま引き継いで残す（`EvaluateSummary.preserved_outcome_count`）。`--db`の兄弟`bars/`がディレクトリごと無い場合、`evaluate`
 と`export`は評価を始める前にエラーで落ちる（Issue #221）。バー0件から
 forward returnを計算しても1件も満期にならず、「評価0 slice」が正常終了として
 返ってしまうためである。

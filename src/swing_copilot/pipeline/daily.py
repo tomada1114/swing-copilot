@@ -1638,7 +1638,8 @@ def run_step_retro_evaluate(deps: DailyDependencies, as_of: date) -> StepOutcome
             f"evaluated {summary.evaluated_slice_count} slice(s), "
             f"{summary.pending_slice_count} pending, "
             f"{summary.recorded_slice_count} already recorded, "
-            f"{summary.outcome_count} outcome(s)",
+            f"{summary.outcome_count} outcome(s) "
+            f"({summary.preserved_outcome_count} preserved)",
             summary.notes,
         ),
     )

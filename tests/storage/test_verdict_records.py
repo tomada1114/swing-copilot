@@ -885,6 +885,49 @@ class TestReplaceVerdictOutcomes:
         assert _rows(state_store, "SELECT symbol FROM verdict_outcomes") == [("KEPT",)]
 
 
+class TestGetVerdictOutcomesForSlice:
+    """Issue #424: what `_evaluate_slice` reads back.
+
+    So it can carry an existing row forward instead of dropping it when it
+    cannot recompute that row this round.
+    """
+
+    def test_returns_the_recorded_rows_for_one_run_and_horizon(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_verdict_outcomes(
+            run_id, 5, [_outcome(run_id, "AAPL"), _outcome(run_id, "MSFT")]
+        )
+
+        rows = state_store.get_verdict_outcomes_for_slice(run_id, 5)
+
+        assert [row.symbol for row in rows] == ["AAPL", "MSFT"]
+
+    def test_is_scoped_to_the_given_horizon(self, state_store: StateStore) -> None:
+        run_id = uuid4()
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL", 5)])
+        state_store.replace_verdict_outcomes(run_id, 20, [_outcome(run_id, "AAPL", 20)])
+
+        rows = state_store.get_verdict_outcomes_for_slice(run_id, 5)
+
+        assert [row.horizon_days for row in rows] == [5]
+
+    def test_is_scoped_to_the_given_run(self, state_store: StateStore) -> None:
+        run_id, other_run_id = uuid4(), uuid4()
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+        state_store.replace_verdict_outcomes(
+            other_run_id, 5, [_outcome(other_run_id, "MSFT")]
+        )
+
+        rows = state_store.get_verdict_outcomes_for_slice(run_id, 5)
+
+        assert [row.symbol for row in rows] == ["AAPL"]
+
+    def test_an_unrecorded_slice_returns_no_rows(self, state_store: StateStore) -> None:
+        assert state_store.get_verdict_outcomes_for_slice(uuid4(), 5) == ()
+
+
 class TestGetVerdictsInWindow:
     def test_returns_rows_inside_the_inclusive_window_only(
         self, state_store: StateStore

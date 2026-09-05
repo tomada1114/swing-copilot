@@ -482,6 +482,79 @@ class TestEvaluateFailSoft:
         assert (summary.evaluated_slice_count, summary.notes) == (0, ())
 
 
+class TestEvaluatePreservesUnrecomputableRows:
+    """Issue #424: a slice replace must correct a row, never quietly delete it.
+
+    `copilot-backfill rebuild` can make a provider re-fetch drop a historical
+    bar that used to be there (the MNST 2026-08-10 case in the issue). Before
+    this fix, `_evaluate_slice` simply omitted the now-unrecomputable symbol
+    from `outcomes`, and the full-slice `replace_verdict_outcomes` call then
+    deleted its previously recorded row along with everything else -- a
+    contaminated (or perfectly valid) outcome vanished instead of being
+    corrected.
+    """
+
+    def test_a_row_whose_maturity_bar_later_disappears_is_kept_not_deleted(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        _evaluate(market_store, state_store, CALENDAR[10])
+        first = _outcome_rows(state_store, 5)
+        assert first == [("AAPL", 5, MATURITY_5D, "proceed", pytest.approx(1.5), HIT)]
+
+        # The provider re-fetch drops the maturity-day bar entirely -- the
+        # store no longer has anything to recompute the return from.
+        market_store.replace_symbol_bars(["AAPL"], bars("AAPL", {RUN_DATE: 100.0}))
+
+        summary = _evaluate(market_store, state_store, CALENDAR[15])
+
+        assert _outcome_rows(state_store, 5) == first
+        assert summary.preserved_outcome_count == 1
+        assert any("既存の評価行を保持した" in note for note in summary.notes)
+
+    def test_a_row_is_dropped_not_carried_forward_after_its_verdict_is_corrected(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # A symbol whose bars later disappear *and* whose verdict was
+        # separately corrected (proceed -> skip) cannot be trusted to keep
+        # its old `proceed` classification -- that would misrepresent a
+        # verdict the store no longer holds. It is dropped, exactly as an
+        # unrecomputable row always was before this fix.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+        market_store.write_bars(bars("AAPL", {RUN_DATE: 100.0, MATURITY_5D: 101.5}))
+        _evaluate(market_store, state_store, CALENDAR[10])
+        assert _outcome_rows(state_store, 5) != []
+
+        _seed_verdict(state_store, run_id, recommendation="skip")
+        market_store.replace_symbol_bars(["AAPL"], bars("AAPL", {RUN_DATE: 100.0}))
+
+        summary = _evaluate(market_store, state_store, CALENDAR[15])
+
+        assert _outcome_rows(state_store, 5) == []
+        assert summary.preserved_outcome_count == 0
+        assert any("満期日" in note and "スキップ" in note for note in summary.notes)
+
+    def test_a_symbol_with_no_previous_row_still_writes_nothing_for_it(
+        self, market_store: MarketStore, state_store: StateStore
+    ) -> None:
+        # The read-back-and-carry-forward path must not manufacture a row
+        # out of nothing: a symbol that never had a recorded outcome stays
+        # absent, exactly as `TestEvaluateFailSoft` already expects.
+        run_id = uuid4()
+        _seed_calendar(market_store)
+        _seed_verdict(state_store, run_id)
+
+        summary = _evaluate(market_store, state_store, CALENDAR[10])
+
+        assert _outcome_rows(state_store, 5) == []
+        assert summary.preserved_outcome_count == 0
+
+
 class TestEvaluateIdempotence:
     def test_rerunning_on_a_later_day_reproduces_the_same_row(
         self, market_store: MarketStore, state_store: StateStore

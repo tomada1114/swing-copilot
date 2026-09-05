@@ -140,7 +140,17 @@ retrace is not a track record, it is an assertion.
   step's `only_pending=True` scope skips a slice only when its recorded
   outcomes already match the run's current verdicts exactly
   (`get_recorded_outcome_slices`) — a corrected verdict (added, dropped, or
-  flipped `proceed`/`skip`) stops matching and is reclassified.
+  flipped `proceed`/`skip`) stops matching and is reclassified. A symbol whose
+  maturity-day close later goes missing from the store is the one exception
+  to "replace the whole slice": `_evaluate_slice` cannot recompute it, but
+  simply omitting it would let the full-slice replace silently delete its
+  previously recorded row (Issue #424 — the MNST 2026-08-10 case, a
+  `copilot-backfill rebuild` re-fetch that dropped a historical bar).
+  `get_verdict_outcomes_for_slice` reads that old row back and carries it
+  forward unchanged, but only when its `recommendation` still matches the
+  current verdict — a verdict correction on top of the missing bar leaves
+  nothing trustworthy to carry forward, and the row is dropped exactly as
+  before.
 - **`update_tracking`** never revisits a session before `last_marked_date`, so
   re-running it at the same `--as-of` is a no-op for every already-marked
   position and adds no duplicate marks.

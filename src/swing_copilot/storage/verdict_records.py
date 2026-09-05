@@ -829,6 +829,54 @@ def replace_verdict_outcomes(
             )
 
 
+def get_verdict_outcomes_for_slice(
+    database: Database, run_id: UUID, horizon_days: int
+) -> tuple[VerdictOutcomeRecord, ...]:
+    """Return one `(run_id, horizon_days)` slice's currently recorded rows.
+
+    Issue #424: `replace_verdict_outcomes` replaces the *whole* slice it is
+    given, so a caller that cannot recompute every symbol this round (a
+    maturity-day close that has since gone missing from the store) must read
+    the previous rows back first if it wants to carry any of them forward
+    rather than let the replace silently drop them.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The evaluated run.
+        horizon_days: The evaluated horizon (5 or 20).
+
+    Returns:
+        Rows ordered by `symbol`, empty if the slice has never been recorded.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, symbol, horizon_days, as_of, recommendation,
+                   forward_return_pct, classification, benchmark_return_pct,
+                   entry_close, maturity_close
+            FROM verdict_outcomes
+            WHERE run_id = ? AND horizon_days = ?
+            ORDER BY symbol
+            """,
+            [str(run_id), horizon_days],
+        ).fetchall()
+    return tuple(
+        VerdictOutcomeRecord(
+            run_id=UUID(str(row[0])),
+            symbol=row[1],
+            horizon_days=row[2],
+            as_of=row[3],
+            recommendation=row[4],
+            forward_return_pct=row[5],
+            classification=row[6],
+            benchmark_return_pct=row[7],
+            entry_close=row[8],
+            maturity_close=row[9],
+        )
+        for row in rows
+    )
+
+
 def get_verdicts_in_window(
     database: Database, window_start: date, as_of: date
 ) -> tuple[VerdictRow, ...]:

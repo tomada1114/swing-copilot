@@ -75,6 +75,16 @@ class EvaluateSummary:
     `recorded_slice_count` is only ever non-zero under `only_pending`
     (Issue #209): the slices left alone because `verdict_outcomes` already
     holds exactly the symbols and recommendations they would produce.
+
+    `preserved_outcome_count` is the subset of `outcome_count` carried
+    forward unchanged from a previous evaluation rather than recomputed this
+    round (Issue #424): a maturity-day close that has since gone missing
+    from the store (a re-fetch that dropped a historical bar, for example)
+    cannot be reproduced, but the previously recorded, already-audited
+    classification is not wrong merely because it cannot be recomputed right
+    now. Without this, the full-slice replace `replace_verdict_outcomes`
+    performs would silently delete that still-valid row instead of leaving it
+    corrected or untouched.
     """
 
     evaluated_slice_count: int
@@ -82,6 +92,7 @@ class EvaluateSummary:
     outcome_count: int
     notes: tuple[str, ...]
     recorded_slice_count: int = 0
+    preserved_outcome_count: int = 0
 
 
 def classify_verdict_outcome(
@@ -187,21 +198,25 @@ def evaluate_verdicts(
         state_store.get_recorded_outcome_slices(tuple(runs)) if only_pending else {}
     )
 
+    stores = _EvaluationStores(market_store=market_store, state_store=state_store)
     notes: list[str] = []
-    evaluated = pending = already_recorded = outcome_count = 0
+    evaluated = pending = already_recorded = outcome_count = preserved_count = 0
     for run_id, rows in runs.items():
         expected = frozenset((row.symbol, row.recommendation) for row in rows)
         for horizon_days in HORIZON_DAYS:
             if only_pending and recorded.get((run_id, horizon_days)) == expected:
                 already_recorded += 1
                 continue
-            outcomes = _evaluate_slice(market_store, rows, horizon_days, request, notes)
-            if outcomes is None:
+            slice_result = _evaluate_slice(stores, rows, horizon_days, request, notes)
+            if slice_result is None:
                 pending += 1
                 continue
-            state_store.replace_verdict_outcomes(run_id, horizon_days, outcomes)
+            state_store.replace_verdict_outcomes(
+                run_id, horizon_days, slice_result.outcomes
+            )
             evaluated += 1
-            outcome_count += len(outcomes)
+            outcome_count += len(slice_result.outcomes)
+            preserved_count += slice_result.preserved_count
 
     return EvaluateSummary(
         evaluated_slice_count=evaluated,
@@ -209,6 +224,7 @@ def evaluate_verdicts(
         recorded_slice_count=already_recorded,
         outcome_count=outcome_count,
         notes=tuple(notes),
+        preserved_outcome_count=preserved_count,
     )
 
 
@@ -257,13 +273,38 @@ def _group_by_run(rows: Sequence[VerdictRow]) -> dict[UUID, list[VerdictRow]]:
     return grouped
 
 
+@dataclass(frozen=True, slots=True)
+class _SliceEvaluation:
+    """One matured `(run, horizon)` slice's replacement outcomes.
+
+    `preserved_count` is the subset of `outcomes` carried forward unchanged
+    from the previous evaluation rather than recomputed this round (Issue
+    #424) -- see `EvaluateSummary.preserved_outcome_count`.
+    """
+
+    outcomes: tuple[VerdictOutcomeRecord, ...]
+    preserved_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _EvaluationStores:
+    """The two stores `_evaluate_slice` reads from.
+
+    Grouped into one value to stay within the project's parameter-count
+    guideline, mirroring `EvaluationRequest`.
+    """
+
+    market_store: MarketStore
+    state_store: StateStore
+
+
 def _evaluate_slice(
-    market_store: MarketStore,
+    stores: _EvaluationStores,
     rows: Sequence[VerdictRow],
     horizon_days: int,
     request: EvaluationRequest,
     notes: list[str],
-) -> list[VerdictOutcomeRecord] | None:
+) -> _SliceEvaluation | None:
     """Classify one `(run, horizon)`; return `None` if it has not matured.
 
     Each record also carries the two closes the classification was computed
@@ -277,7 +318,7 @@ def _evaluate_slice(
     run_id = rows[0].run_id
     run_date = rows[0].as_of
     maturity_date = find_maturity_trading_day(
-        market_store,
+        stores.market_store,
         request.benchmark_symbol,
         run_date,
         horizon_days,
@@ -299,24 +340,56 @@ def _evaluate_slice(
     # "unmeasured" into "the market went nowhere".
     benchmark_return_pct = _finite_or_none(
         compute_forward_return(
-            market_store, request.benchmark_symbol, run_date, maturity_date
+            stores.market_store, request.benchmark_symbol, run_date, maturity_date
         )
     )
 
     outcomes: list[VerdictOutcomeRecord] = []
+    preserved_count = 0
+    # Fetched at most once per slice, and only when a row actually fails to
+    # recompute -- the common case (every row matures cleanly) never pays for
+    # this read (Issue #424).
+    previous_by_symbol: dict[str, VerdictOutcomeRecord] | None = None
     for row in rows:
         # The detail form, not the bare ratio: `entry_close`/`maturity_close`
         # are audit columns recording *which prices this was classified at*,
         # so they must be the very numbers the ratio divided rather than a
         # second read that a later store repair could answer differently.
         forward_return = compute_forward_return_detail(
-            market_store, row.symbol, run_date, maturity_date
+            stores.market_store, row.symbol, run_date, maturity_date
         )
         if forward_return is None:
-            notes.append(
-                f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
-                f"満期日 {maturity_date.isoformat()} までの終値が揃わないためスキップ"
-            )
+            if previous_by_symbol is None:
+                previous_by_symbol = {
+                    previous.symbol: previous
+                    for previous in stores.state_store.get_verdict_outcomes_for_slice(
+                        run_id, horizon_days
+                    )
+                }
+            preserved = previous_by_symbol.get(row.symbol)
+            # Issue #424: `replace_verdict_outcomes` replaces the whole slice
+            # it is given, so simply omitting this row here would delete a
+            # previously recorded, already-audited classification -- not
+            # correct it -- the moment its maturity-day close goes missing
+            # from the store (a re-fetch that dropped a historical bar, for
+            # example). Carry the old row forward untouched instead. Only
+            # when the verdict itself was corrected since (`recommendation`
+            # no longer matches) is the old row not trustworthy enough to
+            # keep; it is dropped, exactly as an unrecomputable row always
+            # was before this fix.
+            if preserved is not None and preserved.recommendation == row.recommendation:
+                outcomes.append(preserved)
+                preserved_count += 1
+                notes.append(
+                    f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
+                    f"満期日 {maturity_date.isoformat()} までの終値が揃わないため、"
+                    "既存の評価行を保持した（削除しない）"
+                )
+            else:
+                notes.append(
+                    f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
+                    f"満期日 {maturity_date.isoformat()} までの終値が揃わないためスキップ"
+                )
             continue
         outcomes.append(
             VerdictOutcomeRecord(
@@ -337,4 +410,4 @@ def _evaluate_slice(
                 ),
             )
         )
-    return outcomes
+    return _SliceEvaluation(outcomes=tuple(outcomes), preserved_count=preserved_count)

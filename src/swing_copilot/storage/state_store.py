@@ -663,6 +663,19 @@ class StateStore:
             self._database, run_id, horizon_days, outcomes
         )
 
+    def get_verdict_outcomes_for_slice(
+        self, run_id: UUID, horizon_days: int
+    ) -> tuple[VerdictOutcomeRecord, ...]:
+        """Return one `(run_id, horizon_days)` slice's currently recorded rows.
+
+        Args:
+            run_id: The evaluated run.
+            horizon_days: The evaluated horizon (5 or 20).
+        """
+        return verdict_records.get_verdict_outcomes_for_slice(
+            self._database, run_id, horizon_days
+        )
+
     def get_verdicts_in_window(
         self, window_start: date, as_of: date
     ) -> tuple[VerdictRow, ...]:

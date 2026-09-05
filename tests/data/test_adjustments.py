@@ -303,7 +303,9 @@ class TestHasMixedBasisSignature:
         assert has_mixed_basis_signature(bars, self.SPLIT) is False
         assert has_mixed_basis_signature(bars, splits) is True
 
-    def test_a_run_after_every_known_splits_ex_date_is_not_a_signature(self) -> None:
+    def test_a_matching_factor_split_that_predates_the_run_is_not_a_signature(
+        self,
+    ) -> None:
         """AIG 2008-09-16: the only matching-factor split predates the run.
 
         Issue #425. AIG's 1.5-factor splits all sit in 1993-2000; the only
@@ -379,7 +381,10 @@ class TestHasMixedBasisSignature:
         assert has_mixed_basis_signature(bars, splits) is False
 
     def test_orcl_type_long_run_is_rejected_on_run_length_alone(self) -> None:
-        """ORCL 1990-03-28: a real 694-session crash-and-recovery.
+        """ORCL 1990-03-28: a real crash-and-recovery, 694 sessions long.
+
+        Reproduced at 30 sessions rather than 694 — one row past the ceiling
+        already decides it, and the shorter frame keeps the fixture readable.
 
         Issue #425's regression case: with an eligible split (`ex_date` after
         the run) supplied, only the run-length ceiling is left to reject it —

@@ -183,12 +183,18 @@ def first_mixed_basis_jump(
 
 
 def _flip_ratios(splits: Sequence[SplitEvent]) -> tuple[float, ...]:
-    """Every jump ratio a basis flip could produce, both directions."""
+    """Every jump ratio a basis flip could produce, both directions.
+
+    Args:
+        splits: The symbol's splits, factors already known usable — the one
+            caller filters once and hands the same list to
+            `_explaining_split`, so the two cannot disagree about which
+            splits exist.
+    """
     ratios: set[float] = set()
     for split in splits:
-        if _is_usable(split.factor):
-            ratios.add(split.factor)
-            ratios.add(1.0 / split.factor)
+        ratios.add(split.factor)
+        ratios.add(1.0 / split.factor)
     return tuple(ratios)
 
 
@@ -200,9 +206,16 @@ def _is_split_sized(ratio: float, flip_ratios: Sequence[float]) -> bool:
     )
 
 
-def _bar_dates(bars: pd.DataFrame) -> list[date]:
-    """`bars["date"]` as plain `date` values, accepting `date` or `Timestamp`."""
-    return [pd.Timestamp(value).date() for value in bars["date"].to_numpy()]
+def _bar_date(bars: pd.DataFrame, position: int) -> date:
+    """One row's `date` as a plain `date`, accepting `date` or `Timestamp`.
+
+    Converted a row at a time rather than a column at a time: a stored
+    history is ~9,000 rows per symbol and all but a handful of symbols never
+    reach a candidate pair at all, so converting up front would cost
+    `copilot-backfill check` (once per symbol, 510 symbols) several seconds
+    to answer a question it almost never asks.
+    """
+    return pd.Timestamp(bars["date"].iloc[position]).date()
 
 
 def _explaining_split(
@@ -227,15 +240,15 @@ def _explaining_split(
     Args:
         first: The earlier jump's ratio.
         second: The later jump's ratio.
-        splits: Every split known for the symbol.
-        run_end: The date of the run's last row (`dates[j - 1]`).
+        splits: The symbol's splits, factors already known usable — the same
+            list `_flip_ratios` read, so a split cannot count towards a jump
+            and then fail to be a candidate for explaining it.
+        run_end: The date of the run's last row (row `j - 1`).
 
     Returns:
         `True` once a qualifying split is found.
     """
     for split in splits:
-        if not _is_usable(split.factor):
-            continue
         if split.ex_date <= run_end:
             continue
         pair = (split.factor, 1.0 / split.factor)
@@ -248,13 +261,11 @@ def _first_reversing_flip(
     bars: pd.DataFrame, splits: Sequence[SplitEvent]
 ) -> int | None:
     """The shared walk behind the boolean gate and its reporting counterpart."""
-    flip_ratios = _flip_ratios(splits)
+    usable = [split for split in splits if _is_usable(split.factor)]
+    flip_ratios = _flip_ratios(usable)
     if not flip_ratios:
         return None
-    values = pd.to_numeric(pd.Series(bars["close"]), errors="coerce").to_numpy(
-        dtype=float
-    )
-    dates = _bar_dates(bars)
+    values = pd.to_numeric(bars["close"], errors="coerce").to_numpy(dtype=float)
     jumps = [
         (position, later / earlier)
         for position, (earlier, later) in enumerate(pairwise(values), start=1)
@@ -268,7 +279,7 @@ def _first_reversing_flip(
             continue
         if j - i > _MAX_FLIP_RUN_SESSIONS:
             continue
-        if _explaining_split(first, second, splits, dates[j - 1]):
+        if _explaining_split(first, second, usable, _bar_date(bars, j - 1)):
             return i
     return None
 
@@ -413,7 +424,10 @@ def unadjust_yahoo_bars(
     # Yahoo's own domain, with the classification undone: continuous if the
     # classification explained every row, still flipping if it did not.
     reconstructed = working["close"] / missing.where(~is_corrected, 1.0)
-    if has_mixed_basis_signature(working.assign(close=reconstructed), usable):
+    # Only `date` and `close` are read, so hand over those two rather than
+    # copying every OHLCV column of a 36-year response to change one of them.
+    residual = pd.DataFrame({"date": working["date"], "close": reconstructed})
+    if has_mixed_basis_signature(residual, usable):
         return NormalizationRejection(
             symbol=symbol,
             reason=(

@@ -102,6 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 戦略設定の `signals_all` が空リストでも設定パースを素通りしていた問題を修正した
+  （PR #434）。`AGENTS.md` の Quantitative correctness は「空の必須シグナルを拒否する」
+  と定めているが、`signals_all` に下限が無く、`signals_all: []` と書いた戦略は
+  「必須シグナル条件ゼロ」のまま外部 I/O まで到達していた。`min_length=1` を足し、
+  設定パース時に拒否する。**これまで読めていた設定が読めなくなる変更**だが、対象は
+  空の `signals_all` を明示的に書いた戦略だけで、`config/strategies.yaml` には該当が
+  無い。`filters_all` は空が「絞り込みなし」という有効な意味を持つため据え置いた。
+
 - `copilot-backfill rebuild` が 510 銘柄中 146 銘柄を拒否して Issue #413 の修復手順が
   完了できない問題を修正した（Issue #421）。主因は複数分割ではなく
   `has_mixed_basis_signature` が**分割を知らない**ことで、「ジャンプ→逆ジャンプ」は

@@ -389,9 +389,12 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
     The splits do come from DuckDB, in one short query per chunk: a flip is a
     split-sized step, and asking the question without them flags 153 of this
     repository's 510 symbols on nothing but 2008 and the dot-com years
-    (Issue #421). Pass a store opened read-only, as the CLI does — a write
-    connection ensures its tables on open, which would make an audit that
-    writes nothing write something.
+    (Issue #421). A reversing pair is further required to have a run no
+    longer than 25 sessions with a matching split's `ex_date` after that run,
+    which took the same audit from 19 flagged symbols to 2 (Issue #425). Pass
+    a store opened read-only, as the CLI does — a write connection ensures
+    its tables on open, which would make an audit that writes nothing write
+    something.
 
     Args:
         market_store: The store to audit; open it read-only.
@@ -423,7 +426,7 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
         splits_by_symbol = market_store.read_splits(chunk, as_of=date.max)
         for symbol, series in rows.groupby("symbol", sort=False):
             position = first_mixed_basis_jump(
-                series["close"], splits_by_symbol.get(str(symbol), ())
+                series, splits_by_symbol.get(str(symbol), ())
             )
             if position is not None:
                 flagged[str(symbol)] = series["date"].to_numpy()[position]

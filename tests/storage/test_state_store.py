@@ -648,6 +648,31 @@ class _FlakyConnection:
         return self._real.__exit__(exc_type, exc, tb)
 
 
+class _FlakyUniverseMembershipConnection:
+    """Wraps a real connection; raises on a later membership insert."""
+
+    def __init__(self, real_conn: duckdb.DuckDBPyConnection, fail_on_call: int):
+        self._real = real_conn
+        self._fail_on_call = fail_on_call
+        self._insert_calls = 0
+
+    def execute(self, sql, parameters=None):
+        if sql.lstrip().startswith("INSERT INTO universe_membership"):
+            self._insert_calls += 1
+            if self._insert_calls == self._fail_on_call:
+                msg = "simulated failure on a later universe membership insert"
+                raise RuntimeError(msg)
+        if parameters is None:
+            return self._real.execute(sql)
+        return self._real.execute(sql, parameters)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
+
+
 class TestMarkStaleRunningRuns:
     @staticmethod
     def _backdate(state_store, run_id, started_at):
@@ -867,6 +892,27 @@ class TestUniverseMembership:
             snapshot_date,
             tuple(corrected),
         )
+
+    def test_rolls_back_entirely_when_a_later_member_insert_fails(
+        self, state_store, monkeypatch
+    ):
+        snapshot_date = date(2026, 7, 20)
+        members = [
+            UniverseMember("AAPL", "Apple", "Technology", "AAPL"),
+            UniverseMember("MSFT", "Microsoft", "Technology", "MSFT"),
+        ]
+
+        real_connect = state_store.database.connect
+        monkeypatch.setattr(
+            state_store.database,
+            "connect",
+            lambda: _FlakyUniverseMembershipConnection(real_connect(), fail_on_call=2),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.record_universe_membership(snapshot_date, members)
+
+        assert state_store.get_latest_universe_membership(snapshot_date) is None
 
 
 class TestRecordSignals:

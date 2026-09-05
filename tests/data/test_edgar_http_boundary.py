@@ -367,6 +367,38 @@ class TestThrottleAtTheRealHttpLayer:
         assert len(requests) == 3
         assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
 
+    def test_every_retried_429_attempt_is_also_throttled(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The throttle fires on every attempt for a 429 too (Issue #447).
+
+        `TooManyRequestsError` now joins the retryable set, so this repeats
+        the sibling test above with a 429-then-recover responder instead of
+        a transport failure, guarding against a fix that widens the caught
+        exception type but accidentally skips the pre-attempt throttle for
+        it.
+        """
+        timeline = ThrottleTimeline(request_seconds=0.02)
+
+        def responder(request: httpx.Request, attempt: int) -> httpx.Response:
+            timeline.issue_request()
+            if attempt <= 2:
+                raise edgar.httprequests.TooManyRequestsError(str(request.url))
+            return _empty_facts(request, attempt)
+
+        client, requests = _build_client(
+            monkeypatch,
+            tmp_path,
+            responder,
+            clock=timeline.clock,
+            sleep_fn=timeline.sleep,
+        )
+
+        _fetch(client)
+
+        assert len(requests) == 3
+        assert timeline.gaps_below(_MIN_REQUEST_INTERVAL_SECONDS) == []
+
 
 class TestHappyPath:
     def test_the_happy_path_issues_exactly_one_request(

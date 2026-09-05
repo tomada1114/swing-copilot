@@ -51,6 +51,33 @@ No real `time.sleep` anywhere in the offline suite — every adapter takes an
 injectable `sleep_fn`, defaulting to `time.sleep` in production and to a
 list-appending fake in tests.
 
+## Check the wrapped library's own retry loop
+
+`retry_external_call` being the only retry loop *this repository writes* does
+not mean it is the only one that runs. `data/edgar.py` wraps `edgartools`,
+and for years `EdgarClient._with_retries`'s three-attempt contract looked
+correct from the outside while the `edgartools` calls inside it
+(`Company.get_facts()`, `get_filings()`, `filing.text()`) ran their own
+independent `stamina`-based retry loop underneath, with real `time.sleep` and
+no injection seam — a transport failure could trigger up to
+`QUICK_RETRY_ATTEMPTS = 5` real, un-injected retries *inside* every one of
+the outer loop's 3 attempts (Issue #429; up to 15 requests and 48s of real
+sleep for one logical call). A `company_factory`-level fake can never
+observe this: it fakes the adapter's own declared seam, one layer *above*
+where the vendored library's internal retry runs.
+
+Before trusting a new (or newly reviewed) adapter's "N attempts,
+deterministic backoff" claim, check whether the wrapped library retries on
+its own — grep its source for a retry decorator (`stamina`, `tenacity`,
+`backoff`, a hand-rolled loop) around the function the adapter actually
+calls. If it does, disable it at the narrowest point that reflects the
+invariant you actually need (`data/edgar.py::_disable_edgartools_internal_retries`
+calls `stamina.set_active(False)` once from `EdgarClient.__init__`, right
+alongside the existing `edgar.set_identity(identity)` construction-time
+side effect, rather than trying to wrap every call site) rather than
+declaring victory because your own `retry_external_call` call site looks
+correct in isolation.
+
 ## Retryable vs. programming/validation errors
 
 `is_retryable_external_error` only ever says yes to transport-level failure:
@@ -173,3 +200,7 @@ untrusted text, and how a skill's citations get checked against it, is
   constructor argument, never module-level monkeypatching two layers deep?
 - Does the new test run clean under the existing offline suite — no real
   socket connection, no `pytest.mark.skip`-style live escape hatch?
+- Does the wrapped library itself retry underneath `retry_external_call`
+  (a `stamina`/`tenacity`/hand-rolled loop around the function the adapter
+  actually calls), and if so, is it disabled or otherwise accounted for
+  (Issue #429)?

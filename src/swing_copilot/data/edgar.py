@@ -34,6 +34,16 @@ and therefore elides cells mid-word and mid-number (Issue #156; see
 Requests are throttled to at most 10/second (SEC fair-access, `docs/00_human_
 preparation.md`) via an injectable clock/sleep pair so the throttle itself is
 unit-testable without real waiting.
+
+The repository's own retry contract (`retry_external_call`: 3 attempts,
+injectable `sleep_fn`, deterministic 1s/2s backoff) is the *only* retry loop
+that runs against EDGAR. `edgartools` implements its own transport-level
+retry with `stamina`'s `@retry` decorator (`get_with_retry` and friends in
+`edgar.httprequests`), which would otherwise run underneath `_with_retries`
+with real `time.sleep` and no injection seam, silently multiplying every
+logical call's attempts and defeating the injected `sleep_fn` (Issue #429).
+`_disable_edgartools_internal_retries()` turns that off process-wide via
+`stamina.set_active(False)`, called once from `EdgarClient.__init__`.
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 import edgar
+import stamina
 from edgar.core import has_html_content, text_extensions
 from edgar.files.html_documents import get_clean_html
 from edgar.files.markdown import to_markdown
@@ -355,6 +366,46 @@ def _group_facts_by_filing(facts: list[_FactLike]) -> list[_FilingFacts]:
     return filings
 
 
+def _disable_edgartools_internal_retries() -> None:
+    """Kill-switch edgartools' own `stamina`-based retry loop (Issue #429).
+
+    `edgartools`'s transport functions (`get_with_retry`, `stream_with_retry`,
+    `post_with_retry` in `edgar.httprequests`) are each wrapped in their own
+    `@stamina.retry(...)` decorator, with real `time.sleep` and no injection
+    seam. Left active, a transport-level failure (`ConnectError`,
+    `ReadTimeout`, ...) is retried up to `QUICK_RETRY_ATTEMPTS = 5` times
+    *inside* edgartools before `_with_retries` ever sees it, so one logical
+    call's outer 3 attempts became up to 15 real requests and 48s of
+    un-injected real sleep -- the repository's stated "3 attempts,
+    deterministic 1s/2s backoff" contract was fiction for EDGAR.
+
+    `stamina.set_active(False)` is stamina's own documented, idempotent kill
+    switch, checked on every retry-context iteration (so it takes effect
+    immediately, even though it is called after edgartools has already been
+    imported and decorated its functions). With retrying deactivated,
+    `reraise=True` still applies: the first (and only) attempt's exception
+    propagates unchanged, so `retry_external_call`'s
+    `is_retryable_external_error` keeps seeing the same exception types as
+    before.
+
+    Rejected alternative: monkeypatching edgartools' retry-count constants
+    (e.g. `QUICK_RETRY_ATTEMPTS`). `@stamina.retry(attempts=...)` evaluates
+    its decorator arguments at *import* time, baking the attempt count into
+    the decorator; reassigning the module constant afterwards has no effect
+    on the already-decorated functions (verified empirically).
+
+    This is a **process-wide** switch, not scoped to this client instance --
+    stamina has no per-call/thread-local variant. Safe here because this
+    venv's only `stamina` importer is `edgartools`, and `edgar` is only
+    imported from this module; the pipeline is also documented elsewhere
+    (`ratelimit.py`) as single-threaded. If a stamina-based dependency that
+    *should* keep retrying is ever added, this call would silently disable it
+    too -- reconsider this design at that point rather than adding a config
+    knob preemptively.
+    """
+    stamina.set_active(False)
+
+
 class EdgarClient:
     """Throttled, point-in-time SEC EDGAR fundamentals/filings client."""
 
@@ -369,6 +420,8 @@ class EdgarClient:
     ) -> None:
         """Create the client and declare `identity` to EDGAR.
 
+        Also disables edgartools' internal retry loop process-wide.
+
         Args:
             identity: SEC-required User-Agent identity (`"Name email"`).
             company_factory: Injectable `edgar.Company` constructor, used by
@@ -376,8 +429,15 @@ class EdgarClient:
             clock: Injectable monotonic clock for rate-limit tests.
             sleep_fn: Injectable sleep function for rate-limit tests.
             date_clock: Injectable wall clock for deterministic fetch timestamps.
+
+        `edgartools` retries transport failures internally via `stamina`,
+        with real `time.sleep` and no injection seam; this constructor turns
+        that off process-wide (`_disable_edgartools_internal_retries()`) so
+        `_with_retries()` below is the only retry loop that ever runs against
+        EDGAR (Issue #429).
         """
         edgar.set_identity(identity)
+        _disable_edgartools_internal_retries()
         self._company_factory = company_factory
         self._clock = clock or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
@@ -578,7 +638,7 @@ class EdgarClient:
             source_url=filing.filing_url,
             content_text=content_text,
             fetched_at=self._date_clock.now(),
-            filing_sections=_extract_ten_q_sections(filing),
+            filing_sections=_extract_ten_q_sections(filing, self._with_retries),
         )
 
     def _exhibit_text(self, filing: _FilingLike) -> str:
@@ -733,17 +793,35 @@ def _earnings_exhibits(attachments: _AttachmentsLike) -> list[_AttachmentLike]:
     ]
 
 
-def _extract_ten_q_sections(filing: _FilingLike) -> tuple[FilingSection, ...]:
+def _extract_ten_q_sections(
+    filing: _FilingLike,
+    with_retries: Callable[
+        [Callable[[], _CompanyReportLike | None]], _CompanyReportLike | None
+    ],
+) -> tuple[FilingSection, ...]:
     """Extract priority sections without making their absence a fetch failure.
 
     EdgarTools parses the primary HTML already loaded by `filing.text()`.
     Issuer-specific markup can still defeat section detection; that is an
     expected data-quality outcome, surfaced later as `head_fallback`.
+
+    Args:
+        filing: The filing whose priority sections are wanted.
+        with_retries: `EdgarClient._with_retries`. `filing.obj()` is not a
+            pure re-parse of what `filing.text()` already downloaded -- when
+            the submission SGML carries no inline HTML, edgartools falls back
+            to fetching the filing homepage and the primary document -- so it
+            is an EDGAR boundary call and owes the same throttled 3-attempt
+            contract as every other one. Without it a single transient
+            `ConnectError` lands straight in the fail-soft handler below and
+            silently downgrades the filing to `head_fallback` (Issue #429
+            removed edgartools' own internal retry, which had been masking
+            this call site's missing wrapper).
     """
     if filing.form not in {"10-Q", "10-Q/A"}:
         return ()
     try:
-        report = filing.obj()
+        report = with_retries(filing.obj)
         if report is None:
             return ()
         requested = (

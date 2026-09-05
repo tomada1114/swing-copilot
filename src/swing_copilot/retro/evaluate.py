@@ -75,6 +75,16 @@ class EvaluateSummary:
     `recorded_slice_count` is only ever non-zero under `only_pending`
     (Issue #209): the slices left alone because `verdict_outcomes` already
     holds exactly the symbols and recommendations they would produce.
+
+    `preserved_outcome_count` is the subset of `outcome_count` carried
+    forward unchanged from a previous evaluation rather than recomputed this
+    round (Issue #424): a maturity-day close that has since gone missing
+    from the store (a re-fetch that dropped a historical bar, for example)
+    cannot be reproduced, but the previously recorded, already-audited
+    classification is not wrong merely because it cannot be recomputed right
+    now. Without this, the full-slice replace `replace_verdict_outcomes`
+    performs would silently delete that still-valid row instead of leaving it
+    corrected or untouched.
     """
 
     evaluated_slice_count: int
@@ -82,6 +92,7 @@ class EvaluateSummary:
     outcome_count: int
     notes: tuple[str, ...]
     recorded_slice_count: int = 0
+    preserved_outcome_count: int = 0
 
 
 def classify_verdict_outcome(
@@ -165,9 +176,12 @@ def evaluate_verdicts(
             to bound the work to slices that are not already recorded.
 
     Returns:
-        Counts plus a note per symbol skipped for missing bars. A horizon that
-        has simply not matured yet is counted in `pending_slice_count` rather
-        than noted: in a batch that runs every few days, most recent runs are
+        Counts plus a note per symbol whose bars were missing -- one saying
+        the symbol was skipped, or, when its previously recorded row was kept
+        instead of being deleted by the slice replace (Issue #424), one saying
+        so, which `preserved_outcome_count` also counts. A horizon that has
+        simply not matured yet is counted in `pending_slice_count` rather than
+        noted: in a batch that runs every few days, most recent runs are
         legitimately not due, and noting each one would drown the real
         data-quality signals.
     """
@@ -187,21 +201,25 @@ def evaluate_verdicts(
         state_store.get_recorded_outcome_slices(tuple(runs)) if only_pending else {}
     )
 
+    stores = _EvaluationStores(market_store=market_store, state_store=state_store)
     notes: list[str] = []
-    evaluated = pending = already_recorded = outcome_count = 0
+    evaluated = pending = already_recorded = outcome_count = preserved_count = 0
     for run_id, rows in runs.items():
         expected = frozenset((row.symbol, row.recommendation) for row in rows)
         for horizon_days in HORIZON_DAYS:
             if only_pending and recorded.get((run_id, horizon_days)) == expected:
                 already_recorded += 1
                 continue
-            outcomes = _evaluate_slice(market_store, rows, horizon_days, request, notes)
-            if outcomes is None:
+            slice_result = _evaluate_slice(stores, rows, horizon_days, request, notes)
+            if slice_result is None:
                 pending += 1
                 continue
-            state_store.replace_verdict_outcomes(run_id, horizon_days, outcomes)
+            state_store.replace_verdict_outcomes(
+                run_id, horizon_days, slice_result.outcomes
+            )
             evaluated += 1
-            outcome_count += len(outcomes)
+            outcome_count += len(slice_result.outcomes)
+            preserved_count += slice_result.preserved_count
 
     return EvaluateSummary(
         evaluated_slice_count=evaluated,
@@ -209,6 +227,7 @@ def evaluate_verdicts(
         recorded_slice_count=already_recorded,
         outcome_count=outcome_count,
         notes=tuple(notes),
+        preserved_outcome_count=preserved_count,
     )
 
 
@@ -257,13 +276,108 @@ def _group_by_run(rows: Sequence[VerdictRow]) -> dict[UUID, list[VerdictRow]]:
     return grouped
 
 
+@dataclass(frozen=True, slots=True)
+class _SliceEvaluation:
+    """One matured `(run, horizon)` slice's replacement outcomes.
+
+    `preserved_count` is the subset of `outcomes` carried forward unchanged
+    from the previous evaluation rather than recomputed this round (Issue
+    #424) -- see `EvaluateSummary.preserved_outcome_count`.
+    """
+
+    outcomes: tuple[VerdictOutcomeRecord, ...]
+    preserved_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _EvaluationStores:
+    """The two stores `_evaluate_slice` reads from.
+
+    Grouped into one value to stay within the project's parameter-count
+    guideline, mirroring `EvaluationRequest`.
+    """
+
+    market_store: MarketStore
+    state_store: StateStore
+
+
+def _carried_forward_row(
+    previous: VerdictOutcomeRecord | None,
+    recommendation: str,
+    maturity_date: date,
+) -> VerdictOutcomeRecord | None:
+    """Return the previous row to keep for an unrecomputable symbol, if any.
+
+    Issue #424: `replace_verdict_outcomes` replaces the *whole* slice it is
+    given, so simply omitting a symbol whose maturity-day close has gone
+    missing from the store (a re-fetch that dropped a historical bar, for
+    example) would delete its previously recorded, already-audited
+    classification rather than correct it. Carrying the old row forward
+    untouched is the only way a full-slice replace can leave it alone.
+
+    Args:
+        previous: The row `verdict_outcomes` already holds for this symbol in
+            this slice, or `None` if it was never recorded.
+        recommendation: The verdict the run currently holds for the symbol.
+        maturity_date: The session this slice is being evaluated as of, which
+            every recomputed row in it is filed under.
+
+    Returns:
+        `previous` when it still describes this slice, otherwise `None`. Two
+        things can make it stale, and both drop the row exactly as an
+        unrecomputable row always was before Issue #424:
+
+        - the verdict was corrected since (`proceed` <-> `skip`), leaving the
+          old classification describing a verdict the store no longer holds;
+        - the slice's maturity session moved (the benchmark's own bars were
+          re-fetched, so `find_maturity_trading_day` now answers differently),
+          leaving the old row filed under a different `as_of` than every
+          recomputed row beside it. Keeping it would put one slice's rows in
+          two reporting windows, since `get_verdict_outcomes_in_window`
+          filters on `as_of`, and pair a `benchmark_return_pct` measured over
+          one span with siblings measured over another.
+    """
+    if previous is None or previous.recommendation != recommendation:
+        return None
+    if previous.as_of != maturity_date:
+        return None
+    return previous
+
+
+def _missing_close_note(
+    *,
+    run_date: date,
+    symbol: str,
+    horizon_days: int,
+    maturity_date: date,
+    is_carried_forward: bool,
+) -> str:
+    """Render the fail-soft note for a symbol whose closes did not line up.
+
+    Args:
+        run_date: The run's own session.
+        symbol: The symbol that could not be recomputed.
+        horizon_days: The horizon being evaluated.
+        maturity_date: The session the horizon came due on.
+        is_carried_forward: Whether a previously recorded row was kept
+            (Issue #424) instead of the symbol dropping out of the slice.
+    """
+    outcome = (
+        "既存の評価行を保持した（削除しない）" if is_carried_forward else "スキップ"
+    )
+    return (
+        f"{run_date.isoformat()} {symbol} {horizon_days}d: "
+        f"満期日 {maturity_date.isoformat()} までの終値が揃わないため{outcome}"
+    )
+
+
 def _evaluate_slice(
-    market_store: MarketStore,
+    stores: _EvaluationStores,
     rows: Sequence[VerdictRow],
     horizon_days: int,
     request: EvaluationRequest,
     notes: list[str],
-) -> list[VerdictOutcomeRecord] | None:
+) -> _SliceEvaluation | None:
     """Classify one `(run, horizon)`; return `None` if it has not matured.
 
     Each record also carries the two closes the classification was computed
@@ -277,7 +391,7 @@ def _evaluate_slice(
     run_id = rows[0].run_id
     run_date = rows[0].as_of
     maturity_date = find_maturity_trading_day(
-        market_store,
+        stores.market_store,
         request.benchmark_symbol,
         run_date,
         horizon_days,
@@ -299,23 +413,46 @@ def _evaluate_slice(
     # "unmeasured" into "the market went nowhere".
     benchmark_return_pct = _finite_or_none(
         compute_forward_return(
-            market_store, request.benchmark_symbol, run_date, maturity_date
+            stores.market_store, request.benchmark_symbol, run_date, maturity_date
         )
     )
 
     outcomes: list[VerdictOutcomeRecord] = []
+    preserved_count = 0
+    # Fetched at most once per slice, and only when a row actually fails to
+    # recompute -- the common case (every row matures cleanly) never pays for
+    # this read (Issue #424).
+    previous_by_symbol: dict[str, VerdictOutcomeRecord] | None = None
     for row in rows:
         # The detail form, not the bare ratio: `entry_close`/`maturity_close`
         # are audit columns recording *which prices this was classified at*,
         # so they must be the very numbers the ratio divided rather than a
         # second read that a later store repair could answer differently.
         forward_return = compute_forward_return_detail(
-            market_store, row.symbol, run_date, maturity_date
+            stores.market_store, row.symbol, run_date, maturity_date
         )
         if forward_return is None:
+            if previous_by_symbol is None:
+                previous_by_symbol = {
+                    previous.symbol: previous
+                    for previous in stores.state_store.get_verdict_outcomes_for_slice(
+                        run_id, horizon_days
+                    )
+                }
+            preserved = _carried_forward_row(
+                previous_by_symbol.get(row.symbol), row.recommendation, maturity_date
+            )
+            if preserved is not None:
+                outcomes.append(preserved)
+                preserved_count += 1
             notes.append(
-                f"{run_date.isoformat()} {row.symbol} {horizon_days}d: "
-                f"満期日 {maturity_date.isoformat()} までの終値が揃わないためスキップ"
+                _missing_close_note(
+                    run_date=run_date,
+                    symbol=row.symbol,
+                    horizon_days=horizon_days,
+                    maturity_date=maturity_date,
+                    is_carried_forward=preserved is not None,
+                )
             )
             continue
         outcomes.append(
@@ -337,4 +474,4 @@ def _evaluate_slice(
                 ),
             )
         )
-    return outcomes
+    return _SliceEvaluation(outcomes=tuple(outcomes), preserved_count=preserved_count)

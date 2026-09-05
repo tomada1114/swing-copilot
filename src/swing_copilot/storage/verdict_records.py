@@ -177,6 +177,17 @@ _INSERT_VERDICT_OUTCOME = """
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+#: The `verdict_outcomes` SELECT list every reader shares, paired with
+#: `_verdict_outcome_from_row` below. Kept in one place because the two are
+#: only correct together: the mapper reads by position, so a column added to
+#: one reader's list and not the other would silently shift every field one
+#: seat over.
+_SELECT_VERDICT_OUTCOME_COLUMNS = """
+    run_id, symbol, horizon_days, as_of, recommendation,
+    forward_return_pct, classification, benchmark_return_pct,
+    entry_close, maturity_close
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class VerdictReasonRecord:
@@ -829,6 +840,62 @@ def replace_verdict_outcomes(
             )
 
 
+def _verdict_outcome_from_row(row: Sequence[object]) -> VerdictOutcomeRecord:
+    """Build one record from a `_SELECT_VERDICT_OUTCOME_COLUMNS` row.
+
+    Positional by necessity (DuckDB hands back plain tuples), which is why the
+    SELECT list lives next to this function rather than being spelled out at
+    each call site.
+
+    Args:
+        row: One `fetchall()` row, in `_SELECT_VERDICT_OUTCOME_COLUMNS` order.
+    """
+    return VerdictOutcomeRecord(
+        run_id=UUID(str(row[0])),
+        symbol=cast("str", row[1]),
+        horizon_days=cast("int", row[2]),
+        as_of=cast("date", row[3]),
+        recommendation=cast("str", row[4]),
+        forward_return_pct=cast("float", row[5]),
+        classification=cast("str", row[6]),
+        benchmark_return_pct=cast("float | None", row[7]),
+        entry_close=cast("float | None", row[8]),
+        maturity_close=cast("float | None", row[9]),
+    )
+
+
+def get_verdict_outcomes_for_slice(
+    database: Database, run_id: UUID, horizon_days: int
+) -> tuple[VerdictOutcomeRecord, ...]:
+    """Return one `(run_id, horizon_days)` slice's currently recorded rows.
+
+    Issue #424: `replace_verdict_outcomes` replaces the *whole* slice it is
+    given, so a caller that cannot recompute every symbol this round (a
+    maturity-day close that has since gone missing from the store) must read
+    the previous rows back first if it wants to carry any of them forward
+    rather than let the replace silently drop them.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        run_id: The evaluated run.
+        horizon_days: The evaluated horizon (5 or 20).
+
+    Returns:
+        Rows ordered by `symbol`, empty if the slice has never been recorded.
+    """
+    with database.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_SELECT_VERDICT_OUTCOME_COLUMNS}
+            FROM verdict_outcomes
+            WHERE run_id = ? AND horizon_days = ?
+            ORDER BY symbol
+            """,  # noqa: S608 - a module constant column list, every value stays bound
+            [str(run_id), horizon_days],
+        ).fetchall()
+    return tuple(_verdict_outcome_from_row(row) for row in rows)
+
+
 def get_verdicts_in_window(
     database: Database, window_start: date, as_of: date
 ) -> tuple[VerdictRow, ...]:
@@ -892,31 +959,15 @@ def get_verdict_outcomes_in_window(
     """
     with database.connect() as conn:
         rows = conn.execute(
-            """
-            SELECT run_id, symbol, horizon_days, as_of, recommendation,
-                   forward_return_pct, classification, benchmark_return_pct,
-                   entry_close, maturity_close
+            f"""
+            SELECT {_SELECT_VERDICT_OUTCOME_COLUMNS}
             FROM verdict_outcomes
             WHERE as_of >= ? AND as_of <= ?
             ORDER BY as_of, run_id, symbol, horizon_days
-            """,
+            """,  # noqa: S608 - a module constant column list, every value stays bound
             [window_start, as_of],
         ).fetchall()
-    return tuple(
-        VerdictOutcomeRecord(
-            run_id=UUID(str(row[0])),
-            symbol=row[1],
-            horizon_days=row[2],
-            as_of=row[3],
-            recommendation=row[4],
-            forward_return_pct=row[5],
-            classification=row[6],
-            benchmark_return_pct=row[7],
-            entry_close=row[8],
-            maturity_close=row[9],
-        )
-        for row in rows
-    )
+    return tuple(_verdict_outcome_from_row(row) for row in rows)
 
 
 def get_run_verdicts(database: Database, run_id: UUID) -> tuple[VerdictRecord, ...]:

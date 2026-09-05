@@ -234,6 +234,7 @@ def _run_evaluate(
         f"評価 {summary.evaluated_slice_count} slice / "
         f"未満期 {summary.pending_slice_count} slice / "
         f"outcome {summary.outcome_count} 件"
+        f"（うち保持 {summary.preserved_outcome_count} 件）"
     )
     _print_notes(console, summary.notes)
 

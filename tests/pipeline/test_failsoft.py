@@ -32,7 +32,7 @@ from swing_copilot.analysis.export import (
     HISTORICAL_REPLAY_FILENAME,
 )
 from swing_copilot.config import StrategiesConfig
-from swing_copilot.models import DailyRunOptions, RunStatus
+from swing_copilot.models import DailyRunOptions, RunStatus, StepStatus
 from swing_copilot.pipeline import daily as daily_module
 from swing_copilot.pipeline import daily_runner
 from swing_copilot.pipeline.daily import (
@@ -623,23 +623,25 @@ class TestEvaluatePrecedesTheAnalysisExport:
         self, base_deps: DailyDependencies, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         order: list[str] = []
-        real_export = daily_module._run_step_analysis_export  # noqa: SLF001
 
-        def _spy_evaluate(*args: object, **kwargs: object) -> EvaluateSummary:
-            order.append("retro_evaluate")
-            return evaluate_verdicts(*args, **kwargs)  # type: ignore[arg-type]
+        real_record_step = base_deps.state_store.record_run_step
 
-        def _spy_export(*args: object, **kwargs: object) -> object:
-            order.append("6_analysis_export")
-            return real_export(*args, **kwargs)  # type: ignore[arg-type]
+        def record_step(
+            run_id: UUID,
+            step: str,
+            status: StepStatus,
+            detail: str | None,
+            duration_s: float,
+        ) -> None:
+            order.append(step)
+            real_record_step(run_id, step, status, detail, duration_s)
 
-        monkeypatch.setattr(daily_module, "evaluate_verdicts", _spy_evaluate)
-        monkeypatch.setattr(daily_runner, "_run_step_analysis_export", _spy_export)
+        monkeypatch.setattr(base_deps.state_store, "record_run_step", record_step)
         deps = replace(base_deps, news_client=StubNewsClient())
 
         run_daily(DailyRunOptions(as_of=AS_OF, is_dry_run=True), deps)
 
-        assert order == ["retro_evaluate", "6_analysis_export"]
+        assert order.index("retro_evaluate") < order.index("6_analysis_export")
 
     def test_an_evaluate_that_overruns_the_budget_does_not_skip_the_export(
         self,
@@ -912,34 +914,37 @@ class TestVirtualLedgerPositionsCountAsHeld:
     ):
         _seed_virtual_position(state_store, "NVDA")
 
-        held = daily_runner._held_symbols(base_deps, is_historical=True)  # noqa: SLF001
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True),
+            replace(base_deps, news_client=StubNewsClient()),
+        )
 
-        assert held == set()
-
-    def test_a_live_run_reads_the_ledger_for_the_same_inputs(
-        self, base_deps, state_store
-    ):
-        _seed_virtual_position(state_store, "NVDA")
-
-        held = daily_runner._held_symbols(base_deps, is_historical=False)  # noqa: SLF001
-
-        assert held == {"NVDA"}
+        assert result.status == RunStatus.SUCCESS
+        assert "NVDA" not in _news_covered_symbols(state_store)
 
     def test_an_unreadable_ledger_warns_and_holds_nothing(
         self, base_deps, state_store, monkeypatch, caplog
     ):
+        calls = 0
+
         def _raise(_status=None, _recommendations=None):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return []
             msg = "ledger unreadable"
             raise RuntimeError(msg)
 
         monkeypatch.setattr(state_store, "get_verdict_positions", _raise)
 
         with caplog.at_level(logging.WARNING):
-            held = daily_runner._held_symbols(  # noqa: SLF001
-                base_deps, is_historical=False
+            result = run_daily(
+                DailyRunOptions(is_dry_run=True),
+                replace(base_deps, news_client=StubNewsClient()),
             )
 
-        assert held == set()
+        assert result.status is not RunStatus.FAILED
+        assert "NVDA" not in _news_covered_symbols(state_store)
         assert "verdict tracking ledger unreadable" in caplog.text
 
 

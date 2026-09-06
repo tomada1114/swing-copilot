@@ -6,7 +6,9 @@ are *full replacements* rather than plain upserts:
 
 * `replace_run_verdicts` replaces one run's entire verdict set, so
   re-ingesting a corrected `analysis_result.json` both updates changed rows
-  and drops symbols that are no longer part of the answer.
+  and drops symbols that are no longer part of the answer. An *empty* set
+  additionally clears the run's `verdict_outcomes`, which nothing else would
+  ever revisit once the run has left `verdicts` (Issue #448).
 * `replace_verdict_outcomes` replaces one `(run_id, horizon_days)` slice,
   mirroring `audit_records.replace_signal_outcomes`, so re-evaluating after a
   price correction reclassifies instead of duplicating.
@@ -453,7 +455,8 @@ def replace_run_verdicts(
         database: Shared DuckDB connection owner.
         run_id: The run whose rows are being replaced wholesale.
         verdicts: The run's verdicts. Empty clears the run (a re-ingest of a
-            result that no longer analyzes any symbol).
+            result that no longer analyzes any symbol), and with it the run's
+            `verdict_outcomes` rows -- see `replace_collected_run`.
         sources: The `source_id`s those verdicts' analyses cited.
         coverages: Every filing source offered to the analysis, cited or not.
     """
@@ -477,7 +480,14 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
             of the two documents they were built from. The fingerprint is
             written in the same transaction so a later scan can prove the
             archive unchanged; `None` *removes* any previous fingerprint
-            rather than leaving it behind.
+            rather than leaving it behind. Any symbol absent from
+            `records.verdicts` also loses its `verdict_outcomes` rows
+            (Issue #448), an empty `records.verdicts` therefore clearing the
+            run's outcomes entirely: `evaluate_verdicts` reclaims a dropped
+            symbol's row on its own only while the run is still inside the
+            evaluation window, and never at all once the run itself has no
+            verdicts left, so those rows would otherwise stay orphaned
+            permanently.
 
     Raises:
         ValueError: A record belongs to a different run than `records.run_id`.
@@ -491,6 +501,33 @@ def replace_collected_run(database: Database, records: CollectedRunRecords) -> N
 
     with database.transaction() as conn:
         conn.execute("DELETE FROM verdicts WHERE run_id = ?", [str(run_id)])
+        # Issue #448: `verdict_outcomes` is a per-run projection like the six
+        # tables around it, so the same snapshot rule applies (AGENTS.md: "A
+        # snapshot replacement must also remove members absent from the
+        # replacement"). Scoped to the symbols this replacement dropped --
+        # never to the whole run when the run survives -- which is exactly
+        # what keeps Issue #424 intact: `_evaluate_slice` only ever carries a
+        # row forward for a symbol that still holds a verdict, so a symbol
+        # *absent* from the replacement can never be a carried-forward row,
+        # while a still-present one is never touched here.
+        #
+        # `evaluate_verdicts`'s own full-slice replace does reclaim a dropped
+        # symbol's row by itself, but only while the run is still inside the
+        # evaluation window (`get_verdicts_in_window`). `collect` enumerates
+        # every run directory forever (Issue #209), so a correction to an
+        # older run drops a symbol that nothing will ever revisit -- and an
+        # empty replacement strands the whole run the same way. Both leak
+        # into `research.frames`, which reads `verdict_outcomes` unwindowed.
+        surviving = sorted({record.symbol for record in verdicts})
+        if surviving:
+            placeholders = ",".join("?" for _ in surviving)
+            conn.execute(
+                "DELETE FROM verdict_outcomes "  # noqa: S608 - placeholder count is generated locally and values are bound
+                f"WHERE run_id = ? AND symbol NOT IN ({placeholders})",
+                [str(run_id), *surviving],
+            )
+        else:
+            conn.execute("DELETE FROM verdict_outcomes WHERE run_id = ?", [str(run_id)])
         conn.execute("DELETE FROM verdict_sources WHERE run_id = ?", [str(run_id)])
         # Issue #192: the normalized projection is replaced with the
         # document it projects. Deleting it here rather than per symbol is

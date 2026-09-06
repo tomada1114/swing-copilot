@@ -441,6 +441,12 @@ noteを残してスキップする（fail-soft）。走査0件は正常終了で
 どちらかの文書を書き換えれば——サイズと更新時刻が同じでも——ハッシュが変わる
 ので、訂正は必ず取り込み直される。解析不能なrunが1件以上あるときは、終了コードを
 変えないまま`COLLECT_UNREADABLE[<件数>]:`を標準エラー出力へ書く（Issue #374）。
+再collectがそのrunのverdictを1件も生まなかったときに限り、同じトランザクションで
+`verdict_outcomes`の当該run行も削除する（Issue #448）。`evaluate`は`verdicts`に
+残っているrunしか走査しないので、verdictが全消しになったrunの当否行は放置すると
+二度と訪問されず、窓を持たない読み出し（`research.verdict_outcomes()`）を汚し
+続けるためである。verdictが残る通常の再collectでは発火しない——Issue #424で
+保持している「再計算できない既存行」を再collectのたびに消してしまうからである。
 
 `evaluate`はrun_dateから5/20営業日先の**満期営業日**を求め、`満期日 <= as_of`の
 ものだけを分類して`verdict_outcomes`へ`(run_id, horizon_days)`単位の完全置換で

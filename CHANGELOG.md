@@ -102,6 +102,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `replace_collected_run`（`verdict_records.py`）が `verdicts` / `verdict_sources` /
+  `verdict_reasons` / `verdict_reason_sources` / `analysis_source_coverage` /
+  `verdict_collections` の6テーブルは run 単位で置換していたが、`verdict_outcomes`
+  だけが対象外だった問題を修正した（Issue #448）。`AGENTS.md` は「スナップショット
+  置換は置換後に存在しないメンバーも削除しなければならない」と定めているが、
+  `verdict_outcomes` にはそれが効いていなかった。漏れは 2 通りある。ある run の
+  再 collect が verdict を1件も生まなくなった場合、`evaluate_verdicts` は
+  `get_verdicts_in_window`（`verdicts` に依存）が返す run しか走査しないため、その
+  run の行は二度と訪問されない。シンボル単位で落ちるケースは
+  `evaluate_verdicts` の全置換で自己修復するが、それは **run が評価窓の中に
+  ある間だけ**である。`collect` は run ディレクトリを従来どおり全件列挙する
+  （Issue #209）ので、評価窓より古い run の訂正で落ちたシンボルの行は同じく
+  恒久的に残る。どちらも `verdict_outcomes` を窓なしで読む `research.frames` を
+  汚し続ける。`replace_collected_run` は置換後の `verdicts` に存在しないシンボルの
+  行を、他の6テーブルと同じトランザクションで削除する（`verdicts` が空なら run の
+  行が全消しになる）。削除をシンボル単位に絞ってあることが Issue #424 の
+  carry-forward を守る — `_evaluate_slice` が行を引き継ぐのは verdict が今も存在する
+  シンボルに対してだけなので、置換後に存在しないシンボルの行が carry-forward された
+  行であることはありえない。逆に run 単位で無条件に削除すると、再 collect のたびに
+  保持済みの行を強制再計算で踏み潰してしまう
+
 - `has_mixed_basis_signature`/`first_mixed_basis_jump`（Issue #421）が誤検知する
   問題を修正した（Issue #425）。実データ（`data/bars` の生バー + `corporate_actions`、
   510 銘柄の store）で再判定したところ、19 銘柄が混在署名として検出されていたが、

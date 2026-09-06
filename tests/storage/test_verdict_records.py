@@ -524,6 +524,146 @@ class TestReplaceRunVerdictsAtomicity:
         assert _rows(state_store, "SELECT symbol FROM verdicts") == [("AAPL",)]
 
 
+class TestReplaceCollectedRunOutcomeCleanup:
+    """Issue #448: a replacement must not orphan the `verdict_outcomes` it drops.
+
+    `evaluate_verdicts` only walks the runs `get_verdicts_in_window` returns,
+    which is driven by `verdicts` itself. So a run whose verdicts go to zero
+    is never revisited at all, and a merely *dropped symbol* self-heals
+    through `evaluate_verdicts`'s own full-slice replace only while its run
+    is still inside the evaluation window -- `collect` re-collects run
+    directories far older than that (Issue #209). Both leaks end in
+    `research.frames`, which reads `verdict_outcomes` unwindowed.
+    """
+
+    def test_an_empty_replacement_clears_the_runs_orphaned_outcomes(
+        self, state_store: StateStore
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL", 5)])
+        state_store.replace_verdict_outcomes(run_id, 20, [_outcome(run_id, "AAPL", 20)])
+
+        # A re-collect produces zero verdicts for this run -- the pathological
+        # case #448 identifies as the real hole.
+        state_store.replace_run_verdicts(run_id, [], [])
+
+        assert _rows(
+            state_store,
+            "SELECT count(*) FROM verdict_outcomes WHERE run_id = ?",
+            [str(run_id)],
+        ) == [(0,)]
+
+    def test_other_runs_outcomes_are_untouched_by_an_empty_replacement(
+        self, state_store: StateStore
+    ) -> None:
+        kept, cleared = uuid4(), uuid4()
+        state_store.replace_run_verdicts(kept, [_verdict(kept, "AAPL")], [])
+        state_store.replace_verdict_outcomes(kept, 5, [_outcome(kept, "AAPL")])
+        state_store.replace_run_verdicts(cleared, [_verdict(cleared, "MSFT")], [])
+        state_store.replace_verdict_outcomes(cleared, 5, [_outcome(cleared, "MSFT")])
+
+        state_store.replace_run_verdicts(cleared, [], [])
+
+        assert _rows(
+            state_store,
+            "SELECT symbol FROM verdict_outcomes WHERE run_id = ?",
+            [str(kept)],
+        ) == [("AAPL",)]
+
+    def test_a_dropped_symbols_outcomes_are_cleared_while_the_rest_survive(
+        self, state_store: StateStore
+    ) -> None:
+        # The symbol-scoped half of the same leak. `evaluate_verdicts` would
+        # reclaim MSFT's row by itself, but only while this run is still
+        # inside the evaluation window; `collect` re-collects run directories
+        # far older than that, and such a run is never walked again.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL"), _verdict(run_id, "MSFT")], []
+        )
+        state_store.replace_verdict_outcomes(
+            run_id, 5, [_outcome(run_id, "AAPL", 5), _outcome(run_id, "MSFT", 5)]
+        )
+
+        # A corrected re-collect keeps AAPL and drops MSFT entirely.
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL")], [])
+
+        assert _rows(
+            state_store,
+            "SELECT symbol FROM verdict_outcomes WHERE run_id = ? ORDER BY symbol",
+            [str(run_id)],
+        ) == [("AAPL",)]
+
+    def test_a_non_empty_replacement_leaves_the_runs_outcomes_untouched(
+        self, state_store: StateStore
+    ) -> None:
+        # Issue #424: `replace_verdict_outcomes` deliberately carries forward
+        # a row whose forward return can no longer be recomputed. If a
+        # *non-empty* re-collect also wiped `verdict_outcomes` for the run,
+        # every re-collect would force a recompute that #424 established
+        # cannot happen for such a row -- silently undoing it. The guard here
+        # must only fire when the run's new verdict set is empty.
+        run_id = uuid4()
+        state_store.replace_run_verdicts(
+            run_id, [_verdict(run_id, "AAPL", "proceed")], []
+        )
+        outcome = _outcome(run_id, "AAPL", forward_return_pct=1.5, classification="HIT")
+        state_store.replace_verdict_outcomes(run_id, 5, [outcome])
+
+        # A re-collect that corrects the verdict's recommendation, but still
+        # analyzes the symbol -- not the "run vanished" case.
+        state_store.replace_run_verdicts(run_id, [_verdict(run_id, "AAPL", "skip")], [])
+
+        assert _rows(
+            state_store,
+            "SELECT symbol, forward_return_pct, classification "
+            "FROM verdict_outcomes WHERE run_id = ?",
+            [str(run_id)],
+        ) == [("AAPL", 1.5, "HIT")]
+
+
+class TestReplaceCollectedRunOutcomeCleanupAtomicity:
+    def test_a_failure_after_the_outcome_delete_rolls_the_whole_write_back(
+        self, state_store: StateStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_id = uuid4()
+        state_store.replace_collected_run(
+            CollectedRunRecords(
+                run_id=run_id,
+                verdicts=[_verdict(run_id, "AAPL")],
+                document_digest="sha256:original",
+            )
+        )
+        state_store.replace_verdict_outcomes(run_id, 5, [_outcome(run_id, "AAPL")])
+        _inject_failure(state_store, monkeypatch, "analysis_source_coverage", 1)
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            state_store.replace_collected_run(
+                CollectedRunRecords(
+                    run_id=run_id,
+                    verdicts=[],
+                    coverages=[_coverage(run_id)],
+                    document_digest="sha256:corrected",
+                )
+            )
+
+        monkeypatch.undo()
+        # The empty replacement's DELETE statements -- verdicts and, per
+        # #448, the orphaned verdict_outcomes -- both ran before the failing
+        # coverage insert; the whole transaction must roll back, not just the
+        # insert.
+        assert _rows(state_store, "SELECT symbol FROM verdicts") == [("AAPL",)]
+        assert _rows(
+            state_store,
+            "SELECT symbol FROM verdict_outcomes WHERE run_id = ?",
+            [str(run_id)],
+        ) == [("AAPL",)]
+        assert state_store.get_verdict_collection_digests() == {
+            run_id: "sha256:original"
+        }
+
+
 class TestNormalizedVerdictReasons:
     """Issue #192: `reasons_json` projected into queryable rows."""
 

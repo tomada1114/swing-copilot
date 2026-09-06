@@ -907,7 +907,16 @@ class MarketStore:
             df: Their new raw rows, matching `BARS_COLUMNS`.
 
         Returns:
-            The stored sessions this replacement erased, per symbol.
+            The stored sessions this replacement erased *from inside the
+            replacement's own date window*, per symbol -- `_dropped_sessions`'
+            window rule, unchanged here. Erasure is wider than the report: a
+            stored bar older than `df`'s first date (or newer than its last),
+            and every row of a symbol named in `symbols` but absent from `df`
+            entirely, is also erased and is deliberately *not* named here,
+            because outside that window "the provider stopped returning it"
+            and "this batch never asked for it" are indistinguishable. Treat
+            an empty result as "nothing was dropped mid-series", never as
+            "nothing was erased".
 
         Raises:
             NonFiniteBarsError: Any OHLCV value is NaN/±inf. Validated before
@@ -936,7 +945,9 @@ class MarketStore:
         # see what the replacement is about to erase. `_read_partition_rows`
         # already normalizes `date` to `datetime.date`, exactly like
         # `working`, so the two frames compare on the same type.
-        existing = self._read_partition_rows(sorted(touched), sorted(replaced))
+        existing = self._read_partition_rows(
+            sorted(touched), sorted(replaced), columns=["symbol", "date"]
+        )
         dropped = _dropped_sessions(working, existing)
         for year in sorted(touched):
             new_rows = working[years == year] if not working.empty else working
@@ -947,20 +958,32 @@ class MarketStore:
         return self.parquet_root / f"year={year}" / "data.parquet"
 
     def _read_partition_rows(
-        self, years: Iterable[int], symbols: Sequence[str]
+        self,
+        years: Iterable[int],
+        symbols: Sequence[str],
+        columns: list[str] | None = None,
     ) -> pd.DataFrame:
         """Stored rows for `symbols` in the given year partitions.
 
         Read straight from Parquet rather than through `read_bars`: the gate
         compares *raw* stored values, and `read_bars` would hand back
         as-of-adjusted ones.
+
+        Args:
+            years: Year partitions to read; missing ones are skipped.
+            symbols: Tickers to keep.
+            columns: Restrict the read to these Parquet columns (`symbol` and
+                `date` must be among them). A whole-store read -- every year
+                of every symbol, which `replace_symbol_bars` does on a full
+                rebuild -- otherwise materializes OHLCV and the `provider`
+                strings it has no use for. `None` reads `BARS_COLUMNS`.
         """
         wanted = set(symbols)
         frames = [
             rows
             for year in sorted(set(years))
             if (path := self._partition_file(year)).is_file()
-            and not (rows := pd.read_parquet(path)).empty
+            and not (rows := pd.read_parquet(path, columns=columns)).empty
             and not (rows := rows[rows["symbol"].isin(wanted)]).empty
         ]
         if not frames:

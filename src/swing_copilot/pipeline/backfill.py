@@ -741,10 +741,24 @@ def _validate_limit(args: argparse.Namespace) -> None:
 
 
 def _truncated_dates(dates: Sequence[date]) -> str:
-    """Render up to `_MAX_REPORTED_MISSING_SESSIONS` dates, then summarize."""
+    """Render up to `_MAX_REPORTED_MISSING_SESSIONS` dates, then summarize.
+
+    Both callers hand over an ascending list, so the slice keeps the *oldest*
+    dates -- the first session a hole opened on is what an operator chases,
+    and `daily.py`'s `run_steps.detail` truncates the same list the same way.
+    The label has to say so: reporting the head as "最新" would send that
+    operator looking for a gap on the wrong end of the series.
+
+    Args:
+        dates: Ascending session dates.
+
+    Returns:
+        A comma-joined date list, with a leading count and a trailing `...`
+        once there are more dates than fit.
+    """
     shown = ", ".join(d.isoformat() for d in dates[:_MAX_REPORTED_MISSING_SESSIONS])
     if len(dates) > _MAX_REPORTED_MISSING_SESSIONS:
-        return f"最新 {_MAX_REPORTED_MISSING_SESSIONS} 件: {shown}, ..."
+        return f"古い順 {_MAX_REPORTED_MISSING_SESSIONS} 件: {shown}, ...（全 {len(dates)} 件）"
     return shown
 
 

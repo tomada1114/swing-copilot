@@ -319,6 +319,144 @@ class TestPriceStepRawBars:
         _status, detail = self._price_step_detail(state_store, result.run_id)
         assert detail == "failed symbols: ['GOOG']; quarantined symbols: ['MSFT']"
 
+    def test_run_step_prices_records_dropped_sessions_in_the_step_detail(
+        self, deps, market_store, state_store
+    ):
+        # Issue #449: MSFT's re-fetch example from #424 (the day before its
+        # split ex-date going missing), reproduced through the public daily
+        # path with generic symbols/dates instead.
+        d1 = AS_OF - timedelta(days=3)
+        d2 = AS_OF - timedelta(days=2)
+        d3 = AS_OF - timedelta(days=1)
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "date": day,
+                        "open": close,
+                        "high": close + 1,
+                        "low": close - 1,
+                        "close": close,
+                        "volume": 1_000_000,
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                    for day, close in ((d1, 100.0), (d2, 100.5), (d3, 101.0))
+                ]
+            )
+        )
+        incoming = pd.concat(
+            [
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": "AAPL",
+                            "date": day,
+                            "open": close,
+                            "high": close + 1,
+                            "low": close - 1,
+                            "close": close,
+                            "volume": 1_000_000,
+                        }
+                        for day, close in ((d1, 100.0), (d3, 101.0))
+                    ]
+                ),
+                _bars_for(["MSFT"], AS_OF),
+            ],
+            ignore_index=True,
+        )
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True),
+            replace(deps, data_provider=StubDataProvider(incoming)),
+        )
+
+        status, detail = self._price_step_detail(state_store, result.run_id)
+        # `write_bars` never drops the row (design decision 1-(c)): the run
+        # still succeeds, and this is purely a report.
+        assert status == "success"
+        assert detail == f"dropped sessions: {{'AAPL': ['{d2.isoformat()}']}}"
+        # The old row is still there -- `write_bars` never lost it.
+        assert d2 in market_store.read_raw_bars(["AAPL"])["date"].tolist()
+
+    def test_run_step_prices_joins_failed_quarantined_and_dropped_in_order(
+        self, deps, market_store, state_store
+    ):
+        d1 = AS_OF - timedelta(days=3)
+        d2 = AS_OF - timedelta(days=2)
+        d3 = AS_OF - timedelta(days=1)
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "date": day,
+                        "open": close,
+                        "high": close + 1,
+                        "low": close - 1,
+                        "close": close,
+                        "volume": 1_000_000,
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                    for day, close in ((d1, 100.0), (d2, 100.5), (d3, 101.0))
+                ]
+            )
+        )
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "MSFT",
+                        "date": AS_OF - timedelta(days=5),
+                        "open": 500.0,
+                        "high": 501.0,
+                        "low": 499.0,
+                        "close": 500.0,
+                        "volume": 2_000_000,
+                        "provider": "yfinance",
+                        "fetched_at": _NOW,
+                    }
+                ]
+            )
+        )
+        incoming = pd.concat(
+            [
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": "AAPL",
+                            "date": day,
+                            "open": close,
+                            "high": close + 1,
+                            "low": close - 1,
+                            "close": close,
+                            "volume": 1_000_000,
+                        }
+                        for day, close in ((d1, 100.0), (d3, 101.0))
+                    ]
+                ),
+                _bars_for(["MSFT"], AS_OF),
+            ],
+            ignore_index=True,
+        )
+        failing = StubDataProvider(
+            incoming,
+            failures=(FetchFailure(symbol="GOOG", reason="no data", retryable=True),),
+        )
+
+        result = run_daily(
+            DailyRunOptions(as_of=AS_OF, is_dry_run=True),
+            replace(deps, data_provider=failing),
+        )
+
+        _status, detail = self._price_step_detail(state_store, result.run_id)
+        assert detail == (
+            "failed symbols: ['GOOG']; quarantined symbols: ['MSFT']; "
+            f"dropped sessions: {{'AAPL': ['{d2.isoformat()}']}}"
+        )
+
 
 class TestSymbolLimit:
     def _sectored_universe(self, sizes: dict[str, int]) -> tuple[UniverseMember, ...]:

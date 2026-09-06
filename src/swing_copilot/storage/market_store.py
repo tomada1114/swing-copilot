@@ -32,7 +32,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import duckdb
 import pandas as pd
@@ -182,6 +182,54 @@ class BarQuarantine:
 
 
 @dataclass(frozen=True, slots=True)
+class DroppedSessions:
+    """One symbol's stored sessions the incoming batch no longer carries.
+
+    A provider re-fetch can silently stop returning a bar it used to (Issue
+    #449, the MNST 2026-08-10 case). This is *report-only*: nothing about it
+    quarantines a write or changes an exit code, because the write path never
+    actually loses the row (`write_bars`' `_publish_partition` concats rather
+    than replaces), so there is nothing here to defend by refusing a write.
+    Only `replace_symbol_bars` erases what this dataclass names — see its
+    docstring.
+    """
+
+    symbol: str
+    #: Ascending, and bounded to `[min(incoming date), max(incoming date)]`
+    #: for this symbol — a stored session outside that window is "outside the
+    #: fetch window" (delisting, IPO, a resumed backfill), not a drop.
+    dates: tuple[date, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BarReplaceResult:
+    """What `replace_symbol_bars` lost in the course of replacing a symbol."""
+
+    dropped: tuple[DroppedSessions, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCoverage:
+    """Store-wide daily coverage: the audit's own trading-day calendar.
+
+    `copilot-backfill check` has no independent notion of "was this a real
+    trading day" — a bond-market holiday, a half day, and a Saturday all look
+    the same to it. This is what lets it derive one from the store itself
+    (Issue #449, 3-B): a date most listed symbols have a bar on is a session;
+    a date nobody has a bar on is simply not in `bars_per_date` at all.
+    """
+
+    #: How many stored symbols have a bar on each date the store holds at
+    #: least one bar for. A date entirely absent from the store (a real
+    #: market holiday, a weekend) is never a key here.
+    bars_per_date: Mapping[date, int]
+    #: Each symbol's `(oldest stored bar date, newest stored bar date)`,
+    #: i.e. the window in which "no bar on a session" means something rather
+    #: than "not listed yet" or "already delisted".
+    listed_span: Mapping[str, tuple[date, date]]
+
+
+@dataclass(frozen=True, slots=True)
 class BarWriteResult:
     """What `write_bars` did, for a caller that reports data quality.
 
@@ -192,6 +240,10 @@ class BarWriteResult:
     """
 
     quarantined: tuple[BarQuarantine, ...] = ()
+    #: Sessions a quarantined symbol used to have are never listed here —
+    #: that symbol's whole story is already told by `quarantined` (one
+    #: symbol, one fact). Report-only, per `DroppedSessions`.
+    dropped: tuple[DroppedSessions, ...] = ()
 
 
 #: Corporate actions live beside `fundamentals` in DuckDB rather than in the
@@ -590,6 +642,68 @@ def _first_basis_conflict(
     return None
 
 
+def _dropped_sessions(
+    new_rows: pd.DataFrame, existing: pd.DataFrame
+) -> tuple[DroppedSessions, ...]:
+    """Stored sessions `new_rows` no longer carries, per symbol (Issue #449).
+
+    A provider re-fetch can silently stop returning a bar it used to hand
+    back — the MNST 2026-08-10 case, discovered when `copilot-backfill
+    rebuild` re-fetched Yahoo and the day before MNST's 2:1 split simply
+    stopped coming back. Neither of `write_bars`' existing gates would ever
+    see this: they compare *values* on overlapping `(symbol, date)` pairs,
+    and a dropped row overlaps nothing.
+
+    Per symbol, this is `stored_dates - incoming_dates`, restricted to
+    `[min(incoming_dates), max(incoming_dates)]`: a stored session outside
+    that window is outside *this batch's fetch range* (a delisting, an IPO,
+    the tail of a resumed backfill), not something the provider dropped.
+    That window is also what makes a first-ever backfill and a
+    fetch-failed-so-nothing-came-back symbol both report nothing, without
+    special-casing either: the former has no `existing` rows to lose, and the
+    latter (or any symbol simply absent from `new_rows`) has no incoming
+    window to compare against.
+
+    Args:
+        new_rows: The incoming batch, date-normalized. A symbol quarantined
+            by the caller should already be filtered out, so its history
+            never reports as "dropped" *and* "quarantined" at once.
+        existing: Stored rows for the same symbols, from the affected year
+            partitions, date-normalized. May be empty.
+
+    Returns:
+        One `DroppedSessions` per affected symbol, ascending by symbol; empty
+        when nothing was dropped.
+    """
+    if new_rows.empty or existing.empty:
+        return ()
+    incoming_by_symbol = {
+        str(symbol): set(rows["date"])
+        for symbol, rows in new_rows.groupby("symbol", sort=False)
+    }
+    stored_by_symbol = {
+        str(symbol): set(rows["date"])
+        for symbol, rows in existing.groupby("symbol", sort=False)
+    }
+    dropped: list[DroppedSessions] = []
+    for symbol in sorted(incoming_by_symbol):
+        incoming_dates = incoming_by_symbol[symbol]
+        stored_dates = stored_by_symbol.get(symbol)
+        if not incoming_dates or not stored_dates:
+            continue
+        window_start, window_end = min(incoming_dates), max(incoming_dates)
+        missing = tuple(
+            sorted(
+                stored_date
+                for stored_date in stored_dates - incoming_dates
+                if window_start <= stored_date <= window_end
+            )
+        )
+        if missing:
+            dropped.append(DroppedSessions(symbol=symbol, dates=missing))
+    return tuple(dropped)
+
+
 def _read_splits_on(
     conn: duckdb.DuckDBPyConnection, symbols: Sequence[str], as_of: date
 ) -> dict[str, tuple[SplitEvent, ...]]:
@@ -703,12 +817,20 @@ class MarketStore:
         fail-soft per symbol (the return value), not an exception: one
         provider glitch must not cost a run the other 499 symbols.
 
+        Also reports, per symbol, any stored session within this batch's own
+        fetch window that the batch no longer carries (`BarWriteResult.
+        dropped`, Issue #449) -- a provider silently no longer returning a
+        bar it used to. Report-only: nothing here is quarantined or refused,
+        because this write path never actually loses the row -- concatenation
+        with existing rows means the old bar simply stays written.
+
         Args:
             df: Rows matching `BARS_COLUMNS` (the Parquet schema, including
                 `provider` and `fetched_at` — already stamped by the caller).
 
         Returns:
-            What was skipped. A caller with nothing to report may ignore it.
+            What was skipped and what was dropped. A caller with nothing to
+            report may ignore it.
 
         Raises:
             NonFiniteBarsError: Any OHLCV value is NaN/±inf. The batch is
@@ -745,16 +867,25 @@ class MarketStore:
             keep = ~working["symbol"].isin(reasons)
             working, years = working[keep], years[keep]
 
+        # After the quarantine filter, not before: a quarantined symbol's
+        # missing sessions are already told by `quarantined` (one symbol, one
+        # fact), and `_dropped_sessions` only ever looks at symbols present
+        # in `working`, so filtering first is what keeps the two disjoint.
+        dropped = _dropped_sessions(working, existing)
+
         for year in sorted(years.unique()):
             self._write_partition(int(year), working[years == year])
         return BarWriteResult(
             quarantined=tuple(
                 BarQuarantine(symbol=symbol, reason=reason)
                 for symbol, reason in sorted(reasons.items())
-            )
+            ),
+            dropped=dropped,
         )
 
-    def replace_symbol_bars(self, symbols: Sequence[str], df: pd.DataFrame) -> None:
+    def replace_symbol_bars(
+        self, symbols: Sequence[str], df: pd.DataFrame
+    ) -> BarReplaceResult:
         """Replace every stored row of `symbols` with `df`, across all years.
 
         The rebuild path (`copilot-backfill rebuild`). `write_bars`' immutable
@@ -765,16 +896,34 @@ class MarketStore:
         absent from `df` is erased rather than half-replaced, so a rejected
         fetch must be left out of `symbols` to preserve its history.
 
+        Unlike `write_bars`, a session this replacement drops is genuinely
+        gone afterwards -- that contract is unchanged (Issue #449 only adds
+        *reporting* it via `BarReplaceResult.dropped`, never keeping it: a
+        stray old-basis row surviving inside a freshly rebuilt series is
+        exactly the mixed-basis state the quarantine gates exist to prevent).
+
         Args:
             symbols: Tickers whose stored rows are being replaced wholesale.
             df: Their new raw rows, matching `BARS_COLUMNS`.
+
+        Returns:
+            The stored sessions this replacement erased *from inside the
+            replacement's own date window*, per symbol -- `_dropped_sessions`'
+            window rule, unchanged here. Erasure is wider than the report: a
+            stored bar older than `df`'s first date (or newer than its last),
+            and every row of a symbol named in `symbols` but absent from `df`
+            entirely, is also erased and is deliberately *not* named here,
+            because outside that window "the provider stopped returning it"
+            and "this batch never asked for it" are indistinguishable. Treat
+            an empty result as "nothing was dropped mid-series", never as
+            "nothing was erased".
 
         Raises:
             NonFiniteBarsError: Any OHLCV value is NaN/±inf. Validated before
                 a partition is touched, exactly as in `write_bars`.
         """
         if not symbols:
-            return
+            return BarReplaceResult()
         replaced = set(symbols)
         working = df.copy()
         if not working.empty:
@@ -792,28 +941,49 @@ class MarketStore:
             int(path.parent.name.removeprefix("year="))
             for path in self.parquet_root.glob("year=*/*.parquet")
         }
+        # Read before any partition is touched: this is the only chance to
+        # see what the replacement is about to erase. `_read_partition_rows`
+        # already normalizes `date` to `datetime.date`, exactly like
+        # `working`, so the two frames compare on the same type.
+        existing = self._read_partition_rows(
+            sorted(touched), sorted(replaced), columns=["symbol", "date"]
+        )
+        dropped = _dropped_sessions(working, existing)
         for year in sorted(touched):
             new_rows = working[years == year] if not working.empty else working
             self._replace_partition(year, replaced, new_rows)
+        return BarReplaceResult(dropped=dropped)
 
     def _partition_file(self, year: int) -> Path:
         return self.parquet_root / f"year={year}" / "data.parquet"
 
     def _read_partition_rows(
-        self, years: Iterable[int], symbols: Sequence[str]
+        self,
+        years: Iterable[int],
+        symbols: Sequence[str],
+        columns: list[str] | None = None,
     ) -> pd.DataFrame:
         """Stored rows for `symbols` in the given year partitions.
 
         Read straight from Parquet rather than through `read_bars`: the gate
         compares *raw* stored values, and `read_bars` would hand back
         as-of-adjusted ones.
+
+        Args:
+            years: Year partitions to read; missing ones are skipped.
+            symbols: Tickers to keep.
+            columns: Restrict the read to these Parquet columns (`symbol` and
+                `date` must be among them). A whole-store read -- every year
+                of every symbol, which `replace_symbol_bars` does on a full
+                rebuild -- otherwise materializes OHLCV and the `provider`
+                strings it has no use for. `None` reads `BARS_COLUMNS`.
         """
         wanted = set(symbols)
         frames = [
             rows
             for year in sorted(set(years))
             if (path := self._partition_file(year)).is_file()
-            and not (rows := pd.read_parquet(path)).empty
+            and not (rows := pd.read_parquet(path, columns=columns)).empty
             and not (rows := rows[rows["symbol"].isin(wanted)]).empty
         ]
         if not frames:
@@ -937,6 +1107,48 @@ class MarketStore:
         for path in sorted(self.parquet_root.glob("year=*/*.parquet")):
             symbols.update(str(value) for value in pd.read_parquet(path)["symbol"])
         return tuple(sorted(symbols))
+
+    def session_coverage(self) -> SessionCoverage:
+        """Store-wide daily bar counts and each symbol's stored span.
+
+        The material `copilot-backfill check` needs to derive its own
+        trading-day calendar (Issue #449, 3-B) instead of assuming one: a
+        date most listed symbols have a bar on is a session, one nobody has a
+        bar on is not. Like `stored_symbols`, this reads straight from the
+        Parquet partitions -- never DuckDB -- so an audit never contends for
+        the exclusive file lock an operator or the scheduled run may hold.
+
+        Only `symbol` and `date` are read from each partition file: this
+        walks every stored row across every year, and a store spanning
+        decades is not the place to also materialize OHLCV.
+
+        Returns:
+            Empty mappings when nothing is stored.
+        """
+        bars_per_date: dict[date, int] = {}
+        first_seen: dict[str, date] = {}
+        last_seen: dict[str, date] = {}
+        for path in sorted(self.parquet_root.glob("year=*/*.parquet")):
+            rows = pd.read_parquet(path, columns=["symbol", "date"])
+            if rows.empty:
+                continue
+            bar_dates = pd.to_datetime(rows["date"]).dt.date
+            for raw_date, count in bar_dates.value_counts().items():
+                bar_date = cast("date", raw_date)
+                bars_per_date[bar_date] = bars_per_date.get(bar_date, 0) + int(count)
+            for raw_symbol, symbol_dates in bar_dates.groupby(rows["symbol"]):
+                symbol = str(raw_symbol)
+                oldest, newest = symbol_dates.min(), symbol_dates.max()
+                if symbol not in first_seen or oldest < first_seen[symbol]:
+                    first_seen[symbol] = oldest
+                if symbol not in last_seen or newest > last_seen[symbol]:
+                    last_seen[symbol] = newest
+        return SessionCoverage(
+            bars_per_date=bars_per_date,
+            listed_span={
+                symbol: (first_seen[symbol], last_seen[symbol]) for symbol in first_seen
+            },
+        )
 
     def read_raw_bars(
         self, symbols: Sequence[str], start: date | None = None, end: date | None = None

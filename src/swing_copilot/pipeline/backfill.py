@@ -38,6 +38,7 @@ stored series still interleaves two adjustment bases.
 from __future__ import annotations
 
 import argparse
+import bisect
 import logging
 import sys
 import time
@@ -67,12 +68,16 @@ from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from datetime import datetime
 
     from swing_copilot.clock import Clock
     from swing_copilot.data.base import DataProvider, FetchFailure
-    from swing_copilot.storage.market_store import FundamentalsRecord
+    from swing_copilot.storage.market_store import (
+        DroppedSessions,
+        FundamentalsRecord,
+        SessionCoverage,
+    )
 
 SYMBOL_CHUNK_SIZE = 50
 CHUNK_SLEEP_SECONDS = 2.0
@@ -88,6 +93,23 @@ COVERAGE_TOLERANCE_DAYS = 7
 REBUILD_START = date(1990, 1, 1)
 _PROVIDER_NAME = "yfinance"
 _DEFAULT_SETTINGS_PATH = "config/settings.yaml"
+#: A stored date counts as a real trading session only when at least this
+#: fraction of that date's *listed* symbols (`SessionCoverage.listed_span`)
+#: actually have a bar on it (Issue #449, 3-B). Chosen without measuring the
+#: real store -- this run was not permitted to touch the shared R2 data to
+#: check it against actual coverage -- so it is a single, trivially re-tuned
+#: module constant rather than something spread across the predicate.
+_SESSION_QUORUM_RATIO = 0.5
+#: Symbols that never trade on a real *equity* market holiday because they
+#: follow a different calendar (`^TNX` tracks the US Treasury market, which
+#: sits open on some equity-only holidays such as Columbus Day/Veterans Day).
+#: Excluded only from the missing-session *scan* when it is auto-enumerated
+#: from the store (`--symbols` omitted) -- never from the session calendar
+#: itself, and never when named explicitly via `--symbols`.
+_NON_EQUITY_CALENDAR_SYMBOLS = ("^TNX",)
+#: How many missing/dropped session dates a report names per symbol before
+#: summarizing the rest, so one badly-covered symbol cannot flood the output.
+_MAX_REPORTED_MISSING_SESSIONS = 5
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +164,11 @@ class BarsBackfillResult:
     #: contradicts stored raw closes). Fail-soft like `failures`: their old
     #: rows stand, and `rebuild` is the sanctioned way to accept new ones.
     quarantined_symbols: tuple[str, ...] = ()
+    #: Stored sessions the provider stopped returning, per symbol -- report
+    #: -only (Issue #449). The old rows are still written: `write_bars` never
+    #: loses a row, it only stops re-affirming one this batch's own window
+    #: could have re-affirmed.
+    dropped_sessions: tuple[DroppedSessions, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +179,10 @@ class BarsRebuildResult:
     rejected_symbols: tuple[str, ...]
     written_rows: int
     failures: tuple[FetchFailure, ...]
+    #: Stored sessions the rebuild's re-fetch dropped, per symbol -- and,
+    #: unlike `BarsBackfillResult.dropped_sessions`, genuinely gone
+    #: afterwards: `replace_symbol_bars` erases what it replaces (Issue #449).
+    dropped_sessions: tuple[DroppedSessions, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +194,21 @@ class MixedBasisFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class MissingSessionFinding:
+    """One symbol missing a session the rest of the store has (Issue #449).
+
+    Read-only and re-derived on every `check` -- never persisted -- because
+    "does the store have a hole today" is a fact `check` can always recompute
+    from the store itself; only "when did the provider drop it" needs the
+    daily run's own `run_steps.detail` history to answer.
+    """
+
+    symbol: str
+    #: Ascending.
+    missing_dates: tuple[date, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BarsCheckResult:
     """What the read-only store audit saw."""
 
@@ -171,6 +217,10 @@ class BarsCheckResult:
     format_problem: str | None
     scanned_symbols: tuple[str, ...]
     findings: tuple[MixedBasisFinding, ...]
+    #: Sessions the rest of the store has that a scanned symbol lacks. Empty
+    #: whenever `format_problem` is set: those partitions cannot be trusted
+    #: as raw, so any gap found in them would be meaningless.
+    missing_sessions: tuple[MissingSessionFinding, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +376,7 @@ def backfill_bars(
         quarantined_symbols=tuple(
             quarantine.symbol for quarantine in write_result.quarantined
         ),
+        dropped_sessions=write_result.dropped,
     )
 
 
@@ -366,43 +417,134 @@ def rebuild_bars(deps: BarsBackfillDeps, symbols: Sequence[str]) -> BarsRebuildR
     rebuilt = batch.symbols_with_bars()
     replaced = tuple(symbol for symbol in symbols if symbol in rebuilt)
     rejected = tuple(symbol for symbol in symbols if symbol not in rebuilt)
+    dropped_sessions: tuple[DroppedSessions, ...] = ()
     if replaced:
-        deps.market_store.replace_symbol_bars(
+        replace_result = deps.market_store.replace_symbol_bars(
             list(replaced), _stamp_bars(batch.bars, deps.provider_name, fetched_at)
         )
+        dropped_sessions = replace_result.dropped
     return BarsRebuildResult(
         replaced_symbols=replaced,
         rejected_symbols=rejected,
         written_rows=len(batch.bars),
         failures=batch.failures,
+        dropped_sessions=dropped_sessions,
     )
 
 
+def _session_dates(coverage: SessionCoverage) -> frozenset[date]:
+    """Which stored dates count as a real trading session (Issue #449, 3-B).
+
+    A date is a session when at least `_SESSION_QUORUM_RATIO` of the symbols
+    *listed* on it (i.e. within their own stored span) actually have a bar on
+    it. This single predicate is what absorbs every edge case without a
+    special rule: a date with zero stored bars is not even a candidate (a
+    real market holiday never got this far), a universe that grows over the
+    years grows `L(D)` right along with it so the threshold never drifts, and
+    one symbol's stray bad bar cannot manufacture a session on its own
+    (`n=1` against `L≈510` never clears the ratio, so it never drags the
+    other 509 symbols into being audited against a date that meant nothing).
+
+    Uses sorted-array binary search for `L(D)` (`bisect`) rather than
+    counting per date over every symbol: the latter is `O(dates * symbols)`,
+    which over a full store (~500 symbols, decades of dates) is the
+    difference between a sub-second scan and one that visibly drags.
+    """
+    if not coverage.bars_per_date:
+        return frozenset()
+    firsts = sorted(first for first, _ in coverage.listed_span.values())
+    lasts = sorted(last for _, last in coverage.listed_span.values())
+    sessions: set[date] = set()
+    for bar_date, count in coverage.bars_per_date.items():
+        # Listed on `bar_date` == first <= bar_date <= last, so the count is
+        # "how many symbols started on or before it" minus "how many had
+        # already ended before it".
+        listed = bisect.bisect_right(firsts, bar_date) - bisect.bisect_left(
+            lasts, bar_date
+        )
+        if count >= _SESSION_QUORUM_RATIO * listed:
+            sessions.add(bar_date)
+    return frozenset(sessions)
+
+
+def _session_gaps(
+    coverage: SessionCoverage,
+    scanned: Sequence[str],
+    bar_dates_by_symbol: Mapping[str, frozenset[date]],
+) -> tuple[MissingSessionFinding, ...]:
+    """Sessions each of `scanned` is missing while it was listed (Issue #449).
+
+    Args:
+        coverage: The store-wide calendar (`MarketStore.session_coverage`),
+            always built from the *whole* store regardless of `scanned` --
+            a calendar derived from one symbol would be meaningless.
+        scanned: Symbols to check for gaps; a symbol absent from
+            `coverage.listed_span` (no stored bars at all) is silently
+            skipped, matching the mixed-basis scan's treatment of the same
+            case.
+        bar_dates_by_symbol: Each scanned symbol's own stored bar dates.
+
+    Returns:
+        One finding per symbol with at least one gap, in `scanned` order.
+    """
+    sessions = _session_dates(coverage)
+    findings: list[MissingSessionFinding] = []
+    for symbol in scanned:
+        span = coverage.listed_span.get(symbol)
+        if span is None:
+            continue
+        first, last = span
+        bar_dates = bar_dates_by_symbol.get(symbol, frozenset())
+        missing = tuple(
+            sorted(
+                session
+                for session in sessions
+                if first <= session <= last and session not in bar_dates
+            )
+        )
+        if missing:
+            findings.append(MissingSessionFinding(symbol=symbol, missing_dates=missing))
+    return tuple(findings)
+
+
 def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckResult:
-    """Audit stored bars for a mixed adjustment basis. Never writes.
+    """Audit stored bars for a mixed adjustment basis and dropped sessions.
 
-    Reads the *bars* from the Parquet partitions directly
-    (`MarketStore.read_raw_bars`) rather than through DuckDB, because the
-    signature is only visible in the values as stored -- `read_bars` would
-    hand back an adjusted series in which it can no longer appear.
+    Never writes. Two independent read-only checks share the same chunked
+    walk over the store:
 
-    The splits do come from DuckDB, in one short query per chunk: a flip is a
-    split-sized step, and asking the question without them flags 153 of this
-    repository's 510 symbols on nothing but 2008 and the dot-com years
-    (Issue #421). A reversing pair is further required to have a run no
-    longer than 25 sessions with a matching split's `ex_date` after that run,
-    which took the same audit from 19 flagged symbols to 2 (Issue #425). Pass
-    a store opened read-only, as the CLI does — a write connection ensures
-    its tables on open, which would make an audit that writes nothing write
-    something.
+    1. **Mixed adjustment basis** (Issue #413/#421/#425). Reads the *bars*
+       from the Parquet partitions directly (`MarketStore.read_raw_bars`)
+       rather than through DuckDB, because the signature is only visible in
+       the values as stored -- `read_bars` would hand back an adjusted series
+       in which it can no longer appear. The splits do come from DuckDB, in
+       one short query per chunk: a flip is a split-sized step, and asking
+       the question without them flags 153 of this repository's 510 symbols
+       on nothing but 2008 and the dot-com years (Issue #421). A reversing
+       pair is further required to have a run no longer than 25 sessions with
+       a matching split's `ex_date` after that run, which took the same audit
+       from 19 flagged symbols to 2 (Issue #425).
+    2. **Sessions the store has that a symbol is missing** (Issue #449). The
+       session calendar (`MarketStore.session_coverage`) is always built from
+       the *whole* store, regardless of `--symbols` -- a calendar derived
+       from one symbol would be meaningless. `^TNX` follows the bond market's
+       holiday calendar rather than the equity one, so it is excluded from
+       this half of the scan only when `symbols` was not given (i.e. the scan
+       enumerated the store itself); naming it explicitly still scans it,
+       since the operator asked on purpose.
+
+    Pass a store opened read-only, as the CLI does — a write connection
+    ensures its tables on open, which would make an audit that writes nothing
+    write something.
 
     Args:
         market_store: The store to audit; open it read-only.
         symbols: Tickers to scan; empty means every symbol with stored bars.
 
     Returns:
-        The marker's state, what was scanned, and one finding per symbol
-        whose series still flips between two bases.
+        The marker's state, what was scanned, one finding per symbol whose
+        series still flips between two bases, and one finding per symbol
+        missing a session the rest of the store has.
     """
     scanned = tuple(symbols) if symbols else market_store.stored_symbols()
     try:
@@ -415,21 +557,31 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
             format_problem=str(exc), scanned_symbols=scanned, findings=()
         )
 
+    coverage = market_store.session_coverage()
+    session_scan_symbols = (
+        tuple(
+            symbol for symbol in scanned if symbol not in _NON_EQUITY_CALENDAR_SYMBOLS
+        )
+        if not symbols
+        else scanned
+    )
+
     # Chunked rather than one symbol at a time: every read re-scans every
     # year partition, so a per-symbol loop over a 500-name universe would
     # walk 26 years of Parquet 500 times over. One chunk is one pass.
     flagged: dict[str, date] = {}
+    bar_dates_by_symbol: dict[str, frozenset[date]] = {}
     for chunk in _chunks(scanned, SYMBOL_CHUNK_SIZE):
         rows = market_store.read_raw_bars(chunk)
         if rows.empty:
             continue
         splits_by_symbol = market_store.read_splits(chunk, as_of=date.max)
-        for symbol, series in rows.groupby("symbol", sort=False):
-            position = first_mixed_basis_jump(
-                series, splits_by_symbol.get(str(symbol), ())
-            )
+        for raw_symbol, series in rows.groupby("symbol", sort=False):
+            symbol = str(raw_symbol)
+            bar_dates_by_symbol[symbol] = frozenset(series["date"])
+            position = first_mixed_basis_jump(series, splits_by_symbol.get(symbol, ()))
             if position is not None:
-                flagged[str(symbol)] = series["date"].to_numpy()[position]
+                flagged[symbol] = series["date"].to_numpy()[position]
     return BarsCheckResult(
         format_problem=None,
         scanned_symbols=scanned,
@@ -438,6 +590,9 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
             MixedBasisFinding(symbol=symbol, first_jump_date=flagged[symbol])
             for symbol in scanned
             if symbol in flagged
+        ),
+        missing_sessions=_session_gaps(
+            coverage, session_scan_symbols, bar_dates_by_symbol
         ),
     )
 
@@ -585,6 +740,33 @@ def _validate_limit(args: argparse.Namespace) -> None:
         raise BackfillError(msg)
 
 
+def _truncated_dates(dates: Sequence[date]) -> str:
+    """Render up to `_MAX_REPORTED_MISSING_SESSIONS` dates, then summarize.
+
+    Both callers hand over an ascending list, so the slice keeps the *oldest*
+    dates -- the first session a hole opened on is what an operator chases,
+    and `daily.py`'s `run_steps.detail` truncates the same list the same way.
+    The label has to say so: reporting the head as "最新" would send that
+    operator looking for a gap on the wrong end of the series.
+
+    Args:
+        dates: Ascending session dates.
+
+    Returns:
+        A comma-joined date list, with a leading count and a trailing `...`
+        once there are more dates than fit.
+    """
+    shown = ", ".join(d.isoformat() for d in dates[:_MAX_REPORTED_MISSING_SESSIONS])
+    if len(dates) > _MAX_REPORTED_MISSING_SESSIONS:
+        return f"古い順 {_MAX_REPORTED_MISSING_SESSIONS} 件: {shown}, ...（全 {len(dates)} 件）"
+    return shown
+
+
+def _format_dropped_sessions_line(prefix: str, dropped: DroppedSessions) -> str:
+    """One line naming a symbol and the sessions the provider stopped returning."""
+    return f"{prefix}: {dropped.symbol}（{_truncated_dates(dropped.dates)}）\n"
+
+
 def _run_bars(args: argparse.Namespace, end: date, symbols: list[str]) -> None:
     deps = BarsBackfillDeps(
         data_provider=YFinanceProvider(),
@@ -603,6 +785,12 @@ def _run_bars(args: argparse.Namespace, end: date, symbols: list[str]) -> None:
     if result.quarantined_symbols:
         sys.stdout.write(
             f"隔離した銘柄: {', '.join(sorted(result.quarantined_symbols))}\n"
+        )
+    for dropped in result.dropped_sessions:
+        sys.stdout.write(
+            _format_dropped_sessions_line(
+                "供給元が返さなくなったセッション（既存行は保持）", dropped
+            )
         )
     if result.failures and not result.fetched_symbols and not result.skipped_symbols:
         # Nothing was covered already and nothing could be fetched: the store
@@ -664,6 +852,12 @@ def _run_rebuild(args: argparse.Namespace, clock: SystemClock) -> None:
         sys.stdout.write(
             f"既存行を維持した銘柄: {', '.join(result.rejected_symbols)}\n"
         )
+    for dropped in result.dropped_sessions:
+        sys.stdout.write(
+            _format_dropped_sessions_line(
+                "供給元が返さなくなったセッション（rebuild により削除済み）", dropped
+            )
+        )
     if not result.replaced_symbols:
         # Nothing was replaced, so the store still holds whatever basis it
         # had -- and, crucially, no format marker was written over it.
@@ -678,19 +872,26 @@ def _run_check(args: argparse.Namespace) -> None:
         sys.stdout.write(f"形式マーカー: NG\n{result.format_problem}\n")
         return
     sys.stdout.write("形式マーカー: ok（basis=raw, version=2）\n")
-    if not result.findings:
+    if not result.findings and not result.missing_sessions:
         sys.stdout.write(
-            f"check: ok（対象 {len(result.scanned_symbols)} 銘柄、混在署名なし）\n"
+            f"check: ok（対象 {len(result.scanned_symbols)} 銘柄、"
+            "混在署名なし、欠損セッションなし）\n"
         )
         return
     sys.stdout.write(
         f"check: 対象 {len(result.scanned_symbols)} 銘柄 / "
-        f"混在署名 {len(result.findings)} 銘柄\n"
+        f"混在署名 {len(result.findings)} 銘柄 / "
+        f"欠損セッション {len(result.missing_sessions)} 銘柄\n"
     )
     for finding in result.findings:
         sys.stdout.write(
             f"混在署名: {finding.symbol}（最初のジャンプ "
             f"{finding.first_jump_date.isoformat()}）\n"
+        )
+    for missing in result.missing_sessions:
+        sys.stdout.write(
+            f"欠損セッション: {missing.symbol} {len(missing.missing_dates)} 件"
+            f"（{_truncated_dates(missing.missing_dates)}）\n"
         )
 
 

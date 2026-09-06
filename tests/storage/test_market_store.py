@@ -16,6 +16,7 @@ from swing_copilot.storage.market_store import (
     BARS_COLUMNS,
     DEFAULT_PARQUET_ROOT,
     BarsFormatError,
+    DroppedSessions,
     FundamentalsFetchStamp,
     FundamentalsFetchState,
     FundamentalsRecord,
@@ -1491,6 +1492,164 @@ class TestWriteBarsQuarantineGate:
         assert result.quarantined == ()
 
 
+class TestWriteBarsReportsDroppedSessions:
+    """Issue #449: a re-fetch that silently stops carrying a stored session."""
+
+    def test_write_bars_reports_a_stored_session_the_batch_no_longer_carries(
+        self, market_store
+    ):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-02", 10, 10.5, 9.5, 10.1, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        assert result.dropped == (
+            DroppedSessions(symbol="AAA", dates=(date(2026, 7, 2),)),
+        )
+
+    def test_write_bars_keeps_the_dropped_row_and_writes_the_rest(self, market_store):
+        """The load-bearing test.
+
+        If `write_bars` ever starts erasing a dropped row, this is the test
+        that must fail (design decision 1-(c)).
+        """
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-02", 10, 10.5, 9.5, 10.1, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        stored = market_store.read_raw_bars(["AAA"])
+        assert stored["date"].tolist() == [
+            date(2026, 7, 1),
+            date(2026, 7, 2),
+            date(2026, 7, 3),
+        ]
+
+    def test_write_bars_does_not_report_a_stored_session_outside_the_incoming_window(
+        self, market_store
+    ):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-02", 10, 10.5, 9.5, 10.1, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                    ("AAA", "2026-07-04", 10, 10.5, 9.5, 10.3, 1000),
+                    ("AAA", "2026-07-05", 10, 10.5, 9.5, 10.4, 1000),
+                ]
+            )
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                    ("AAA", "2026-07-04", 10, 10.5, 9.5, 10.3, 1000),
+                ]
+            )
+        )
+
+        assert result.dropped == ()
+
+    def test_write_bars_reports_nothing_when_nothing_is_stored_yet(self, market_store):
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        assert result.dropped == ()
+
+    def test_write_bars_does_not_report_dropped_sessions_for_a_quarantined_symbol(
+        self, market_store
+    ):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("AAA", "2026-07-02", 10, 10.5, 9.5, 10.1, 1000),
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    # A close that deviates past the correction tolerance
+                    # quarantines the whole symbol...
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 5.0, 1000),
+                    # ...so 07-02 going missing from this same batch must not
+                    # *also* surface as a drop: one symbol, one fact.
+                    ("AAA", "2026-07-03", 10, 10.5, 9.5, 10.2, 1000),
+                ]
+            )
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["AAA"]
+        assert result.dropped == ()
+
+    def test_write_bars_reports_a_drop_for_one_symbol_and_a_quarantine_for_another(
+        self, market_store
+    ):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 10.0, 1000),
+                    ("BBB", "2026-07-01", 20, 20.5, 19.5, 20.0, 1000),
+                    ("BBB", "2026-07-02", 20, 20.5, 19.5, 20.1, 1000),
+                    ("BBB", "2026-07-03", 20, 20.5, 19.5, 20.2, 1000),
+                ]
+            )
+        )
+
+        result = market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10.5, 9.5, 5.0, 1000),
+                    ("BBB", "2026-07-01", 20, 20.5, 19.5, 20.0, 1000),
+                    ("BBB", "2026-07-03", 20, 20.5, 19.5, 20.2, 1000),
+                ]
+            )
+        )
+
+        assert [item.symbol for item in result.quarantined] == ["AAA"]
+        assert result.dropped == (
+            DroppedSessions(symbol="BBB", dates=(date(2026, 7, 2),)),
+        )
+
+
 class TestCorporateActions:
     def test_write_then_read_back_both_kinds(self, market_store):
         market_store.write_corporate_actions(
@@ -1790,6 +1949,98 @@ class TestReplaceSymbolBars:
 
         assert partition.read_bytes() == previous
 
+    def test_reports_the_sessions_the_replacement_drops(self, market_store):
+        """The MNST shape from Issue #449.
+
+        A rebuild silently drops the day before the symbol's 2:1 split
+        ex-date.
+        """
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-10", 90, 91, 89, 90.0, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            )
+        )
+
+        result = market_store.replace_symbol_bars(
+            ["MNST"],
+            _bars(
+                [
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            ),
+        )
+
+        assert result.dropped == (
+            DroppedSessions(symbol="MNST", dates=(date(2026, 8, 10),)),
+        )
+
+    def test_still_erases_the_dropped_session(self, market_store):
+        """Regression guard.
+
+        Detecting a drop must never turn into keeping it -- that is exactly
+        the `replace_symbol_bars` contract (design decision 1 note).
+        """
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-10", 90, 91, 89, 90.0, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            )
+        )
+
+        market_store.replace_symbol_bars(
+            ["MNST"],
+            _bars(
+                [
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            ),
+        )
+
+        stored = market_store.read_raw_bars(["MNST"])
+        assert date(2026, 8, 10) not in stored["date"].tolist()
+
+    def test_reports_nothing_for_a_symbol_with_no_stored_rows(self, market_store):
+        result = market_store.replace_symbol_bars(
+            ["NEWSYM"], _bars([("NEWSYM", "2026-07-15", 10, 10, 10, 10.0, 100)])
+        )
+
+        assert result.dropped == ()
+
+    def test_ignores_sessions_outside_the_replacement_window(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("MNST", "2025-01-01", 10, 10, 10, 10.0, 100),
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            )
+        )
+
+        # A whole-history rebuild that no longer covers 2025-01-01 at all --
+        # the fetch window is [2026-08-07, 2026-08-11], and a stored date
+        # outside it is out of scope for this batch, not something dropped.
+        result = market_store.replace_symbol_bars(
+            ["MNST"],
+            _bars(
+                [
+                    ("MNST", "2026-08-07", 97, 97, 97, 97.2, 1000),
+                    ("MNST", "2026-08-11", 45, 46, 44, 45.5, 2000),
+                ]
+            ),
+        )
+
+        assert result.dropped == ()
+
 
 class TestCorporateActionsOnALegacyDatabase:
     """A database written before Issue #413 has no `corporate_actions` table.
@@ -1922,3 +2173,58 @@ class TestStoredSymbols:
 
     def test_an_empty_store_lists_nothing(self, market_store):
         assert market_store.stored_symbols() == ()
+
+
+class TestSessionCoverage:
+    """Issue #449, 3-B: the audit's own store-derived trading-day calendar."""
+
+    def test_counts_bars_per_date_and_bounds_each_symbol(self, market_store):
+        market_store.write_bars(
+            _bars(
+                [
+                    ("AAA", "2026-07-01", 10, 10, 10, 10.0, 100),
+                    ("AAA", "2026-07-02", 10, 10, 10, 10.0, 100),
+                    ("BBB", "2026-07-02", 20, 20, 20, 20.0, 100),
+                    ("BBB", "2026-07-03", 20, 20, 20, 20.0, 100),
+                ]
+            )
+        )
+
+        coverage = market_store.session_coverage()
+
+        assert coverage.bars_per_date == {
+            date(2026, 7, 1): 1,
+            date(2026, 7, 2): 2,
+            date(2026, 7, 3): 1,
+        }
+        assert coverage.listed_span == {
+            "AAA": (date(2026, 7, 1), date(2026, 7, 2)),
+            "BBB": (date(2026, 7, 2), date(2026, 7, 3)),
+        }
+
+    def test_an_empty_store_reports_empty_coverage(self, market_store):
+        coverage = market_store.session_coverage()
+
+        assert (coverage.bars_per_date, coverage.listed_span) == ({}, {})
+
+    def test_never_opens_the_database(self, tmp_path: Path) -> None:
+        # `replace_symbol_bars` never opens DuckDB (it reads no splits), so
+        # planting through it -- rather than `write_bars` -- is what proves
+        # the DB file was never created by anything other than
+        # `session_coverage()` itself.
+        writer = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        writer.replace_symbol_bars(
+            ["AAA"], _bars([("AAA", "2026-07-01", 10, 10, 10, 10.0, 100)])
+        )
+        assert not (tmp_path / "copilot.duckdb").exists()
+        auditor = MarketStore(
+            Database(tmp_path / "copilot.duckdb", read_only=True),
+            parquet_root=tmp_path / "bars",
+        )
+
+        coverage = auditor.session_coverage()
+
+        assert coverage.bars_per_date == {date(2026, 7, 1): 1}
+        assert not (tmp_path / "copilot.duckdb").exists()

@@ -811,13 +811,35 @@ S&P 500ユニバースに含まれないので、`--symbols`で別途バック�
 なく`MarketStore.stored_symbols()`**（ストアに実在する銘柄）を対象にする。
 `MarketStore.read_raw_bars()`で生値をそのまま読み、マーカーが揃っていれば
 `形式マーカー: ok（basis=raw, version=2）`、揃っていなければ
-`形式マーカー: NG`と`BarsFormatError`の本文を表示する。続けて混在署名と
-欠損セッション（下記節）がいずれも無ければ`check: ok（対象 N 銘柄、
-混在署名なし、欠損セッションなし）`、どちらか一方でもあれば
-`check: 対象 N 銘柄 / 混在署名 K 銘柄 / 欠損セッション M 銘柄`に続けて
-該当銘柄ごとに`混在署名: SYM（最初のジャンプ YYYY-MM-DD）`・
-`欠損セッション: SYM N 件（日付, ...）`を1行ずつ列挙する。何も
-書き込まない。
+`形式マーカー: NG`と`BarsFormatError`の本文を表示する（この場合は下記の
+2つの監査とも走らない）。続けて混在署名と欠損セッション（下記節）が
+いずれも無ければ`check: ok（対象 N 銘柄、混在署名なし、欠損セッション
+なし）`、どちらか一方でもあれば`check: 対象 N 銘柄 / 混在署名 K 銘柄 /
+欠損セッション M 銘柄`に続けて該当銘柄ごとに`混在署名: SYM（最初のジャンプ
+YYYY-MM-DD）`・`欠損セッション: SYM N 件（日付, ...）`を1行ずつ列挙する。
+
+**続けて2つ目の監査として`risk_assessments.entry_price`の基準ずれを報告する
+（Issue #427）。** `risk_assessments`が凍結した`entry_price`は、構成上その
+run日の**生バーの終値そのもの**である（`read_bars`が掛ける分割調整は
+`as_of`当日の行には決して効かないため）。`copilot-backfill rebuild`が
+その後バーだけを生値へ置き換えると、凍結値と生バーの間に事後的な乖離が
+生まれうる——これが#423で発見された基準ずれの実体で、`entry_price`監査は
+それを保存済み履歴から検出する。判定は`tracking/update.py`の同日整合性
+述語（`is_entry_price_basis_mismatch`、許容幅0.5%）をそのまま共有し、
+分割は一切参照しない。findingsが無ければ`entry_price: ok（対象 N 行 /
+M 銘柄、基準ずれなし）`、あれば`entry_price: 対象 N 行 / M 銘柄 / 基準ずれ
+K 行`に続けて`基準ずれ: SYM YYYY-MM-DD（凍結 P1 / 生バー終値 P2、比 R）`を
+1行ずつ列挙し、`copilot-track rebuild --symbol <SYMBOL>`での是正を促す
+1行を添える。同日の生バーが無い等で判定できなかった行は`entry_price
+判定不能: N 行（同日の生バーが store に無い）`として件数だけ報告する
+（誤検知を避けるため個別行は列挙しない）。`risk_assessments`/`runs`が
+存在しないDB（バーだけのバックフィル用途）でも例外にならず、対象0行の
+`ok`を返す。
+
+**両方の監査とも何も書き込まず、`--symbols`は両方に効く。findingsが
+あっても`check`の終了コードは0のまま変わらない**——是正経路（
+`copilot-track rebuild`）は既に存在し、しかもfail-softで自動的に直るため、
+runを止める根拠が無い。
 
 ### 欠損セッションの検出・記録（Issue #449）
 

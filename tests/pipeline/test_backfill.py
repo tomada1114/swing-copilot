@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import pandas as pd
 import pytest
@@ -20,6 +21,7 @@ from swing_copilot.pipeline.backfill import (
     backfill_bars,
     backfill_fundamentals,
     check_bars,
+    check_entry_prices,
     rebuild_bars,
 )
 from swing_copilot.pipeline.backfill import main as backfill_main
@@ -31,8 +33,10 @@ from swing_copilot.storage.market_store import (
     MarketStore,
     NonFiniteBarsError,
 )
+from swing_copilot.storage.state_store import StateStore
 from swing_copilot.universe import UniverseMember
 from swing_copilot.universe_sampling import select_universe_sample
+from tests.support.runs import seed_run as support_seed_run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1756,3 +1760,253 @@ class TestCheckCliUnmigratedStore:
         assert "形式マーカー: NG" in out
         assert "copilot-backfill rebuild" in out
         assert "混在署名" not in out
+
+
+def _seed_run(database: Database, run_id: UUID, run_date: date) -> None:
+    """Register one `runs` row, the entry_price audit's date source.
+
+    Through `tests.support.runs.seed_run` (Issue #398's public write path)
+    rather than a hand-written raw SQL insert against the `runs` table, which
+    `test_quality_contracts.py` bans outside `tests/storage/`/`tests/support/`.
+    """
+    support_seed_run(StateStore(database), run_id, run_date)
+
+
+def _seed_frozen_entry_price(
+    database: Database, run_id: UUID, symbol: str, entry_price: float | None
+) -> None:
+    """Insert one `risk_assessments` row -- the audit's own read target."""
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO risk_assessments (
+                run_id, symbol, status, entry_price,
+                reasons_json, warnings_json, sizing_warnings_json
+            ) VALUES (?, ?, 'approved', ?, '[]', '[]', '[]')
+            """,
+            [str(run_id), symbol, entry_price],
+        )
+
+
+class TestCheckEntryPrices:
+    """Issue #427: `risk_assessments.entry_price` audited against its own day's raw bar."""
+
+    RUN_DATE = date(2026, 8, 19)
+    RUN_ID = UUID("66666666-6666-6666-6666-666666666666")
+
+    def _deps(self, tmp_path: Path) -> tuple[Database, MarketStore]:
+        database = Database(tmp_path / "copilot.duckdb")
+        StateStore(database).init_schema()
+        return database, MarketStore(database, parquet_root=tmp_path / "bars")
+
+    def test_a_matching_entry_price_is_not_a_finding(self, tmp_path: Path) -> None:
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 100.0)
+        store.write_bars(pd.DataFrame([_stored_row("APH", self.RUN_DATE, 100.0)]))
+
+        result = check_entry_prices(database, store, [])
+
+        assert result.scanned_rows == 1
+        assert result.findings == ()
+
+    def test_the_aph_shape_frozen_at_double_the_raw_close_is_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 156.039993)
+        store.write_bars(pd.DataFrame([_stored_row("APH", self.RUN_DATE, 78.019997)]))
+
+        result = check_entry_prices(database, store, [])
+
+        assert len(result.findings) == 1
+        finding = result.findings[0]
+        assert finding.symbol == "APH"
+        assert finding.run_date == self.RUN_DATE
+        assert finding.run_id == self.RUN_ID
+        assert finding.frozen_entry_price == pytest.approx(156.039993)
+        assert finding.bar_close == pytest.approx(78.019997)
+
+    def test_a_rounding_level_difference_is_not_a_finding(self, tmp_path: Path) -> None:
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        # 0.01 on a 100.00 close is 0.01%, well inside the 0.5% tolerance.
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 100.01)
+        store.write_bars(pd.DataFrame([_stored_row("APH", self.RUN_DATE, 100.0)]))
+
+        result = check_entry_prices(database, store, [])
+
+        assert result.findings == ()
+        assert result.unresolved_rows == 0
+
+    def test_a_missing_same_day_bar_is_unresolved_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 100.0)
+        # No bars stored for APH at all.
+
+        result = check_entry_prices(database, store, [])
+
+        assert result.scanned_rows == 1
+        assert result.findings == ()
+        assert result.unresolved_rows == 1
+
+    def test_a_split_after_the_run_date_never_produces_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """The audit never reads splits at all (design decision, Issue #427).
+
+        A regression guard against the factor-driven false positives #425
+        tuned `check_bars` for: this audit has no equivalent tuning because it
+        has no split-based comparison to tune in the first place.
+        """
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 100.0)
+        store.write_bars(pd.DataFrame([_stored_row("APH", self.RUN_DATE, 100.0)]))
+        store.write_corporate_actions(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "APH",
+                        "ex_date": self.RUN_DATE + timedelta(days=5),
+                        "kind": "split",
+                        "value": 2.0,
+                    }
+                ]
+            ),
+            provider="yfinance",
+            fetched_at=_NOW,
+        )
+
+        result = check_entry_prices(database, store, [])
+
+        assert result.findings == ()
+
+    def test_a_store_with_no_frozen_rows_returns_an_all_zero_result(
+        self, tmp_path: Path
+    ) -> None:
+        database, store = self._deps(tmp_path)
+
+        result = check_entry_prices(database, store, [])
+
+        assert (result.scanned_rows, result.scanned_symbols) == (0, ())
+        assert (result.findings, result.unresolved_rows) == ((), 0)
+
+    def test_writes_nothing_at_all(self, tmp_path: Path) -> None:
+        database, store = self._deps(tmp_path)
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        _seed_frozen_entry_price(database, self.RUN_ID, "APH", 156.039993)
+        store.write_bars(pd.DataFrame([_stored_row("APH", self.RUN_DATE, 78.019997)]))
+        before = _tree_snapshot(tmp_path)
+
+        auditor_db = Database(tmp_path / "copilot.duckdb", read_only=True)
+        auditor_store = MarketStore(auditor_db, parquet_root=tmp_path / "bars")
+        result = check_entry_prices(auditor_db, auditor_store, [])
+
+        # The scan did real work (a genuine finding), and still touched nothing.
+        assert result.findings != ()
+        assert _tree_snapshot(tmp_path) == before
+
+
+class TestCheckCliEntryPriceAudit:
+    """Issue #427: `check`'s second audit, appended after the bar audit."""
+
+    RUN_DATE = date(2026, 8, 19)
+    RUN_ID = UUID("77777777-7777-7777-7777-777777777777")
+
+    def _seed(self, tmp_path: Path, rows: dict[str, tuple[float, float]]) -> None:
+        """Seed one run plus a frozen entry_price/raw bar pair per symbol.
+
+        `rows` maps `symbol -> (frozen_entry_price, raw_bar_close)`.
+        """
+        database = Database(tmp_path / "copilot.duckdb")
+        StateStore(database).init_schema()
+        store = MarketStore(database, parquet_root=tmp_path / "bars")
+        _seed_run(database, self.RUN_ID, self.RUN_DATE)
+        for symbol, (entry_price, _) in rows.items():
+            _seed_frozen_entry_price(database, self.RUN_ID, symbol, entry_price)
+        store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row(symbol, self.RUN_DATE, bar_close)
+                    for symbol, (_, bar_close) in rows.items()
+                ]
+            )
+        )
+
+    def test_prints_ok_when_no_row_disagrees(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path, {"AAA": (100.0, 100.0)})
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "entry_price: ok（対象 1 行 / 1 銘柄、基準ずれなし）" in out
+
+    def test_lists_every_basis_mismatch_and_the_remediation_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path, {"APH": (156.039993, 78.019997)})
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "entry_price: 対象 1 行 / 1 銘柄 / 基準ずれ 1 行" in out
+        assert (
+            "基準ずれ: APH 2026-08-19（凍結 156.039993 / 生バー終値 78.019997、"
+            "比 2.0000）" in out
+        )
+        assert (
+            "基準ずれの建玉は `copilot-track rebuild --symbol <SYMBOL>` "
+            "で是正すること（凍結値ではなく同日バー終値が使われる）。" in out
+        )
+
+    def test_findings_do_not_change_the_exit_code(self, tmp_path: Path) -> None:
+        self._seed(tmp_path, {"APH": (156.039993, 78.019997)})
+
+        # Would raise SystemExit if a finding turned `check` non-zero.
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+    def test_an_unmigrated_store_skips_the_entry_price_section(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path, {"APH": (156.039993, 78.019997)})
+        (tmp_path / "bars" / "_format.json").unlink()
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "形式マーカー: NG" in out
+        assert "entry_price" not in out
+
+    def test_a_store_with_no_risk_assessments_table_reports_zero_rows(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_bars(pd.DataFrame([_stored_row("AAA", self.RUN_DATE, 100.0)]))
+
+        backfill_main(["check", "--db", str(tmp_path / "copilot.duckdb")])
+
+        out = capsys.readouterr().out
+        assert "entry_price: ok（対象 0 行 / 0 銘柄、基準ずれなし）" in out
+
+    def test_symbols_narrows_the_entry_price_audit_too(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path, {"AAA": (200.0, 100.0), "BBB": (50.0, 50.0)})
+
+        backfill_main(
+            ["check", "--db", str(tmp_path / "copilot.duckdb"), "--symbols", "aaa"]
+        )
+
+        out = capsys.readouterr().out
+        assert "基準ずれ 1 行" in out
+        assert "基準ずれ: AAA" in out
+        assert "BBB" not in out

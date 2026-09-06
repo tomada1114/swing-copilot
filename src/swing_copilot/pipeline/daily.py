@@ -115,6 +115,7 @@ if TYPE_CHECKING:
         TruncatedCandidate,
     )
     from swing_copilot.storage.market_store import (
+        DroppedSessions,
         FundamentalsFetchState,
         FundamentalsRecord,
         MarketStore,
@@ -159,6 +160,16 @@ _FUNDAMENTALS_INGESTED_FORMS = ("10-K", "10-Q")
 #: How many symbols a fundamentals `run_steps.detail` enumerates before it
 #: summarizes the rest as a count (`_summarize_symbols`).
 _FUNDAMENTALS_DETAIL_SYMBOL_LIMIT = 10
+#: How many symbols' dropped sessions (Issue #449) the price step's detail
+#: names before summarizing the rest, mirroring `_FUNDAMENTALS_DETAIL_SYMBOL_
+#: LIMIT`'s reasoning: an outage-shaped event can touch every symbol, and a
+#: detail nobody can read is a detail nobody reads.
+_MAX_REPORTED_DROPPED_SYMBOLS = 10
+#: How many dropped dates a single symbol's entry shows before summarizing
+#: the rest as `(+N)`. Deliberately the same name/value `pipeline/backfill.py`
+#: uses for its own truncation of the same kind of list — both are private,
+#: module-local constants (Issue #449).
+_MAX_REPORTED_MISSING_SESSIONS = 5
 #: How many of a symbol's earlier verdicts the export feeds back (Issue #191).
 _PRIOR_VERDICT_LIMIT = 3
 #: How many of a retro step's fail-soft notes fit in one `run_steps.detail`.
@@ -502,6 +513,29 @@ def _stamp_bars(
     return stamped
 
 
+def _format_dropped_sessions(dropped: tuple[DroppedSessions, ...]) -> str:
+    """Render `write_bars`' Issue #449 report for a durable `run_steps.detail`.
+
+    `run_steps.detail` is the only place "when did the provider drop a
+    session" persists (`check_bars`' own scan recomputes "does the store have
+    a hole today" fresh every time and stores nothing) -- so this must fit a
+    string, not a table, and still be readable after a bad day touches many
+    symbols. Symbols beyond `_MAX_REPORTED_DROPPED_SYMBOLS` and dates beyond
+    `_MAX_REPORTED_MISSING_SESSIONS` per symbol are summarized as `(+N)`
+    rather than silently cut, so the count is never lost even when the
+    enumeration is.
+    """
+    shown: dict[str, list[str]] = {}
+    for item in dropped[:_MAX_REPORTED_DROPPED_SYMBOLS]:
+        dates = [d.isoformat() for d in item.dates[:_MAX_REPORTED_MISSING_SESSIONS]]
+        if len(item.dates) > _MAX_REPORTED_MISSING_SESSIONS:
+            dates.append(f"(+{len(item.dates) - _MAX_REPORTED_MISSING_SESSIONS})")
+        shown[item.symbol] = dates
+    if len(dropped) > _MAX_REPORTED_DROPPED_SYMBOLS:
+        shown["..."] = [f"(+{len(dropped) - _MAX_REPORTED_DROPPED_SYMBOLS} symbols)"]
+    return str(shown)
+
+
 def screening_lookback_days(deps: DailyDependencies) -> int:
     """Calendar days of price history the configured strategy screens over.
 
@@ -556,6 +590,16 @@ def run_step_prices(
         # were written, and a quarantined one keeps whatever it already had.
         details.append(
             f"quarantined symbols: {[q.symbol for q in write_result.quarantined]}"
+        )
+    if write_result.dropped:
+        # Report-only (Issue #449): the row is not actually lost on this
+        # path (`write_bars` concatenates rather than replaces), so this
+        # never touches `StepOutcome.ok` or the run's exit code -- it is
+        # purely what makes "the provider dropped a session" durable, via
+        # `run_steps.detail`, since `copilot-backfill check` only ever
+        # answers "is there a hole today", never "when did it appear".
+        details.append(
+            f"dropped sessions: {_format_dropped_sessions(write_result.dropped)}"
         )
     return StepOutcome(True, "; ".join(details) or None)
 

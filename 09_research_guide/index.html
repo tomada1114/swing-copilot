@@ -1,0 +1,1428 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/09_research_guide/">
+      
+      
+        <link rel="prev" href="../08_architecture_review_2026-08/">
+      
+      
+        <link rel="next" href="../getting-started/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Research Guide - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#09-python" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Research Guide
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../10_investment_philosophy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investment Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01_requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../02_project_plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../03_basic_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI and Dashboard Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../06_reliability_roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../07_invariant_test_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../08_architecture_review_2026-08/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Review 2026-08
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research Guide
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        クイックスタート
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API 一覧
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v_verdict_scorecard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        データ辞書: v_verdict_scorecard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-190" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #190 で増えた列
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-188" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #188 で増えた対照群
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-192" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #192 で実列になった値
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-189-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #189 で増えた 2 つの台帳
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        安全上の規約
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        クイックスタート
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API 一覧
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v_verdict_scorecard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        データ辞書: v_verdict_scorecard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-190" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #190 で増えた列
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-188" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #188 で増えた対照群
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-192" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #192 で実列になった値
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#issue-189-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issue #189 で増えた 2 つの台帳
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        安全上の規約
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="09-python">09. リサーチガイド（蓄積データの Python 分析）<a class="headerlink" href="#09-python" title="Permanent link">&para;</a></h1>
+<p><code>swing_copilot.research</code> は、DuckDB に蓄積された判断履歴を pandas DataFrame と
+して読み出す<strong>読み取り専用</strong>の入口である。ノートブックやアドホックスクリプトから
+「verdict の当否 × スコア内訳 × レジーム」のような横断分析を 1 行で書けるように
+し、かつ運用中のデータベースを壊す経路を構造的に持たない。</p>
+<p>Claude Code からは <code>swing-research</code> スキル（「蓄積データを分析して」「勝率を見て」
+等で発動）が本ガイドの規約に従って読み取り専用の集計を行う。</p>
+<h2 id="_1">クイックスタート<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>uv<span class="w"> </span>run<span class="w"> </span>python<span class="w">  </span><span class="c1"># または jupyter 等（リポジトリルートで実行）</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">swing_copilot</span><span class="w"> </span><span class="kn">import</span> <span class="n">research</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1"># verdict を軸にした結合済みスコアカード（下記データ辞書参照）</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">df</span> <span class="o">=</span> <span class="n">research</span><span class="o">.</span><span class="n">scorecard</span><span class="p">()</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="c1"># 例1: レジーム別 × 判断別の平均 forward return</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">([</span><span class="s2">&quot;gate_verdict&quot;</span><span class="p">,</span> <span class="s2">&quot;recommendation&quot;</span><span class="p">])[</span><span class="s2">&quot;forward_return_pct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">agg</span><span class="p">([</span><span class="s2">&quot;mean&quot;</span><span class="p">,</span> <span class="s2">&quot;count&quot;</span><span class="p">])</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="c1"># 例2: スコア上位/下位で 20 日リターンに差はあるか</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="n">h20</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;horizon_days&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="mi">20</span><span class="p">]</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="n">h20</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="n">h20</span><span class="p">[</span><span class="s2">&quot;score&quot;</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">h20</span><span class="p">[</span><span class="s2">&quot;score&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">median</span><span class="p">())[</span><span class="s2">&quot;forward_return_pct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="c1"># 例3: 落選理由コード別の件数推移</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="n">research</span><span class="o">.</span><span class="n">screening_rejections</span><span class="p">()</span><span class="o">.</span><span class="n">groupby</span><span class="p">([</span><span class="s2">&quot;as_of&quot;</span><span class="p">,</span> <span class="s2">&quot;reason_code&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">size</span><span class="p">()</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="c1"># 例4: 任意の read-only SQL（書き込み文は失敗する）</span>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="n">research</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="s2">&quot;SELECT count(*) FROM verdicts WHERE recommendation = &#39;proceed&#39;&quot;</span><span class="p">)</span>
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="c1"># 価格バーは Parquet から直接（DB ファイルに一切触れない）</span>
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="n">bars</span> <span class="o">=</span> <span class="n">research</span><span class="o">.</span><span class="n">bars</span><span class="p">([</span><span class="s2">&quot;AAPL&quot;</span><span class="p">,</span> <span class="s2">&quot;MSFT&quot;</span><span class="p">])</span>
+</code></pre></div>
+<p><code>db_path</code> を省略すると既定の <code>data/copilot.duckdb</code> を読む。別ファイルを見るときは
+<code>research.scorecard(db_path=...)</code>。</p>
+<h2 id="api">API 一覧<a class="headerlink" href="#api" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>関数</th>
+<th>返すもの</th>
+<th>元</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scorecard()</code></td>
+<td>verdict × 当否 × スコア内訳 × リスク制約 × レジーム × 追跡 × セクター</td>
+<td><code>v_verdict_scorecard</code></td>
+</tr>
+<tr>
+<td><code>candidates()</code></td>
+<td>候補とスコア内訳（JSON から型付き列へ展開済み）</td>
+<td><code>v_candidates</code></td>
+</tr>
+<tr>
+<td><code>tracked_positions()</code></td>
+<td>verdict 追跡台帳の仮想ポジション + recommendation（Issue #190 以降は <code>skip</code> のシャドウ建玉も含む）</td>
+<td><code>v_tracked_positions</code></td>
+</tr>
+<tr>
+<td><code>truncated_candidates()</code></td>
+<td><code>candidate_limit</code> で順位落ちした near-miss とスコア内訳（列は <code>candidates()</code> と揃えてある）</td>
+<td><code>v_truncated_candidates</code></td>
+</tr>
+<tr>
+<td><code>universe_forward_returns()</code></td>
+<td>候補 ∪ 順位落ち ∪ 落選の forward return（<code>outcome_class</code> / <code>reason_code</code> / <code>execution_state</code> 付き）</td>
+<td><code>v_universe_forward_returns</code></td>
+</tr>
+<tr>
+<td><code>signal_hits()</code></td>
+<td>その run のシグナル発火（候補にならなかった銘柄の分も含む）</td>
+<td><code>v_signal_hits</code></td>
+</tr>
+<tr>
+<td><code>verdict_reasons()</code></td>
+<td>verdict の理由 1 件 1 行（<code>basis</code> / <code>source_id_count</code> 付き）</td>
+<td><code>v_verdict_reasons</code></td>
+</tr>
+<tr>
+<td><code>runs()</code> / <code>verdicts()</code> / <code>verdict_outcomes()</code> / <code>screening_rejections()</code> / <code>regime_snapshots()</code></td>
+<td>各テーブルそのまま</td>
+<td>実テーブル</td>
+</tr>
+<tr>
+<td><code>bars(symbols)</code></td>
+<td>日足 OHLCV（in-memory DuckDB で Parquet を直読）</td>
+<td><code>data/parquet/</code></td>
+</tr>
+<tr>
+<td><code>query(sql, params)</code></td>
+<td>任意 SQL の結果</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>ensure_views(db_path)</code></td>
+<td>ビュー未作成の古い DB を修復（唯一 read-write を短時間開く）</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<h2 id="v_verdict_scorecard">データ辞書: <code>v_verdict_scorecard</code><a class="headerlink" href="#v_verdict_scorecard" title="Permanent link">&para;</a></h2>
+<p>粒度は <strong>(verdict, 成熟したホライズン)</strong>。未成熟の verdict も horizon 列が NULL の
+1 行として必ず現れる（「今日何を判断したか」用途を兼ねる）。</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>意味</th>
+<th>NULL の意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_date</code> / <code>mode</code> / <code>config_hash</code></td>
+<td>run の属性。config_hash で設定変更前後を分割できる</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>recommendation</code> / <code>no_trade</code></td>
+<td>スキル verdict（proceed/skip）</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>news_supply_level</code></td>
+<td>verdict 時のニュース供給量（sufficient/sparse/none）</td>
+<td>計測導入(#130)前の行。none ではない</td>
+</tr>
+<tr>
+<td><code>horizon_days</code> / <code>forward_return_pct</code> / <code>classification</code></td>
+<td>5/20 営業日の当否（HIT/MISS_*）</td>
+<td>まだ成熟していない</td>
+</tr>
+<tr>
+<td><code>rank</code> / <code>score</code> / <code>score_*</code> / <code>rsi14</code> / <code>atr14</code> / <code>close</code> / <code>avg_volume</code></td>
+<td>スクリーニングのランキング内訳と生値</td>
+<td>該当 run の candidates に無い、または成分導入前の行</td>
+</tr>
+<tr>
+<td><code>execution_state</code> / <code>execution_distance</code></td>
+<td>ランキング時の実行状態と SMA50 からの ATR 距離（Issue #192）</td>
+<td>未記録（列の導入前の行）。<code>UNKNOWN</code> とは別</td>
+</tr>
+<tr>
+<td><code>dd15_spy</code> / <code>dd5_spy</code> / <code>vix_close</code></td>
+<td>短い窓の distribution 件数と VIX（Issue #192）</td>
+<td>レジーム snapshot が無い run、またはゲート評価不能</td>
+</tr>
+<tr>
+<td><code>risk_status</code> / <code>binding_constraint</code></td>
+<td>リスク評価と、候補を最初にblockした残存理由（#348以降は口座サイジング値ではない）</td>
+<td>リスク評価が無い</td>
+</tr>
+<tr>
+<td><code>gate_verdict</code> / <code>dd_level</code> / <code>dd_count_*</code></td>
+<td>市場レジームゲートの状態</td>
+<td>レジーム snapshot が無い run</td>
+</tr>
+<tr>
+<td><code>position_status</code> / <code>exit_reason</code> / <code>realized_return_pct</code> / <code>days_held</code></td>
+<td>追跡台帳（2.5×ATR トレーリング / 25 セッション）の結果</td>
+<td>まだ追跡が始まっていない（Issue #190 以降、<code>skip</code> も同じルールで追跡されるので「skip だから NULL」ではなくなった）</td>
+</tr>
+<tr>
+<td><code>gics_sector</code></td>
+<td>run 日時点で有効なユニバース snapshot のセクター（as-of inclusive）</td>
+<td>snapshot が run 日以前に無い</td>
+</tr>
+</tbody>
+</table>
+<p>セクターの as-of 解決（<code>snapshot_date &lt;= run_date</code> の最新）は
+<code>v_symbol_sector_asof</code> に一元化してある。<strong>ノートブック側で universe_membership を
+自前 JOIN しないこと</strong>（look-ahead 混入の典型源）。</p>
+<h2 id="issue-190">Issue #190 で増えた列<a class="headerlink" href="#issue-190" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>意味</th>
+<th>NULL の意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>verdict_positions.recommendation</code></td>
+<td>そのシャドウ建玉がどちら側の verdict を追っているか（<code>proceed</code> / <code>skip</code>）</td>
+<td>列の導入前に書かれた行。<code>proceed</code> と読む（<code>v_tracked_positions</code> は <code>COALESCE</code> 済み）</td>
+</tr>
+<tr>
+<td><code>verdict_outcomes.benchmark_return_pct</code></td>
+<td>同一区間のベンチマーク（既定 SPY）リターン。超過リターンで separation を見るための材料</td>
+<td><strong>未計測</strong>。0 ではない。列の導入前に分類された行か、ベンチマークのバーが揃わなかった行</td>
+</tr>
+</tbody>
+</table>
+<p><code>skip</code> 群は<strong>同一の出口ルールで仮想追跡した反実仮想</strong>であって、実際に提案された建玉では
+ない。<code>tracked_positions()</code> を集計するときは <code>recommendation</code> で層別するか、
+<code>proceed</code> へ絞ること。層別せずに平均を取ると「proceed だけ買った場合」でも
+「候補を全部買った場合」でもない、解釈できない数字になる。</p>
+<h2 id="issue-188">Issue #188 で増えた対照群<a class="headerlink" href="#issue-188" title="Permanent link">&para;</a></h2>
+<p>候補になった銘柄にしか forward return が付かない間、測れているのは<strong>偽陽性率だけ</strong>
+だった。<code>universe_forward_returns()</code> はその run が下した screening 判断すべてに
+同じ forward return を付ける。</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>意味</th>
+<th>NULL の意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>outcome_class</code></td>
+<td>その日その銘柄がどちら側だったか（<code>candidate</code> / <code>truncated</code> / <code>rejected</code>）</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>reason_code</code></td>
+<td>落選理由（<code>screening_rejections</code> と同じ閉じた enum）</td>
+<td>候補・順位落ちは「何にも落とされていない」ので理由が無い</td>
+</tr>
+<tr>
+<td><code>rank</code> / <code>score</code></td>
+<td>候補または順位落ちとしてのランキング位置</td>
+<td>落選銘柄はそもそもランク付けされていない</td>
+</tr>
+<tr>
+<td><code>gics_sector</code></td>
+<td>as-of 解決済みセクター（<code>v_symbol_sector_asof</code>）</td>
+<td>snapshot が run 日以前に無い</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># フィルタは利益に貢献しているか（落選銘柄のその後）</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">df</span> <span class="o">=</span> <span class="n">research</span><span class="o">.</span><span class="n">universe_forward_returns</span><span class="p">()</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="o">.</span><span class="n">outcome_class</span> <span class="o">==</span> <span class="s2">&quot;rejected&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;reason_code&quot;</span><span class="p">)[</span><span class="s2">&quot;forward_return_pct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="c1"># candidate_limit を広げたら成績は上がるか（順位帯別）</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="o">.</span><span class="n">outcome_class</span><span class="o">.</span><span class="n">isin</span><span class="p">([</span><span class="s2">&quot;candidate&quot;</span><span class="p">,</span> <span class="s2">&quot;truncated&quot;</span><span class="p">])]</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;rank&quot;</span><span class="p">)[</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="s2">&quot;forward_return_pct&quot;</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="p">]</span><span class="o">.</span><span class="n">agg</span><span class="p">([</span><span class="s2">&quot;mean&quot;</span><span class="p">,</span> <span class="s2">&quot;count&quot;</span><span class="p">])</span>
+</code></pre></div>
+<p>注意点が2つある。<code>truncated</code> 側は<strong>切り口のすぐ下だけ</strong>（<code>candidate_limit * 3</code> 件）
+しか保存していないので、順位帯の平均は保存範囲までしか語れない。もう一つ、
+これらは <code>signal_outcomes</code> / <code>verdict_outcomes</code> のような当否分類を持たない<strong>生の
+リターン</strong>であり、ここから「勝率」を作るときは分類の閾値を自分で決めることになる。</p>
+<h2 id="issue-192">Issue #192 で実列になった値<a class="headerlink" href="#issue-192" title="Permanent link">&para;</a></h2>
+<p>JSON の中にしか無かった値が実列になった。<code>json_extract</code> を書く必要はもう無い。</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>意味</th>
+<th>NULL の意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>candidates.score</code> / <code>score_rsi_pullback</code> / <code>score_trend_quality</code> / <code>score_liquidity</code> / <code>score_atr_pct</code></td>
+<td>複合スコアと当初の 4 成分</td>
+<td>既存行は <code>metrics_json</code> からバックフィル済み。それでも NULL なら成分導入前の run</td>
+</tr>
+<tr>
+<td><code>candidates.score_pivot_proximity</code> / <code>score_rs_percentile</code> / <code>score_criteria_met</code></td>
+<td>戦略別ランキング成分の加重後の値（Issue #251、既定重み 0.0）</td>
+<td><strong>未記録</strong>。成分が存在しなかった run は <code>metrics_json</code> にも無いのでバックフィルしていない。0.0（計測された寄与ゼロ）と読み替えないこと</td>
+</tr>
+<tr>
+<td><code>candidates.execution_state</code> / <code>execution_distance</code></td>
+<td>ランキングの実行状態（<code>READY</code> / <code>EXTENDED</code> など）と SMA50 からの ATR 距離</td>
+<td><strong>未記録</strong>。どこにも永続化されていなかったので過去行は復元不能。<code>UNKNOWN</code>（距離が計算不能という測定結果）と読み替えないこと</td>
+</tr>
+<tr>
+<td><code>regime_snapshots.dd15_*</code> / <code>dd5_*</code> / <code>spy_close</code> / <code>spy_sma200</code> / <code>vix_close</code> / <code>spy_ftd_state</code></td>
+<td>短い窓の distribution 件数とSMA200/FTDゲート入力（<code>dd_count_*</code> は従来どおり 25 セッション）</td>
+<td>ゲート入力はバー欠損で評価不能だった run。旧<code>spy_ema</code>は互換列として残るが、新仕様ではNULL</td>
+</tr>
+<tr>
+<td><code>exposure_decisions.gate_verdict</code> / <code>dd_level</code> / <code>is_conservatively_downgraded</code> / <code>reduce_only_risk_multiplier</code></td>
+<td>露出上限の判断根拠。最後の列は旧口座ルールの互換列で、新仕様では常に 1.0（過去行は過去値）</td>
+<td>新列は新規runのみ。旧列はバックフィル済み</td>
+</tr>
+<tr>
+<td><code>verdict_reasons</code> / <code>verdict_reason_sources</code></td>
+<td><code>verdicts.reasons_json</code> の正規化投影（<code>reasons_json</code> は引き続き記録の正）</td>
+<td>バックフィル済み。<code>basis</code> の NULL は Issue #191 のタグが付く前に書かれた理由</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># 実行状態別に、その後のリターンはどう違ったか（DoD の 1 行集計）</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">research</span><span class="o">.</span><span class="n">universe_forward_returns</span><span class="p">()</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;execution_state&quot;</span><span class="p">)[</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="s2">&quot;forward_return_pct&quot;</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="c1"># ソースを一つも引かなかった理由だけで proceed した銘柄</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="n">reasons</span> <span class="o">=</span> <span class="n">research</span><span class="o">.</span><span class="n">verdict_reasons</span><span class="p">()</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="n">uncited</span> <span class="o">=</span> <span class="n">reasons</span><span class="o">.</span><span class="n">groupby</span><span class="p">([</span><span class="s2">&quot;run_id&quot;</span><span class="p">,</span> <span class="s2">&quot;symbol&quot;</span><span class="p">])[</span><span class="s2">&quot;source_id_count&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">max</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="c1"># 候補にはならなかったが、そのシグナルには当たっていた銘柄</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="n">research</span><span class="o">.</span><span class="n">signal_hits</span><span class="p">()</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;signal_name&quot;</span><span class="p">)[</span><span class="s2">&quot;symbol&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">nunique</span><span class="p">()</span>
+</code></pre></div>
+<p><code>signal_hits()</code> は <code>run_id</code> キーの <code>signal_hits</code> テーブルを読む。旧 <code>signals</code>
+テーブル（<code>run_date</code> キー）は同日の <code>dry_run</code> と <code>live</code> が衝突するため読まない。
+2026-08 以前の run には <code>signal_hits</code> の行が無い（一方向の切断であり、
+<code>signals</code> に残っている行も run に紐付けられない）。</p>
+<h2 id="issue-189-2">Issue #189 で増えた 2 つの台帳<a class="headerlink" href="#issue-189-2" title="Permanent link">&para;</a></h2>
+<p>「記録しなければ後から復元できない」値の蓄積。専用アクセサは置いていないので
+<code>research.query()</code> から下の 2 ビュー（または実テーブル）を読む。</p>
+<table>
+<thead>
+<tr>
+<th>ビュー / テーブル</th>
+<th>何が入るか</th>
+<th>NULL の意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>v_retro_narrations</code></td>
+<td>振り返り 1 回 × サプライズ 1 銘柄の敗因分類と叙述。当時の run・verdict を結合済み</td>
+<td><code>run_date</code> / <code>recommendation</code> が NULL＝その run の verdict 行が再 <code>collect</code> で消えた</td>
+</tr>
+<tr>
+<td><code>retro_sessions</code></td>
+<td>取り込んだ振り返りそのもの（<code>window_start</code> / <code>input_digest</code> / <code>outcome_count</code> / <code>proposal_count</code>）</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>v_run_configs</code></td>
+<td>run と、その run が実行された設定値（提案対象の 8 セクション）</td>
+<td><code>snapshot_hash</code> / <code>sections_json</code> が NULL＝<strong>未記録</strong>。台帳導入（2026-08）前の run であって「設定が空」ではない</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># 同じ敗因分類が何回繰り返しているか（L2 定性ゲートの素材）</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">research</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="s2">&quot;SELECT failure_class, count(*) AS n, count(DISTINCT retro_as_of) AS sessions &quot;</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="s2">&quot;FROM v_retro_narrations GROUP BY 1 ORDER BY n DESC&quot;</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">)</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="c1"># 設定変更の前後で candidate の成績は動いたか</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="n">research</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="s2">&quot;SELECT c.config_hash, c.first_seen_run_date, avg(s.forward_return_pct) &quot;</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="s2">&quot;FROM v_verdict_scorecard s JOIN v_run_configs c USING (run_id) &quot;</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="s2">&quot;WHERE s.horizon_days = 20 GROUP BY 1, 2 ORDER BY 2&quot;</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="p">)</span>
+</code></pre></div>
+<p><code>config_versions</code> の主キーは <code>runs.config_hash</code>（設定全体＋戦略の完全指紋）で、
+<code>snapshot_hash</code> は提案対象になりうる 8 セクションだけのダイジェスト。通知や
+スケジュールしか違わない 2 設定は <code>config_hash</code> が割れても <code>snapshot_hash</code> は
+一致するので、比較窓を割るかどうかの判断には <code>snapshot_hash</code> を使うこと。
+なお設定で層別すると必ずサンプルが小さくなる。差が出ても点推定であって、
+<code>docs/08_architecture_review_2026-08.md</code> のとおり設定変更の根拠にはならない。</p>
+<h2 id="_2">安全上の規約<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>接続は関数呼び出しの内側だけ</strong>: 各関数はクエリごとに read-only 接続を開いて
+  即閉じる。DuckDB のファイルロックは read-write プロセスと排他なので、生の
+  <code>duckdb.connect()</code> を開いたまま保持するノートブックは（read-only でも）
+  <code>just data-pull</code> / <code>just data-push</code> を失敗させ、ローカルコピーを古い世代に
+  取り残す。必ずこのモジュール経由で読むこと。</li>
+<li><strong>書けない</strong>: read-only 接続なので INSERT/UPDATE/DDL は失敗する。これは仕様。
+  修正・取り込みは従来どおり <code>storage</code> リポジトリと各 CLI の責務。</li>
+<li><strong>古い DB</strong>: ビュー導入前のファイルを読むと <code>ResearchError</code> がヒント付きで出る。
+  <code>research.ensure_views()</code> を一度呼べば直る（次の日次実行でも自動作成される）。</li>
+<li>NULL の意味論はテーブルごとに異なる（上表）。特に <code>news_supply_*</code> の NULL を
+  0/none と混同しないこと。スキーマの正本は <code>storage/schema.py</code>。</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

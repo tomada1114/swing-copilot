@@ -1,0 +1,2702 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local decision-support tooling for U.S. stock swing trading.">
+      
+      
+      
+        <link rel="canonical" href="https://tomada1114.github.io/swing-copilot/06_reliability_roadmap/">
+      
+      
+        <link rel="prev" href="../05_ui_design/">
+      
+      
+        <link rel="next" href="../07_invariant_test_matrix/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Reliability Roadmap - swing-copilot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#06-reliability-renovation-roadmap" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="swing-copilot" class="md-header__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            swing-copilot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Reliability Roadmap
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="swing-copilot" class="md-nav__button md-logo" aria-label="swing-copilot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    swing-copilot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tomada1114/swing-copilot" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tomada1114/swing-copilot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../10_investment_philosophy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investment Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Product Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Product Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../00_human_preparation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Human Preparation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01_requirements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../02_project_plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../03_basic_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Basic Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../04_detailed_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detailed Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../05_ui_design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UI and Dashboard Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 背景と診断
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 改修原則
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. フェーズ構成
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-issue-dod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 全 Issue 共通完了条件（共通 DoD）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-issue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Issue 仕様シード
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Issue 仕様シード">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#p1-01-screening-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-01 【基盤】screening - シグナルメトリクス伝搬とスコア内訳付き複合ランキング
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-02-worktreep1-screeningscreeningstorage-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-02 【並列可/worktree:p1-screening】screening/storage - 落選銘柄の理由コード台帳
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-03-issue-348risk-1r" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-03 【Issue #348で公開契約を更新】risk - 銘柄単位の1Rと警告
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-04-worktreep1-riskriskstorage-fraction-naninf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-04 【並列可/worktree:p1-risk】risk/storage - 数値堅牢性（Fraction 床計算・NaN/Inf 書き込みガード）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-05-worktreep1-cliclireport-copilot-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-05 【依存あり/worktree:p1-cli】cli/report - 判断履歴の読み出し（copilot-history）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-07-backtest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-07 【基盤】backtest - リスク調整後指標の追加
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-08-worktreep2-backtestbacktest-cli-copilot-backtest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-08 【依存あり/worktree:p2-backtest】backtest - CLI エントリポイント copilot-backtest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-09-worktreep2-backtestbacktest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-09 【依存あり/worktree:p2-backtest】backtest - 悲観シナリオモード
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-10-worktreep2-backtestbacktest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-10 【依存あり/worktree:p2-backtest】backtest - パラメータ感応度グリッドと過学習警告
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-11-worktreep2-feedbackfeedback-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-11 【並列可/worktree:p2-feedback】feedback - シグナル・ポストモーテム（フォワードリターン検証）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-12-worktreep2-llmllm-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-12 【並列可/worktree:p2-llm】llm - 分析コンテキストと出力スキーマの判断根拠強化
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-13-regime-distribution-day" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-13 【基盤】regime - レジームモジュール新設（市場ゲートスコア + Distribution Day）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-14-worktreep3-regimeregimeriskreport-exposure-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-14 【依存あり/worktree:p3-regime】regime/risk/report - Exposure Ceiling 統合
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-15-worktreep3-regimellm-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-15 【依存あり/worktree:p3-regime】llm - レジームコンテキスト注入と整合性自己点検
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-16-worktreep3-regimeregime-ftd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-16 【依存あり/worktree:p3-regime】regime - フォロースルーデー（FTD）状態機械
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p4-18-worktreep4-datadatarisk-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P4-18 【並列可/worktree:p4-data】data/risk - 決算近接ガード（決算カレンダーアダプタ）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-21-worktreep5-signalsscreening-minervini" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-21 【並列可/worktree:p5-signals】screening - Minervini トレンドテンプレートシグナル
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-22-worktreep5-signalsscreening-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-22 【依存あり/worktree:p5-signals】screening - 決算後 5 因子スコアシグナル
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-23-worktreep5-signalsscreening-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-23 【並列可/worktree:p5-signals】screening - エグゼキューション状態分類（品質と買い時の2軸化）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-24-worktreep5-signalsscreening-vcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-24 【依存あり/worktree:p5-signals】screening - VCP 収縮パターン検出（オプション・最後）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-2026-07-25-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6: 実運用ギャップ修正（2026-07-25 実 API 動作確認より）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-25-worktreep6-screeningdatascreeningstorage-fundamentals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-25 【最優先/worktree:p6-screening】data/screening/storage - fundamentals 抽出リグレッション修正とスクリーニング機能回復
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-26-worktreep6-llmllmstoragedata-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-26 【最優先/worktree:p6-llm】llm/storage/data - LLM 予算会計の実支出化と開示取得の境界設定
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-27-worktreep6-llmllmreport-provenance-p2-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-27 【依存あり/worktree:p6-llm】llm/report - 開示分析の provenance 修正とレポート反映・P2-12 残件
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-28-worktreep6-reportreport-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-28 【並列可/worktree:p6-report】report - 表示の正確性修正
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-29-obsoletescreeningllm-catalyst_quality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-29 【obsolete】screening/llm - catalyst_quality のランキング統合検討
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p7-claude-code-2026-07-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P7: 定性分析の Claude Code スキル移行（2026-07-28）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-2026-07-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8: 振り返り→改善提案機構（2026-07-28）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-30-worktreep8-retrostorageretro-verdict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-30 【基盤/worktree:p8-retro】storage/retro - verdict 永続化と当否評価
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-31-worktreep8-retroretro-retro_inputjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-31 【依存あり/worktree:p8-retro】retro - 集約とretro_input.json エクスポート
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-32-worktreep8-retroretro-retro_result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-32 【依存あり/worktree:p8-retro】retro - retro_result 検証・レポート・提案台帳
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-33-worktreep8-retroskilldocs-swing-retro" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-33 【依存あり/worktree:p8-retro】skill/docs - swing-retro スキルと設計正本昇格
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 知見の出典と信頼性
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. 実施体制
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../07_invariant_test_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Invariant Test Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../08_architecture_review_2026-08/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture Review 2026-08
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../09_research_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 背景と診断
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 改修原則
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. フェーズ構成
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-issue-dod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 全 Issue 共通完了条件（共通 DoD）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-issue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Issue 仕様シード
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Issue 仕様シード">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#p1-01-screening-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-01 【基盤】screening - シグナルメトリクス伝搬とスコア内訳付き複合ランキング
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-02-worktreep1-screeningscreeningstorage-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-02 【並列可/worktree:p1-screening】screening/storage - 落選銘柄の理由コード台帳
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-03-issue-348risk-1r" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-03 【Issue #348で公開契約を更新】risk - 銘柄単位の1Rと警告
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-04-worktreep1-riskriskstorage-fraction-naninf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-04 【並列可/worktree:p1-risk】risk/storage - 数値堅牢性（Fraction 床計算・NaN/Inf 書き込みガード）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p1-05-worktreep1-cliclireport-copilot-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P1-05 【依存あり/worktree:p1-cli】cli/report - 判断履歴の読み出し（copilot-history）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-07-backtest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-07 【基盤】backtest - リスク調整後指標の追加
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-08-worktreep2-backtestbacktest-cli-copilot-backtest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-08 【依存あり/worktree:p2-backtest】backtest - CLI エントリポイント copilot-backtest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-09-worktreep2-backtestbacktest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-09 【依存あり/worktree:p2-backtest】backtest - 悲観シナリオモード
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-10-worktreep2-backtestbacktest-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-10 【依存あり/worktree:p2-backtest】backtest - パラメータ感応度グリッドと過学習警告
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-11-worktreep2-feedbackfeedback-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-11 【並列可/worktree:p2-feedback】feedback - シグナル・ポストモーテム（フォワードリターン検証）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p2-12-worktreep2-llmllm-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P2-12 【並列可/worktree:p2-llm】llm - 分析コンテキストと出力スキーマの判断根拠強化
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-13-regime-distribution-day" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-13 【基盤】regime - レジームモジュール新設（市場ゲートスコア + Distribution Day）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-14-worktreep3-regimeregimeriskreport-exposure-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-14 【依存あり/worktree:p3-regime】regime/risk/report - Exposure Ceiling 統合
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-15-worktreep3-regimellm-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-15 【依存あり/worktree:p3-regime】llm - レジームコンテキスト注入と整合性自己点検
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p3-16-worktreep3-regimeregime-ftd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P3-16 【依存あり/worktree:p3-regime】regime - フォロースルーデー（FTD）状態機械
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p4-18-worktreep4-datadatarisk-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P4-18 【並列可/worktree:p4-data】data/risk - 決算近接ガード（決算カレンダーアダプタ）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-21-worktreep5-signalsscreening-minervini" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-21 【並列可/worktree:p5-signals】screening - Minervini トレンドテンプレートシグナル
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-22-worktreep5-signalsscreening-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-22 【依存あり/worktree:p5-signals】screening - 決算後 5 因子スコアシグナル
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-23-worktreep5-signalsscreening-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-23 【並列可/worktree:p5-signals】screening - エグゼキューション状態分類（品質と買い時の2軸化）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p5-24-worktreep5-signalsscreening-vcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P5-24 【依存あり/worktree:p5-signals】screening - VCP 収縮パターン検出（オプション・最後）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-2026-07-25-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6: 実運用ギャップ修正（2026-07-25 実 API 動作確認より）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-25-worktreep6-screeningdatascreeningstorage-fundamentals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-25 【最優先/worktree:p6-screening】data/screening/storage - fundamentals 抽出リグレッション修正とスクリーニング機能回復
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-26-worktreep6-llmllmstoragedata-llm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-26 【最優先/worktree:p6-llm】llm/storage/data - LLM 予算会計の実支出化と開示取得の境界設定
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-27-worktreep6-llmllmreport-provenance-p2-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-27 【依存あり/worktree:p6-llm】llm/report - 開示分析の provenance 修正とレポート反映・P2-12 残件
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-28-worktreep6-reportreport-" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-28 【並列可/worktree:p6-report】report - 表示の正確性修正
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p6-29-obsoletescreeningllm-catalyst_quality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P6-29 【obsolete】screening/llm - catalyst_quality のランキング統合検討
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p7-claude-code-2026-07-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P7: 定性分析の Claude Code スキル移行（2026-07-28）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-2026-07-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8: 振り返り→改善提案機構（2026-07-28）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-30-worktreep8-retrostorageretro-verdict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-30 【基盤/worktree:p8-retro】storage/retro - verdict 永続化と当否評価
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-31-worktreep8-retroretro-retro_inputjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-31 【依存あり/worktree:p8-retro】retro - 集約とretro_input.json エクスポート
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-32-worktreep8-retroretro-retro_result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-32 【依存あり/worktree:p8-retro】retro - retro_result 検証・レポート・提案台帳
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#p8-33-worktreep8-retroskilldocs-swing-retro" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        P8-33 【依存あり/worktree:p8-retro】skill/docs - swing-retro スキルと設計正本昇格
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 知見の出典と信頼性
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. 実施体制
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="06-reliability-renovation-roadmap">06. 信頼性改修ロードマップ（Reliability Renovation Roadmap）<a class="headerlink" href="#06-reliability-renovation-roadmap" title="Permanent link">&para;</a></h1>
+<ul>
+<li>ステータス: 計画確定（2026-07-22）</li>
+<li>由来: <code>claude-trading-skills</code> リポジトリ（約70スキル）の Dynamic Workflow 調査
+  （11エージェント・約119万トークン）と swing-copilot 現状監査の統合結果</li>
+<li>位置づけ: 本書はこの改修一式の<strong>計画の正本</strong>である。実装時に確定した仕様は
+  Issue 単位で <code>docs/03_basic_design.md</code> / <code>docs/04_detailed_design.md</code> /
+  <code>docs/reference.md</code> へ反映し、本書は履歴として残す（AGENTS.md の正本優先則に従う）。</li>
+</ul>
+<blockquote>
+<p><strong>Exposure の正本と変更手順</strong>: Exposure の判定状態・表示バケット・新規エントリー
+許可の写像は <code>docs/10_investment_philosophy.md</code> を正本とする。変更時はまず同書の
+判断規約を改訂し、その後 <code>docs/04_detailed_design.md</code>、<code>docs/reference.md</code>、
+<code>src/swing_copilot/screening/</code> と回帰テストを同じ変更単位で同期する。本書は
+変更計画と履歴だけを記録し、実装仕様を上書きしない。</p>
+<p><strong>現況注記（P7 スキル移行後）</strong>: P2-12 / P3-15 / P6-26 / P6-27 は完了記録として
+そのまま残すが、これらが対象としていた Anthropic API 直呼びの <code>llm/</code> パッケージ、
+<code>llm_calls</code> テーブル、月次予算ゲート、応答キャッシュと near-stale 警告は、
+P7（§5 末尾）で機構ごと削除されている。設計の現況は
+<code>docs/03_basic_design.md</code> 6.2 節と <code>docs/04_detailed_design.md</code> 3.15〜3.17 節を
+正とすること。以降の本文で「LLM」と書かれている箇所は、現行では
+「Claude Code スキルによる定性分析」と読み替える。</p>
+<p><strong>現況注記（Issue #348）</strong>: 本書のP1-03/P1-04/P3-14および旧口座レベルリスクの
+記述は実装履歴としてのみ残す。本番/公開経路は読者の口座・保有を知らず、銘柄単位の
+指値・逆指値・ATR14・1R・warnings・市場状態だけを公開する。株数、集中度、相関、
+ポートフォリオ損失上限、REDUCE_ONLY倍率は現行の本番契約ではない。正本は
+<code>docs/01_requirements.md</code>のFR-06と<code>docs/04_detailed_design.md</code> 3.13節である。</p>
+</blockquote>
+<h2 id="1">1. 背景と診断<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
+<p>swing-copilot はエンジニアリング基盤（as-of 規律・provenance・fail-soft・原子的書き込み）
+は堅牢だが、投資ドメインの中身は初級戦略1本にとどまり、判断根拠の可視性に構造的欠陥がある。</p>
+<p>主要な診断結果（ファイル根拠付き）:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>問題</th>
+<th>根拠</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D1</td>
+<td>シグナルは「SMA50&gt;200 + RSI&lt;45」の実質1種。<code>SignalHit.strength</code> は常に 1.0 固定で未使用</td>
+<td><code>screening/technical_signals.py</code></td>
+</tr>
+<tr>
+<td>D2</td>
+<td>ランキングは <code>(rsi14 asc, avg_volume desc, symbol)</code> の固定ソートでスコア内訳が存在しない</td>
+<td><code>screening/pipeline.py:115</code></td>
+</tr>
+<tr>
+<td>D3</td>
+<td>SPY/QQQ/^VIX/^TNX は表示専用。市場環境がスクリーニング・リスク判断に一切反映されない</td>
+<td><code>pipeline/daily.py:778-782</code></td>
+</tr>
+<tr>
+<td>D4</td>
+<td>スクリーニング落選銘柄は無記録（リスク段階の却下のみ reasons が残る非対称）</td>
+<td><code>storage/audit_records.py</code></td>
+</tr>
+<tr>
+<td>D5</td>
+<td>バックテストに Sharpe/最大DD/勝率/PF がなく、実行 CLI も未登録</td>
+<td><code>backtest/engine.py:64-73</code>, <code>pyproject.toml</code></td>
+</tr>
+<tr>
+<td>D7</td>
+<td>口座レベルのリスク制御（総リスク量・実現損失上限・決算近接）が皆無</td>
+<td><code>risk/checks.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>日次 run の出力は terminal/markdown/discord が <code>DailyBrief</code> 単一モデルを共有する
+構成で、run 自体は HTML を生成しない。Markdown が <code>reports/</code> に原子的に残るため
+「実行結果の永続化」は満たされている。蓄積済みデータの振り返りは、別プロセスの
+読み取り専用ビューア <code>copilot-dashboard</code> が担う（<code>docs/05_ui_design.md</code> 10節）。</p>
+<h2 id="2">2. 改修原則<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>信頼性最優先</strong>: 新しいシグナルより先に「見える化」と「検証装置」を作る。
+   検証できない知見は導入しない。</li>
+<li><strong>仕組みは採用、閾値は要検証</strong>: 参照元スキル集の「ゲート構造・状態機械・スコア内訳・
+   fail-closed 設計」はそのまま採用する。一方、具体的な閾値・重みは
+   <strong>すべて設定値（config）として実装</strong>し、既定値には出典と検証状態を注記する。
+   <code>(要検証)</code> の付く値を検証なしでハードコードしてはならない。</li>
+<li><strong>既存不変条件の堅持</strong>: as-of 境界（inclusive）、Clock 注入、オフラインテスト
+   （socket guard）、1論理書き込み=1トランザクション、原子的置換、CON-03、
+   provenance（source_ids）は全 Issue に適用される。</li>
+<li><strong>判断はコード、叙述はスキル分析</strong>: ゲート・スコア・却下判定は決定論的コードのみが
+   行う。定性分析は根拠の説明・定性文脈の付加に限定し、コードの定量判定を上書きしない。
+   定性と定量が矛盾する場合は保守側を採択し両論併記する。
+   （P7 移行前は「叙述は LLM」と表記していた。担い手が Anthropic API から
+   Claude Code スキルへ変わっただけで、原則そのものは不変である。）</li>
+<li><strong>落選にも根拠</strong>: 候補に「なぜ載ったか」だけでなく「なぜ載らなかったか」を
+   理由コード付きで永続化する。</li>
+</ol>
+<h2 id="3">3. フェーズ構成<a class="headerlink" href="#3" title="Permanent link">&para;</a></h2>
+<p>既存ラベル <code>phase-1</code>（守りと判断根拠の土台）/ <code>phase-2</code>（フィードバックループとLLM強化）を
+再利用し、<code>phase-3</code>〜<code>phase-5</code> を追加する。フェーズ = GitHub マイルストーン。</p>
+<table>
+<thead>
+<tr>
+<th>フェーズ</th>
+<th>内容</th>
+<th>狙い</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P1 判断根拠の可視化と数値堅牢性</td>
+<td>スコア内訳、落選記録、制約明示</td>
+<td>ユーザーの痛点に直結。以降の全機能の「根拠が見える」土台</td>
+</tr>
+<tr>
+<td>P2 検証ループとLLM強化</td>
+<td>バックテスト指標/CLI、悲観モード、感応度グリッド、ポストモーテム、LLM文脈強化</td>
+<td>「知見を数値で裏取りする装置」。P5 の前提</td>
+</tr>
+<tr>
+<td>P3 市場レジームゲート</td>
+<td>レジームスコア、Distribution Day、Exposure Ceiling、FTD</td>
+<td>最大のドメインギャップ（D3）の解消</td>
+</tr>
+<tr>
+<td>P4 口座レベルリスク規律</td>
+<td>決算近接</td>
+<td>候補単体→口座全体への守りの拡張</td>
+</tr>
+<tr>
+<td>P5 シグナル拡充（検証済み導入）</td>
+<td>Minervini、決算後スコア、実行状態分類、VCP</td>
+<td>P2 の装置で裏取りしながら追加</td>
+</tr>
+<tr>
+<td>P6 実運用ギャップ修正</td>
+<td>実 API 動作確認で発見したリグレッション・境界欠落・会計/表示バグの修正</td>
+<td>P1〜P5 を「テストが通る」から「毎日回る」へ</td>
+</tr>
+<tr>
+<td>P7 定性分析のスキル移行</td>
+<td>LLM API 統合の全廃、<code>analysis/</code> 境界の新設、Claude Code スキルによる定性分析と <code>copilot-ingest-analysis</code> での検証</td>
+<td>叙述の担い手を API 課金・予算ゲート・キャッシュなしで持てるようにする</td>
+</tr>
+<tr>
+<td>P8 振り返り→改善提案</td>
+<td>verdict 当否検証（<code>verdict_outcomes</code>）、統合振り返り CLI <code>copilot-retro</code> とスキル <code>swing-retro</code>、提案台帳と適用 PR</td>
+<td>定性レイヤを含む分析ロジック全体を、蓄積した証拠に基づき継続改善する（軽微は即時適用 + PR、中規模以上は設計承認後に適用 + PR）</td>
+</tr>
+</tbody>
+</table>
+<p>実施順序は P1 → P2 → P3 → P4 → P5 を基本とするが、フェーズ内は並列可能、
+P3/P4 は P2 完了を待たず着手可能（P5 のみ P2 完了が前提）。</p>
+<h2 id="4-issue-dod">4. 全 Issue 共通完了条件（共通 DoD）<a class="headerlink" href="#4-issue-dod" title="Permanent link">&para;</a></h2>
+<p>各 Issue はこのブロックを受け入れ条件に含める:</p>
+<ul>
+<li>[ ] オフラインテストのみで再現するテストを追加（socket guard 維持、外部ポートはフェイク注入）</li>
+<li>[ ] as-of 境界テスト: カットオフ直前・ちょうど・直後の3点を検証（該当する場合）</li>
+<li>[ ] <code>just verify</code> がグリーン（lint / test カバレッジ95%以上 / docs-check / smoke）</li>
+<li>[ ] 変更が公開 API・データ形状に触れる場合、<code>docs/03_basic_design.md</code> /
+      <code>docs/04_detailed_design.md</code> / <code>docs/reference.md</code> の該当箇所を同一論理コミットで更新</li>
+<li>[ ] 下記「動作確認」手順を実行し、コマンドと観測結果を PR に記録
+      （動作確認は原則 <code>--dry-run</code> で行い、live DB を汚さない）</li>
+<li>[ ] 新しい設定値には既定値・単位・出典（本書のセクション番号）をコメントで記載</li>
+</ul>
+<h2 id="5-issue">5. Issue 仕様シード<a class="headerlink" href="#5-issue" title="Permanent link">&para;</a></h2>
+<p>以下の各項が GitHub Issue 1件に対応する。ID は <code>P&lt;フェーズ&gt;-&lt;連番&gt;</code>。
+Issue 化の際は planning-tickets テンプレートに従い EARS 形式に展開する。</p>
+<hr />
+<h3 id="p1-01-screening-">P1-01 【基盤】screening - シグナルメトリクス伝搬とスコア内訳付き複合ランキング<a class="headerlink" href="#p1-01-screening-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: D1/D2 の解消。ランキングを「なぜこの順位か」を説明できる複合スコアにする。</li>
+<li><strong>スコープ</strong>: <code>screening/base.py</code>, <code>screening/technical_signals.py</code>,
+  <code>screening/pipeline.py</code>, <code>config.py</code>, <code>config/strategies.yaml</code>,
+  <code>report/daily_brief.py</code>, <code>report/terminal_report.py</code>, <code>report/markdown_report.py</code>,
+  <code>storage/audit_records.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>各シグナルの個別メトリクス（rsi14, sma50, sma200, atr14, avg_volume20 等）を
+    <code>Candidate.metrics</code> に保持し、レポートまで到達させる。</li>
+<li>複合スコア <code>score = Σ(weight_i × component_i)</code>、component は [0,1] に正規化:<ul>
+<li><code>rsi_pullback = clamp((rsi_threshold − rsi14) / rsi_threshold, 0, 1)</code>（重み既定 0.5）</li>
+<li><code>trend_quality = clamp((sma50/sma200 − 1) / 0.10, 0, 1)</code>（重み既定 0.3）</li>
+<li><code>liquidity</code> = 候補集合内の avg_volume20 パーセンタイル（重み既定 0.2）</li>
+</ul>
+</li>
+<li>重みは strategies.yaml の ranking 設定で構成可能。合計 1.0・各重み ≥0 を strict 検証、
+    未知キーは拒否。同点時の決定的 tiebreak は symbol 昇順（決定的順序の既存不変条件）。</li>
+<li>スコアと内訳（component ごとの値×重み）を DuckDB に永続化し、
+    terminal / markdown にスコア内訳列を表示する。</li>
+<li>既定重みは出典なしの初期値であり (要検証)。P2-10 感応度グリッドの検証対象。</li>
+<li><strong>動作確認</strong>: <code>uv run copilot-daily --as-of &lt;直近営業日&gt; --dry-run --skip-text --limit 20</code>
+  （<code>--skip-llm</code> は P7 で廃止）
+  → terminal 出力に <code>score</code> 列とスコア内訳、markdown に内訳テーブルが出ること。
+  重み合計 ≠1.0 の strategies.yaml で起動し fail-fast のエラーメッセージを確認。</li>
+<li><strong>Not in scope</strong>: 新シグナル追加（P5）、レジーム項のスコア組み込み（P3-14）</li>
+<li><strong>依存</strong>: なし（フェーズ基盤）</li>
+</ul>
+<h3 id="p1-02-worktreep1-screeningscreeningstorage-">P1-02 【並列可/worktree:p1-screening】screening/storage - 落選銘柄の理由コード台帳<a class="headerlink" href="#p1-02-worktreep1-screeningscreeningstorage-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: D4 の解消。「なぜ候補に挙がらなかったか」を事後検証可能にする。</li>
+<li><strong>スコープ</strong>: <code>screening/pipeline.py</code>, <code>storage/schema.py</code>, <code>storage/audit_records.py</code>,
+  <code>report/daily_brief.py</code>, <code>report/markdown_report.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>新テーブル <code>screening_rejections(run_id, symbol, stage, reason_code, detail, as_of)</code>。
+    stage ∈ {data_quality, fundamental_filter, technical_signal}。</li>
+<li>reason_code は列挙型（例: <code>FILTER_NEGATIVE_NET_INCOME</code>, <code>FILTER_NEGATIVE_FCF</code>,
+    <code>FILTER_LOW_EQUITY_RATIO</code>, <code>SIGNAL_TREND_NOT_MET</code>, <code>SIGNAL_RSI_NOT_MET</code>,
+    <code>DATA_INSUFFICIENT_HISTORY</code>）。detail に観測値と閾値を JSON で記録
+    （例: <code>{"equity_ratio": 0.24, "threshold": 0.30}</code>）。</li>
+<li>候補書き込みと同一トランザクションで記録（原子性不変条件）。</li>
+<li>markdown / terminal に落選サマリ（reason_code 別件数）を表示。</li>
+<li><strong>動作確認</strong>: dry-run 実行後、DuckDB に落選行が入ること
+  （<code>uv run python -c "..."</code> で件数と1行サンプルを表示）、markdown に
+  「落選サマリ」節が出ること。全銘柄合格のケースで 0 件でも節が壊れないこと。</li>
+<li><strong>Not in scope</strong>: 落選履歴の閲覧 CLI、ユニバース選定段階の記録</li>
+<li><strong>依存</strong>: なし</li>
+</ul>
+<h3 id="p1-03-issue-348risk-1r">P1-03 【Issue #348で公開契約を更新】risk - 銘柄単位の1Rと警告<a class="headerlink" href="#p1-03-issue-348risk-1r" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>現況</strong>: 読者口座に基づくサイジング内訳・株数・集中制約は本番/公開経路から撤去済み。
+  DuckDBの旧列は履歴互換のため残し、新規行はNULLとする。</li>
+<li><strong>現行仕様</strong>: 指値・逆指値・ATR14・1R・blocking reasons・warningsを銘柄単位で返す。
+  損切り幅が指値の10%（要検証）を超える場合は<code>WIDE_STOP</code> warningを追加する。</li>
+<li><strong>動作確認</strong>: daily Markdown/terminalと<code>analysis_input.json</code>が1Rを持ち、口座依存値を
+  持たないこと。旧履歴が引き続き読めること。</li>
+</ul>
+<h3 id="p1-04-worktreep1-riskriskstorage-fraction-naninf">P1-04 【並列可/worktree:p1-risk】risk/storage - 数値堅牢性（Fraction 床計算・NaN/Inf 書き込みガード）<a class="headerlink" href="#p1-04-worktreep1-riskriskstorage-fraction-naninf" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 丸め誤差・非数の混入という既知バグクラスを構造的に排除する。</li>
+<li><strong>スコープ</strong>: <code>risk/position_sizing.py</code>, <code>storage/</code> 配下の JSON 直列化境界</li>
+<li><strong>主要仕様</strong>:</li>
+<li>株数の床計算を float 除算から <code>fractions.Fraction</code> による厳密床計算へ置換。
+    <code>shares × risk_per_share ≤ risk_budget</code> が構成的に成立することをプロパティ的
+    テスト（極端な口座額・微小リスク%を含む）で保証。</li>
+<li><code>storage/</code> に共通ガード（反復スタック方式で dict/list を走査し inf/-inf/nan を検出、
+    <code>json.dumps(allow_nan=False)</code> を第二防御）を追加し、JSON を書くすべての箇所に適用。</li>
+<li>NaN/Inf 検出時は書き込み前に明示的例外（どのキーかを含む）。再帰は使わない
+    （深いネストで RecursionError になるため）。</li>
+<li><strong>動作確認</strong>: <code>uv run pytest tests/risk tests/storage -q</code> グリーン。
+  NaN を含むレコードを書こうとするテストでキー名入りの例外が出ること。</li>
+<li><strong>Not in scope</strong>: Decimal 化などの全面的な数値型変更</li>
+<li><strong>依存</strong>: なし</li>
+</ul>
+<h3 id="p1-05-worktreep1-cliclireport-copilot-history">P1-05 【依存あり/worktree:p1-cli】cli/report - 判断履歴の読み出し（copilot-history）<a class="headerlink" href="#p1-05-worktreep1-cliclireport-copilot-history" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況</strong>: <code>copilot-history</code>（<code>report/history_cli.py</code>）として実装済み。ただし
+<code>performance</code> サブコマンド、markdown の「過去判断」節、および実売買ジャーナルの
+読み出しは、実売買記録機能一式の撤去（2026-08）に伴い削除された。現存するのは
+<code>runs</code> / <code>run</code> / <code>symbol</code> / <code>rejections</code> / <code>incomplete</code> の決定論的run履歴のみ。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: D6 の解消（読み出し側）。書き込み専用 CLI に「見る」手段を追加する。</li>
+<li><strong>スコープ</strong>: 新 <code>[project.scripts]</code> エントリ <code>copilot-history</code>（新モジュール、
+  例: <code>paper/history_cli.py</code> または <code>report/history_cli.py</code>）、
+  <code>storage/state_store.py</code>, <code>report/markdown_report.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>サブコマンド: <code>runs</code>（直近 N 件の run 一覧: as_of・候補数・落選数）、
+    <code>run --run-id &lt;id&gt;</code>（候補+リスクの詳細）、<code>symbol &lt;SYM&gt;</code>（銘柄横断の
+    候補化・結果の時系列）、<code>rejections --run-id &lt;id&gt;</code>（P1-02 の台帳照会）。
+    すべて読み出し専用・Rich テーブル出力。</li>
+<li><strong>動作確認</strong>: <code>uv run copilot-history runs</code>、<code>uv run copilot-history symbol AAPL</code> 等を
+  実行し、既存 DB の内容が表形式で出ること。DB が空でも例外にならず
+  「記録なし」表示になること。</li>
+<li><strong>Not in scope</strong>: 書き込み・編集経路の追加</li>
+<li><strong>依存</strong>: P1-02（rejections 照会）</li>
+</ul>
+<hr />
+<h3 id="p2-07-backtest-">P2-07 【基盤】backtest - リスク調整後指標の追加<a class="headerlink" href="#p2-07-backtest-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: D5 の解消（指標側）。エッジの有無を標準指標で判定可能にする。</li>
+<li><strong>スコープ</strong>: <code>backtest/engine.py</code>, <code>backtest/runner.py</code>, <code>models.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li><code>BacktestResult</code> に追加: <code>sharpe</code>（日次リターンから年率化、rf=0、√252）、
+    <code>max_drawdown_pct</code>、<code>win_rate</code>、<code>profit_factor</code>、<code>expectancy_per_trade</code>、
+    <code>avg_r_multiple</code>、<code>trade_count</code>。</li>
+<li>トレード数警告: &lt;30 は「統計的に不十分（最低30、推奨100+）」、&lt;100 は「予備的」を
+    結果オブジェクトの warnings に含める（出典: backtest-expert）。</li>
+<li>勝率90%超や最大DDが極小の場合「ルックアヘッド疑い」警告を付す。</li>
+<li>小さな合成価格系列による手計算フィクスチャで全指標を検証
+    （既存の「手計算 cash/equity」テスト方針を踏襲）。</li>
+<li><strong>動作確認</strong>: <code>uv run pytest tests/backtest -q</code> グリーン。
+  手計算フィクスチャの期待値がコメントで検算可能なこと。</li>
+<li><strong>Not in scope</strong>: CLI（P2-08）、グリッド実行（P2-10）</li>
+<li><strong>依存</strong>: なし（フェーズ基盤）</li>
+</ul>
+<h3 id="p2-08-worktreep2-backtestbacktest-cli-copilot-backtest">P2-08 【依存あり/worktree:p2-backtest】backtest - CLI エントリポイント copilot-backtest<a class="headerlink" href="#p2-08-worktreep2-backtestbacktest-cli-copilot-backtest" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: D5 の解消（実行側)。バックテストを tests 専用から日常道具に昇格させる。</li>
+<li><strong>スコープ</strong>: 新 <code>[project.scripts]</code> エントリ <code>copilot-backtest</code>、<code>backtest/cli.py</code>（新規）</li>
+<li><strong>主要仕様</strong>:</li>
+<li>引数: <code>--strategy &lt;name&gt;</code>（strategies.yaml のキー）、<code>--start YYYY-MM-DD</code>、
+    <code>--end YYYY-MM-DD</code>、<code>--limit N</code>（ユニバース制限）、<code>--output &lt;path.md&gt;</code>（省略時は
+    <code>reports/backtests/&lt;end&gt;-&lt;strategy&gt;.md</code>）、<code>--pessimistic</code>（P2-09）。</li>
+<li>出力: P2-07 の全指標 + 取引一覧 + equity curve サマリを terminal（Rich）と
+    markdown（一時ファイル + <code>os.replace</code> の既存原子的置換パターン）で出力。</li>
+<li>生存者バイアス注記を出力に含める（既存方針の踏襲）。</li>
+<li><strong>動作確認</strong>: <code>uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30</code>
+  が完走し、terminal に指標テーブル、<code>reports/backtests/</code> に markdown が生成されること。
+  データ不足銘柄が混在しても完走すること（fail-soft）。</li>
+<li><strong>Not in scope</strong>: ウォークフォワード自動分割（将来）、パラメータ探索（P2-10）</li>
+<li><strong>依存</strong>: P2-07</li>
+</ul>
+<h3 id="p2-09-worktreep2-backtestbacktest-">P2-09 【依存あり/worktree:p2-backtest】backtest - 悲観シナリオモード<a class="headerlink" href="#p2-09-worktreep2-backtestbacktest-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 「摩擦を増やしても壊れないか」を常時確認できるようにする。</li>
+<li><strong>スコープ</strong>: <code>backtest/engine.py</code>, <code>backtest/cli.py</code>, <code>config.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>config に <code>slippage_multiplier</code>（既定 1.0）を追加。悲観プリセットは 1.75
+    （出典: backtest-expert の 1.5〜2.0 帯の中央値、(要検証)）。</li>
+<li><code>--pessimistic</code> 指定時は通常(×1.0)と悲観(×1.75)を両方実行し、指標の差分表を併記。</li>
+<li>両側（entry/exit、強制清算含む）に乗数が効くことをテストで確認。</li>
+<li><strong>動作確認</strong>: <code>uv run copilot-backtest --strategy default --start 2025-01-01 --end 2026-06-30 --limit 30 --pessimistic</code>
+  で2列比較表が出ること。悲観側の final_equity が通常側以下であること。</li>
+<li><strong>Not in scope</strong>: 約定モデルの高度化（板・出来高制約）</li>
+<li><strong>依存</strong>: P2-07, P2-08</li>
+</ul>
+<h3 id="p2-10-worktreep2-backtestbacktest-">P2-10 【依存あり/worktree:p2-backtest】backtest - パラメータ感応度グリッドと過学習警告<a class="headerlink" href="#p2-10-worktreep2-backtestbacktest-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 「プラトーを探し、ピークを避ける」を機械化し、閾値の妥当性検証装置を作る。</li>
+<li><strong>スコープ</strong>: <code>backtest/sensitivity.py</code>（新規）、<code>backtest/cli.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>対象パラメータ: ATR ストップ倍率 {50, 75, 100, 125, 150}% ×
+    最大保有日数 {40, 70, 100, 140, 200}%（基準値比）。将来 P1-01 のランキング重みも対象。</li>
+<li>各セルで expectancy_per_trade と trade_count を算出したマトリクスを markdown 出力。</li>
+<li>過学習警告: 最良セルの成績が隣接セル中央値の 1.5 倍超なら
+    「スパイク（過学習疑い）」、全セル±20%以内なら「プラトー（頑健）」と判定 (要検証)。</li>
+<li>trade_count &lt; 30 のセルは灰色扱い（結論に使わない）。</li>
+<li>サブコマンド例: <code>copilot-backtest grid --strategy default --start ... --end ...</code>。</li>
+<li><strong>動作確認</strong>: grid 実行でマトリクス markdown が生成され、判定ラベルが出ること。</li>
+<li><strong>Not in scope</strong>: ベイズ最適化等の探索高度化（意図的に総当たりのみ）</li>
+<li><strong>依存</strong>: P2-07, P2-08</li>
+</ul>
+<h3 id="p2-11-worktreep2-feedbackfeedback-">P2-11 【並列可/worktree:p2-feedback】feedback - シグナル・ポストモーテム（フォワードリターン検証）<a class="headerlink" href="#p2-11-worktreep2-feedbackfeedback-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 過去の候補が実際どうなったかを自動追跡し、シグナルの実力を測る。</li>
+<li><strong>スコープ</strong>: <code>pipeline/daily.py</code>（新ステップ）、<code>storage/schema.py</code>（新テーブル
+  <code>signal_outcomes</code>）、<code>report/markdown_report.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>日次パイプラインで、5営業日前・20営業日前の run の候補について as-of 時点までの
+    リターンを計算し分類: |リターン| &lt; 0.5% は NEUTRAL（ノイズ除外）、
+    +0.5% 超は TRUE_POSITIVE、−0.5% 未満は FALSE_POSITIVE
+    （−0.5〜−2% MILD、−2% 超 SEVERE）。5日は重み60%・20日は重み40%として
+    シグナル別の的中集計を保持（出典: signal-postmortem、閾値は (要検証) config 化）。</li>
+<li>すべて <code>date &lt;= as_of</code> の価格のみ使用（look-ahead 禁止）。</li>
+<li>markdown に「シグナル成績（直近90日）」節: シグナル別 TP/FP/NEUTRAL 件数と的中率。
+    サンプル 20 件未満は「暫定」表示。</li>
+<li><strong>動作確認</strong>: フィクスチャ DB で dry-run し、<code>signal_outcomes</code> 相当の行が生成され
+  markdown に節が出ること。5/20営業日前に run が無い日はスキップされ壊れないこと。</li>
+<li><strong>Not in scope</strong>: 的中率に基づく重みの自動調整（人間判断を挟む）</li>
+<li><strong>依存</strong>: なし（P1-01 のスコア記録があると内訳が豊かになるが必須ではない）</li>
+</ul>
+<h3 id="p2-12-worktreep2-llmllm-">P2-12 【並列可/worktree:p2-llm】llm - 分析コンテキストと出力スキーマの判断根拠強化<a class="headerlink" href="#p2-12-worktreep2-llmllm-" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P7）</strong>: 完了済み。<code>llm/decision_context.py</code> の整形純関数は
+<code>analysis/context.py</code> へ移設され現役だが、<code>catalyst_quality</code> と
+キャッシュ near-stale 警告は P7 で廃止された。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: LLM 出力の曖昧語を減らし、根拠の構造化と定量/定性の役割分担を明確化する。</li>
+<li><strong>スコープ</strong>: <code>llm/decision_context.py</code>, <code>llm/schemas.py</code>, <code>llm/summarize.py</code>,
+  <code>llm/filings_analysis.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>decision_context にコード側の定量ブロックを注入: スコア内訳（P1-01）、
+    リスク制約（P1-03）。</li>
+<li>保守的不一致ルールをシステム指示に明記: LLM の定性判断がコードの定量シグナルと
+    矛盾する場合、保守側を採択し矛盾自体を両論併記する（定量判定の上書き禁止）。</li>
+<li><code>NewsSummary</code> に <code>catalyst_quality</code> ∈ {high, medium, low, none} を追加。
+    判定基準をプロンプトに明記: high = ガイダンス上方修正/beat-and-raise/FDA承認/
+    初回の決算加速/大型契約、medium = M&amp;A/製品ローンチ/提携/ショートスクイーズ、
+    low = アナリスト格上げのみ/テーマのみ。dilution / secondary offering /
+    investigation / lawsuit / resignation / downgrade の検出時は <code>risk_flags</code> に必須反映。
+    catalyst_quality の根拠も source_ids 必須（既存 provenance 規約）。</li>
+<li>キャッシュ near-stale 警告: キャッシュ済み分析が TTL まで残り 2 日以内なら
+    レポートに警告表示（as_of 基準で計算、壁時計は使わない）。</li>
+<li>行動パターン言及規則: 実績値と計画値の差分という具体的根拠がある場合のみ
+    「〜の可能性(possible pattern)」表現で言及し、断定的な心理診断を禁止
+    （CON-03 検査対象に含める）。</li>
+<li><strong>動作確認</strong>: フェイク LLM クライアントでスキーマ検証テストが通ること。
+  <code>--skip-llm</code> なしの dry-run（API キーがある場合のみ）で catalyst_quality が
+  出力され、CON-03 検査を通過すること。</li>
+<li><strong>Not in scope</strong>: 新しい LLM プロバイダ、シナリオ確率分析（swing-copilot には未実装）</li>
+<li><strong>依存</strong>: P1-01, P1-03（注入データ。先行未完なら該当ブロックを段階的に追加）</li>
+</ul>
+<hr />
+<h3 id="p3-13-regime-distribution-day">P3-13 【基盤】regime - レジームモジュール新設（市場ゲートスコア + Distribution Day）<a class="headerlink" href="#p3-13-regime-distribution-day" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: D3 の解消。表示専用だった市場データを判断ロジックに接続する第一歩。</li>
+<li><strong>スコープ</strong>: 新パッケージ <code>src/swing_copilot/regime/</code>（<code>gate.py</code>, <code>distribution.py</code>）、
+  <code>screening/indicators.py</code>（SMA利用）、<code>storage/schema.py</code>（regime スナップショット）、
+  <code>config/settings.yaml</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>市場ゲート（決定論・純関数）: 入力 = SPY 終値 vs SMA200、^VIX 終値。
+    <code>SPY &gt;= SMA200</code> は通常、SMA200の3%以内の下側は警戒、それ未満は停止。
+    VIXは30超のパニック停止だけに使う。閾値はすべて config（フェーバー系の
+    長期トレンド線とオーナー決定）。</li>
+<li>IBD 式 Distribution Day カウンター（SPY・QQQ 各指数）:
+    DD = 前日比 −0.2% 以下かつ出来高が前日超。停滞日（出来高増・値動き +0.1% 未満）は
+    0.5 日換算。25 営業日で失効、または DD 当日終値から +5% 上昇で無効化。
+    水準: d25 ≤ 2 → NORMAL、d25 ≥ 3 → CAUTION、d25 ≥ 5 または d15 ≥ 3 または
+    d5 ≥ 2 → HIGH、d25 ≥ 6 または d15 ≥ 4 → SEVERE（出典: ibd-distribution-day-monitor）。</li>
+<li>すべて既存 OHLCV ストアから <code>date &lt;= as_of</code> で計算。市場指数データが不足する場合は
+    <code>data_quality = INSUFFICIENT</code> を返し、判定を UNKNOWN とする（欠損時は安全側）。</li>
+<li>run ごとに RegimeSnapshot を DuckDB へ永続化。</li>
+<li><strong>動作確認</strong>: dry-run で terminal/markdown にレジーム節（ゲート判定・DD カウント・
+  水準）が表示されること。指数データを意図的に欠損させたフィクスチャで UNKNOWN と
+  なり例外にならないこと。</li>
+<li><strong>Not in scope</strong>: ブレッド指標（ユニバース全体の MA 上比率等は将来検討）。
+  Exposure接続はP3-14、FTD再参入接続はP3-16で完了した。</li>
+<li><strong>依存</strong>: なし（フェーズ基盤）</li>
+<li><strong>(要検証) の履歴</strong>: 2026-08-07、#111 で <code>dd_severe_d25: 7</code> / <code>dd_severe_d15: 6</code>
+  を採用し <code>config/settings.yaml</code> に反映した。根拠は 2000-01-03〜2026-08-06
+  （6,589観測日）への履歴延長・holdout・エピソード単位ブロックブートストラップに
+  よる再検証で、①当時のDD単独モデル（6/4）では SEVERE（= <code>CASH_PRIORITY</code>）が全期間の 61% を
+  占める既定状態だったこと（7/6 で 35%、前半/後半分割でも安定）、②SEVERE の
+  先行き平均ドローダウンが最深で、SEVERE−(CAUTION+NORMAL) の差はブートストラップ
+  95%CI でも有意なこと。先行きリターンの単調性は期間分割で再現せず根拠から
+  撤回した。<code>dd_high_*</code>（5/3/2）は据え置きで引き続き要検証。実損益への効果は
+  <code>backtest/</code> が exposure を消費しないため未測定（P3-14 の範囲）。詳細は
+  <code>reports/regime/2026-08-06-dd-threshold-review.md</code> §10。
+  なお <code>dd_high_*</code> と <code>dd_caution_d25</code> は表示専用である。Issue #252後の本番Exposureは
+  DD単独ではなくSMA200/VIX/FTDを先に評価し、<code>SEVERE</code>はSMA200以上のときだけ
+  <code>REDUCE_ONLY</code>ラベルに影響する。<code>REDUCE_ONLY</code>は口座固有のリスク半減を行わない。</li>
+</ul>
+<h3 id="p3-14-worktreep3-regimeregimeriskreport-exposure-ceiling">P3-14 【依存あり/worktree:p3-regime】regime/risk/report - Exposure Ceiling 統合<a class="headerlink" href="#p3-14-worktreep3-regimeregimeriskreport-exposure-ceiling" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 「今どれだけ張ってよいか」を個別銘柄より先に提示し、サイジングに強制反映する。</li>
+<li><strong>スコープ</strong>: <code>regime/exposure.py</code>（新規）、<code>risk/checks.py</code>, <code>risk/position_sizing.py</code>,
+  <code>report/daily_brief.py</code>, <code>report/*</code>, <code>pipeline/daily.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>判定は上から、VIX&gt;30は<code>CASH_PRIORITY</code>、SMA200を3%超下回りFTD非アクティブは
+    <code>CASH_PRIORITY</code>、同じ下落域でFTDアクティブは<code>REDUCE_ONLY</code>、SMA200直下3%以内は
+    <code>REDUCE_ONLY</code>、SMA200以上でもDD SEVEREなら<code>REDUCE_ONLY</code>、それ以外は
+    <code>NEW_ENTRY_ALLOWED</code>とする。HIGH/CAUTIONは表示専用。</li>
+<li>欠損時保守則: 入力のいずれかが UNKNOWN なら判定を 1 段階厳しい側へ倒す。
+    緩める方向への自動変更は行わない（出典: exposure-coach の安全第一原則）。</li>
+<li>リスク統合: CASH_PRIORITYでも候補と価格計画を保持し、理由
+    <code>REGIME_CASH_PRIORITY</code>で「見送り（地合い）」とする。REDUCE_ONLYは警戒ラベルと
+    説明文だけで、候補掲載数や口座固有値を変更しない。</li>
+<li>レポート: terminal / markdown / discord の<strong>先頭</strong>（候補一覧より前）に
+    Exposure Ceiling ブロック（判定・根拠・データ品質）を表示。</li>
+<li><strong>動作確認</strong>: フィクスチャで3判定それぞれを再現する dry-run を行い、
+  レポート先頭に判定が出ること、CASH_PRIORITYで候補が「見送り（地合い）」として
+  残ること、REDUCE_ONLYで候補が残ることを確認。</li>
+<li><strong>Not in scope</strong>: 加重平均型の複合エクスポージャー式（複数指標が揃う将来に拡張）</li>
+<li><strong>依存</strong>: P3-13、P1-03（理由コード表示の枠組み）</li>
+</ul>
+<h3 id="p3-15-worktreep3-regimellm-">P3-15 【依存あり/worktree:p3-regime】llm - レジームコンテキスト注入と整合性自己点検<a class="headerlink" href="#p3-15-worktreep3-regimellm-" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P7）</strong>: 完了済み。<code>format_market_regime()</code> は <code>analysis/context.py</code> に
+残り、注入先が「API の system フィールド」から
+「<code>analysis_input.json</code> の run 単位 <code>context</code> フィールド」へ変わった。
+未信頼テキストと分離するという不変条件は維持されている。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: 個別銘柄分析が地合いと矛盾したまま出力されるのを防ぐ。</li>
+<li><strong>スコープ</strong>: <code>llm/decision_context.py</code>, <code>llm/summarize.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li><code>&lt;market_regime&gt;</code> ブロック（ゲート判定・DD 水準・Exposure Ceiling・データ品質）を
+    プロンプトへ決定論的に注入（信頼できるコード側データとしてシステム側フィールドに置く）。</li>
+<li>自己点検指示: 各銘柄の interpretation にレジームとの整合性を1文で言及させる。
+    レジームと矛盾する強気/弱気の結論には根拠の明示を要求し、
+    保守的不一致ルール（P2-12）を適用。</li>
+<li><strong>動作確認</strong>: プロンプトハッシュのテスト更新。フェイククライアントで
+  レジームブロックが user/system の適切なフィールドに分離されていることを検証。</li>
+<li><strong>Not in scope</strong>: LLM によるレジーム判定そのもの（判定はコードのみ）</li>
+<li><strong>依存</strong>: P3-13, P3-14, P2-12</li>
+</ul>
+<h3 id="p3-16-worktreep3-regimeregime-ftd">P3-16 【依存あり/worktree:p3-regime】regime - フォロースルーデー（FTD）状態機械<a class="headerlink" href="#p3-16-worktreep3-regimeregime-ftd" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 底打ち後の「再エントリー許可」を日数・出来高・終値ルールで根拠づける。</li>
+<li><strong>スコープ</strong>: <code>regime/ftd.py</code>（新規）、<code>storage/schema.py</code>、<code>report/*</code></li>
+<li><strong>主要仕様</strong>（出典: ftd-detector。優先度は P3 内で最後）:</li>
+<li>調整確定: 直近高値から −3% 以上かつ下落日 3 日以上。</li>
+<li>Day1 = 前日終値超え（または当日レンジ上位 50% で引け）。Day2-3 は Day1 安値
+    割れでリセット。FTD = Day4-10 に +1.25% 以上かつ前日超え出来高。</li>
+<li>品質スコア: Day4-7 基礎 60 点、Day8-10 基礎 50 点、上昇率 1.25/1.5/2.0% で段階加点、
+    SPY・QQQ 両指数同時確認で +15 点。FTD確認日の安値割れ、またはSPY終値の
+    SMA200回復でFTDを失効させる。</li>
+<li>「FTD 成功率 25%」等の成功率言説は採用しない（一次資料未確認）。
+    表示は状態と品質スコアのみ。</li>
+<li>状態機械は明示的な状態遷移（純関数 + 状態列挙）で実装し、全遷移をテストする。</li>
+<li><strong>動作確認</strong>: 2020年3月・2022年等の実データ相当フィクスチャで既知の FTD 相当日を
+  検出すること。リセット条件のテスト。dry-run のレジーム節に FTD 状態が出ること。</li>
+<li><strong>Not in scope</strong>: FTD成功率などの統計的な採否検証。FTDは既にSMA200下の
+  <code>CASH_PRIORITY</code>を<code>REDUCE_ONLY</code>へ戻す狭い例外としてExposureへ接続済み。</li>
+<li><strong>依存</strong>: P3-13</li>
+</ul>
+<hr />
+<h3 id="p4-18-worktreep4-datadatarisk-">P4-18 【並列可/worktree:p4-data】data/risk - 決算近接ガード（決算カレンダーアダプタ）<a class="headerlink" href="#p4-18-worktreep4-datadatarisk-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 決算跨ぎの二値的・非対称リスクを機械的に警告・回避する。</li>
+<li><strong>スコープ</strong>: <code>data/</code>（新アダプタ、Finnhub earnings calendar 想定）、
+  <code>storage/schema.py</code>, <code>risk/checks.py</code>, <code>config.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>アダプタは既存外部境界規約に完全準拠: 明示タイムアウト、有界リトライ、
+    全試行へのレート制限、決定論的バックオフのテスト、オフラインテストはフェイク注入。</li>
+<li>取得した決算予定日はスナップショットとして保存（取得日時を記録。
+    予定日は変更されうるため、rerun は補正を取り込む upsert）。</li>
+<li>リスクチェック: 次回決算まで 2 営業日以内 → blocking reject
+    <code>EARNINGS_PROXIMITY_BLOCK</code>、5 営業日以内 → warning <code>EARNINGS_PROXIMITY_WARN</code>
+    （N は config、既定 2/5、出典: parabolic-short-trade-planner の原則、(要検証)）。</li>
+<li>決算日が取得できない銘柄は warning <code>EARNINGS_DATE_UNKNOWN</code>（沈黙させない）。</li>
+<li><strong>動作確認</strong>: フェイクアダプタで 1/2/3/5/6 営業日前の境界テスト。dry-run で
+  該当候補に決算警告が表示されること。API キー未設定時は機能全体が
+  「無効(理由表示)」として fail-soft すること。</li>
+<li><strong>Not in scope</strong>: 決算後スコアリング（P5-22）、経済指標カレンダー</li>
+<li><strong>依存</strong>: なし</li>
+<li><strong>備考</strong>: Finnhub 決算カレンダー API の無料枠での利用可否を実装前に確認し、
+  不可なら yfinance の決算日で代替（精度低下を README に注記）。</li>
+</ul>
+<hr />
+<h3 id="p5-21-worktreep5-signalsscreening-minervini">P5-21 【並列可/worktree:p5-signals】screening - Minervini トレンドテンプレートシグナル<a class="headerlink" href="#p5-21-worktreep5-signalsscreening-minervini" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: Stage2 判定を 7 条件に精密化し、条件ごとの充足状況を根拠として出す。</li>
+<li><strong>スコープ</strong>: <code>screening/technical_signals.py</code>, <code>screening/indicators.py</code>,
+  <code>config/strategies.yaml</code>, <code>data/</code>（52週高安値・RS 計算に必要な範囲）、
+  <code>pipeline/daily.py</code>（--strategy 引数追加）</li>
+<li><strong>主要仕様</strong>（出典: vcp-screener の Minervini Trend Template）:</li>
+<li>7 条件: (1) close &gt; SMA150 かつ &gt; SMA200、(2) SMA150 &gt; SMA200、
+    (3) SMA200 が 22 営業日以上上昇継続、(4) close &gt; SMA50、
+    (5) close ≥ 52週安値 × 1.25、(6) close ≥ 52週高値 × 0.75、
+    (7) RS パーセンタイル ≥ 70（ユニバース内、63/126/189/252 日リターンの
+    加重 40/20/20/20% で算出 (要検証)）。</li>
+<li>合格ライン: 7 条件中 6 以上（config <code>min_criteria</code> 既定 6）。</li>
+<li><code>SignalHit.strength = 充足条件数 / 7</code>、metrics に条件ごとの bool と実値を保持
+    → P1-01 経由でレポート到達。</li>
+<li><code>copilot-daily</code> に <code>--strategy &lt;key&gt;</code> 引数を追加する（既定 "default"。
+    strategies.yaml に存在しないキーは起動時に fail-fast）。P5 の全戦略の
+    動作確認はこの引数を使う。</li>
+<li><strong>導入前検証を DoD に含める</strong>: <code>copilot-backtest</code> で本シグナル追加戦略 vs default を
+    同一期間（最低3年）で比較し、結果の指標表を PR に添付する。結果が悪くても
+    導入自体は可（strategies.yaml で無効化可能なため）だが、事実を記録する。</li>
+<li><strong>動作確認</strong>: --strategy minervini_stage2 を指定して dry-run し、
+  候補の根拠列に「6/7 条件」等が表示されること。境界テスト（ちょうど 22 日、
+  ちょうど 25% 上、RS=70）。</li>
+<li><strong>Not in scope</strong>: VCP 検出(P5-24)、RS のセクター内比較</li>
+<li><strong>依存</strong>: P1-01、P2-08（検証用）</li>
+</ul>
+<h3 id="p5-22-worktreep5-signalsscreening-5">P5-22 【依存あり/worktree:p5-signals】screening - 決算後 5 因子スコアシグナル<a class="headerlink" href="#p5-22-worktreep5-signalsscreening-5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 決算というイベントを「避ける」(P4-18) だけでなく「使う」選択肢を追加する。</li>
+<li><strong>スコープ</strong>: <code>screening/technical_signals.py</code>, <code>config/strategies.yaml</code></li>
+<li><strong>主要仕様</strong>（出典: earnings-trade-analyzer、重み・閾値は config、(要検証)）:</li>
+<li>ギャップ算出: BMO 決算 = 当日 open / 前日 close − 1、AMC = 翌日 open / 当日 close − 1。</li>
+<li>5 因子加重: Gap 幅 25%、決算前 20 日リターン 30%、出来高比（20d/60d 平均）20%、
+    MA200 乖離 15%、MA50 乖離 10%。因子ごとの閾値表でスコア化し、
+    A(85+)/B(70-84)/C(55-69)/D(&lt;55) グレード。</li>
+<li>グレードと因子内訳を metrics に保持しレポート表示。D グレードはシグナル不成立。</li>
+<li>導入前検証を DoD に含める（P5-21 と同じ方式）。</li>
+<li><strong>動作確認</strong>: 決算日フィクスチャ + 価格フィクスチャでグレード境界（84.9/85.0 等）の
+  テスト。dry-run で決算後銘柄にグレードが表示されること。</li>
+<li><strong>Not in scope</strong>: PEAD 週足パターン（将来）、Episodic Pivot</li>
+<li><strong>依存</strong>: P4-18（決算日データ）、P1-01、P2-08（検証用）</li>
+</ul>
+<h3 id="p5-23-worktreep5-signalsscreening-2">P5-23 【並列可/worktree:p5-signals】screening - エグゼキューション状態分類（品質と買い時の2軸化）<a class="headerlink" href="#p5-23-worktreep5-signalsscreening-2" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 「パターンが良い」と「今買ってよい」を分離し、候補を3バケットで提示する。</li>
+<li><strong>スコープ</strong>: <code>screening/pipeline.py</code>, <code>report/daily_brief.py</code>, <code>report/*</code></li>
+<li><strong>主要仕様</strong>（出典: vcp-screener の 2 軸 + state cap 設計。閾値は (要検証) config）:</li>
+<li>状態判定（ATR 正規化距離 <code>d = (close − SMA50) / ATR14</code> を使用）:
+    DAMAGED（d &lt; −3）、PULLBACK_ZONE（−3 ≤ d &lt; 0）、FAIR（0 ≤ d &lt; 2）、
+    EXTENDED（2 ≤ d &lt; 4）、OVEREXTENDED（d ≥ 4）。</li>
+<li>バケット提示: 即検討可（PULLBACK_ZONE/FAIR）、様子見（EXTENDED）、
+    見送り（OVEREXTENDED/DAMAGED、スコアに関わらず候補リスト末尾へ降格 = state cap）。</li>
+<li>レポートは3バケット見出しで候補を分けて表示。状態と d 値を根拠列に出す。</li>
+<li><strong>動作確認</strong>: d 値境界（−3, 0, 2, 4 ちょうど）のテスト。dry-run で候補が
+  バケット別に表示されること。</li>
+<li><strong>Not in scope</strong>: ピボット価格ベースの状態判定（P5-24 の VCP 導入後に高度化）</li>
+<li><strong>依存</strong>: P1-01</li>
+</ul>
+<h3 id="p5-24-worktreep5-signalsscreening-vcp">P5-24 【依存あり/worktree:p5-signals】screening - VCP 収縮パターン検出（オプション・最後）<a class="headerlink" href="#p5-24-worktreep5-signalsscreening-vcp" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 収縮比・出来高 dry-up という検証可能な数値基準でセットアップ品質を測る。</li>
+<li><strong>スコープ</strong>: <code>screening/vcp.py</code>（新規）、<code>screening/technical_signals.py</code></li>
+<li><strong>主要仕様</strong>（出典: vcp-screener、全閾値 config、(要検証)）:</li>
+<li>スイング高安値検出は ATR 倍数ジグザグ。収縮列 T1, T2, ... について
+    T1 深さ 8-35%（小型株 50% まで許容）、T_{i+1} ≤ 0.75 × T_i、最低 2 回収縮、
+    パターン全長 15-325 営業日。</li>
+<li>dry-up 比 = ピボット手前 10 本平均出来高 / 50 日平均。&lt; 0.30 理想、&gt; 0.70 弱い。</li>
+<li>ピボット = 最終収縮の高値。ピボット超え +5% 超は追いかけ禁止（候補から降格）。</li>
+<li>metrics: 収縮回数・各収縮深さ・dry-up 比・ピボット価格。</li>
+<li><strong>導入判定を DoD に含める</strong>: P2-11 のポストモーテム様式で過去 2 年の検出時点
+    のフォワード成績を集計し、結果を PR に記録した上で既定 off の戦略として追加。</li>
+<li><strong>動作確認</strong>: 教科書的な VCP を含む合成価格フィクスチャで検出。収縮比 0.76 で
+  不成立になる境界テスト。dry-run で VCP 戦略有効時に metrics が表示されること。</li>
+<li><strong>Not in scope</strong>: 週足での検証、チャート画像出力</li>
+<li><strong>依存</strong>: P1-01, P2-08, P2-11</li>
+</ul>
+<hr />
+<h3 id="p6-2026-07-25-api">P6: 実運用ギャップ修正（2026-07-25 実 API 動作確認より）<a class="headerlink" href="#p6-2026-07-25-api" title="Permanent link">&para;</a></h3>
+<p>P1〜P5 完了後、実 API（yfinance / SEC EDGAR / Finnhub / Anthropic）を使った
+動作確認を2セッション実施した。ローカルメモは gitignore 対象のため、
+判断に必要な結論は本節に記録する。</p>
+<p><strong>総合診断</strong>: ガードレール機構（fail-soft、キャッシュ再利用と再検証、
+provenance 検証、予算ゲート機構そのもの、補正 upsert、原子的置換、
+バックテスト一式、P3/P4 のゲート群）はすべて設計どおり動作した。
+設計の見直しは不要。修正対象は次の3クラスに限られる:</p>
+<ol>
+<li><strong>リグレッション</strong>: fundamentals 抽出がコミット <code>29ffa2c</code>（bulk facts API 化）で
+   壊れ、net_income 等の 76% が NULL 化 → スクリーニングが候補0件（P6-25）</li>
+<li><strong>開示経路だけの境界欠落</strong>: ニュース側には存在する lookback・件数上限・
+   ソート・プロンプトへの source_id 明記が、開示側だけ欠けている非対称
+   （P6-26, P6-27）。1回の実行で LLM 呼び出し 3,000 回超・provenance 検証
+   実効成功率 0% の複合要因</li>
+<li><strong>会計・表示の局所バグ</strong>: 応答受信後の検証失敗が cost_usd=0 で記録され
+   月次予算上限が素通し（上限 $0.30 に対し実消費 約$1.5 を観測）、
+   markdown テーブル分断、株数0の理由誤表示（P6-26, P6-28）</li>
+</ol>
+<h3 id="p6-25-worktreep6-screeningdatascreeningstorage-fundamentals">P6-25 【最優先/worktree:p6-screening】data/screening/storage - fundamentals 抽出リグレッション修正とスクリーニング機能回復<a class="headerlink" href="#p6-25-worktreep6-screeningdatascreeningstorage-fundamentals" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: 実データで候補0件になる主因（fundamentals の 76% NULL）を解消する。</li>
+<li><strong>スコープ</strong>: <code>data/edgar.py</code>, <code>screening/rejection_classifier.py</code>,
+  <code>storage/market_store.py</code>, <code>pipeline/daily.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>根本原因: <code>_group_facts_by_filing</code> の <code>fiscal_period_end = max(period_ends)</code> が
+    <code>dei</code> タクソノミの表紙 fact（<code>EntityCommonStockSharesOutstanding</code> 等、
+    期末より 30〜45 日後の日付を持つ）に乗っ取られ、
+    <code>_pick_concept_value</code> の期末日厳密一致が全 concept で失敗する
+    （net_income だけでなく revenue/equity/assets/fcf も同時に NULL 化）。
+    期末日算出を <code>us-gaap</code> タクソノミの fact のみに限定して修正する。
+    <code>filed_at</code>（可視性境界）には触れないため as-of 規律への影響はない。</li>
+<li>落選 detail の根拠修正: <code>_classify_fundamentals</code> の net_income 判定は
+    「直近 N 四半期のいずれかが不合格」で落選させた後、最新四半期の値を
+    detail に書いている。実際に条件を満たさなかった四半期の
+    <code>fiscal_period_end</code> と値を記録する。「古い四半期が原因で最新は陽性」の
+    回帰テストを追加する（現状このシナリオのテストが存在しない）。</li>
+<li>理由コードの分離: net_income が NULL（データ欠損）の場合は
+    <code>FILTER_NEGATIVE_NET_INCOME</code> ではなくデータ不足系の理由コードに分離する
+    （「純損失で落ちた」と「データが無くて判定不能」は別の事実）。</li>
+<li>fundamentals キャッシュ判定の修正: <code>has_fundamentals_fetched_on</code> の呼び出し側が
+    <code>as_of</code> を渡すため、過去日 <code>--as-of</code> では <code>CAST(fetched_at AS DATE) = day</code> が
+    永久に不成立で毎回フル取得になる。判定を注入 Clock の wall clock 基準に
+    改める（as_of は可視性境界、wall time はキャッシュ鮮度、という役割分離。
+    AGENTS.md「wall time は metadata」の裏返しの誤用を正す）。</li>
+<li><strong>動作確認</strong>: dry-run <code>--limit 150</code> で fundamentals の NULL 率が激減し
+  （post-2011 の非訂正申告で 99% 超が値を持つ見込み）、落選理由が実データに
+  基づくこと。同一 <code>--as-of</code> での再実行で EDGAR 取得がスキップされること。</li>
+<li><strong>Not in scope</strong>: Q4 離散値の導出（FY − ΣQ1..Q3）。10-K 行は通期値のまま扱う</li>
+<li><strong>依存</strong>: なし</li>
+</ul>
+<h3 id="p6-26-worktreep6-llmllmstoragedata-llm">P6-26 【最優先/worktree:p6-llm】llm/storage/data - LLM 予算会計の実支出化と開示取得の境界設定<a class="headerlink" href="#p6-26-worktreep6-llmllmstoragedata-llm" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P7）</strong>: 完了済みだが、予算会計・月次上限ゲート・<code>max_llm_calls_per_run</code>
+は LLM API 呼び出しの廃止に伴い削除された。生き残ったのは開示取得の境界設定
+（<code>filing_lookback_days</code> / <code>max_filings_per_symbol</code>）で、<code>settings.llm.*</code> から
+<code>settings.analysis.*</code> へ移設されている。</p>
+<p><strong>2026-07-29再評価</strong>: 1開示120,000字は維持し、10-Q/10-Q-Aを重要章優先で
+構成する。1銘柄合計240,000字の上限と<code>analysis-input-v3</code>のcoverageを追加した。
+P8は重大外しと入力欠落の併存を<code>with_gap</code> / <code>without_gap</code> / <code>unknown</code>で集計するが、
+因果は自動認定しない。詳細は<code>docs/04_detailed_design.md</code> 3.15、3.16、3.23.4、6節。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: NFR-01 の月次予算上限を「実支出に対する保証」にする。
+  1回の実行で予算を溶かす構造を止める。</li>
+<li><strong>スコープ</strong>: <code>llm/client.py</code>, <code>storage/llm_records.py</code>, <code>config.py</code>,
+  <code>config/settings.yaml</code>, <code>data/edgar.py</code>, <code>text/edgar_filings.py</code>,
+  <code>pipeline/daily.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>会計の実支出化: 応答受信後の検証失敗（SchemaValidationError /
+    ForbiddenLanguageError）と refusal の監査記録に <code>response.usage</code> 由来の
+    実トークン数・実コストを載せる（status は failed のまま）。
+    API 例外分岐は response 不在のため現状どおり 0 で正しい。</li>
+<li>月次集計の意味論変更: <code>get_monthly_cost()</code> の <code>WHERE status = 'success'</code> を
+    廃し、実際に課金が発生した全行（cost_usd）の合算にする。
+    これを直さない限り client 側の記録修正はゲートに反映されない。</li>
+<li>トークン見積もり係数: <code>_CHARS_PER_TOKEN_ESTIMATE = 4</code> は日本語主体
+    プロンプトの実測（約 2.0）に対し2倍過小見積もりで、「保守的」の意図と
+    逆方向。2.0 に変更しコメントを実態に合わせる。</li>
+<li>開示取得の境界: <code>filing_lookback_days</code>（既定 90）と
+    <code>max_filings_per_symbol</code>（既定 3）を config 化し、取得〜LLM 分析の経路に
+    通す（ニュース側 <code>max_news_items_per_symbol</code> と対称）。
+    <code>fetch_filing_texts</code> の結果を <code>filed_at</code> 降順で決定的にソートする
+    （現状は外部ライブラリの返却順に依存し、fundamentals 側の明示ソートと
+    非対称）。</li>
+<li>実行単位の呼び出し上限: <code>max_llm_calls_per_run</code> を config 化し、
+    パイプラインの LLM ステップで超過分をスキップ・監査記録する
+    （予算ゲートの第二防御。無音の暴走を防ぐ）。</li>
+<li><strong>動作確認</strong>: オフラインテストで (a) 検証失敗・refusal 時に cost_usd &gt; 0 が
+  記録され月次集計とゲートに反映される (b) 開示が 90日・3件・filed_at 降順に
+  絞られる (c) 呼び出し上限超過でスキップと監査記録が残ること。</li>
+<li><strong>Not in scope</strong>: 開示分析のプロンプト修正・レポート反映（P6-27）</li>
+<li><strong>依存</strong>: なし</li>
+</ul>
+<h3 id="p6-27-worktreep6-llmllmreport-provenance-p2-12">P6-27 【依存あり/worktree:p6-llm】llm/report - 開示分析の provenance 修正とレポート反映・P2-12 残件<a class="headerlink" href="#p6-27-worktreep6-llmllmreport-provenance-p2-12" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P7）</strong>: 完了済み。「本文に source_id を明記する」原則と
+「同一銘柄の全開示を個別に描画する」修正は新しいスキル契約へ引き継がれた
+（<code>analysis/schemas.py::FilingAnalysis</code>、<code>BriefFilingAnalysis</code>）。
+<code>catalyst_quality</code> の表示接続と near-stale 警告は廃止された。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: 実効成功率 0% の開示分析を機能させ、生成した分析を捨てない。</li>
+<li><strong>スコープ</strong>: <code>llm/filings_analysis.py</code>, <code>report/daily_brief.py</code>,
+  <code>report/markdown_report.py</code>, <code>report/terminal_report.py</code>, <code>config/settings.yaml</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>provenance 修正: <code>_analyze_chunk</code> のユーザープロンプトに
+    <code>[source_id: {chunk_source_id}]</code> を明記する（ニュース側
+    <code>_format_news_item</code> と同形）。モデルは引用すべき ID を知らされないまま
+    「source_ids 必須」と指示され、263 件中 262 件が検証失敗していた。
+    回帰テストは「プロンプト本文に source_ids の各要素が含まれること」を
+    assert する。プロンプト変更により prompt_hash が変わり既存キャッシュは
+    自然に無効化される（想定内）。</li>
+<li>レポート反映の拡張: 銘柄あたり最初の 1 件のみだった開示分析を、
+    <code>max_filings_per_symbol</code> 件まで表示する（terminal / markdown 両方）。</li>
+<li><code>catalyst_quality</code> の表示接続: <code>BriefLlm</code> に追加しレポートに表示する
+    （表示のみ。ランキングへの定量統合は P6-29 で別途判断）。</li>
+<li>near-stale 警告: <code>is_cache_near_stale()</code> を本番経路に接続し、TTL 残り
+    2 日以内のキャッシュ済み分析に警告を表示する（P2-12 未完項目の解消）。</li>
+<li><strong>動作確認</strong>: オフラインテストに加え、絞った予算上限での実 API 再検証で
+  開示分析が provenance 検証を通過し facts が非空であること
+  （実 API 実行は事前にユーザー確認を取る）。</li>
+<li><strong>Not in scope</strong>: catalyst_quality のランキング統合（P6-29）</li>
+<li><strong>依存</strong>: P6-26（境界設定と会計修正が先）</li>
+</ul>
+<h3 id="p6-28-worktreep6-reportreport-">P6-28 【並列可/worktree:p6-report】report - 表示の正確性修正<a class="headerlink" href="#p6-28-worktreep6-reportreport-" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: レポートが事実と異なる・壊れた表示をしない。</li>
+<li><strong>スコープ</strong>: <code>report/markdown_report.py</code>, <code>report/daily_brief.py</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>markdown の Candidates テーブル: ヘッダ行・区切り行の直後にバケット見出し
+    （### 即検討可 等）が挿入され、データ行が見出しの後ろに孤立して
+    テーブルとして描画されない。バケットごとに完結したテーブルを出力する形に
+    修正する（P5-23 のバケット節導入時のリグレッション）。</li>
+<li>Issue #348後は株数表示自体を廃止し、候補表は1Rを表示する。CASH_PRIORITYは
+    <code>binding_constraint=regime</code>を「見送り（地合い）」として表示する。</li>
+<li><strong>動作確認</strong>: バケットに候補が分散するフィクスチャで markdown が有効な
+  テーブルとしてレンダリングされること。<code>binding_constraint = regime</code> の
+  候補で表示文言が一致すること。</li>
+<li><strong>Not in scope</strong>: レポートのレイアウト変更・新節の追加</li>
+<li><strong>依存</strong>: なし</li>
+</ul>
+<h3 id="p6-29-obsoletescreeningllm-catalyst_quality">P6-29 【obsolete】screening/llm - catalyst_quality のランキング統合検討<a class="headerlink" href="#p6-29-obsoletescreeningllm-catalyst_quality" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>obsolete（P7）</strong>: <code>catalyst_quality</code> フィールド自体が P7 のスキル移行で
+廃止されたため、本 Issue は検討対象を失った。改修原則 4（判断はコード、
+叙述はスキル分析）は維持されており、定性シグナルを定量ランキングへ
+組み込まないという結論も変わらない。将来 <code>analysis/schemas.py</code> に
+同等の任意フィールドを復活させる場合は、新しい Issue を起こす。</p>
+</blockquote>
+<ul>
+<li><strong>目的（当時）</strong>: 表示接続（P6-27）の先にある「定性シグナルを定量ランキングに
+  組み込むか」の設計判断を行う。</li>
+<li><strong>実装しない</strong>。改修原則 4 との整合が論点であり、検討結果（採否と理由）を
+  本 Issue に記録して閉じる。</li>
+<li><strong>依存</strong>: P6-27</li>
+</ul>
+<h3 id="p7-claude-code-2026-07-28">P7: 定性分析の Claude Code スキル移行（2026-07-28）<a class="headerlink" href="#p7-claude-code-2026-07-28" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>目的</strong>: Anthropic API 直呼びの LLM 統合を全廃し、定性分析を Claude Code
+  スキルへ移す。判断はコード・叙述はスキル分析という原則を、API 課金・
+  予算ゲート・キャッシュという運用負債なしで成立させる。</li>
+<li><strong>スコープ</strong>: <code>analysis/</code>（新設）, <code>pipeline/daily.py</code>, <code>report/daily_brief.py</code>,
+  <code>report/terminal_report.py</code>, <code>report/markdown_report.py</code>, <code>config.py</code>,
+  <code>storage/</code>, <code>.claude/skills/swing-daily</code>（<code>analyze-news</code> / <code>analyze-filings</code> /
+  <code>interpret-screening</code>）</li>
+<li><strong>実施内容</strong>:</li>
+<li><code>llm/</code> パッケージ・<code>storage/llm_records.py</code>・<code>llm_calls</code> テーブル・
+    <code>anthropic</code> 依存・<code>LLMConfig</code>/<code>BudgetConfig</code>/<code>ANTHROPIC_API_KEY</code>・
+    月次予算・実行単位の呼び出し上限・応答キャッシュ / near-stale 機構を削除。</li>
+<li>日次バッチのステップ 6 を <code>6_llm</code> から <code>6_analysis_export</code> へ。候補と
+    テキストがあれば <code>analysis_input.json</code>（strict スキーマ）を日付付き
+    レポートディレクトリへ原子的に書き出す。あわせて <code>report_context.json</code>
+    （<code>DailyBrief</code> のスナップショット、schema <code>report-context-v2</code>）を保存。</li>
+<li>新 CLI <code>copilot-ingest-analysis</code> が strict スキーマ検証・provenance 検証
+    （<code>source_ids</code> ⊆ 入力、facts 非空）・CON-03 機械検査（旧 <code>llm/safety.py</code> の
+    純関数を <code>analysis/safety.py</code> へ移設）を行い、違反銘柄は fail-closed で
+    縮退表示（リトライなし）。レポートを再描画する。</li>
+<li>銘柄ごとの verdict（<code>proceed</code> / <code>skip</code>）と run 単位の <code>no_trade</code> 表示を追加。
+    スクリーニングの決定論的結果は不変。</li>
+<li>旧 <code>llm.*</code> セクションのテキスト境界設定を <code>analysis.*</code> へ移設。</li>
+<li><strong>意図的な仕様変更</strong>: <code>catalyst_quality</code>（REQ-006/007 の触媒の質表示）と
+  <code>guidance_direction</code> は新契約に含めず廃止した。いずれも表示専用で
+  ランキング・リスク判定に接続されておらず、必要になれば
+  <code>analysis/schemas.py</code> の任意フィールドとして復活できる。</li>
+<li><strong>監査証跡</strong>: <code>llm_calls</code> に代わり、レポートディレクトリの
+  <code>analysis_input.json</code> / <code>analysis_result.json</code> / <code>report_context.json</code> が
+  そのまま監査アーティファクトになる（NFR-05）。</li>
+<li><strong>動作確認</strong>: <code>uv run copilot-daily --dry-run --limit 20</code> で
+  <code>analysis_input.json</code> が出力されること。<code>swing-daily</code> スキルを実行し
+  <code>uv run copilot-ingest-analysis &lt;dir&gt;</code> がレポートを再描画すること。
+  provenance 違反・CON-03 違反を含む <code>analysis_result.json</code> で、当該銘柄だけが
+  「検証不合格のため非表示」になり他の銘柄が巻き込まれないこと。</li>
+<li><strong>依存</strong>: P6-26 / P6-27（同じ境界を扱うため、両者の完了後に実施）</li>
+</ul>
+<h3 id="p8-2026-07-28">P8: 振り返り→改善提案機構（2026-07-28）<a class="headerlink" href="#p8-2026-07-28" title="Permanent link">&para;</a></h3>
+<p>過去の LLM 定性 verdict の当否を定量計測し、シグナル成績・ソース貢献・
+人間判断との突き合わせを統合俯瞰した上で、パラメータ調整（L1）から
+構成変更（L2）・設計見直し（L3）までの改善提案を生成・適用する仕組み。
+適用は L1 が即時（検証合格 + PR 作成まで）、L2/L3 が設計の
+AskUserQuestion 承認後（適用 + PR 作成まで）。いずれも 1 提案 1 PR で
+main 直接コミットはせず、「人間判断を挟む」原則は PR マージ（および
+L2/L3 の設計承認）に集約する。Python 側には config / コードを書き換える
+経路を持たせない。詳細設計と事前確定判断は
+<code>docs/goal-prompts/swing-copilot-retrospective/</code>（design.md / decisions.md）を
+正とする。P7 完了が前提。</p>
+<h3 id="p8-30-worktreep8-retrostorageretro-verdict">P8-30 【基盤/worktree:p8-retro】storage/retro - verdict 永続化と当否評価<a class="headerlink" href="#p8-30-worktreep8-retrostorageretro-verdict" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P8）</strong>: 完了済み（#71）。<code>verdicts</code> / <code>verdict_sources</code> /
+<code>verdict_outcomes</code> の 3 テーブル、<code>copilot-retro collect</code> / <code>evaluate</code>、
+<code>pipeline/forward_returns.py</code>（逆算 <code>find_target_trading_day</code> / 順算
+<code>find_maturity_trading_day</code>）の抽出が入った。設計の現況は
+<code>docs/04_detailed_design.md</code> 3.23 節を正とする。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: LLM verdict を DuckDB に正本化し、forward return で当否を
+  決定論的に分類する（P2-11 の verdict 版・観測専用）。</li>
+<li><strong>スコープ</strong>: <code>storage/schema.py</code>（新テーブル <code>verdicts</code> /
+  <code>verdict_sources</code> / <code>verdict_outcomes</code>）、<code>retro/</code>（新設: <code>cli.py</code> /
+  <code>collect.py</code> / <code>evaluate.py</code>）、<code>pipeline/forward_returns.py</code>（postmortem
+  から純関数抽出）、<code>pyproject.toml</code>（<code>copilot-retro</code>）</li>
+<li><strong>主要仕様</strong>:</li>
+<li><code>copilot-retro collect</code>: <code>reports/&lt;date&gt;/&lt;run_id&gt;/analysis_result.json</code> を
+    走査し run 単位の完全置換で取り込み。source_type は
+    <code>analysis_input.json</code>（コード所有側）から解決。</li>
+<li><code>copilot-retro evaluate --as-of</code>: 満期営業日（run_date + 5/20 営業日、
+    <code>満期日 &lt;= as_of</code>）の終値で forward return を確定し、verdict 非対称
+    分類（proceed: HIT/MISS_MILD/MISS_SEVERE、skip: HIT/NEUTRAL/
+    MISS_MILD/MISS_SEVERE）。閾値は <code>settings.postmortem</code> を流用。
+    <code>(run_id, horizon_days)</code> 単位の完全置換で冪等。</li>
+<li><code>signal_outcomes</code> と postmortem の既存挙動は不変（回帰テストで担保）。</li>
+<li><strong>動作確認</strong>: フィクスチャの reports/ ディレクトリと DB で collect →
+  evaluate を dry-run し、3 テーブルに行が生成されること。再実行で行が
+  重複しないこと。bar 欠損銘柄がスキップされ壊れないこと。</li>
+<li><strong>Not in scope</strong>: 集約・レポート（P8-31）、評価コードによる config /
+  コードの書き換え（恒久。適用は P8-33 のスキルが PR 経由で行う）</li>
+<li><strong>依存</strong>: P7</li>
+</ul>
+<h3 id="p8-31-worktreep8-retroretro-retro_inputjson">P8-31 【依存あり/worktree:p8-retro】retro - 集約とretro_input.json エクスポート<a class="headerlink" href="#p8-31-worktreep8-retroretro-retro_inputjson" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P8）</strong>: 完了済み（#72）。<code>retro/aggregate.py</code> / <code>surprises.py</code> /
+<code>export.py</code> と strict スキーマ <code>retro-input-v1</code>、<code>RetroConfig</code>
+（<code>max_surprises</code>）、<code>prepare</code> umbrella が入った。予約済みの
+<code>approval_mode</code> は挙動を変えないまま誤解を招くため Issue #178 で削除した。
+<code>trades_journal</code> × verdict クロス集計（人間整合 <code>human_alignment</code>）は
+実売買記録機能一式の撤去（2026-08）に伴い削除された。
+設計の現況は <code>docs/04_detailed_design.md</code> 3.23.3〜3.23.4 節を正とする。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: 振り返りスキルに渡す証拠 dossier を strict スキーマで出力する。</li>
+<li><strong>スコープ</strong>: <code>retro/export.py</code> / <code>retro/schemas.py</code>（<code>retro-input-v1</code>）、
+  <code>config.py</code>（<code>RetroConfig</code>: <code>max_surprises=5</code> (要検証) 等）</li>
+<li><strong>主要仕様</strong>:</li>
+<li>集約: separation（proceed 群−skip 群の平均 forward return、最重要）、
+    proceed 重大外し率（ウォッチ 15% (要検証)・候補全体ベースライン併記）、
+    skip 的中率（ベースライン比）、ソース貢献表（<code>text_items</code> join）。
+    サンプル 20 件未満は「暫定」。</li>
+<li>サプライズ選定: MISS_SEVERE 両方向、上限超過は |return| 降順で切り
+    件数明示。各銘柄に当時の verdict・reasons・実現パスと、run 以降の
+    鮮度データ（既存 text アダプタで取得、<code>analysis.*</code> 予算と timeout/
+    retry/rate limit を流用）を同梱。</li>
+<li><code>input_digest</code>（SHA-256）付与、原子的書き込み。</li>
+<li><strong>動作確認</strong>: フィクスチャ DB から export し、strict スキーマで
+  round-trip できること。サプライズ超過時に切り捨て件数が出力に残ること。</li>
+<li><strong>Not in scope</strong>: 提案の生成・検証（スキル / P8-32）</li>
+<li><strong>依存</strong>: P8-30</li>
+</ul>
+<h3 id="p8-32-worktreep8-retroretro-retro_result">P8-32 【依存あり/worktree:p8-retro】retro - retro_result 検証・レポート・提案台帳<a class="headerlink" href="#p8-32-worktreep8-retroretro-retro_result" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P8）</strong>: 完了済み（#73）。<code>retro/ingest.py</code> / <code>validate.py</code> /
+<code>ledger.py</code> と strict スキーマ <code>retro-result-v1</code> が入った。台帳は再提案
+ガードが完全一致で判定できるよう <code>proposal_key</code> 列を持ち、この乖離は
+<code>docs/04_detailed_design.md</code> 3.23.7 節に記録した。設計の現況は同 3.23.5〜
+3.23.6 節を正とする。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: スキル出力を信用せず検証し、振り返りレポートと提案台帳へ
+  fail-closed で反映する。</li>
+<li><strong>スコープ</strong>: <code>retro/ingest.py</code> / <code>retro/schemas.py</code>（<code>retro-result-v1</code>）、
+  <code>docs/retro/</code>（台帳 <code>proposals.md</code> + <code>proposals/RP-NNN-&lt;slug&gt;.md</code>）</li>
+<li><strong>主要仕様</strong>:</li>
+<li>strict 検証・<code>as_of</code>/<code>input_digest</code> 同一性（不一致は run ごと hard fail）。</li>
+<li>evidence 参照検証: <code>evidence_refs</code> ⊆ 供給した集約 ID・サプライズ ID・
+    source_id。CON-03 機械検査（<code>analysis/safety.py</code> 流用）。違反は
+    当該提案/叙述のみ withhold・リトライなし。</li>
+<li>提案は <code>level</code>（L1/L2/L3）・<code>evidence_basis</code>・<code>verification_plan</code>
+    （L1/L2 必須、指標・閾値系は <code>copilot-backtest</code> の前後比較手順）・
+    敗因分類（<code>information_absent</code> 等 5 値）を必須フィールドに持つ。</li>
+<li>ingest の台帳操作は status=proposed の追記のみ。以降の遷移
+    （applied(PR#) / rejected / deferred / verification_failed）は適用段階の
+    スキルが記録する。rejected / verification_failed と同一 <code>proposal_key</code> の
+    再提案は <code>reopen_justification</code> がなければ差し戻す。</li>
+<li><strong>動作確認</strong>: 違反入りフィクスチャ result で当該提案だけが withhold され
+  他が巻き込まれないこと。再 ingest で台帳が重複追記されないこと。</li>
+<li><strong>Not in scope</strong>: ingest 自身による config / コードの書き換え（恒久。
+  適用は P8-33 のスキルが検証・承認を経て PR で行う）</li>
+<li><strong>依存</strong>: P8-31</li>
+</ul>
+<h3 id="p8-33-worktreep8-retroskilldocs-swing-retro">P8-33 【依存あり/worktree:p8-retro】skill/docs - swing-retro スキルと設計正本昇格<a class="headerlink" href="#p8-33-worktreep8-retroskilldocs-swing-retro" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p><strong>現況（P8）</strong>: 完了済み。<code>.claude/skills/swing-retro/</code>（SKILL.md +
+<code>references/proposal-rules.md</code> / <code>result-schema.md</code>）、空の提案台帳
+<code>docs/retro/proposals.md</code>（ヘッダが <code>ingest</code> の生成物と一致することを
+<code>tests/retro/test_ledger.py::TestCommittedLedger</code> が固定）、
+<code>docs/04_detailed_design.md</code> 3.23 節への昇格が入った。以降、振り返り機構の
+設計正本は 3.23 節であり、<code>docs/goal-prompts/swing-copilot-retrospective/</code>
+は実装前シードと実行履歴として残す。「動作確認」の実データ 1 周は本フェーズの
+スコープ外（E33.3）で、初回の手動運用時に行う。</p>
+</blockquote>
+<ul>
+<li><strong>目的</strong>: 人間が数日おきに手動起動する振り返りスキルを整備し、設計を
+  正本へ昇格する。</li>
+<li><strong>スコープ</strong>: <code>.claude/skills/swing-retro/</code>、<code>docs/retro/</code> 初期化、
+  <code>docs/04_detailed_design.md</code>（3.x 節新設）、<code>docs/reference.md</code></li>
+<li><strong>主要仕様</strong>:</li>
+<li>スキル手順: <code>copilot-retro prepare</code> → dossier + 台帳読み込み →
+    サプライズ敗因分析 / シグナル×verdict 突合 / ソース貢献の並列深掘り →
+    証拠ゲート判定（L1: n≥20 + 方向一致、L2: n≥40 または敗因反復、
+    L3: separation ≤ 0 持続または systemic 欠陥 + 代替案 2 案）→
+    <code>retro_result.json</code> → <code>copilot-retro ingest</code> → ユーザーへ提示 →
+    適用: L1 は即時（提案ごとのブランチで config 編集 →
+    verification_plan + <code>just verify</code> 合格 → PR 作成）、L2/L3 は設計を
+    AskUserQuestion で承認後に適用 + PR 作成（規模超過は goal-prompt 化）。
+    不合格・却下は台帳に記録して終了。</li>
+<li>毎回「L2/L3 相当の構造的観察はないか」を自問し、なければ
+    「再点検の上でなし」と明記（細かい調整への偏り防止）。</li>
+<li>叙述規約は <code>swing-daily</code> の analysis-conventions を流用。</li>
+<li><strong>動作確認</strong>: フィクスチャ dossier でスキルを 1 周し、レポートと
+  proposed 提案が生成されること。L1 適用で検証合格時のみ PR 用ブランチと
+  台帳の applied 記録が作られ、不合格時は適用が取り消されること。
+  rejected 記録後、同一提案が ingest で差し戻されること。</li>
+<li><strong>Not in scope</strong>: daily レポートへの Verdict 成績節、<code>analysis_result</code> への
+  confidence フィールド追加（いずれも本機構の初回運用で提案として検討）</li>
+<li><strong>依存</strong>: P8-30〜P8-32</li>
+</ul>
+<h2 id="6">6. 知見の出典と信頼性<a class="headerlink" href="#6" title="Permanent link">&para;</a></h2>
+<ul>
+<li>分析ルールの一次資料と系譜の正本は <code>docs/10_investment_philosophy.md</code> とする。
+  本節の <code>(要検証)</code> の扱いは同書の制定後も変わらない。</li>
+<li>出典リポジトリ: <code>/Users/masuyama/Downloads/claude-trading-skills-main</code>（ローカルコピー）。
+  スキル名は各 Issue の「出典」注記を参照。</li>
+<li>調査で <code>(要検証)</code> と付いた値の例: FTD 成功率 25%（伝聞）、Druckenmiller の数値表
+  （作者創作の疑い）、FINRA 規制変更日付（一次資料未確認）、ブレッド閾値
+  （単一サイトの独自バックテスト由来）。<strong>方針</strong>: 仕組みは採用し、閾値は config 化して
+  既定値に (要検証) を明記、P2 の検証装置で自前データによる裏取りを行う。</li>
+<li>未調査の補足資料（必要になったら参照）: 同リポジトリの <code>workflows/*.yaml</code>
+  （decision_gate 付きオーケストレーション定義）、<code>audits/errata/</code>
+  （実運用で起きた誤判定の記録。スクリーニングのテストケース源として有用）。</li>
+</ul>
+<h2 id="7">7. 実施体制<a class="headerlink" href="#7" title="Permanent link">&para;</a></h2>
+<ul>
+<li>各フェーズ = GitHub マイルストーン。Issue には <code>phase-N</code> / <code>area:*</code> ラベルと
+  タイトルプレフィックス（【基盤】/【並列可】/【依存あり】、worktree 提案付き）を付す。</li>
+<li>実装は Claude Code の /goal による無人セッションを想定し、フェーズ単位で
+  ゴールプロンプトを用意する（<code>~/.claude/goal-prompts/</code>）。</li>
+<li>完了報告は必ず <code>just verify</code> の結果と「動作確認」手順の実行ログを伴うこと。</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "content.tabs.link", "navigation.instant", "navigation.tracking", "navigation.top", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

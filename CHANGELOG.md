@@ -61,6 +61,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   無いときの代替（bars 由来）と ATR 由来のストップは `read_bars` が既に調整済みなので
   割らない。docs/04 §3.24.3-5 が既に「`risk_assessments.entry_price` → 分割の再基準化 →
   日次前進」と書いており、実装が設計正本から外れていた
+- 表示層の数値フォーマッタを `report/formatting.py` の
+  `format_number`/`format_money`/`format_one_r`/`format_fraction_pct`/`format_ratio` に
+  統一した（Issue #399）。レポート3媒体（`markdown_report.py`/`terminal_report.py`/
+  `verdict_notification.py`）に同じ4関数（`_number`/`_money`/`_one_r`/`_percent`）が
+  コピーされ、うち `verdict_notification.py` の `_number` だけ #390 で桁区切りカンマを
+  落としていた（意図の記録なし）。CLI 5本（`backtest/cli.py`、`tracking/cli.py`、
+  `regime/dd_forward_cli.py`、`report/history_cli.py`、`screening/filter_matrix_cli.py`）
+  にも `_fmt_pct` 系が7定義コピーされ、同じ関数名 `_fmt_pct` が `backtest/cli.py` では
+  割合（0..1）を、`tracking/cli.py` では既に×100した%数値を受けるという単位の食い違いが
+  あった。**唯一の意図的な挙動変更**: `verdict_notification.py`（Discord 通知）の数値表示に
+  桁区切りカンマが戻った（例: `1234.56` → `1,234.56`。ATR14 など）。それ以外の出力文字列は
+  すべて既存のゴールデン出力テストで無変更を確認済み。`tracking/cli.py` の win_rate 表示は
+  呼び出し側の `* 100` を削除し、割合をそのまま共有フォーマッタへ渡すよう修正した
+  （`realized_return_pct` 等の既に%点スケールの値はこの本ファイル独自の "—" 欠損表記のまま
+  ローカルに残る——単位・欠損表記とも共有フォーマッタと異なるため）。
+- `backtest/cli.py`（1458行）のレンダリング約600行（`ReportMeta` と全 `render_*` 関数）を
+  `backtest/render.py` へ移動した（Issue #399、純粋なコード移動）。`backtest/cli.py` は
+  677行まで縮み、CLI配線（引数パース・依存合成・`run`/`grid`/`entry-grid` コマンド）だけが
+  残る。対応するテストクラス10本も `tests/backtest/test_render.py` へ内容そのまま移動した
+- `tests/test_quality_contracts.py` に
+  `test_no_local_reimplementation_of_shared_formatters` を追加し、上記の共有フォーマッタが
+  `report/formatting.py` 以外で再定義されないことを機械的に強制する
 
 ### Added
 

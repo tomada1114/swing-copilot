@@ -1162,11 +1162,226 @@ class TestCheckBars:
         # as raw, so any finding from them would be meaningless.
         assert result.findings == ()
 
+    def test_reports_a_symbol_missing_a_session_the_rest_of_the_store_has(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("CCC", date(2026, 7, 1)),
+                    _stored_row("CCC", date(2026, 7, 2)),
+                    _stored_row("CCC", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert [(f.symbol, f.missing_dates) for f in result.missing_sessions] == [
+            ("AAA", (date(2026, 7, 2),))
+        ]
+
+    def test_does_not_flag_a_date_no_symbol_traded(
+        self, market_store: MarketStore
+    ) -> None:
+        """A real market holiday: nobody has a bar, so it is not a session."""
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert result.missing_sessions == ()
+
+    def test_does_not_flag_a_session_before_a_symbol_first_bar(
+        self, market_store: MarketStore
+    ) -> None:
+        """An IPO: sessions before the symbol's own listed span are not gaps."""
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 2)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("CCC", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert result.missing_sessions == ()
+
+    def test_does_not_flag_a_session_after_a_symbol_last_bar(
+        self, market_store: MarketStore
+    ) -> None:
+        """A delisting: sessions after the symbol's own listed span are not gaps."""
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("CCC", date(2026, 7, 1)),
+                    _stored_row("CCC", date(2026, 7, 2)),
+                    _stored_row("CCC", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert result.missing_sessions == ()
+
+    def test_does_not_treat_a_lone_bar_as_a_session(
+        self, market_store: MarketStore
+    ) -> None:
+        """Issue #421's lesson applied to sessions.
+
+        One stray bar out of many listed symbols must not manufacture a
+        session the rest get flagged for missing.
+        """
+        common_dates = [
+            date(2026, 7, 1),
+            date(2026, 7, 2),
+            date(2026, 7, 3),
+            date(2026, 7, 5),
+        ]
+        rows = [
+            _stored_row(symbol, day)
+            for symbol in ("AAA", "BBB", "CCC")
+            for day in common_dates
+        ]
+        rows.append(_stored_row("AAA", date(2026, 7, 4)))
+        market_store.write_bars(pd.DataFrame(rows))
+
+        result = check_bars(market_store, [])
+
+        assert result.missing_sessions == ()
+
+    def test_skips_the_bond_calendar_symbol_when_enumerating_the_store(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 2)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("^TNX", date(2026, 7, 1)),
+                    _stored_row("^TNX", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert "^TNX" in result.scanned_symbols
+        assert result.missing_sessions == ()
+
+    def test_scans_the_bond_calendar_symbol_when_named_explicitly(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 2)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("^TNX", date(2026, 7, 1)),
+                    _stored_row("^TNX", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, ["^TNX"])
+
+        assert [(f.symbol, f.missing_dates) for f in result.missing_sessions] == [
+            ("^TNX", (date(2026, 7, 2),))
+        ]
+
+    def test_builds_the_session_calendar_from_the_whole_store_even_with_symbols(
+        self, market_store: MarketStore
+    ) -> None:
+        """Auditing one symbol must not shrink the calendar down to it."""
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 7, 1)),
+                    _stored_row("AAA", date(2026, 7, 3)),
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 2)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                    _stored_row("CCC", date(2026, 7, 1)),
+                    _stored_row("CCC", date(2026, 7, 2)),
+                    _stored_row("CCC", date(2026, 7, 3)),
+                ]
+            )
+        )
+
+        result = check_bars(market_store, ["AAA"])
+
+        assert [(f.symbol, f.missing_dates) for f in result.missing_sessions] == [
+            ("AAA", (date(2026, 7, 2),))
+        ]
+
+    def test_reports_no_gap_for_a_complete_store(
+        self, market_store: MarketStore
+    ) -> None:
+        market_store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row(symbol, day)
+                    for symbol in ("AAA", "BBB")
+                    for day in (date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3))
+                ]
+            )
+        )
+
+        result = check_bars(market_store, [])
+
+        assert result.missing_sessions == ()
+
     def test_writes_nothing_at_all(
         self, market_store: MarketStore, tmp_path: Path
     ) -> None:
         self._plant(
             market_store, self._series([100.0, 100.0, 50.0, 100.0, 100.0]), split=2.0
+        )
+        # A second symbol with a real session gap, so the missing-session
+        # scan this test guards has actual work to do (Issue #449) --
+        # extending the existing "writes nothing" pin rather than adding a
+        # parallel one.
+        market_store.replace_symbol_bars(
+            ["BBB"],
+            pd.DataFrame(
+                [
+                    _stored_row("BBB", date(2026, 7, 1)),
+                    _stored_row("BBB", date(2026, 7, 3)),
+                ]
+            ),
         )
         # Read-only, as the CLI opens it: a write connection would ensure its
         # tables on open and touch the database file (Issue #421).
@@ -1176,8 +1391,12 @@ class TestCheckBars:
         )
         before = _tree_snapshot(tmp_path)
 
-        check_bars(auditor, [])
+        result = check_bars(auditor, [])
 
+        # The scan did real work (the mixed-basis finding plus a genuine
+        # session gap), and still touched nothing.
+        assert result.findings != ()
+        assert result.missing_sessions != ()
         # The DuckDB file included: opened for the splits, but byte- and
         # mtime-identical afterwards.
         assert _tree_snapshot(tmp_path) == before
@@ -1194,6 +1413,7 @@ class TestCheckBars:
         result = check_bars(store, [])
 
         assert (result.scanned_symbols, result.findings) == ((), ())
+        assert result.missing_sessions == ()
         assert not (tmp_path / "copilot.duckdb").exists()
 
 
@@ -1270,7 +1490,7 @@ class TestRebuildAndCheckCli:
 
         out = capsys.readouterr().out
         assert "形式マーカー: ok" in out
-        assert "check: ok（対象 1 銘柄、混在署名なし）" in out
+        assert "check: ok（対象 1 銘柄、混在署名なし、欠損セッションなし）" in out
 
     def test_check_lists_every_symbol_with_a_mixed_basis_series(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1351,7 +1571,80 @@ class TestRebuildAndCheckCli:
         )
 
         out = capsys.readouterr().out
-        assert "check: ok（対象 1 銘柄、混在署名なし）" in out
+        assert "check: ok（対象 1 銘柄、混在署名なし、欠損セッションなし）" in out
+
+    def test_rebuild_reports_the_sessions_the_refetch_dropped(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        db_path = tmp_path / "copilot.duckdb"
+        store = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+        store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 8, 7)),
+                    _stored_row("AAA", date(2026, 8, 10)),
+                    _stored_row("AAA", date(2026, 8, 11)),
+                ]
+            )
+        )
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [
+                    _bar_row("AAA", date(2026, 8, 7)),
+                    _bar_row("AAA", date(2026, 8, 11)),
+                ]
+            }
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        backfill_main(["rebuild", "--db", str(db_path), "--symbols", "AAA"])
+
+        out = capsys.readouterr().out
+        assert (
+            "供給元が返さなくなったセッション（rebuild により削除済み）: "
+            "AAA（2026-08-10）" in out
+        )
+
+    def test_rebuild_exits_zero_when_sessions_were_dropped(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Design decision 1.
+
+        A dropped session never quarantines or fails the run, so `rebuild`
+        exits 0 even though it reports one.
+        """
+        db_path = tmp_path / "copilot.duckdb"
+        store = MarketStore(Database(db_path), parquet_root=tmp_path / "bars")
+        store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 8, 7)),
+                    _stored_row("AAA", date(2026, 8, 10)),
+                    _stored_row("AAA", date(2026, 8, 11)),
+                ]
+            )
+        )
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [
+                    _bar_row("AAA", date(2026, 8, 7)),
+                    _bar_row("AAA", date(2026, 8, 11)),
+                ]
+            }
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        # Would raise SystemExit if `rebuild` treated the drop as a failure.
+        backfill_main(["rebuild", "--db", str(db_path), "--symbols", "AAA"])
 
 
 class TestBarsCliQuarantineReport:
@@ -1388,6 +1681,63 @@ class TestBarsCliQuarantineReport:
         )
 
         assert "隔離した銘柄: AAA" in capsys.readouterr().out
+
+    def test_bars_backfill_reports_dropped_sessions_without_quarantining(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Issue #449.
+
+        The daily/backfill write path never loses the row, so its wording
+        must say "kept", never "rebuild".
+        """
+        store = MarketStore(
+            Database(tmp_path / "copilot.duckdb"), parquet_root=tmp_path / "bars"
+        )
+        store.write_bars(
+            pd.DataFrame(
+                [
+                    _stored_row("AAA", date(2026, 8, 7)),
+                    _stored_row("AAA", date(2026, 8, 10)),
+                    _stored_row("AAA", date(2026, 8, 11)),
+                ]
+            )
+        )
+        provider = _RecordingProvider(
+            rows_by_symbol={
+                "AAA": [
+                    _bar_row("AAA", date(2026, 8, 7)),
+                    _bar_row("AAA", date(2026, 8, 11)),
+                ]
+            }
+        )
+        monkeypatch.setattr(
+            "swing_copilot.pipeline.backfill.YFinanceProvider", lambda: provider
+        )
+
+        backfill_main(
+            [
+                "bars",
+                "--start",
+                "2019-01-01",
+                "--end",
+                "2026-08-15",
+                "--db",
+                str(tmp_path / "copilot.duckdb"),
+                "--symbols",
+                "AAA",
+            ]
+        )
+
+        out = capsys.readouterr().out
+        assert (
+            "供給元が返さなくなったセッション（既存行は保持）: AAA（2026-08-10）" in out
+        )
+        assert "隔離した銘柄" not in out
+        # The old row is still there -- `write_bars` never lost it.
+        assert date(2026, 8, 10) in store.read_raw_bars(["AAA"])["date"].tolist()
 
 
 class TestCheckCliUnmigratedStore:

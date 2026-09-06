@@ -95,7 +95,6 @@ DEFAULT_SETTINGS_PATH = "config/settings.yaml"
 # Ranking score_weights live here, not in settings.yaml, so comparing a
 # weighting variant needs its own override alongside --settings.
 DEFAULT_STRATEGIES_PATH = "config/strategies.yaml"
-_CONSOLE_WIDTH = 200
 #: `--policy` default: the pre-Issue-#184 behaviour, so an existing command
 #: line keeps measuring what it used to measure.
 _DEFAULT_POLICY = EntryPolicyArm.NONE.value

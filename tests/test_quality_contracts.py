@@ -1060,6 +1060,8 @@ _BANNED_FORMATTER_NAMES = frozenset(
         "_fmt_share",
         "_fmt_score",
         "_fmt_ratio_pct",
+        "_format_number",
+        "_format_percent",
     }
 )
 
@@ -1074,6 +1076,11 @@ _FORMATTER_NAME_ALLOWLIST = frozenset(
         # shape, not a copy of any of the report/CLI formatters this issue
         # consolidated.
         (PROJECT_ROOT / "src/swing_copilot/retro/ingest.py", "_number"),
+        # `analysis_input.json` is read by a skill, not a human: the market
+        # context block deliberately renders SPY close/SMA200 without a
+        # thousands separator, so it cannot share `format_number`. Kept local
+        # and named so the ban still catches a *new* copy elsewhere.
+        (PROJECT_ROOT / "src/swing_copilot/analysis/context.py", "_format_number"),
     }
 )
 

@@ -102,16 +102,6 @@ def _parse_run_id(value: str) -> UUID:
         raise HistoryCommandError(msg) from exc
 
 
-def _fmt_percent_points(value: float | None) -> str:
-    """Format a value already expressed in percentage points (SPY return).
-
-    Kept local (Issue #399): distinct from `report.formatting.format_fraction_pct`,
-    which takes a 0..1 fraction, not an already-in-percentage-points value.
-    Currently unused pending the SPY-return display this was written for.
-    """
-    return "N/A" if value is None else f"{value:+.2f}%"
-
-
 def _run_runs(database: Database, console: Console, limit: int) -> None:
     runs = list_runs(database, limit)
     if not runs:

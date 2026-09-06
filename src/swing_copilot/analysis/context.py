@@ -13,6 +13,8 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING
 
+from swing_copilot.report.formatting import format_fraction_pct
+
 if TYPE_CHECKING:
     from swing_copilot.regime.exposure import ExposureDecision
     from swing_copilot.regime.gate import RegimeSnapshot
@@ -65,8 +67,9 @@ def format_market_regime(snapshot: RegimeSnapshot, exposure: ExposureDecision) -
     )
     spy_close = _format_number(snapshot.gate.spy_close)
     spy_sma200 = _format_number(snapshot.gate.spy_sma200)
-    trend_gap = _format_percent(
-        _relative_gap(snapshot.gate.spy_close, snapshot.gate.spy_sma200)
+    trend_gap = format_fraction_pct(
+        _relative_gap(snapshot.gate.spy_close, snapshot.gate.spy_sma200),
+        signed=True,
     )
     spy_ftd_state = (
         snapshot.ftd.spy.state.value if snapshot.ftd is not None else "UNKNOWN"
@@ -92,10 +95,6 @@ def _relative_gap(close: float | None, trend: float | None) -> float | None:
 
 def _format_number(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.2f}"
-
-
-def _format_percent(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:+.2%}"
 
 
 def format_prior_verdicts(prior: tuple[PriorVerdictRecord, ...]) -> str:

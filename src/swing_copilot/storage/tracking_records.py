@@ -365,7 +365,10 @@ def get_frozen_entry_prices(
                 "WHERE table_name IN ('risk_assessments', 'runs')"
             ).fetchall()
         }
-        if "risk_assessments" not in existing_tables and "runs" not in existing_tables:
+        if not {"risk_assessments", "runs"} <= existing_tables:
+            # Either one missing is enough: the query joins both, so a
+            # half-initialized database would raise a catalog error here
+            # rather than read as "nothing frozen".
             return ()
         symbol_clause = ""
         parameters: list[object] = []

@@ -51,7 +51,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
 
@@ -694,16 +694,24 @@ def check_entry_prices(
         )
 
     scanned_symbols = tuple(sorted({row.symbol for row in rows}))
+    wanted = {(row.symbol, row.run_date) for row in rows}
     run_dates = [row.run_date for row in rows]
     start, end = min(run_dates), max(run_dates)
+    # Only the frozen rows' own (symbol, run_date) pairs are kept: the range
+    # read spans every session between the oldest and newest run, which for a
+    # multi-year history is orders of magnitude more bars than the audit
+    # compares against.
     raw_closes: dict[tuple[str, date], float] = {}
     for chunk in _chunks(scanned_symbols, SYMBOL_CHUNK_SIZE):
         raw = market_store.read_raw_bars(chunk, start=start, end=end)
         if raw.empty:
             continue
-        # Any: pandas records are heterogeneous by column.
-        for record in cast("list[dict[str, Any]]", raw.to_dict("records")):
-            raw_closes[(str(record["symbol"]), record["date"])] = float(record["close"])
+        for symbol, bar_date, close in zip(
+            raw["symbol"], raw["date"], raw["close"], strict=True
+        ):
+            key = (str(symbol), bar_date)
+            if key in wanted:
+                raw_closes[key] = float(close)
 
     findings: list[EntryPriceFinding] = []
     unresolved_rows = 0

@@ -753,3 +753,13 @@ class TestFrozenEntryPrices:
         database = Database(tmp_path / "copilot.duckdb")
 
         assert get_frozen_entry_prices(database) == ()
+
+    def test_a_database_missing_only_one_table_returns_empty_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """A half-initialized store must not raise a DuckDB catalog error."""
+        database = Database(tmp_path / "copilot.duckdb")
+        with database.connect() as conn:
+            conn.execute("CREATE TABLE runs (run_id UUID, run_date DATE)")
+
+        assert get_frozen_entry_prices(database) == ()

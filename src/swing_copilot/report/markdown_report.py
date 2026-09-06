@@ -11,6 +11,12 @@ from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
     format_verdict,
 )
+from swing_copilot.report.formatting import (
+    format_fraction_pct,
+    format_money,
+    format_number,
+    format_one_r,
+)
 from swing_copilot.screening.execution import (
     EXECUTION_BUCKETS,
     EXECUTION_CASH_PRIORITY_BUCKET,
@@ -65,7 +71,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
         ]
     )
     lines.extend(
-        f"| {item.label} | {_number(item.value)} | {_percent(item.pct_change)} |"
+        f"| {item.label} | {format_number(item.value)} | {format_fraction_pct(item.pct_change, signed=True)} |"
         for item in brief.market
     )
     if brief.regime is not None:
@@ -75,7 +81,7 @@ def render_markdown(brief: DailyBrief, status: RunStatus) -> str:
                 "## Market regime",
                 "",
                 f"- Gate: `{brief.regime.gate}`",
-                f"- Trend: SPY close {_number(brief.regime.spy_close)} / SMA200 {_number(brief.regime.spy_sma200)} ({_percent(brief.regime.spy_trend_gap_pct)})",
+                f"- Trend: SPY close {format_number(brief.regime.spy_close)} / SMA200 {format_number(brief.regime.spy_sma200)} ({format_fraction_pct(brief.regime.spy_trend_gap_pct, signed=True)})",
                 f"- Distribution Day level: `{brief.regime.dd_level}`",
                 f"- SPY d25: {brief.regime.spy_d25:g}; QQQ d25: {brief.regime.qqq_d25:g}",
                 f"- Data quality: `{brief.regime.data_quality}`",
@@ -218,16 +224,16 @@ def _candidate_row(candidate: BriefCandidate) -> str:
             (
                 str(candidate.rank),
                 candidate.symbol,
-                _money(candidate.close),
-                _percent(candidate.pct_change),
-                _number(candidate.rsi14, digits=1),
-                _number(candidate.score, digits=3),
+                format_money(candidate.close),
+                format_fraction_pct(candidate.pct_change, signed=True),
+                format_number(candidate.rsi14, digits=1),
+                format_number(candidate.score, digits=3),
                 _execution_state_text(candidate),
                 ", ".join(candidate.signals) or "-",
                 candidate.risk.status,
-                _one_r(candidate.risk.stop_distance_pct),
-                _money(candidate.risk.stop_price),
-                _money(candidate.risk.limit_price),
+                format_one_r(candidate.risk.stop_distance_pct),
+                format_money(candidate.risk.stop_price),
+                format_money(candidate.risk.limit_price),
             )
         )
         + " |"
@@ -252,10 +258,10 @@ def _tracking_section(rows: tuple[BriefTrackedRow, ...]) -> list[str]:
             (
                 row.symbol,
                 row.entry_date.isoformat(),
-                _money(row.entry_price),
-                _money(row.last_close),
+                format_money(row.entry_price),
+                format_money(row.last_close),
                 _tracking_return(row.unrealized_return_pct),
-                _money(row.stop_price),
+                format_money(row.stop_price),
                 _tracking_status(row),
                 _tracking_days(row.days_remaining),
             )
@@ -433,17 +439,13 @@ def _score_breakdown_section(candidate: BriefCandidate) -> list[str]:
 
 def _signal_performance_row(row: SignalPerformanceRow) -> str:
     """P2-11: one "シグナル成績" table row, with a `(暫定)` marker under REQ-030."""
-    hit_rate = _percent(row.hit_rate)
+    hit_rate = format_fraction_pct(row.hit_rate, signed=True)
     if row.is_preliminary:
         hit_rate += " (暫定)"
     return (
         f"| {row.signal_name} | {row.true_positive_count} | "
         f"{row.false_positive_count} | {row.neutral_count} | {hit_rate} | {row.n} |"
     )
-
-
-def _number(value: float | None, *, digits: int = 2) -> str:
-    return "N/A" if value is None else f"{value:,.{digits}f}"
 
 
 def _execution_state_text(candidate: BriefCandidate) -> str:
@@ -456,18 +458,6 @@ def _execution_state_text(candidate: BriefCandidate) -> str:
     if candidate.execution_distance is None:
         return f"{candidate.execution_state} (d=N/A)"
     return f"{candidate.execution_state} (d={candidate.execution_distance:.2f})"
-
-
-def _money(value: float | None) -> str:
-    return "N/A" if value is None else f"${value:,.2f}"
-
-
-def _one_r(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.2%}"
-
-
-def _percent(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:+.2%}"
 
 
 def _ftd_suffix(day_number: int | None, score: int | None) -> str:

@@ -551,6 +551,46 @@ class TestProceedDay:
         # Share count is never shown -- the account is unknown to this product.
         assert "株" not in body or "1株あたりリスク" in body
 
+    def test_atr14_gets_a_thousands_separator(self, tmp_path: Path) -> None:
+        """Issue #399: the Discord `ATR14` line now groups like the other two media.
+
+        `verdict_notification.py`'s own `_number` lost its thousands separator
+        in #390 while `markdown_report.py`/`terminal_report.py` kept theirs --
+        the one intentional behavior change this refactor makes is restoring
+        it here, via the shared `report/formatting.py::format_number`. No
+        existing fixture's ATR14 was ever >= 1,000, so this is a new,
+        deliberately added case rather than an edit to an existing golden.
+        """
+        reports_dir = tmp_path / "reports"
+        analysis_input = _analysis_input(reports_dir, symbols=["AAPL"])
+        _write_analysis_result(
+            reports_dir,
+            analysis_input,
+            symbols=[
+                SymbolAnalysis(
+                    symbol="AAPL",
+                    screening_assessment=ScreeningAssessment(summary="Strong trend."),
+                    verdict=Verdict(
+                        recommendation="proceed",
+                        reasons=[
+                            VerdictReason(
+                                text="Technical score is strong.",
+                                basis="technical_score",
+                            )
+                        ],
+                    ),
+                )
+            ],
+        )
+        candidate = _brief_candidate("AAPL", risk=_brief_risk(atr14=1234.5))
+        _write_report_context(reports_dir, analysis_input, candidates=[candidate])
+        path = _write_outcome_file(tmp_path, candidates=1)
+
+        messages = build_daily_notification(outcome_file=path, reports_dir=reports_dir)
+
+        assert len(messages) == 1
+        assert "ATR14: 1,234.50" in messages[0]
+
     def test_blocked_risk_shows_blocking_reasons_without_warnings(
         self, tmp_path: Path
     ) -> None:

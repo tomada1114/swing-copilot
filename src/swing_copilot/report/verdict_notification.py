@@ -47,6 +47,7 @@ from swing_copilot.analysis.validate import (
     validate_analysis,
     validate_artifact_identity,
 )
+from swing_copilot.report.formatting import format_money, format_number, format_one_r
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -314,18 +315,6 @@ def _header_lines(
     return lines
 
 
-def _money(value: float | None) -> str:
-    return "N/A" if value is None else f"${value:,.2f}"
-
-
-def _one_r(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.2%}"
-
-
-def _number(value: float | None, digits: int = 2) -> str:
-    return "N/A" if value is None else f"{value:{'.' + str(digits) + 'f'}}"
-
-
 def _per_share_risk(
     limit_price: float | None, stop_price: float | None
 ) -> float | None:
@@ -356,20 +345,20 @@ def _proceed_block(
     if candidate is not None:
         risk = candidate.risk
         lines.append(
-            f"順位: {candidate.rank} / 合計スコア: {_number(candidate.score, 3)}"
+            f"順位: {candidate.rank} / 合計スコア: {format_number(candidate.score, digits=3)}"
         )
-        lines.append(f"参照終値(entry_price): {_money(risk.entry_price)}")
+        lines.append(f"参照終値(entry_price): {format_money(risk.entry_price)}")
         lines.append(
-            f"指値(limit_price): {_money(risk.limit_price)} / "
-            f"逆指値(stop_price): {_money(risk.stop_price)}"
+            f"指値(limit_price): {format_money(risk.limit_price)} / "
+            f"逆指値(stop_price): {format_money(risk.stop_price)}"
         )
-        lines.append(f"1R(stop_distance_pct): {_one_r(risk.stop_distance_pct)}")
+        lines.append(f"1R(stop_distance_pct): {format_one_r(risk.stop_distance_pct)}")
         per_share_risk = _per_share_risk(risk.limit_price, risk.stop_price)
         lines.append(
-            f"1株あたりリスク: {_money(per_share_risk)}"
+            f"1株あたりリスク: {format_money(per_share_risk)}"
             "（指値-逆指値。口座規模に依存しない、この2値からの単純な減算）"
         )
-        lines.append(f"ATR14: {_number(risk.atr14)}")
+        lines.append(f"ATR14: {format_number(risk.atr14)}")
         lines.append(
             f"状態(status): {risk.status} / "
             f"制約(binding_constraint): {risk.binding_constraint or 'なし'}"

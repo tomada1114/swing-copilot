@@ -48,6 +48,7 @@ from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.clock import SystemClock
 from swing_copilot.config import Settings, load_settings
 from swing_copilot.exceptions import ConfigError
+from swing_copilot.report.formatting import format_fraction_pct
 from swing_copilot.retro.aggregate import (
     ALL_RECOMMENDATIONS,
     compute_tracked_performance,
@@ -276,16 +277,23 @@ def _fmt_snapshot(snapshot: PositionSnapshot | None) -> str:
     if snapshot.status != OPEN:
         return (
             f"{snapshot.exit_reason or _NOT_AVAILABLE} "
-            f"{_fmt_date(snapshot.exit_date)} {_fmt_pct(snapshot.return_pct)}"
+            f"{_fmt_date(snapshot.exit_date)} {_fmt_percent_points_or_dash(snapshot.return_pct)}"
         )
-    return f"open {_fmt_pct(snapshot.return_pct)}"
+    return f"open {_fmt_percent_points_or_dash(snapshot.return_pct)}"
 
 
 def _fmt_price(value: float | None) -> str:
     return _NOT_AVAILABLE if value is None else f"{value:.2f}"
 
 
-def _fmt_pct(value: float | None) -> str:
+def _fmt_percent_points_or_dash(value: float | None) -> str:
+    """Already-in-percent-points value (e.g. realized_return_pct), dash for missing.
+
+    Distinct from `report.formatting.format_fraction_pct`: this file's
+    values (`realized_return_pct`, `unrealized_return_pct`, `expectancy_pct`)
+    are already percent-points, not 0..1 fractions, and this module's own
+    convention is a dash for missing data, not `N/A`.
+    """
     return _NOT_AVAILABLE if value is None else f"{value:+.2f}%"
 
 
@@ -370,7 +378,7 @@ def _run_list(
             _fmt_price(position.entry_price),
             _fmt_price(position.stop_price),
             _fmt_price(None if mark is None else mark.close),
-            _fmt_pct(
+            _fmt_percent_points_or_dash(
                 None if mark is None or not is_open else mark.unrealized_return_pct
             ),
             f"{position.days_held}/{position.max_hold_days}",
@@ -381,7 +389,7 @@ def _run_list(
             ),
             _fmt_date(position.exit_date),
             position.exit_reason or _NOT_AVAILABLE,
-            _fmt_pct(position.realized_return_pct),
+            _fmt_percent_points_or_dash(position.realized_return_pct),
         )
     console.print(table)
 
@@ -435,12 +443,12 @@ def _run_published_list(
             _fmt_price(row.entry_price),
             _fmt_price(row.stop_price),
             _fmt_price(row.last_close),
-            _fmt_pct(row.unrealized_return_pct),
+            _fmt_percent_points_or_dash(row.unrealized_return_pct),
             f"{row.days_held}/{position.max_hold_days}",
             _NOT_AVAILABLE if row.days_remaining is None else str(row.days_remaining),
             _fmt_date(row.exit_date),
             row.exit_reason or _NOT_AVAILABLE,
-            _fmt_pct(position.realized_return_pct),
+            _fmt_percent_points_or_dash(position.realized_return_pct),
         )
     console.print(table)
 
@@ -463,7 +471,8 @@ def _run_show(
         _print_position_detail(state_store, position, console)
 
 
-def _fmt_ratio(value: float | None) -> str:
+def _fmt_ratio_or_dash(value: float | None) -> str:
+    """A plain ratio/score, dash for missing (this file's own convention)."""
     return _NOT_AVAILABLE if value is None else f"{value:.2f}"
 
 
@@ -502,11 +511,15 @@ def _run_stats(
             row.recommendation,
             str(row.closed_count),
             str(row.open_count),
-            _fmt_pct(None if row.win_rate is None else row.win_rate * 100),
-            _fmt_ratio(row.profit_factor),
-            _fmt_pct(row.expectancy_pct),
-            _fmt_ratio(row.avg_r_multiple),
-            _fmt_ratio(row.avg_holding_days),
+            (
+                _NOT_AVAILABLE
+                if row.win_rate is None
+                else format_fraction_pct(row.win_rate, signed=True)
+            ),
+            _fmt_ratio_or_dash(row.profit_factor),
+            _fmt_percent_points_or_dash(row.expectancy_pct),
+            _fmt_ratio_or_dash(row.avg_r_multiple),
+            _fmt_ratio_or_dash(row.avg_holding_days),
             " / ".join(
                 f"{cell.reason}={cell.count}" for cell in row.exit_reason_counts
             ),
@@ -536,7 +549,7 @@ def _print_position_detail(
         console.print(
             f"  手仕舞い: {_fmt_date(position.exit_date)} "
             f"@ {_fmt_price(position.exit_price)} "
-            f"({position.exit_reason}) {_fmt_pct(position.realized_return_pct)}"
+            f"({position.exit_reason}) {_fmt_percent_points_or_dash(position.realized_return_pct)}"
         )
     for reason in _verdict_reasons(state_store, position):
         console.print(f"  verdict: {reason}")
@@ -550,7 +563,7 @@ def _print_position_detail(
             mark.as_of_date.isoformat(),
             _fmt_price(mark.close),
             _fmt_price(mark.stop_price),
-            _fmt_pct(mark.unrealized_return_pct),
+            _fmt_percent_points_or_dash(mark.unrealized_return_pct),
         )
     console.print(mark_table)
 

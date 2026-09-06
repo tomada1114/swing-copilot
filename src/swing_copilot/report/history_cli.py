@@ -25,6 +25,7 @@ from rich.table import Table
 
 from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.exceptions import SwingCopilotError
+from swing_copilot.report.formatting import format_ratio
 from swing_copilot.report.incomplete_runs import (
     ANALYSIS_INCOMPLETE_EXIT_CODE,
     IncompleteRunKind,
@@ -101,24 +102,6 @@ def _parse_run_id(value: str) -> UUID:
         raise HistoryCommandError(msg) from exc
 
 
-def _fmt_score(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.3f}"
-
-
-def _fmt_money(value: float | None) -> str:
-    return "N/A" if value is None else f"${value:,.2f}"
-
-
-def _fmt_ratio_pct(value: float | None) -> str:
-    """Format a 0..1 fraction (e.g. win_rate, realized_return_pct) as a percent."""
-    return "N/A" if value is None else f"{value:+.2%}"
-
-
-def _fmt_percent_points(value: float | None) -> str:
-    """Format a value already expressed in percentage points (SPY return)."""
-    return "N/A" if value is None else f"{value:+.2f}%"
-
-
 def _run_runs(database: Database, console: Console, limit: int) -> None:
     runs = list_runs(database, limit)
     if not runs:
@@ -154,7 +137,7 @@ def _render_run_detail(console: Console, detail: RunDetail) -> None:
                 candidate.symbol,
                 candidate.strategy_key,
                 str(candidate.rank),
-                _fmt_score(candidate.score),
+                format_ratio(candidate.score, digits=3),
                 ", ".join(candidate.signal_names) or "-",
             )
         console.print(table)
@@ -199,7 +182,7 @@ def _render_symbol_timeline(console: Console, timeline: SymbolTimeline) -> None:
             str(candidacy.run_id),
             candidacy.strategy_key,
             str(candidacy.rank),
-            _fmt_score(candidacy.score),
+            format_ratio(candidacy.score, digits=3),
         )
     console.print(table)
 

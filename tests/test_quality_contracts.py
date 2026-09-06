@@ -1034,6 +1034,92 @@ def _declares_extra_forbid(config_dict_call: ast.Call) -> bool:
     )
 
 
+# --- Issue #399: one shared display-formatter set ----------------------------
+
+_FORMATTING_MODULE = PROJECT_ROOT / "src/swing_copilot/report/formatting.py"
+
+#: The exact formatter names Issue #399 consolidated: `_number`/`_money`/
+#: `_one_r`/`_percent` were copied into `markdown_report.py`/
+#: `terminal_report.py`/`verdict_notification.py`, and `_fmt_pct`/`_fmt_ratio`/
+#: `_fmt_money`/`_fmt_rate`/`_fmt_share`/`_fmt_score`/`_fmt_ratio_pct` were
+#: copied (with disagreeing unit contracts under the same names) into
+#: `backtest/cli.py`, `tracking/cli.py`, `regime/dd_forward_cli.py`,
+#: `report/history_cli.py`, and `screening/filter_matrix_cli.py`. A local
+#: re-definition of any of these names anywhere else is exactly how a future
+#: copy could drift again the way `verdict_notification.py`'s `_number` did.
+_BANNED_FORMATTER_NAMES = frozenset(
+    {
+        "_number",
+        "_money",
+        "_one_r",
+        "_percent",
+        "_fmt_pct",
+        "_fmt_ratio",
+        "_fmt_money",
+        "_fmt_rate",
+        "_fmt_share",
+        "_fmt_score",
+        "_fmt_ratio_pct",
+        "_format_number",
+        "_format_percent",
+    }
+)
+
+#: `(file, function name)` pairs kept out of the ban even though the name
+#: matches -- each with its own recorded reason, same convention as
+#: `_ATOMIC_REPLACEMENT_ALLOWLIST` above.
+_FORMATTER_NAME_ALLOWLIST = frozenset(
+    {
+        # Pre-dates Issue #399 and is out of its scope: this `_number` formats
+        # a retro dossier value with "-" for missing (not "N/A") and no
+        # thousands separator -- a genuinely different, narration-specific
+        # shape, not a copy of any of the report/CLI formatters this issue
+        # consolidated.
+        (PROJECT_ROOT / "src/swing_copilot/retro/ingest.py", "_number"),
+        # `analysis_input.json` is read by a skill, not a human: the market
+        # context block deliberately renders SPY close/SMA200 without a
+        # thousands separator, so it cannot share `format_number`. Kept local
+        # and named so the ban still catches a *new* copy elsewhere.
+        (PROJECT_ROOT / "src/swing_copilot/analysis/context.py", "_format_number"),
+    }
+)
+
+
+def test_no_local_reimplementation_of_shared_formatters():
+    """Issue #399: display-layer number formatting has one home.
+
+    Before this module existed, `_number`/`_money`/`_one_r`/`_percent` were
+    hand-copied into three report media, and a `_fmt_pct`/`_fmt_ratio`/...
+    family was hand-copied into five CLIs -- one copy already silently lost
+    its thousands separator (`verdict_notification.py`, #390), and the same
+    name `_fmt_pct` meant a fraction in `backtest/cli.py` but an
+    already-multiplied percent in `tracking/cli.py`. Banning a local
+    re-definition of any of these names outside `report/formatting.py` is
+    what makes a future copy-paste fail loudly instead of silently drifting
+    or colliding on unit again.
+    """
+    violations: list[str] = []
+    for source_path in _iter_scanned_source_files():
+        if source_path == _FORMATTING_MODULE:
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        violations.extend(
+            f"{source_path.relative_to(PROJECT_ROOT)}:{node.lineno} ({node.name})"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name in _BANNED_FORMATTER_NAMES
+            and (source_path, node.name) not in _FORMATTER_NAME_ALLOWLIST
+        )
+
+    assert not violations, (
+        "display-layer number formatting belongs in "
+        "swing_copilot.report.formatting, not a local re-definition: "
+        + ", ".join(violations)
+    )
+
+
 # --- Issue #395: one storage transaction primitive --------------------------
 
 

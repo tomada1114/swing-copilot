@@ -14,6 +14,12 @@ from swing_copilot.report.daily_brief import (
     NO_TRADE_MESSAGE,
     format_verdict,
 )
+from swing_copilot.report.formatting import (
+    format_fraction_pct,
+    format_money,
+    format_number,
+    format_one_r,
+)
 from swing_copilot.screening.execution import (
     EXECUTION_BUCKETS,
     EXECUTION_CASH_PRIORITY_BUCKET,
@@ -90,7 +96,7 @@ def render_terminal(
         reason = f"（{brief.no_trade_reason}）" if brief.no_trade_reason else ""
         console.print(f"[bold]{NO_TRADE_MESSAGE}{reason}[/bold]")
     market = "  ".join(
-        f"{item.label} {_number(item.value)} ({_percent(item.pct_change)})"
+        f"{item.label} {format_number(item.value)} ({format_fraction_pct(item.pct_change, signed=True)})"
         for item in brief.market
     )
     if market:
@@ -154,12 +160,12 @@ def render_terminal(
         table.add_row(
             str(candidate.rank),
             candidate.symbol,
-            _money(candidate.close),
-            _percent(candidate.pct_change),
-            _number(candidate.score, digits=3),
-            _one_r(candidate.risk.stop_distance_pct),
-            _money(candidate.risk.stop_price),
-            _money(candidate.risk.limit_price),
+            format_money(candidate.close),
+            format_fraction_pct(candidate.pct_change, signed=True),
+            format_number(candidate.score, digits=3),
+            format_one_r(candidate.risk.stop_distance_pct),
+            format_money(candidate.risk.stop_price),
+            format_money(candidate.risk.limit_price),
         )
     console.print(table)
 
@@ -260,10 +266,10 @@ def _render_tracking(console: Console, rows: tuple[BriefTrackedRow, ...]) -> Non
         table.add_row(
             row.symbol,
             row.entry_date.isoformat(),
-            _money(row.entry_price),
-            _money(row.last_close),
+            format_money(row.entry_price),
+            format_money(row.last_close),
             _tracking_return(row.unrealized_return_pct),
-            _money(row.stop_price),
+            format_money(row.stop_price),
             _tracking_status(row),
             "—" if row.days_remaining is None else str(row.days_remaining),
         )
@@ -304,8 +310,8 @@ def _render_regime(console: Console, brief: DailyBrief) -> None:
         "[bold]Market regime[/bold] "
         f"Gate: {brief.regime.gate} / DD: {brief.regime.dd_level} "
         f"(SPY d25={brief.regime.spy_d25:g}, QQQ d25={brief.regime.qqq_d25:g}) / "
-        f"Trend: SPY {_number(brief.regime.spy_close)} vs SMA200 "
-        f"{_number(brief.regime.spy_sma200)} ({_percent(brief.regime.spy_trend_gap_pct)}) / "
+        f"Trend: SPY {format_number(brief.regime.spy_close)} vs SMA200 "
+        f"{format_number(brief.regime.spy_sma200)} ({format_fraction_pct(brief.regime.spy_trend_gap_pct, signed=True)}) / "
         f"Data quality: {brief.regime.data_quality}"
     )
     if brief.regime.spy_ftd_state is not None:
@@ -314,22 +320,6 @@ def _render_regime(console: Console, brief: DailyBrief) -> None:
             f"SPY {_ftd_description(brief.regime.spy_ftd_state, brief.regime.spy_ftd_day_number, brief.regime.spy_ftd_quality_score)} / "
             f"QQQ {_ftd_description(brief.regime.qqq_ftd_state, brief.regime.qqq_ftd_day_number, brief.regime.qqq_ftd_quality_score)}"
         )
-
-
-def _number(value: float | None, *, digits: int = 2) -> str:
-    return "N/A" if value is None else f"{value:,.{digits}f}"
-
-
-def _money(value: float | None) -> str:
-    return "N/A" if value is None else f"${value:,.2f}"
-
-
-def _one_r(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.2%}"
-
-
-def _percent(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:+.2%}"
 
 
 def _ftd_description(

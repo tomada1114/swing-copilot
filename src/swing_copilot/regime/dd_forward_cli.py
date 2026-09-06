@@ -69,6 +69,7 @@ from swing_copilot.regime.distribution import (
 from swing_copilot.regime.exposure import ExposureVerdict
 from swing_copilot.regime.ftd import FtdThresholds
 from swing_copilot.regime.gate import GateThresholds, RegimeThresholds
+from swing_copilot.report.formatting import format_fraction_pct
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
     MarketStore,
@@ -300,14 +301,6 @@ def _read_bars(args: Namespace, settings: Settings) -> tuple[pd.DataFrame, date]
     return bars, max(start, min(bars["date"]))
 
 
-def _fmt_pct(value: float | None, digits: int = 2) -> str:
-    return "N/A" if value is None else f"{value * 100:+.{digits}f}%"
-
-
-def _fmt_share(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.1%}"
-
-
 def _render_header(
     console: Console, scan: ForwardScan, thresholds: RegimeThresholds
 ) -> None:
@@ -356,7 +349,7 @@ def _render_distribution(
             level.value,
             dd_only_exposure(level).value,
             str(days),
-            _fmt_share(days / len(levels) if levels else None),
+            format_fraction_pct(days / len(levels) if levels else None, digits=1),
             str(episodes),
         )
     console.print(table)
@@ -371,12 +364,12 @@ def _stats_row(stats: LevelStats) -> tuple[str, ...]:
         stats.level.value,
         str(stats.sample_size),
         str(stats.episode_count),
-        _fmt_pct(stats.mean_return),
-        _fmt_pct(stats.median_return),
-        _fmt_share(stats.positive_rate),
-        _fmt_pct(stats.mean_drawdown),
-        _fmt_pct(stats.median_drawdown),
-        _fmt_pct(stats.worst_drawdown),
+        format_fraction_pct(stats.mean_return, signed=True),
+        format_fraction_pct(stats.median_return, signed=True),
+        format_fraction_pct(stats.positive_rate, digits=1),
+        format_fraction_pct(stats.mean_drawdown, signed=True),
+        format_fraction_pct(stats.median_drawdown, signed=True),
+        format_fraction_pct(stats.worst_drawdown, signed=True),
     )
 
 
@@ -432,7 +425,7 @@ def _render_gate_cross(
                 is not None
             ]
             mean = sum(returns) / len(returns) if returns else None
-            cells.append(f"{_fmt_pct(mean)} / {len(returns)}")
+            cells.append(f"{format_fraction_pct(mean, signed=True)} / {len(returns)}")
         table.add_row(gate.value, *cells)
     console.print(table)
 
@@ -474,16 +467,16 @@ def _sweep_cells(point: SweepPoint) -> tuple[str, ...]:
     reduced = point.stats(ExposureVerdict.REDUCE_ONLY)
     allowed = point.stats(ExposureVerdict.NEW_ENTRY_ALLOWED)
     return (
-        _fmt_share(point.cash_share),
+        format_fraction_pct(point.cash_share, digits=1),
         str(blocked.episodes if blocked else 0),
-        _fmt_pct(blocked.mean_return if blocked else None),
-        _fmt_share(reduced.share if reduced else None),
+        format_fraction_pct(blocked.mean_return if blocked else None, signed=True),
+        format_fraction_pct(reduced.share if reduced else None, digits=1),
         str(reduced.episodes if reduced else 0),
-        _fmt_pct(reduced.mean_return if reduced else None),
-        _fmt_share(allowed.share if allowed else None),
-        _fmt_pct(allowed.mean_return if allowed else None),
-        _fmt_pct(point.return_gap),
-        _fmt_pct(point.drawdown_gap),
+        format_fraction_pct(reduced.mean_return if reduced else None, signed=True),
+        format_fraction_pct(allowed.share if allowed else None, digits=1),
+        format_fraction_pct(allowed.mean_return if allowed else None, signed=True),
+        format_fraction_pct(point.return_gap, signed=True),
+        format_fraction_pct(point.drawdown_gap, signed=True),
     )
 
 

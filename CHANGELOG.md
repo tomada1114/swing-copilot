@@ -113,6 +113,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `欠損セッション: SYM N 件（日付, ...）`として報告する（`_SESSION_QUORUM_RATIO
   = 0.5` は実データ未検証の閾値）。新しい DuckDB テーブル・ビュー・`research`
   アクセサ・CLI フラグは追加していない
+- `copilot-backfill check` に `risk_assessments.entry_price` の基準ずれ監査を
+  追加した（Issue #427）。凍結された `entry_price` は構成上その run 日の
+  **生バーの終値そのもの**（`read_bars` の分割調整は `as_of` 当日の行には
+  効かない恒等式）なので、`copilot-backfill rebuild` がその後バーだけを
+  生値へ置き換えると事後的な乖離が生まれうる——#423 で発見された基準ずれの
+  実体である。判定は `tracking/update.py` が Issue #423 で持った同日整合性の
+  述語（`is_entry_price_basis_mismatch`、`ENTRY_PRICE_BAR_TOLERANCE = 0.005`）
+  をそのまま共有し、監査は分割を一切参照しない（`check_bars` と同じ
+  `MarketStore.read_raw_bars()` を使う）ため、Issue #425 が扱う分割 factor
+  由来の誤検知の族が構造的に入り込まない。**書き込み時ゲートは入れない**
+  （書き込みの瞬間は値をそれ自身の出所と比べるだけの恒真検査になるため）
+  **し、`check` の終了コードも 0 のまま変えない**——是正経路
+  （`copilot-track rebuild`、fail-soft）が既にあるため。`risk_assessments`/
+  `runs` が存在しない DB でも例外にならず対象 0 行を報告する。新しい
+  DuckDB テーブル・列・CLI フラグは追加していない
 
 ### Fixed
 

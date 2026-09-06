@@ -313,6 +313,89 @@ def get_untracked_truncations(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class FrozenEntryPrice:
+    """One `risk_assessments.entry_price` row, dated by its owning run.
+
+    The read side of Issue #427's entry_price basis audit
+    (`pipeline/backfill.py::check_entry_prices`). `run_date` comes from
+    `runs.run_date` rather than `verdicts.as_of` because a row here need not
+    have a `verdicts` row at all (the audit deliberately does not join
+    `verdicts` -- see `get_frozen_entry_prices`), and the two are equal by
+    construction anyway (`verdicts`' own DDL comment).
+    """
+
+    run_id: UUID
+    run_date: date
+    symbol: str
+    entry_price: float
+
+
+def get_frozen_entry_prices(
+    database: Database, symbols: Sequence[str] = ()
+) -> tuple[FrozenEntryPrice, ...]:
+    """Return every non-null frozen `entry_price`, dated by its run.
+
+    Every row a daily run ever froze into `risk_assessments`, not only the
+    ones a verdict was tracked from: `verdicts` is deliberately not joined,
+    so a symbol the qualitative layer never judged (or a `dry_run`/`failed`
+    run) is audited exactly like any other -- the corruption this reads for
+    (Issue #427) is written by the risk layer, before a verdict or a `status`
+    exists to filter on. `runs.status`/`runs.mode` are likewise not filtered:
+    a `dry_run` or `failed` run froze the same `risk_assessments` row through
+    the same path as a `live`/`success` one, so it is equally good evidence.
+
+    Args:
+        database: Shared DuckDB connection owner.
+        symbols: Tickers to narrow to; empty selects every symbol with a
+            frozen price.
+
+    Returns:
+        Rows ordered by `(symbol, run_date, run_id)`. `()` when either
+        `risk_assessments` or `runs` has never been created -- a database
+        that only ever backfilled bars never runs `StateStore.init_schema()`
+        far enough to create them, and that is not an error condition for a
+        read-only audit to raise on.
+    """
+    with database.connect() as conn:
+        existing_tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name IN ('risk_assessments', 'runs')"
+            ).fetchall()
+        }
+        if not {"risk_assessments", "runs"} <= existing_tables:
+            # Either one missing is enough: the query joins both, so a
+            # half-initialized database would raise a catalog error here
+            # rather than read as "nothing frozen".
+            return ()
+        symbol_clause = ""
+        parameters: list[object] = []
+        if symbols:
+            placeholders = ", ".join("?" for _ in symbols)
+            symbol_clause = f"AND ra.symbol IN ({placeholders})"
+            parameters.extend(symbols)
+        query = f"""
+            SELECT ra.run_id, r.run_date, ra.symbol, ra.entry_price
+            FROM risk_assessments ra
+            JOIN runs r ON r.run_id = ra.run_id
+            WHERE ra.entry_price IS NOT NULL
+            {symbol_clause}
+            ORDER BY ra.symbol, r.run_date, ra.run_id
+        """  # noqa: S608 - symbol_clause interpolates only `?` placeholders
+        rows = conn.execute(query, parameters).fetchall()
+    return tuple(
+        FrozenEntryPrice(
+            run_id=UUID(str(row[0])),
+            run_date=row[1],
+            symbol=str(row[2]),
+            entry_price=row[3],
+        )
+        for row in rows
+    )
+
+
 _ORPHANED_POSITIONS = """
     SELECT vp.run_id, vp.symbol
     FROM verdict_positions vp

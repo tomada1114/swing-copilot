@@ -31,8 +31,13 @@ Two further subcommands exist for the raw-bar storage model (Issue #413):
 `rebuild` re-fetches a symbol's *entire* history and replaces it wholesale --
 the only sanctioned way to change the adjustment basis of stored bars, and
 the migration path off a store written before that model -- while `check`
-audits the store read-only, reporting the format marker and any symbol whose
-stored series still interleaves two adjustment bases.
+audits the store read-only, running two independent scans in one pass: the
+format marker and any symbol whose stored series still interleaves two
+adjustment bases (`check_bars`), and, since Issue #427, every frozen
+`risk_assessments.entry_price` that no longer agrees with its own day's raw
+bar (`check_entry_prices`) -- the corruption a `rebuild` can leave behind in
+history that was already frozen before it ran. Neither scan writes, and
+findings from either never change `check`'s exit code.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import logging
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -64,12 +70,15 @@ from swing_copilot.storage.market_store import (
     NonFiniteBarsError,
     validate_bars_format,
 )
+from swing_copilot.storage.tracking_records import get_frozen_entry_prices
+from swing_copilot.tracking.update import is_entry_price_basis_mismatch
 from swing_copilot.universe import UniverseFetchOptions, get_sp500_universe
 from swing_copilot.universe_sampling import select_universe_sample
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from datetime import datetime
+    from uuid import UUID
 
     from swing_copilot.clock import Clock
     from swing_copilot.data.base import DataProvider, FetchFailure
@@ -221,6 +230,40 @@ class BarsCheckResult:
     #: whenever `format_problem` is set: those partitions cannot be trusted
     #: as raw, so any gap found in them would be meaningless.
     missing_sessions: tuple[MissingSessionFinding, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EntryPriceFinding:
+    """One `risk_assessments.entry_price` that disagrees with its own day's bar.
+
+    Issue #427: a frozen `entry_price` is, by construction, the run day's raw
+    close (see `check_entry_prices`), so a disagreement here is never a
+    market move to interpret -- only a corruption already frozen into
+    history, most often a store repaired (`copilot-backfill rebuild`) after
+    the run that froze this row.
+    """
+
+    symbol: str
+    run_date: date
+    run_id: UUID
+    frozen_entry_price: float
+    bar_close: float
+
+
+@dataclass(frozen=True, slots=True)
+class EntryPriceCheckResult:
+    """What the read-only `risk_assessments` basis audit saw.
+
+    `unresolved_rows` is deliberately separate from `findings`: a row whose
+    same-day raw bar cannot be resolved at all (no stored session, or a
+    non-finite/non-positive price on either side) is a data-quality gap, not
+    proof of a basis mismatch, so it is counted rather than reported as one.
+    """
+
+    scanned_rows: int
+    scanned_symbols: tuple[str, ...]
+    findings: tuple[EntryPriceFinding, ...]
+    unresolved_rows: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +640,107 @@ def check_bars(market_store: MarketStore, symbols: Sequence[str]) -> BarsCheckRe
     )
 
 
+def check_entry_prices(
+    database: Database, market_store: MarketStore, symbols: Sequence[str]
+) -> EntryPriceCheckResult:
+    """Audit every frozen `risk_assessments.entry_price` against its own day's bar.
+
+    Issue #427's second `check` audit, deliberately independent of
+    `check_bars`' mixed-basis scan above: a frozen `entry_price` is, by
+    construction, the *raw* close of its own run day. `read_bars` only ever
+    divides a row dated `as_of` by a split whose `ex_date` also satisfies
+    `as_of < ex_date <= as_of` -- which no split can, so the cumulative
+    factor on that row is always exactly `1.0`. This audit therefore never
+    reads a split at all: it compares the frozen price straight against
+    `MarketStore.read_raw_bars`, the same as-stored source `check_bars` uses,
+    which is what keeps the factor-driven false positives Issue #425 tuned
+    for structurally out of reach here.
+
+    A write-time gate making the same comparison would be a tautology: at
+    the moment a daily run freezes `entry_price`, it *is* the same day's
+    stored close by construction, so the two could only ever agree. The
+    #423 corruption this audit exists to catch is created afterwards, when
+    `copilot-backfill rebuild` replaces the bars a `risk_assessments` row
+    already froze a value from -- a divergence a write-time check could never
+    see, and only a scan over stored history can.
+
+    Never writes, and the shared predicate
+    (`tracking.update.is_entry_price_basis_mismatch`) is exactly the one
+    `_seed_position` uses to fall back to the bar's close, so a finding here
+    names precisely the row `copilot-track rebuild` would replace.
+
+    Args:
+        database: Shared DuckDB connection owner, opened read-only as the CLI
+            does.
+        market_store: Stored bars; nothing is fetched.
+        symbols: Tickers to narrow to; empty audits every symbol with a
+            frozen price.
+
+    Returns:
+        How many rows and symbols were scanned, every basis mismatch found,
+        and how many rows could not be resolved either way (no same-day raw
+        bar, or a non-finite/non-positive price on either side).
+    """
+    if not database.db_path.exists():
+        # The CLI's format-marker check already returns before this runs for
+        # a missing store; this only guards a caller that reaches here first.
+        return EntryPriceCheckResult(
+            scanned_rows=0, scanned_symbols=(), findings=(), unresolved_rows=0
+        )
+    rows = get_frozen_entry_prices(database, symbols)
+    if not rows:
+        return EntryPriceCheckResult(
+            scanned_rows=0, scanned_symbols=(), findings=(), unresolved_rows=0
+        )
+
+    scanned_symbols = tuple(sorted({row.symbol for row in rows}))
+    wanted = {(row.symbol, row.run_date) for row in rows}
+    run_dates = [row.run_date for row in rows]
+    start, end = min(run_dates), max(run_dates)
+    # Only the frozen rows' own (symbol, run_date) pairs are kept: the range
+    # read spans every session between the oldest and newest run, which for a
+    # multi-year history is orders of magnitude more bars than the audit
+    # compares against.
+    raw_closes: dict[tuple[str, date], float] = {}
+    for chunk in _chunks(scanned_symbols, SYMBOL_CHUNK_SIZE):
+        raw = market_store.read_raw_bars(chunk, start=start, end=end)
+        if raw.empty:
+            continue
+        for symbol, bar_date, close in zip(
+            raw["symbol"], raw["date"], raw["close"], strict=True
+        ):
+            key = (str(symbol), bar_date)
+            if key in wanted:
+                raw_closes[key] = float(close)
+
+    findings: list[EntryPriceFinding] = []
+    unresolved_rows = 0
+    for row in rows:
+        if not math.isfinite(row.entry_price) or row.entry_price <= 0:
+            unresolved_rows += 1
+            continue
+        bar_close = raw_closes.get((row.symbol, row.run_date))
+        if bar_close is None or not math.isfinite(bar_close) or bar_close <= 0:
+            unresolved_rows += 1
+            continue
+        if is_entry_price_basis_mismatch(row.entry_price, bar_close):
+            findings.append(
+                EntryPriceFinding(
+                    symbol=row.symbol,
+                    run_date=row.run_date,
+                    run_id=row.run_id,
+                    frozen_entry_price=row.entry_price,
+                    bar_close=bar_close,
+                )
+            )
+    return EntryPriceCheckResult(
+        scanned_rows=len(rows),
+        scanned_symbols=scanned_symbols,
+        findings=tuple(findings),
+        unresolved_rows=unresolved_rows,
+    )
+
+
 def backfill_fundamentals(
     deps: FundamentalsBackfillDeps,
     symbols: Sequence[str],
@@ -819,19 +963,34 @@ def _run_fundamentals(args: argparse.Namespace, end: date, symbols: list[str]) -
         sys.stdout.write(f"失敗した銘柄: {', '.join(result.failed_symbols)}\n")
 
 
-def _market_store(args: argparse.Namespace, *, read_only: bool = False) -> MarketStore:
-    """The store both bar commands address: `<db>`'s sibling `bars/` root.
+def _market_store(args: argparse.Namespace) -> MarketStore:
+    """The store `bars`/`fundamentals`/`rebuild` write through: `<db>`'s sibling `bars/`.
 
     Args:
         args: The parsed command line; `--db` names the database file.
-        read_only: Open the database read-only. `check` does, so that reading
-            a symbol's splits cannot ensure a table, and the audit keeps the
-            "writes nothing" property its own test pins.
     """
     return MarketStore(
-        Database(args.db, read_only=read_only),
+        Database(args.db),
         parquet_root=Path(args.db).parent / "bars",
     )
+
+
+def _read_only_audit_deps(args: argparse.Namespace) -> tuple[Database, MarketStore]:
+    """The read-only collaborators `check`'s two audits share.
+
+    Read-only because opening the database write-mode would ensure the
+    fundamentals/corporate-actions tables on connect (`MarketStore.
+    get_connection`), which would make an audit that writes nothing write
+    something -- the property `check`'s own tests pin.
+
+    Args:
+        args: The parsed command line; `--db` names the database file.
+
+    Returns:
+        The shared `Database` and the `MarketStore` built on top of it.
+    """
+    database = Database(args.db, read_only=True)
+    return database, MarketStore(database, parquet_root=Path(args.db).parent / "bars")
 
 
 def _run_rebuild(args: argparse.Namespace, clock: SystemClock) -> None:
@@ -865,34 +1024,73 @@ def _run_rebuild(args: argparse.Namespace, clock: SystemClock) -> None:
         raise BackfillError(msg)
 
 
+def _write_entry_price_section(result: EntryPriceCheckResult) -> None:
+    """Print `check`'s entry_price basis audit, appended after the bar audit.
+
+    Args:
+        result: The audit's own result; never raises and never writes.
+    """
+    if not result.findings:
+        sys.stdout.write(
+            f"entry_price: ok（対象 {result.scanned_rows} 行 / "
+            f"{len(result.scanned_symbols)} 銘柄、基準ずれなし）\n"
+        )
+    else:
+        sys.stdout.write(
+            f"entry_price: 対象 {result.scanned_rows} 行 / "
+            f"{len(result.scanned_symbols)} 銘柄 / "
+            f"基準ずれ {len(result.findings)} 行\n"
+        )
+        for finding in result.findings:
+            ratio = finding.frozen_entry_price / finding.bar_close
+            sys.stdout.write(
+                f"基準ずれ: {finding.symbol} {finding.run_date.isoformat()}"
+                f"（凍結 {finding.frozen_entry_price:.6f} / "
+                f"生バー終値 {finding.bar_close:.6f}、比 {ratio:.4f}）\n"
+            )
+        sys.stdout.write(
+            "基準ずれの建玉は `copilot-track rebuild --symbol <SYMBOL>` "
+            "で是正すること（凍結値ではなく同日バー終値が使われる）。\n"
+        )
+    if result.unresolved_rows > 0:
+        sys.stdout.write(
+            f"entry_price 判定不能: {result.unresolved_rows} 行"
+            "（同日の生バーが store に無い）\n"
+        )
+
+
 def _run_check(args: argparse.Namespace) -> None:
     symbols = _resolve_explicit_symbols(args)
-    result = check_bars(_market_store(args, read_only=True), symbols)
-    if result.format_problem is not None:
-        sys.stdout.write(f"形式マーカー: NG\n{result.format_problem}\n")
+    database, store = _read_only_audit_deps(args)
+    bars_result = check_bars(store, symbols)
+    if bars_result.format_problem is not None:
+        sys.stdout.write(f"形式マーカー: NG\n{bars_result.format_problem}\n")
+        # A store predating the raw-bar model cannot be trusted for either
+        # audit: the entry_price side does not run against it either.
         return
     sys.stdout.write("形式マーカー: ok（basis=raw, version=2）\n")
-    if not result.findings and not result.missing_sessions:
+    if not bars_result.findings and not bars_result.missing_sessions:
         sys.stdout.write(
-            f"check: ok（対象 {len(result.scanned_symbols)} 銘柄、"
+            f"check: ok（対象 {len(bars_result.scanned_symbols)} 銘柄、"
             "混在署名なし、欠損セッションなし）\n"
         )
-        return
-    sys.stdout.write(
-        f"check: 対象 {len(result.scanned_symbols)} 銘柄 / "
-        f"混在署名 {len(result.findings)} 銘柄 / "
-        f"欠損セッション {len(result.missing_sessions)} 銘柄\n"
-    )
-    for finding in result.findings:
+    else:
         sys.stdout.write(
-            f"混在署名: {finding.symbol}（最初のジャンプ "
-            f"{finding.first_jump_date.isoformat()}）\n"
+            f"check: 対象 {len(bars_result.scanned_symbols)} 銘柄 / "
+            f"混在署名 {len(bars_result.findings)} 銘柄 / "
+            f"欠損セッション {len(bars_result.missing_sessions)} 銘柄\n"
         )
-    for missing in result.missing_sessions:
-        sys.stdout.write(
-            f"欠損セッション: {missing.symbol} {len(missing.missing_dates)} 件"
-            f"（{_truncated_dates(missing.missing_dates)}）\n"
-        )
+        for finding in bars_result.findings:
+            sys.stdout.write(
+                f"混在署名: {finding.symbol}（最初のジャンプ "
+                f"{finding.first_jump_date.isoformat()}）\n"
+            )
+        for missing in bars_result.missing_sessions:
+            sys.stdout.write(
+                f"欠損セッション: {missing.symbol} {len(missing.missing_dates)} 件"
+                f"（{_truncated_dates(missing.missing_dates)}）\n"
+            )
+    _write_entry_price_section(check_entry_prices(database, store, symbols))
 
 
 def _resolve_explicit_symbols(args: argparse.Namespace) -> list[str]:

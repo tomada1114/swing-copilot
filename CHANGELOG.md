@@ -99,6 +99,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backfill はしない）。**段階2（既定値の変更）は未了であり、`vcp_breakout` は
   依然として押し目の深さで順位付けされている**。既定値を動かすにはバックテストの
   裏取りが要る
+- 供給元が過去に返していたバーを再取得時に返さなくなったこと（`copilot-backfill
+  rebuild` で MNST の 2026-08-10 が消えた実例、Issue #424）を検出・記録するように
+  した（Issue #449）。**記録のみで、検疫も終了コードの変更もしない**——
+  `write_bars`/`replace_symbol_bars` は既存行を保持したまま
+  `BarWriteResult.dropped`/`BarReplaceResult.dropped`
+  （`DroppedSessions(symbol, dates)`）へ報告し、`copilot-daily` の
+  `run_steps.detail` に `dropped sessions: {...}` として永続化される
+  （`replace_symbol_bars` の戻り値は `None` から `BarReplaceResult` に変わった。
+  戻り値を無視している既存の呼び出し側は無影響）。`MarketStore.session_coverage()`
+  （新規、Parquet のみ走査）を材料に `copilot-backfill check` が独自のセッション
+  カレンダーを導出し、上場中の銘柄がそのセッションのバーを欠く場合を
+  `欠損セッション: SYM N 件（日付, ...）`として報告する（`_SESSION_QUORUM_RATIO
+  = 0.5` は実データ未検証の閾値）。新しい DuckDB テーブル・ビュー・`research`
+  アクセサ・CLI フラグは追加していない
 
 ### Fixed
 

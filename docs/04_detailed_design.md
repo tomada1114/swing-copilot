@@ -441,6 +441,14 @@ class MarketStore:
         書き込み、パーティションがありマーカーが無い/内容が異なれば
         `BarsFormatError`（`copilot-backfill rebuild`を案内）で拒否する。
         temp file作成後のrenameで中断時の破損を防ぐ。
+        検疫フィルタ適用後の`working`について、供給元が返さなくなった
+        保存済みセッション（`(symbol,date)`の`existing`にはあるが`working`に
+        無く、かつ当該銘柄の新規行が張る日付窓の内側）を
+        `BarWriteResult.dropped: tuple[DroppedSessions, ...]`へ報告する
+        （Issue #449。検疫された銘柄は`quarantined`側でのみ語られるので
+        `dropped`には出さない）。**報告のみで、書き込みは一切止めない**——
+        `_publish_partition`が`pd.concat`＋`drop_duplicates(keep="last")`
+        で既存行を保持し続ける以上、この経路で失うものは無い。
         """
 
     def read_bars(self, symbols: list[str], start: date, end: date, as_of: date) -> pd.DataFrame:
@@ -480,6 +488,13 @@ class MarketStore:
         """ストアに実在する銘柄集合を返す（ユニバースは参照しない）。
         `copilot-backfill check`が`--symbols`省略時の対象を決めるのに使う。"""
 
+    def session_coverage(self) -> SessionCoverage:
+        """ストア全体の日次バー件数（`bars_per_date`）と銘柄ごとの
+        `(最古バー日, 最新バー日)`（`listed_span`）を返す（Issue #449）。
+        `stored_symbols`と同様Parquetのみを走査しDuckDBは開かない。
+        `copilot-backfill check`が独自のセッションカレンダーを
+        導出するための唯一の材料であり、新テーブル・ビューは作らない。"""
+
     def upsert_fundamentals(self, records: list["FundamentalsRecord"]) -> None:
         """fundamentalsへaccession_noで訂正可能なupsertを1transactionで行う。"""
 
@@ -511,6 +526,8 @@ class MarketStore:
 同じIssueで、`storage/database.py`に`fetch_records(conn, query, params)`（カーソルの列名で`dict[str, object]`化する読み取りヘルパー）も追加した。`tracking_records.py`の`_position`・`retro_records.py`の`_narration`・`verdict_records.py`の`_news_supply_from_row`（の呼び出し元2箇所）は、位置インデックス（`row[7]`のような）読み出しから列名ベース（`record["stop_price"]`）へ移行した。列の追加・並べ替えで値が型エラーなく隣の列へずれるリスクが消える代わりに、欠けた列は`KeyError`で、`columns`と行の長さが食い違えば`zip(..., strict=True)`で即座に落ちる。
 
 **生バーの不変性・企業行動テーブル・整合性ゲート（Issue #413）**: 供給元（yfinance）が調整済み系列を返す前提は、Yahooが分割を履歴全体へ一様に適用しない場合があるという実例（MNST 2026-08-11 2:1分割）で崩れた。1回の悪い応答が全期間の基準を書き換えるのを防ぐため、`write_bars()`はOHLCVを生値（as-traded）として不変に扱う。銘柄ごとに(a)新規行の系列が調整基準の混在署名（`has_mixed_basis_signature`: 分割相当のジャンプに続く逆ジャンプ）を示さないこと、(b)既存行と重なる`(symbol, date)`の生closeの差が0.5%以内であることを検査し、いずれかに違反した銘柄は書かずに`BarWriteResult.quarantined`へ積む（既存行は不変。3.19節の`NonFiniteBarsError`と同じ「バッチ単位で落とす」流儀で、こちらは銘柄単位）。分割・配当は`corporate_actions(symbol, ex_date, kind, value, provider, fetched_at)`（`fundamentals`と同居するDuckDBテーブル、主キー`(symbol, ex_date, kind)`）へ`write_corporate_actions()`が1トランザクションで訂正upsertし、`read_bars(..., as_of)`は生値に`read_splits()`で引いた`ex_date <= as_of`の分割係数の積を掛けて返す（価格は`/`、出来高は`*`。窓外・`as_of`より後の分割も正しく効く／効かない。配当は保存するが価格には掛けない——3.24.3節参照）。ストアの保存基準を表す形式マーカー`data/bars/_format.json`（`{"basis":"raw","version":2}`）を導入し、パーティションはあるがマーカーが無い/内容が違う未移行ストアへの`read_bars`/`write_bars`は`BarsFormatError`（`SwingCopilotError`派生）でfail-fastし、`copilot-backfill rebuild`（3.25節）を案内する。**このマーカーは`scripts/data_sync.py`の同期対象に含める**（`_has_data_sync_shape`が`bars/_format.json`だけを`.parquet`以外の例外として通す。名前は`BARS_FORMAT_MARKER_NAME`を両者で共有し、綴りが割れないようにする）——定時実行は毎回空のチェックアウトから`pull`するので、Parquetだけを同期するとマーカーの無いストアが手元に降ってきて、上のfail-fastが「`rebuild`しろ」と言い続ける（すでにrebuild済みなのに）行き止まりになる。混在署名の判定は`data/adjustments.py::has_mixed_basis_signature(bars, splits)`（真偽値、書き込みゲート用）と、それが最初に検出したジャンプの日付を返す報告用の対`first_mixed_basis_jump(bars, splits) -> int | None`（インデックス。`copilot-backfill check`の一覧表示が使う）の2関数に分かれる（実装は1本の走査を共有し、ゲートと監査が食い違わないようにする。第1引数は`date`/`close`列を持つフレーム）。**両者は銘柄の分割を引数に取り、逆ジャンプ対の各比がいずれかのfactor（または1/factor）に一致することを要求する**（Issue #421）。基準の反転は正確な算術なので、必要な緩みは同日の実勢リターン分だけでよい（MNSTの実応答にある6回の反転はすべて4.1%以内）。分割を見ない判定は36年の日足では通常のボラティリティで頻繁に成立し、実測でストアの510銘柄中153銘柄が該当した——分割が1件も無い`^VIX`/`^TNX`を含む（混ぜる相手の基準が存在しない銘柄なので、この問いは難問ではなく無意味である）。`write_bars`はこの判定のために`corporate_actions`を短く1回読む（`read_bars`と同じ経路。呼び出し側はいずれもバーより先に企業行動を書くので、当該バッチの段差を作りうる分割はこの時点で見えている）。`copilot-daily`（`pipeline/daily.py::run_step_prices`）は隔離結果を`StepOutcome.detail`へ`failed symbols: [...]; quarantined symbols: [...]`として`"; "`で連結して残す（隔離はrunを失敗にしないfail-soft）。（**Issue #413以前**: `write_bars`は`(symbol,date)`の無条件upsertで、OHLCは「常に同一の調整基準」という前提のもと`auto_adjust=True`の調整済み値をそのまま保存していた。）
+
+**供給元が過去バーを落としたことの検出・記録（Issue #449）**: 0.5%訂正ゲートと混在署名ゲートはいずれも「値が変わった行」を検疫する防御であり、「行そのものが消えた」ケースは対象外だった（`#424`で観測されたMNST 2026-08-10の消滅——`copilot-backfill rebuild`がYahooから再取得した際、分割ex-date前日のバーを供給元が返さなくなった）。この検出は**記録のみで、検疫しない**——`write_bars`の`_publish_partition`は`pd.concat`＋`drop_duplicates(keep="last")`で既存行を保持し続けるため、日次経路（`copilot-daily`/`copilot-backfill bars`）では供給元が過去バーを落としても守るべき資産を何も失わない。1セッションの穴を理由に書き込み境界を検疫すると、その銘柄の**今日のバー**が穴のせいで毎日永久に拒否される恒久的な全面停止に化けるため、検疫の強さを向けるべき先は「保持」ではなく「記録の義務化」である。書き込み境界（`MarketStore.write_bars`/`replace_symbol_bars`）は`_dropped_sessions(new_rows, existing)`という新規pure helperで、銘柄ごとに`stored_dates - incoming_dates`を`[min(incoming_dates), max(incoming_dates)]`の窓に制限して算出する——窓外の保存済みセッション（上場前・上場廃止後・取得窓の端）は「落ちた」ではなく「取得範囲外」として報告しない。`replace_symbol_bars`（`copilot-backfill rebuild`）だけは実際に行を消すので、報告された`DroppedSessions`はその後`read_raw_bars`から本当に消える——検出したから保持する、という改悪はしない。監査経路（`copilot-backfill check`）は別ルールを持つ：`MarketStore.session_coverage()`が返す`bars_per_date`/`listed_span`から、ストアに存在する日`D`について`n(D) >= _SESSION_QUORUM_RATIO(=0.5) * L(D)`（`L(D)`=`D`で上場中の銘柄数、`n(D)`=`D`にバーを持つ銘柄数）を満たすときだけ`D`をセッションとみなし、上場中の銘柄がそのセッションにバーを持たなければ`MissingSessionFinding`として報告する。この単一の述語が上場廃止・休場日・上場前・単発の誤バー（Issue #421同様、n=1では他の509銘柄を巻き込まない）を全て吸収する。非株式カレンダー銘柄`^TNX`（米国債市場の休場日に従い、Columbus Day等の実在の株式取引日にバーを持たない）は`--symbols`省略時の欠損走査対象からのみ除外する（`--symbols ^TNX`と明示された場合は走査する）。`_SESSION_QUORUM_RATIO = 0.5`は共有R2データに触れずに置いた閾値であり実データで未検証——将来ここを再検討する際は実測が先である。分割ex-date前日という相関の実在性（起票者の仮説）も本実装では確認できていない。
 
 **混在署名判定のさらなる絞り込み（Issue #425）**: Issue #421の判定はfactor相当のジャンプに限定するだけで、実測すると510銘柄中19銘柄を誤検知していた（分割の時期を無視して全期間の分割factorを候補に入れていたことが主因）。逆ジャンプ対`(i, j)`（`i < j`、いずれも「後ろ側の行」の位置）に対し、次の2条件を追加する。(1) **適格性**——対を説明できる分割は`ex_date > dates[j - 1]`（runの最終行より**後**、厳密不等号）を満たすものに限る。Yahooが伝播に失敗した分割が作る食い違いはその分割の`ex_date`より**前**の行にしか出ないので、runより前の分割はその対の原因になり得ない。(2) **runの長さの上限**`_MAX_FLIP_RUN_SESSIONS = 25`セッション——実際に観測された唯一の欠陥（Issue #421のMNST）はrun長1〜3セッションだった一方、月〜年単位で水準が保たれるrunは実勢の暴落と戻りである。さらに、対の2本のジャンプは**同一の**分割の`{factor, 1/factor}`に一致することを要求する（異なる2分割のfactorをまたいだ偶然の対を排除する）。3条件とも実測（510銘柄の`data/bars`+`corporate_actions`）で検証済みで、19銘柄の誤検知は2銘柄（JKHY 1990-06-06、WDC 2002-07-22）まで減り、MNSTの真陽性は変わらず検出される。残る2銘柄は、factorが小さく実勢の往復と基準の反転が算術的に区別できないという既知の限界（PR #422）で、本Issueのスコープ外として明記して残す。判定は単調に狭くなる合接なので、これらの追加によって新たに検出される銘柄は原理的に生じない。
 
@@ -2039,6 +2056,8 @@ CLIの操作面は`docs/reference.md`が正本。エントリポイントは`cop
 **`rebuild`/`check`サブコマンド（Issue #413、生バー化への復旧経路）**: `copilot-backfill rebuild [--db PATH] [--settings PATH] [--symbols A,B] [--limit N]`は対象銘柄（`--symbols`省略時はユニバース全体、`--limit`で決定論的サンプルに絞れる）の全履歴を再取得し、`write_bars`の重複不変ゲートを経由せず、全yearパーティションから当該銘柄の既存行を削除したうえで生値を書き直す。調整基準の混在を解消できなかった銘柄は既存行を残したまま結果に列挙し（`rebuild: 対象 N 銘柄 / 置換 R / 拒否 J / 書き込み W 行`に続けて`既存行を維持した銘柄: ...`）、解消できた銘柄は`corporate_actions`を全履歴分upsertする。**形式マーカー（`_format.json`）は少なくとも1銘柄を実際に置換できたときだけ書く**——全銘柄が拒否された場合はストアを未移行のまま残し、`rebuild: 全銘柄の取得に失敗したため置き換えは行われませんでした。`で終了コード1を返す（1行も置き換えていないのに「移行済み」を騙るマーカーを書かないため）。既存パーティションにマーカーが無い未移行ストアでも動く必要があるため、`rebuild`は（置換が1件以上あった場合を除き）マーカー検査を迂回する。`copilot-backfill bars`にも同じ隔離結果が`隔離した銘柄: ...`として出力へ加わった。
 
 `copilot-backfill check [--db PATH] [--symbols A,B]`は読み出し専用で、`--settings`も`--limit`も持たない——`--symbols`省略時はユニバースではなく`MarketStore.stored_symbols()`（ストアに実在する銘柄）を対象にする。`MarketStore.read_raw_bars()`で生値をそのまま読み、マーカーが揃っていれば`形式マーカー: ok（basis=raw, version=2）`、無ければ`形式マーカー: NG`とその`BarsFormatError`本文を出す。**バーはParquetから直接読むが、分割はDuckDBから短く読む**（Issue #421。混在署名はfactor相当の段差を探すものなので、分割を渡さない判定は意味を成さない）。これにより「DuckDBがロックされていても走らせられる監査」という以前の性質は失われるが、指摘が意味を持たない監査より価値がある、という判断である。続けて全対象銘柄の生系列に混在署名（`has_mixed_basis_signature`）が無ければ`check: ok（対象 N 銘柄、混在署名なし）`、あれば`check: 対象 N 銘柄 / 混在署名 K 銘柄`に続けて該当銘柄ごとに`混在署名: SYM（最初のジャンプ YYYY-MM-DD）`（`first_mixed_basis_jump`が返す最初のジャンプ日）を1行ずつ列挙する。何も書き込まない。逆ジャンプ対は、対を説明する分割の`ex_date`がrunより後にあり（`dates[j - 1]`より後、厳密不等号）、かつrunの長さが`_MAX_FLIP_RUN_SESSIONS = 25`セッション以下の場合にのみ該当する（Issue #425、出力の書式・文言は不変）。
+
+**欠損セッションの検出・記録（Issue #449）**: `rebuild`は置換の過程で供給元が返さなくなった保存済みセッションを`供給元が返さなくなったセッション（rebuildにより削除済み）: SYM（日付, ...）`として報告する（`replace_symbol_bars`が実際に消す。3.7節）。`bars`（`copilot-daily`と同じ`write_bars`経路）は同じ状況を`供給元が返さなくなったセッション（既存行は保持）: SYM（日付, ...）`と文言を変えて報告する——既存行は消えていないので「保持」と「削除済み」を混同してはならない。`check`は独立の監査ルールを持つ：`MarketStore.session_coverage()`から導いたセッションカレンダー（`--symbols`の有無にかかわらず常にストア全体から作る）に対し、対象銘柄が上場中のセッションでバーを欠く場合を`欠損セッション: SYM N 件（日付, ...）`として列挙し、何も無ければ`check: ok（対象 N 銘柄、混在署名なし、欠損セッションなし）`。いずれの経路も**終了コードを変えず、検疫もしない**（判断の根拠は3.7節の追記を参照）。銘柄あたり最大5件・（`daily.py`の`run_steps.detail`では銘柄も最大10件）を超えた分は`(+N)`で要約する。
 
 全銘柄`rebuild`は`data/`のR2 generationを進める操作なので実行前に確認を取り、定時実行と重ならない時間帯にpull→`rebuild`→`check`→pushを1セットで行う（`AGENTS.md`の運用節を参照）。
 

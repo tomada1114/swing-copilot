@@ -100,6 +100,46 @@ proves the accept side; the reject side needs a row past the ratio and a
 batch carrying the mixed-basis signature, each quarantining independently of
 the other.
 
+### A dropped row is reported, never quarantined (Issue #449)
+
+Both gates above defend against a row whose *value* changed. A row that
+*disappears* — a provider re-fetch silently no longer returning a session it
+used to (the MNST 2026-08-10 case: gone on `copilot-backfill rebuild`, one
+day before that symbol's split ex-date) — is a different kind of event, and
+it gets a different remedy: `write_bars`/`replace_symbol_bars` report it
+(`BarWriteResult.dropped` / `BarReplaceResult.dropped`,
+`DroppedSessions(symbol, dates)`) but never quarantine it and never change an
+exit code.
+
+This is deliberate, not an oversight. `_publish_partition` concats the new
+batch onto the existing partition and `drop_duplicates(subset=["symbol",
+"date"], keep="last")`s the result — it never deletes a row the incoming
+batch simply omits. So on the write path (`write_bars`, i.e. `copilot-daily`
+and `copilot-backfill bars`) there is nothing to protect: the old bar is
+still sitting in the partition after the write, dropped-report or not.
+Quarantining on a gap would be *worse* than the gap: `write_bars`'
+quarantine means "write nothing for this symbol," and a quarantine keyed on
+a months-old hole would refuse that symbol's *today* bar forever, turning a
+one-session gap into a permanent blackout — exactly the kind of harm the
+0.5%/mixed-basis gates exist to avoid, inflicted in the name of avoiding it.
+`replace_symbol_bars` (the `rebuild` path) is the one place a dropped
+session is genuinely erased, because replacing a symbol's whole history
+wholesale is the expected shape of that command; the report there names what
+the replacement actually deleted, and does not resurrect it — keeping one
+stale-basis row inside a freshly rebuilt series would recreate the very
+mixed-basis condition `has_mixed_basis_signature` exists to catch.
+
+The comparison window matters as much as the report: a stored session counts
+as "dropped" only when it falls inside `[min(incoming date), max(incoming
+date)]` for that symbol. A stored date outside the incoming batch's own
+range is out of scope for that batch — a delisting, an IPO, the tail of a
+resumed backfill — not something the provider silently withheld.
+
+Regression pin: `tests/storage/test_market_store.py::
+TestWriteBarsReportsDroppedSessions::test_write_bars_keeps_the_dropped_row_and_writes_the_rest`
+is the test that must fail if `write_bars` ever starts erasing what it
+reports.
+
 ## Splits and dividends adjust only on read
 
 `write_bars` never rewrites a stored close for a split. `read_bars(symbols,

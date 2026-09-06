@@ -40,6 +40,7 @@ from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, SwingCopilotError
 from swing_copilot.io_atomic import write_json_atomically
+from swing_copilot.report.formatting import format_fraction_pct
 from swing_copilot.screening.base import ScreeningInput
 from swing_copilot.screening.filter_matrix import (
     FilterMatrixResult,
@@ -238,10 +239,6 @@ def _select_strategy(
     return StrategySelection(key=args.strategy, spec=spec)
 
 
-def _fmt_rate(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.1%}"
-
-
 def _co_blocked(result: FilterMatrixResult, row: str, column: str) -> int:
     """Symbols blocked by both checks, whichever configured order they came in."""
     counts = result.co_blocked_counts
@@ -255,7 +252,7 @@ def _check_row(stats: CheckStats) -> tuple[str, ...]:
         str(stats.pass_count),
         str(stats.fail_count),
         str(stats.no_data_count),
-        _fmt_rate(stats.pass_rate),
+        format_fraction_pct(stats.pass_rate, digits=1),
         str(stats.sole_blocker_count),
     )
 
@@ -289,7 +286,7 @@ def _render_distribution(console: Console, result: FilterMatrixResult) -> None:
         table.add_row(
             str(blocked_checks),
             str(symbol_count),
-            _fmt_rate(None if total == 0 else symbol_count / total),
+            format_fraction_pct(None if total == 0 else symbol_count / total, digits=1),
         )
     console.print(table)
     console.print("0 = 全チェック通過（ランキング指標と candidate_limit の適用前）")

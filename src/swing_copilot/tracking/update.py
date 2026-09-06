@@ -94,7 +94,31 @@ _OHLC_KEYS = ("open", "low", "close")
 #: between the two figures to move in) -- both numbers claim to be the same
 #: single session's close, so this is rounding tolerance between two paths
 #: that recorded it, mirroring `market_store.py`'s `_MAX_CORRECTION_RATIO`.
-_ENTRY_PRICE_BAR_TOLERANCE = 0.005
+#: Issue #427: this tolerance and the comparison itself are shared with
+#: `pipeline/backfill.py`'s entry_price audit -- the same invariant #425 put
+#: in `adjustments.py` -- so the correction side and the audit side share one
+#: predicate and can never disagree.
+ENTRY_PRICE_BAR_TOLERANCE = 0.005
+
+
+def is_entry_price_basis_mismatch(entry_price: float, bar_close: float) -> bool:
+    """Whether a frozen `entry_price` definitionally disagrees with its own day's bar.
+
+    Args:
+        entry_price: The price a risk assessment froze, already re-based for
+            any split between entry and the caller's `as_of`.
+        bar_close: The stored bar's close for that same day, on the same
+            basis.
+
+    Returns:
+        `True` when the gap exceeds `ENTRY_PRICE_BAR_TOLERANCE`. `False` when
+        `bar_close` is not positive, since there is nothing to compare
+        against.
+    """
+    return (
+        bar_close > 0
+        and abs(entry_price - bar_close) > bar_close * ENTRY_PRICE_BAR_TOLERANCE
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,7 +636,7 @@ def _seed_position(
     happens to be, because both numbers claim to be one single day's close.
     This is a same-day consistency check against the stored bar, structurally
     different from the ratio-based *rebase* this module's own docstring
-    rejects: a mismatch beyond `_ENTRY_PRICE_BAR_TOLERANCE` falls back to the
+    rejects: a mismatch beyond `ENTRY_PRICE_BAR_TOLERANCE` falls back to the
     bar's close (the same value the None-entry-price path below already
     uses) and is recorded in `notes`, never silently substituted.
     """
@@ -627,10 +651,8 @@ def _seed_position(
         if factor != 1.0:
             entry_price /= factor
         bar_close = _close_on(bars, candidate.symbol, candidate.as_of)
-        if (
-            bar_close is not None
-            and bar_close > 0
-            and abs(entry_price - bar_close) > bar_close * _ENTRY_PRICE_BAR_TOLERANCE
+        if bar_close is not None and is_entry_price_basis_mismatch(
+            entry_price, bar_close
         ):
             notes.append(
                 f"{candidate.symbol} {candidate.as_of.isoformat()}: "

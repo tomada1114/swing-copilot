@@ -18,8 +18,10 @@ import pytest
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 from swing_copilot.tracking.board import build_board, position_records
 from swing_copilot.tracking.update import (
+    ENTRY_PRICE_BAR_TOLERANCE,
     RebuildTarget,
     TrackingUpdateResult,
+    is_entry_price_basis_mismatch,
     rebuild_positions,
     update_tracking,
 )
@@ -1370,6 +1372,26 @@ class TestEntryPriceBarConsistency:
         # The risk assessment's own frozen price is kept, not the bar's.
         assert position.entry_price == pytest.approx(FLAT_CLOSE + 0.01)
         assert not any("一致しない" in note for note in result.notes)
+
+
+class TestIsEntryPriceBasisMismatch:
+    """Issue #427: the shared predicate `check_entry_prices` reuses verbatim."""
+
+    def test_a_gap_exactly_at_the_tolerance_is_not_a_mismatch(self) -> None:
+        bar_close = 100.0
+        entry_price = bar_close + bar_close * ENTRY_PRICE_BAR_TOLERANCE
+
+        assert is_entry_price_basis_mismatch(entry_price, bar_close) is False
+
+    def test_a_gap_just_past_the_tolerance_is_a_mismatch(self) -> None:
+        bar_close = 100.0
+        entry_price = bar_close + bar_close * ENTRY_PRICE_BAR_TOLERANCE + 0.0001
+
+        assert is_entry_price_basis_mismatch(entry_price, bar_close) is True
+
+    def test_a_non_positive_bar_close_is_never_a_mismatch(self) -> None:
+        assert is_entry_price_basis_mismatch(100.0, 0.0) is False
+        assert is_entry_price_basis_mismatch(100.0, -1.0) is False
 
 
 class TestExitAtrPeriod:

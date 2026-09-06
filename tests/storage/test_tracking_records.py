@@ -9,22 +9,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 import duckdb
 import pytest
 
+from swing_copilot.models import RunMode, RunStatus
 from swing_copilot.screening.base import ScreeningResult, TruncatedCandidate
 from swing_copilot.storage.audit_records import ScreeningRunMeta
+from swing_copilot.storage.database import Database
 from swing_copilot.storage.tracking_records import (
     VerdictPosition,
     VerdictPositionMark,
+    get_frozen_entry_prices,
 )
 from swing_copilot.storage.verdict_records import VerdictReasonRecord, VerdictRecord
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from swing_copilot.storage.state_store import StateStore
 
 RUN_ID = UUID("44444444-4444-4444-4444-444444444444")
@@ -641,3 +646,110 @@ class TestDeliberateDeletion:
         } == {SYMBOL, "BBB"}
         assert len(state_store.get_verdict_position_marks(RUN_ID, SYMBOL)) == 1
         assert len(state_store.get_verdict_position_marks(RUN_ID, "BBB")) == 1
+
+
+def _seed_run(
+    state_store: StateStore,
+    *,
+    run_id: UUID = RUN_ID,
+    run_date: date = ENTRY_DATE,
+    mode: RunMode = RunMode.LIVE,
+    status: RunStatus = RunStatus.SUCCESS,
+) -> None:
+    """Register a `runs` row through the production writer (Issue #427)."""
+    state_store.insert_run(
+        run_id,
+        run_date,
+        mode,
+        "test-config-hash",
+        status=status,
+        started_at=datetime(2027, 3, 20, tzinfo=UTC),
+    )
+
+
+def _seed_frozen_entry_price(
+    state_store: StateStore,
+    *,
+    run_id: UUID = RUN_ID,
+    symbol: str = SYMBOL,
+    entry_price: float | None = 100.0,
+) -> None:
+    """Insert one `risk_assessments` row, the audit's own read target."""
+    with state_store.database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO risk_assessments (
+                run_id, symbol, status, entry_price,
+                reasons_json, warnings_json, sizing_warnings_json
+            ) VALUES (?, ?, 'approved', ?, '[]', '[]', '[]')
+            """,
+            [str(run_id), symbol, entry_price],
+        )
+
+
+class TestFrozenEntryPrices:
+    """Issue #427: the read side of `pipeline/backfill.py::check_entry_prices`."""
+
+    def test_rows_are_ordered_by_symbol_then_run_date_then_run_id(
+        self, state_store: StateStore
+    ) -> None:
+        later_run = uuid4()
+        _seed_run(state_store, run_id=RUN_ID, run_date=ENTRY_DATE)
+        _seed_run(state_store, run_id=later_run, run_date=DAY_1)
+        _seed_frozen_entry_price(
+            state_store, run_id=RUN_ID, symbol="BBB", entry_price=50.0
+        )
+        _seed_frozen_entry_price(
+            state_store, run_id=later_run, symbol="AAA", entry_price=60.0
+        )
+        _seed_frozen_entry_price(
+            state_store, run_id=RUN_ID, symbol="AAA", entry_price=55.0
+        )
+
+        rows = get_frozen_entry_prices(state_store.database)
+
+        assert [(row.symbol, row.run_date, row.run_id) for row in rows] == [
+            ("AAA", ENTRY_DATE, RUN_ID),
+            ("AAA", DAY_1, later_run),
+            ("BBB", ENTRY_DATE, RUN_ID),
+        ]
+
+    def test_a_null_entry_price_is_excluded(self, state_store: StateStore) -> None:
+        _seed_run(state_store)
+        _seed_frozen_entry_price(state_store, entry_price=None)
+
+        assert get_frozen_entry_prices(state_store.database) == ()
+
+    def test_symbols_narrows_and_an_empty_tuple_selects_every_symbol(
+        self, state_store: StateStore
+    ) -> None:
+        _seed_run(state_store)
+        _seed_frozen_entry_price(state_store, symbol="AAA", entry_price=100.0)
+        _seed_frozen_entry_price(state_store, symbol="BBB", entry_price=50.0)
+
+        narrowed = get_frozen_entry_prices(state_store.database, ["AAA"])
+        everything = get_frozen_entry_prices(state_store.database)
+
+        assert [row.symbol for row in narrowed] == ["AAA"]
+        assert {row.symbol for row in everything} == {"AAA", "BBB"}
+
+    def test_a_failed_dry_run_row_is_returned_not_filtered(
+        self, state_store: StateStore
+    ) -> None:
+        # Design decision: `runs.status`/`runs.mode` are deliberately not
+        # filtered -- a `dry_run`/`failed` run froze `risk_assessments`
+        # through the same path as a `live`/`success` one.
+        _seed_run(state_store, mode=RunMode.DRY_RUN, status=RunStatus.FAILED)
+        _seed_frozen_entry_price(state_store, entry_price=100.0)
+
+        rows = get_frozen_entry_prices(state_store.database)
+
+        assert [row.symbol for row in rows] == [SYMBOL]
+
+    def test_a_database_missing_both_tables_returns_empty_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """A store that only ever backfilled bars never creates either table."""
+        database = Database(tmp_path / "copilot.duckdb")
+
+        assert get_frozen_entry_prices(database) == ()

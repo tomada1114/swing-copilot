@@ -60,6 +60,11 @@ from swing_copilot.cli_support import ExitPolicy, run_cli
 from swing_copilot.config import load_settings, load_strategies
 from swing_copilot.exceptions import ConfigError, StorageSchemaError, SwingCopilotError
 from swing_copilot.io_atomic import write_text_atomically
+from swing_copilot.report.formatting import (
+    format_fraction_pct,
+    format_money,
+    format_ratio,
+)
 from swing_copilot.storage.database import DEFAULT_DB_PATH, Database
 from swing_copilot.storage.market_store import (
     MarketStore,
@@ -267,18 +272,6 @@ def _missing_data_symbols(
     return sorted(set(symbols) - present)
 
 
-def _fmt_ratio(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.3f}"
-
-
-def _fmt_pct(value: float | None) -> str:
-    return "N/A" if value is None else f"{value:.2%}"
-
-
-def _fmt_money(value: float | None) -> str:
-    return "N/A" if value is None else f"${value:,.2f}"
-
-
 _METRIC_ROWS: tuple[tuple[str, str], ...] = (
     ("trade_count", "trade_count"),
     ("sharpe", "sharpe"),
@@ -311,16 +304,18 @@ def _metric_value(result: BacktestResult, field: str) -> str:
     if field in _INT_FIELDS:
         return str(value)
     if field in _PCT_FIELDS:
-        return _fmt_pct(value)
+        return format_fraction_pct(value)
     if field in _MONEY_FIELDS:
-        return _fmt_money(value)
-    return _fmt_ratio(value)
+        return format_money(value)
+    return format_ratio(value)
 
 
 def _exit_breakdown_rows(result: BacktestResult) -> list[tuple[str, str]]:
     """Label/value rows shared by the terminal and markdown exit sections."""
     rows = [(reason, str(count)) for reason, count in result.exit_reason_counts]
-    rows.append(("max_hold binding rate", _fmt_pct(result.max_hold_binding_rate)))
+    rows.append(
+        ("max_hold binding rate", format_fraction_pct(result.max_hold_binding_rate))
+    )
     held = result.holding_days
     rows.append(
         ("holding days (median)", "N/A" if held is None else f"{held.median:.1f}")

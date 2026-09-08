@@ -44,20 +44,48 @@ sessions. The regime layer allowed new entries on only 7 of 29 runs
 (`CASH_PRIORITY` 9, `REDUCE_ONLY` 13); `binding_constraint` was `regime` on 89
 scorecard rows. Over the same window SPY returned **+3.79%**.
 
-Sitting in cash through a rising market was a far larger drag than anything the
-stock selection did. More importantly, at 7 proposals per six weeks, reaching a
-sample that could actually settle the strategy question (~50 `proceed` verdicts
-across three or more regimes) would take **years**. The live loop is an
-operational-validation device, not an evidence-generating one.
+And of those 7, only **one** was an actual buy proposal rather than a
+counterfactual ledger entry (see below). Six weeks of unattended operation
+produced a single tradeable signal.
 
-### What the outcomes looked like
+Sitting in cash through a rising market was a far larger drag than anything the
+stock selection did. More importantly, at that rate, reaching a sample that
+could settle the strategy question (~20 matured `proceed` positions under one
+config, per issue #412's own restart trigger — let alone across three regimes)
+would take **years**. The live loop is an operational-validation device, not an
+evidence-generating one. Issue #412 names the sharper version of this: the
+system stopped producing the very signal its feedback loop needs, a
+self-concealing state where "no `proceed` ever fires" is itself the finding.
+
+### What the outcomes looked like — and why the headline number misleads
+
+The observation that started this review was "all 7 `proceed` verdicts lost".
+That is literally true and analytically almost worthless. **Six of those seven
+were `no_trade=true` days**: the risk engine had rejected every candidate
+(`binding_constraint` = `regime` ×4, `earnings` ×2), and the ledger opened
+counterfactual positions purely to score verdict quality. They were never buy
+proposals. They were also produced by gate logic that no longer exists —
+#345 (regime redesign from EMA50+VIX to SMA200+FTD), #112 (SEVERE thresholds),
+#352 (account-dependent rules removed) and #241 (earnings demotion) all landed
+afterwards.
+
+**Under the current configuration, exactly one real buy proposal was ever made:
+HWM on 2026-08-24, stopped out in 4 sessions at −5.85%. n = 1.** Issue #412
+established this on 2026-09-02 and correctly held off the retrospective loop
+for it; this review re-derived the same conclusion with five more days of data.
+
+So the cohort table below describes a system that has since been partly
+replaced. Read it as context, not as a verdict on the current logic:
 
 | Cohort | Mean | Win rate | n |
 |---|---|---|---|
-| `proceed`, closed | −5.99% | 0% | 7 |
+| `proceed`, closed (6 of 7 counterfactual, retired logic) | −5.99% | 0% | 7 |
 | `proceed`, blind 20-day hold | −4.81% (−9.61% vs SPY) | 0% | 5 |
 | `skip`, closed | −3.37% (−2.65% ex. a stale row) | 25% | 64 |
 | `skip`, blind 20-day hold | +1.73% (+0.97% vs SPY) | 48% | 52 |
+
+There is no evidence the `proceed` cohort did worse than `skip`, and none that
+it did better. That comparison is simply unmeasured.
 
 One structural defect is visible without any statistics: **67 of 71 closed
 positions (94.4%) exited on the trailing stop**, at a mean stop distance of
@@ -82,7 +110,8 @@ They do **not** show that individual-stock swing trading cannot work:
   sat at 14–20 — a low-volatility grinding bull, which is simultaneously the
   friendliest environment for index buy-and-hold and the harshest for
   stop-managed single-name swing trading.
-- The `proceed` sample is effectively 2–3 independent entry episodes, not 7.
+- The `proceed` sample is 1 real proposal, plus 6 counterfactual entries from
+  two adjacent sessions under retired logic — not 7 independent observations.
 - The control-group comparisons rest on only 4–7 independent dates, roughly
   eight different cuts were tried (multiple comparisons), and nothing is
   regime-adjusted — the known weakness recorded as R7 in
@@ -97,8 +126,14 @@ An unadjusted 2:1 split in `APH` produced a phantom −48.86% tracking row
 **pre-fix residue, not an open bug**: split re-basing was already designed,
 found broken, and repaired across #418, #419, #420, #422, #426 and #450 between
 2026-09-02 and 2026-09-05, and `copilot-track rebuild` exists to reconstruct
-affected positions. The ledger handles corporate actions. Data hygiene was not
-why this stopped.
+affected positions.
+
+The repair demonstrably worked. `MNST` had the same contamination — issue #412
+recorded its 20-day outcome as −50.8%, which alone dragged the `proceed` 20-day
+mean to −14.35%. After the fix and backfill it reads −1.66% / −1.83% / −3.01%,
+and the same cohort mean is −4.81%. `APH` is simply a row the rebuild has not
+been re-run over. The ledger handles corporate actions; data hygiene is not why
+this stopped.
 
 ### If this is ever revisited
 

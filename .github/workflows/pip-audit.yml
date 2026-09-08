@@ -1,8 +1,9 @@
 name: pip-audit
 
 on:
-  schedule:
-    - cron: "0 6 * * 1"
+  # 2026-09-08: リポジトリのアーカイブに伴い定時実行を停止した。
+  # schedule:
+  #   - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:
